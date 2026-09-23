@@ -530,12 +530,16 @@ class EventPriority(IntEnum):
     replay is the defect this enum exists to prevent (a same-day buy or sell trades in
     POST-action terms, so the action must apply first). Spaced by 10, transcribed from the
     spec's normative block.
+
+    **Rule change transcribed 2026-09-23 (DEF-012, domain-ledger.md "same-day trades").**
+    ``BUY = 20 / SELL = 30`` — buys before sells within a day — was retired: a day's trades
+    are ONE priority (``TRADE``) and tie-break on the ledger id, i.e. the order they were
+    entered. The oracle keeps its own transcription of that rule, as of every other.
     """
 
     OPENING = 0
     CORPORATE_ACTION = 10
-    BUY = 20
-    SELL = 30
+    TRADE = 20
     DIVIDEND = 40
 
 
@@ -794,12 +798,13 @@ def replay(facts: Facts) -> OracleResult:
 
     Same-day ordering derived from domain-ledger semantics + spec §4's normative
     ``EventPriority`` (this module's OWN copy, see :class:`EventPriority`):
-      opening(0) -> CORPORATE ACTION(10) -> buy(20) -> sell(30) -> dividend(40);
-      ties broken by DB id (insertion order), reproducing a stable sort over
-      (date, priority). An action is effective at the START of its date: a same-day buy
-      or sell trades in post-action terms (post-split price, new ticker), so the action
-      must apply first. Opening inventory dated ON an action date is PRE-action — it
-      describes the position as it stood before — which is why OPENING sorts ahead of it.
+      opening(0) -> CORPORATE ACTION(10) -> trades(20, buys and sells in DB-id order,
+      DEF-012 2026-09-23) -> dividend(40); ties broken by DB id (insertion order),
+      reproducing a sort over (date, priority, id). An action is effective at the START of
+      its date: a same-day buy or sell trades in post-action terms (post-split price, new
+      ticker), so the action must apply first. Opening inventory dated ON an action date is
+      PRE-action — it describes the position as it stood before — which is why OPENING
+      sorts ahead of it.
 
     Declared-short model — derived INDEPENDENTLY from domain-ledger.md ("Declared short
     sale", owner ruling 2026-07-31), not from the app:
@@ -831,9 +836,8 @@ def replay(facts: Facts) -> OracleResult:
     for act in facts.actions:
         events.append((act.d, EventPriority.CORPORATE_ACTION, act.id, "corp", act))
     for t in facts.txs:
-        events.append((t.trade_date,
-                       EventPriority.BUY if t.side == "BUY" else EventPriority.SELL,
-                       t.id, "tx", t))
+        # One rank for both sides; the id (third key) is the intraday order (DEF-012).
+        events.append((t.trade_date, EventPriority.TRADE, t.id, "tx", t))
     for dv in facts.divs:
         events.append((dv.effective, EventPriority.DIVIDEND, dv.id, "div", dv))
     events.sort(key=lambda e: (e[0], e[1], e[2]))
@@ -1486,9 +1490,8 @@ def integrity_findings(
     for act in facts.actions:
         events.append((act.d, EventPriority.CORPORATE_ACTION, act.id, "corp", act))
     for t in facts.txs:
-        events.append((t.trade_date,
-                       EventPriority.BUY if t.side.upper() == "BUY" else EventPriority.SELL,
-                       t.id, "tx", t))
+        # One rank for both sides; the id (third key) is the intraday order (DEF-012).
+        events.append((t.trade_date, EventPriority.TRADE, t.id, "tx", t))
     for dv in facts.divs:
         if dv.reinvest_shares:
             events.append((dv.effective, EventPriority.DIVIDEND, dv.id, "div", dv))

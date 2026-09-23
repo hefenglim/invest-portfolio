@@ -22,17 +22,17 @@ from pydantic import BaseModel
 from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.api.routers.scheduler import get_scheduler
+from portfolio_dash.api.routers.scheduler import get_scheduler, insight_task_run_refusal
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import figure_check, official_templates
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.ops.notify import RULE_CATALOG
 from portfolio_dash.scheduler.jobs import (
     bind_insight_schedule,
     insight_job_id,
-    latest_run_unfinished,
     run_insight_func,
     start_insight_run,
     unbind_insight_schedule,
@@ -797,30 +797,12 @@ def run_insight_now(
     dispatches the registered insight runner in a daemon thread. Mirrors spec-15 ``/run``:
     progress is polled via ``GET /api/insight-types/{id}/runs`` (running/ok/error/skipped).
     A disabled or archived task rejects with 409 (H2 fix, decision Q2a — ``get_insight_type``
-    returns archived rows, which is how an archived re-run used to slip through).
+    returns archived rows, which is how an archived re-run used to slip through). The
+    refusal is THE one the 排程中心's run-now door uses too (DEF-030).
     """
-    cs.ensure_seeded(conn)
-    it = cs.get_insight_type(conn, insight_type_id)
-    if it is None:
-        return JSONResponse(
-            status_code=404,
-            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
-        )
-    if it.archived:
-        return JSONResponse(
-            status_code=409,
-            content=error_body("task_archived", "任務已刪除，無法執行"),
-        )
-    if not it.enabled:
-        return JSONResponse(
-            status_code=409,
-            content=error_body("task_disabled", "任務已停用，請先啟用再執行"),
-        )
-    if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
-        return JSONResponse(
-            status_code=409,
-            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
-        )
+    refusal = insight_task_run_refusal(conn, insight_type_id)
+    if refusal is not None:
+        return refusal
     run_id = start_insight_run(conn, insight_type_id, now=now)
     thread = threading.Thread(
         target=run_insight_func,
@@ -1001,6 +983,26 @@ def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[st
     return flags.model_dump()
 
 
+# rule id → zh label, from the ONE Python catalog of rule labels (the push surface's).
+_RULE_LABEL: dict[str, str] = {rid: label for rid, label, _sev in RULE_CATALOG}
+
+
+def _trigger_wire(trigger: istore.InsightTrigger | None) -> dict[str, Any] | None:
+    """DEF-037: what produced the card — the page renders 「由預警「<規則>」觸發」 from it.
+
+    ``rule_label`` is resolved here (the frontend has no complete rule catalog; the push
+    catalog is the single Python source of rule labels). ``None`` for a legacy card: it
+    claims no trigger rather than a guessed one.
+    """
+    if trigger is None:
+        return None
+    wire = trigger.model_dump()
+    wire["rule_label"] = (
+        _RULE_LABEL.get(trigger.rule, trigger.rule) if trigger.rule is not None else None
+    )
+    return wire
+
+
 def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
     pred = rec.card.prediction
     return {
@@ -1041,6 +1043,7 @@ def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, 
         "tokens_in": rec.tokens_in,
         "tokens_out": rec.tokens_out,
         "created_at": rec.created_at,
+        "trigger": _trigger_wire(rec.trigger),
     }
 
 

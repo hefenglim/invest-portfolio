@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "W4 (AI-D20) AI-extraction accuracy corpus — SYNTHETIC, hand-authored. Each case is one input text (+ a fixed `today` anchor) and the rows the extraction MUST produce, expressed at the COMMIT-CSV level (the csv_texts the door emits), because a draft that cannot ride the CSV is a miss (the AI-1 lesson). Field names are the kind's CSV columns; `kind` routes the row. Values are strings everywhere — money is never a JSON float. Asserted fields per row are a SUBSET of the CSV columns (note is free-text and only asserted where a case says so); daytrade/short_sale are asserted on EVERY txn row and cash `kind` on EVERY cash row — the three fields that move money silently. Measured by scripts/ai_extraction_eval.py (live, manual); guarded against rot by tests/data_ingestion/test_ai_extraction_corpus.py (deterministic).",
+  "comment": "W4 (AI-D20) AI-extraction accuracy corpus — SYNTHETIC, hand-authored. Each case is one input text (+ a fixed `today` anchor) and the rows the extraction MUST produce, expressed at the COMMIT-CSV level (the csv_texts the door emits), because a draft that cannot ride the CSV is a miss (the AI-1 lesson). Field names are the kind's CSV columns; `kind` routes the row. Values are strings everywhere — money is never a JSON float. Asserted fields per row are a SUBSET of the CSV columns (note is free-text and only asserted where a case says so); daytrade/short_sale are asserted on EVERY txn row and cash `kind` on EVERY cash row — the three fields that move money silently. Measured by scripts/ai_extraction_eval.py (live, manual); guarded against rot by tests/data_ingestion/test_ai_extraction_corpus.py (deterministic). DEF-036 (2026-09-23): a txn row MAY carry, beside `fields`, a row-level `stated_amount` (the statement's own total the model must COPY, never compute — it is not a CSV column, so it is not a field) and an `amount_check` verdict (mismatch / consistent / absent) that the door's Decimal check must reach on those drafts; test_ai_extraction_corpus.py replays every such case through the real door, deterministically.",
   "today_default": "2026-08-18",
   "accounts": [
     "tw_broker",
@@ -920,6 +920,131 @@
               "ccy": "USD",
               "amount": "25"
             }
+          }
+        ],
+        "unparsed_contains": []
+      }
+    },
+    {
+      "id": "amount-contradiction-measured",
+      "today": "2026-09-23",
+      "note": "DEF-036, the verifier's exact text: 100 × 46 = 4,600 against a stated 50,000 — copy all three, bend none; the door flags it",
+      "input": "2026/09/22 台灣券商 買進 玉山金 2884 100股 成交價 46 成交金額 50,000 元",
+      "expect": {
+        "rows": [
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2884",
+              "side": "BUY",
+              "date": "2026-09-22",
+              "shares": "100",
+              "price": "46",
+              "daytrade": "0",
+              "short_sale": "0"
+            },
+            "stated_amount": "50000",
+            "amount_check": "mismatch"
+          }
+        ],
+        "unparsed_contains": []
+      }
+    },
+    {
+      "id": "amount-contradiction-lot-vs-shares",
+      "note": "DEF-036: 2 張 = 2,000 股 × 180 = 360,000 against a stated 360 (a factor of 1,000) — the lot rule still applies to shares, the total is still copied as written",
+      "input": "8/14 買進鴻海 2 張 成交價 180，成交金額 360 元",
+      "expect": {
+        "rows": [
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2317",
+              "side": "BUY",
+              "date": "2026-08-14",
+              "shares": "2000",
+              "price": "180",
+              "daytrade": "0",
+              "short_sale": "0"
+            },
+            "stated_amount": "360",
+            "amount_check": "mismatch"
+          }
+        ],
+        "unparsed_contains": []
+      }
+    },
+    {
+      "id": "amount-consistent-gross",
+      "note": "DEF-036: a 成交金額 that agrees with shares × price — copied, and the door stays silent",
+      "input": "8/10 買 2330 20 股 @950，成交金額 19,000 元",
+      "expect": {
+        "rows": [
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "BUY",
+              "date": "2026-08-10",
+              "shares": "20",
+              "price": "950",
+              "daytrade": "0",
+              "short_sale": "0"
+            },
+            "stated_amount": "19000",
+            "amount_check": "consistent"
+          }
+        ],
+        "unparsed_contains": []
+      }
+    },
+    {
+      "id": "amount-consistent-fee-inclusive",
+      "note": "DEF-036: 應付金額 includes the NT$20 minimum fee (1,100 + 20) — 1.8% above the gross, still consistent because the door also tries gross + the engine's own fee",
+      "input": "8/12 元大買 00878 50 股 @22，應付金額 1,120 元",
+      "expect": {
+        "rows": [
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "00878",
+              "side": "BUY",
+              "date": "2026-08-12",
+              "shares": "50",
+              "price": "22",
+              "daytrade": "0",
+              "short_sale": "0"
+            },
+            "stated_amount": "1120",
+            "amount_check": "consistent"
+          }
+        ],
+        "unparsed_contains": []
+      }
+    },
+    {
+      "id": "amount-absent",
+      "note": "DEF-036: no total in the text — stated_amount stays absent (never computed) and nothing is checked",
+      "input": "8/13 賣出 2330 30 股 @960",
+      "expect": {
+        "rows": [
+          {
+            "kind": "txn",
+            "fields": {
+              "account": "tw_broker",
+              "symbol": "2330",
+              "side": "SELL",
+              "date": "2026-08-13",
+              "shares": "30",
+              "price": "960",
+              "daytrade": "0",
+              "short_sale": "0"
+            },
+            "amount_check": "absent"
           }
         ],
         "unparsed_contains": []

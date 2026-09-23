@@ -23,14 +23,19 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
     ensure_job_rows,
+    insight_job_id,
+    insight_task_of,
+    job_kind,
     latest_run_unfinished,
     run_job_func,
     running_job_ids,
     running_progress,
-    start_job_run,
+    start_run,
+    unknown_job_message,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
 from portfolio_dash.shared.wire import decimal_str
@@ -131,18 +136,71 @@ def _next_fire(scheduler: BaseScheduler | None, job_id: str) -> str | None:
     return str(job.next_run_time.isoformat())
 
 
+def _insight_tasks(conn: sqlite3.Connection) -> dict[int, cs.InsightType]:
+    """Every insight task by id, archived included — read ONCE per request (trap #21).
+
+    Degrades to ``{}`` when the composer tables are absent (a scheduler-only database):
+    the rows then fall back to their ids, never a 500.
+    """
+    try:
+        return {it.id: it for it in cs.list_insight_types(conn, include_archived=True)}
+    except sqlite3.OperationalError:
+        return {}
+
+
+def _insight_label(task_id: int, tasks: dict[int, cs.InsightType]) -> str:
+    """The 排程中心 name of an ``insight:<id>`` row: the TASK's name (DEF-030)."""
+    task = tasks.get(task_id)
+    if task is None:
+        return f"AI 洞察任務 #{task_id}（已刪除）"
+    if task.archived:
+        return f"AI 洞察任務「{task.name}」（已刪除）"
+    return f"AI 洞察任務「{task.name}」"
+
+
+def _insight_pause(task_id: int, tasks: dict[int, cs.InsightType]) -> str | None:
+    """Why an insight row will not execute although its schedule is on — or None."""
+    task = tasks.get(task_id)
+    if task is None or task.archived:
+        return "任務已刪除，排程觸發時不會執行"
+    if not task.enabled:
+        return "任務已在 AI 洞察管線暫停，排程觸發時不會執行；請至洞察管線啟用"
+    return None
+
+
 def _job_element(
-    conn: sqlite3.Connection, row: sqlite3.Row, scheduler: BaseScheduler | None
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    scheduler: BaseScheduler | None,
+    tasks: dict[int, cs.InsightType],
 ) -> dict[str, Any]:
+    """One 排程中心 row. DEF-030 adds ``kind`` / ``label`` / ``effective_enabled`` /
+    ``paused_reason``: an ``insight:<id>`` row is named by its TASK (it used to render its
+    raw id, the description fallback), and the schedule row's ``enabled`` (its stored
+    intent, unchanged) is combined HERE with the task's own ``enabled`` — a task paused in
+    the 洞察管線 kept a schedule toggle reading 「啟用」 while every fire was skipped. The
+    frontend only displays the combined state; ``next`` is withheld for a paused task (the
+    trigger may still fire, but it will not execute)."""
     job_id = row["job_id"]
+    enabled = bool(row["enabled"])
+    task_id = insight_task_of(conn, job_id)
+    label: str | None = None
+    paused: str | None = None
+    if task_id is not None:
+        label = _insight_label(task_id, tasks)
+        paused = _insight_pause(task_id, tasks)
     return {
         "id": job_id,
         "desc": _desc(job_id),
+        "kind": "insight" if task_id is not None else "system",
+        "label": label,
         "cron": row["cron"],
         "tz": row["timezone"],
-        "enabled": bool(row["enabled"]),
+        "enabled": enabled,
+        "effective_enabled": enabled and paused is None,
+        "paused_reason": paused,
         "last": _last_run(conn, job_id),
-        "next": _next_fire(scheduler, job_id),
+        "next": None if paused is not None else _next_fire(scheduler, job_id),
     }
 
 
@@ -162,8 +220,9 @@ def list_jobs(
     rows = conn.execute(
         "SELECT job_id, enabled, cron, timezone FROM schedule_config ORDER BY job_id"
     ).fetchall()
+    tasks = _insight_tasks(conn)
     return {
-        "jobs": [_job_element(conn, r, scheduler) for r in rows],
+        "jobs": [_job_element(conn, r, scheduler, tasks) for r in rows],
         "scheduler": scheduler_state(request),
     }
 
@@ -222,7 +281,43 @@ def update_job(
         "SELECT job_id, enabled, cron, timezone FROM schedule_config WHERE job_id = ?",
         (job_id,),
     ).fetchone()
-    return _job_element(conn, updated, get_scheduler(request))
+    return _job_element(conn, updated, get_scheduler(request), _insight_tasks(conn))
+
+
+def insight_task_run_refusal(
+    conn: sqlite3.Connection, insight_type_id: int
+) -> JSONResponse | None:
+    """THE refusal for "run this insight task now" — shared by both doors (DEF-030).
+
+    ``POST /api/insight-tasks/{id}/run`` and the 排程中心's ``POST /api/scheduler/jobs/
+    insight:{id}/run`` start the same run, so they refuse it in the same words: an unknown
+    task 404, a deleted or paused task 409 (H2 fix, decision Q2a), a run already in flight
+    409. The 排程中心 door used to have none of these — it accepted a paused task's run and
+    failed it in the background.
+    """
+    cs.ensure_seeded(conn)
+    it = cs.get_insight_type(conn, insight_type_id)
+    if it is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    if it.archived:
+        return JSONResponse(
+            status_code=409,
+            content=error_body("task_archived", "任務已刪除，無法執行"),
+        )
+    if not it.enabled:
+        return JSONResponse(
+            status_code=409,
+            content=error_body("task_disabled", "任務已停用，請先啟用再執行"),
+        )
+    if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
+        return JSONResponse(
+            status_code=409,
+            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
+        )
+    return None
 
 
 @router.post("/scheduler/jobs/{job_id}/run")
@@ -231,19 +326,34 @@ def run_job_now(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    """§15.3 — fire a job once now (async 202; background thread opens its own session)."""
+    """§15.3 — fire a job once now (async 202; background thread opens its own session).
+
+    DEF-030: accepted only when something in this process can RUN the id (``job_kind``) —
+    a row the registry cannot run is a 404 here, not a background ``KeyError``. An
+    ``insight:<id>`` row is refused exactly as the task door refuses it
+    (:func:`insight_task_run_refusal`), and its running row is pre-inserted in the insight
+    shape (:func:`scheduler.jobs.start_run`) for the worker to finalize.
+    """
     ensure_job_rows(conn)
     known = conn.execute(
         "SELECT 1 FROM schedule_config WHERE job_id = ?", (job_id,)
     ).fetchone()
-    if known is None:
-        raise HTTPException(status_code=404, detail=f"{job_id} 不存在")
-    if latest_run_unfinished(conn, job_id):
+    kind = job_kind(conn, job_id) if known is not None else None
+    if kind is None:
+        return JSONResponse(
+            status_code=404, content=error_body("not_found", unknown_job_message(job_id))
+        )
+    task_id = insight_task_of(conn, job_id) if kind == "insight" else None
+    if task_id is not None:
+        refusal = insight_task_run_refusal(conn, task_id)
+        if refusal is not None:
+            return refusal
+    elif latest_run_unfinished(conn, job_id):
         return JSONResponse(
             status_code=409,
             content=error_body("already_running", f"{job_id} 執行中"),
         )
-    run_id = start_job_run(conn, job_id, now=now)
+    run_id = start_run(conn, job_id, now=now)
     thread = threading.Thread(
         target=run_job_func, kwargs={"job_id": job_id, "now": now}, daemon=True
     )
@@ -447,10 +557,29 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     return {"jobs": jobs, "active": active}
 
 
-def _run_row(row: sqlite3.Row) -> dict[str, Any]:
+def _run_task_id(row: sqlite3.Row, bindings: dict[str, int]) -> int | None:
+    """The insight task a run row belongs to — its ``payload`` (only insight runs write
+    one), else the schedule binding of its job id; never parsed out of the id string."""
+    payload = row["payload"]
+    if payload is not None:
+        try:
+            return int(payload)
+        except (TypeError, ValueError):
+            return None
+    return bindings.get(row["job_id"])
+
+
+def _run_row(
+    row: sqlite3.Row,
+    tasks: dict[int, cs.InsightType] | None = None,
+    bindings: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    task_id = _run_task_id(row, bindings or {}) if "payload" in row.keys() else None
     return {
         "id": row["id"],
         "job_id": row["job_id"],
+        # DEF-030: an insight run is named by its task, like its 排程中心 row.
+        "label": _insight_label(task_id, tasks or {}) if task_id is not None else None,
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
         "status": row["status"],
@@ -488,8 +617,24 @@ def list_runs(
         f"SELECT COUNT(*) AS n FROM job_runs {where}", params
     ).fetchone()["n"]
     rows = conn.execute(
-        f"SELECT id, job_id, started_at, finished_at, status, detail, cost_usd "
+        f"SELECT id, job_id, started_at, finished_at, status, detail, cost_usd, payload "
         f"FROM job_runs {where} ORDER BY id DESC LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
-    return {"rows": [_run_row(r) for r in rows], "total_count": total}
+    tasks = _insight_tasks(conn)
+    bindings = _insight_bindings(conn)
+    return {"rows": [_run_row(r, tasks, bindings) for r in rows], "total_count": total}
+
+
+def _insight_bindings(conn: sqlite3.Connection) -> dict[str, int]:
+    """job_id → task id for every kind=insight schedule row (one read per request)."""
+    out: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT job_id, payload FROM schedule_config WHERE kind = 'insight' "
+        "AND payload IS NOT NULL"
+    ):
+        try:
+            out[str(r["job_id"])] = int(r["payload"])
+        except (TypeError, ValueError):
+            continue
+    return out

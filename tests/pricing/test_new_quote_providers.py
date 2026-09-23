@@ -132,11 +132,20 @@ def test_malaysiastock_fetch_preserves_3dp(monkeypatch: pytest.MonkeyPatch) -> N
     assert r.market is Market.MY
 
 
-def test_providers_use_today_as_of() -> None:
+def test_providers_use_today_as_of(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEF-022: a latest quote's ``as_of`` is a BUSINESS date, so it is the Taipei day
+    (``shared/clock.py``, Q6) — not ``date.today()`` in whatever zone the host runs in.
+    Pinned at a Taipei time whose UTC date is the day BEFORE, so the two clocks disagree."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    import portfolio_dash.pricing.providers.twstock_provider as mod
+
+    taipei_morning = datetime(2030, 1, 1, 3, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    monkeypatch.setattr(mod, "app_now", lambda: taipei_morning)
     p = TwStockProvider()
-    # as_of defaults to today's date for the latest-quote providers.
     row = p._row("2330", Decimal("1"))
-    assert row.as_of == date.today()
+    assert row.as_of == date(2030, 1, 1)
 
 
 # --- default registry order ---------------------------------------------------

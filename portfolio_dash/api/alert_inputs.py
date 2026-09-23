@@ -40,7 +40,6 @@ from portfolio_dash.strategy.alerts import (
     ConsensusDelta,
     SymbolMetric,
     TargetLevels,
-    account_display_names,
     compute_alerts_from,
 )
 from portfolio_dash.strategy.rules_config import get_alert_rules
@@ -228,7 +227,6 @@ def compute_alerts_full(
         quota_threshold=get_alert_threshold(conn),
         ai_active=ai_active(conn),
         calib_gap=calib_gap,
-        account_names=account_display_names(conn),
         symbol_metrics=inputs.symbol_metrics,
         target_weights=inputs.target_weights,
         consensus_deltas=inputs.consensus_deltas,

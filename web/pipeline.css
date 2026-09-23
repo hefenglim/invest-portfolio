@@ -281,3 +281,17 @@
   .wz-shell { flex-direction: column; }
   .wz-rail { position: static; width: 100%; }
 }
+
+/* DEF-031 / DEF-032: 標的宇宙 picker — one checkbox per SYMBOL with its account chips, shared
+   by the wizard's 自選標的 step and the drawer's 編輯標的 dialog (pipeline.js). Columns size to
+   the content (code + name + chips) and fold to one column in a phone-width dialog. */
+.pp-uni-body { display: flex; flex-direction: column; gap: 10px; }
+.pp-uni-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+.pp-uni-picker .pv-symgrid { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+.pp-uni-picker .pv-check { flex-wrap: wrap; min-width: 0; gap: 6px; }
+.pp-uni-sym { font-family: var(--font-num); font-weight: 600; }
+.pp-uni-name {
+  color: var(--text-3); font-size: 11px; max-width: 120px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pp-uni-count { color: var(--text-2); }

@@ -223,7 +223,9 @@ def test_the_end_balance_message_is_preserved_for_the_plain_overdraft(
         "from_ccy": "TWD", "from_amt": "400000", "to_ccy": "USD", "to_amt": "12000"})
     assert response.status_code == 422, response.text
     assert _error_code(response) == "fx_insufficient_balance"
-    assert "可用餘額" in response.json()["error"]["message"]
+    # DEF-008 (2026-09-23): both branches now share ONE sentence; the covering-balance
+    # branch is told apart by its cause 「換匯當日」 (the other says 「換匯日早於資金到位」).
+    assert "（換匯當日）" in response.json()["error"]["message"]
 
 
 def test_a_conversion_on_or_after_its_funding_still_passes(

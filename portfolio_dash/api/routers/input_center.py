@@ -15,10 +15,14 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn, get_now
-from portfolio_dash.api.errors import error_body
+from portfolio_dash.api.errors import error_body, llm_refusal_message
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
 from portfolio_dash.api.routers.cash import cash_pool_fn
-from portfolio_dash.api.routers.ledgers import _to_models, reconcile_split_prices
+from portfolio_dash.api.routers.ledgers import (
+    _delete_actions,
+    _to_models,
+    reconcile_split_prices,
+)
 from portfolio_dash.api.wire import (
     account_markets_wire,
     div_model_wire,
@@ -26,7 +30,13 @@ from portfolio_dash.api.wire import (
     issue_wire,
     parse_side,
 )
-from portfolio_dash.data_ingestion.agents import ai_agents_input
+from portfolio_dash.data_ingestion.agents import (
+    AiDraftList,
+    AiInputResult,
+    ai_agents_input,
+    cash_kind_vocabulary,
+    revalidate_ai_drafts,
+)
 from portfolio_dash.data_ingestion.cash_import import (
     build_cash_movement_preview,
     write_cash_movement_row,
@@ -34,8 +44,8 @@ from portfolio_dash.data_ingestion.cash_import import (
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.corporate_action_import import (
     build_corporate_action_preview,
+    corporate_action_writer,
     parse_action_batch,
-    write_corporate_action_row,
 )
 from portfolio_dash.data_ingestion.csv_import import (
     DateAmbiguity,
@@ -67,24 +77,35 @@ from portfolio_dash.data_ingestion.preview import (
     BatchContext,
     ImportPreview,
     PreviewRow,
+    Writer,
     commit_preview,
 )
 from portfolio_dash.data_ingestion.provenance import (
     delete_batch,
     existing_hashes,
+    is_undoable,
+    list_batches,
     open_batch,
     row_hashes,
 )
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
+    MovedWeight,
+    StoredCorporateAction,
     list_accounts,
     list_cash_movements,
+    list_corporate_actions,
     list_dividends,
     list_fx_conversions,
     list_instruments,
     list_transactions,
 )
-from portfolio_dash.data_ingestion.validate import Issue, TxnInput, unknown_account_issue
+from portfolio_dash.data_ingestion.validate import (
+    Issue,
+    TxnInput,
+    unknown_account_issue,
+    unknown_account_message,
+)
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
@@ -278,7 +299,7 @@ def input_holdings(
     accounts = {a.account_id for a in list_accounts(conn)}
     if account not in accounts:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"帳戶 {account} 不存在", field="account"))
+            "not_found", unknown_account_message(account), field="account"))
     # Every symbol this account has ever touched, across the three share-bearing ledgers.
     symbols: set[str] = set()
     for row in conn.execute(
@@ -428,8 +449,9 @@ def _issue_wire_manual(
             "text": f"未註冊標的 {symbol} — 寫入時將自動查詢並註冊（查無報價則無法寫入）",
             "field": "symbol",
         }
-    wired: dict[str, Any] = issue_wire(issue)
-    return wired
+    # The advisory severity (DEF-014) is issue_wire's own since I-13 — the wrapper that
+    # added it here is retired.
+    return issue_wire(issue)
 
 
 def _cash_overdraft_issue(
@@ -518,16 +540,17 @@ def _ledger_before(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
 
     The cut is :class:`EventPriority`'s, read from the enum rather than re-stated, because
     that enum exists to be the ONE owner of same-day order (``OPENING 0 → CORPORATE_ACTION
-    10 → BUY 20 → SELL 30 → DIVIDEND 40``). A transaction's own rank is BUY or SELL, so:
+    10 → TRADE 20 → DIVIDEND 40``). A transaction's rank is TRADE whichever side it is, so:
 
-    * ``opening`` / ``actions`` — ``<= day``: both rank below either side, so a same-day
+    * ``opening`` / ``actions`` — ``<= day``: both rank below a trade, so a same-day
       opening and a same-day corporate action are already applied when the trade books
       (the same call ``LedgerBundle.before_action_on`` makes for openings, and D3's ruling);
-    * ``transactions`` — ``< day``, plus the same-day rows whose rank is not ABOVE the
-      draft's: a same-day BUY precedes a SELL, and the draft is last within its own rank
-      because ``list_transactions`` orders by ``(trade_date, id)`` and the new row takes the
-      highest id;
-    * ``dividends`` — ``< day`` STRICTLY. DIVIDEND (40) outranks both sides, so a payout
+    * ``transactions`` — ``<= day``: EVERY stored same-day row precedes the draft, buys and
+      sells alike, because trades of one day book in ledger-id order (DEF-012, 2026-09-23)
+      and the draft takes the highest id. Until DEF-012 a same-day BUY outranked a SELL, so
+      a drafted buy was projected AHEAD of the sells already entered that day — and then
+      booked there, re-pricing a realized row the owner had already read (B-18);
+    * ``dividends`` — ``< day`` STRICTLY. DIVIDEND (40) outranks a trade, so a payout
       dated on the trade date books AFTER the trade. This is the half that makes the bug
       reachable without any backfill at all: a sell entered for "yesterday" was projected
       against a cost basis that day's dividends had already reduced.
@@ -541,7 +564,9 @@ def _ledger_before(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
     follows the day's earlier trades).
     """
     day = draft.trade_date
-    rank = EventPriority.BUY if draft.side is Side.BUY else EventPriority.SELL
+    # Read from the enum so this stays true by construction: a stored same-day trade's
+    # rank is never ABOVE the draft's, because both are TRADE.
+    rank = EventPriority.TRADE
     return replace(
         bundle,
         opening=[o for o in bundle.opening if o.build_date <= day],
@@ -549,8 +574,7 @@ def _ledger_before(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
         transactions=[
             t for t in bundle.transactions
             if t.trade_date < day
-            or (t.trade_date == day
-                and (EventPriority.BUY if t.side is Side.BUY else EventPriority.SELL) <= rank)
+            or (t.trade_date == day and EventPriority.TRADE <= rank)
         ],
         dividends=[d for d in bundle.dividends if d.effective_date < day],
         unreadable_actions=[u for u in bundle.unreadable_actions if u.date <= day],
@@ -1091,11 +1115,47 @@ _BUILDERS: dict[str, Builder] = {
     "corporate_actions": build_corporate_action_preview,
     "cash": _cash_builder,
 }
-_WRITERS = {
-    "transactions": write_transaction_row, "dividends": write_dividend_row,
-    "fx": write_fx_row, "openings": write_opening_row,
-    "corporate_actions": write_corporate_action_row,
-    "cash": write_cash_movement_row,
+#: kind -> the writer ``commit_preview`` calls, BOUND per request (I-2). Five kinds need
+#: nothing bound; ``corporate_actions`` needs the target-weight mover, which lives in
+#: ``strategy/`` and is therefore injected from here — the layer above both — once per import
+#: (``architecture.md``'s injection convention). A binder rather than a writer so that seam is
+#: a required argument at the one place it can be supplied, not a module-level default.
+WriterBinder = Callable[[sqlite3.Connection, datetime], Writer]
+
+
+def _unbound(writer: Writer) -> WriterBinder:
+    def bind(_conn: sqlite3.Connection, _now: datetime) -> Writer:
+        return writer
+
+    return bind
+
+
+def _bind_corporate_action_writer(conn: sqlite3.Connection, now: datetime) -> Writer:
+    """The corporate-action writer with its weight mover bound to this request (I-2).
+
+    The mover runs INSIDE ``commit_preview``'s transaction (``commit=False``) and its result
+    is recorded on the EXCHANGE row (``weight_move_json``) — the manual door's F-3 contract,
+    now at the bulk door too. It used to run after the commit, in this router: a failure there
+    left the EXCHANGE standing with the weight on the dead ticker, and nothing was recorded, so
+    deleting the imported row could never move the weight back.
+    """
+
+    def move_weight(from_symbol: str, to_symbol: str) -> MovedWeight | None:
+        weight = move_target_weight(conn, from_symbol=from_symbol, to_symbol=to_symbol,
+                                    now=now, commit=False)
+        if weight is None:
+            return None
+        return MovedWeight(from_symbol=from_symbol, to_symbol=to_symbol, weight=weight)
+
+    return corporate_action_writer(move_weight=move_weight)
+
+
+_WRITERS: dict[str, WriterBinder] = {
+    "transactions": _unbound(write_transaction_row),
+    "dividends": _unbound(write_dividend_row),
+    "fx": _unbound(write_fx_row), "openings": _unbound(write_opening_row),
+    "corporate_actions": _bind_corporate_action_writer,
+    "cash": _unbound(write_cash_movement_row),
 }
 # Kinds whose commit moves the stored price basis and must therefore run the §5.1(c)
 # reconcile afterwards. A SPLIT restates every close of its symbol; leaving it out would
@@ -1106,9 +1166,11 @@ _RECONCILING_KINDS = frozenset({"corporate_actions"})
 
 
 def _row_status(row: PreviewRow) -> str:
+    """``error`` / ``warn`` / ``ok`` — an ADVISORY-only row is ``ok`` (DEF-014): it is shown,
+    it is never a reason to withhold the tick or to demand ``ack_warnings``."""
     if row.has_hard_issue:
         return "error"
-    return "warn" if row.issues else "ok"
+    return "warn" if any(not i.info for i in row.issues) else "ok"
 
 
 def _row_data(row: PreviewRow) -> dict[str, Any]:
@@ -1137,10 +1199,25 @@ def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
     for r in preview.rows:
         st = _row_status(r)
         counts[st] += 1
-        rows.append({"n": r.index, "status": st,
-                     "reason": r.issues[0].message if r.issues else None,
-                     "code": _row_code(r),
-                     "data": _row_data(r)})
+        # The gating finding leads; an advisory is the reason only when nothing else is
+        # (so it is visible today in the row's message cell without a frontend change),
+        # and the full advisory list rides as ``info`` — ADDITIVE, only when non-empty.
+        gating = [i for i in r.issues if not i.info]
+        advisory = [i for i in r.issues if i.info]
+        wire: dict[str, Any] = {
+            "n": r.index, "status": st,
+            "reason": (gating[0].message if gating
+                       else advisory[0].message if advisory else None),
+            "code": _row_code(r),
+            # I-13: every finding's KIND, in issue order — a stable machine code per row, so
+            # a page that needs to recognise one (the broker door's 賣超 consequence line)
+            # reads the kind instead of pattern-matching the server's sentence. ADDITIVE.
+            "kinds": [i.kind for i in r.issues],
+            "data": _row_data(r),
+        }
+        if advisory:
+            wire["info"] = [i.message for i in advisory]
+        rows.append(wire)
     return {"rows": rows, "summary": {"total": len(preview.rows), **counts}}
 
 
@@ -1263,10 +1340,11 @@ def import_commit(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    writer = _WRITERS.get(body.kind)
-    if body.kind not in _BUILDERS or writer is None:
+    bind_writer = _WRITERS.get(body.kind)
+    if body.kind not in _BUILDERS or bind_writer is None:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
+    writer = bind_writer(conn, now)
     if (bad := _bad_date_format(body.date_format)) is not None:
         return bad
     builder = _resolve_builder(body.kind, conn, body.pending_actions_csv)
@@ -1280,12 +1358,22 @@ def import_commit(
         content["date_ambiguity"] = _date_ambiguity_wire(norm.ambiguity)
         return JSONResponse(status_code=422, content=content)
     preview = builder(conn, norm.text)  # re-derive (re-validate vs current ledger)
-    has_warn = any((not r.has_hard_issue) and r.issues for r in preview.rows)
+    # An ADVISORY (``info``) is not a warning to acknowledge (DEF-014).
+    has_warn = any(
+        (not r.has_hard_issue) and any(not i.info for i in r.issues) for r in preview.rows)
     if has_warn and not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", "有警告列需確認後才寫入"))
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
+    # WHY a row was skipped, per row (DEF-024, 2026-09-23). ``skipped`` used to be one
+    # number covering two different events — a row the caller left unticked, and a row the
+    # narrowed re-derivation below dropped because a finding surfaced that the owner never
+    # saw — so a commit that wrote nothing announced 「寫入成功 成功 0 筆・跳過 2 筆」 and the
+    # second event was invisible. Each skipped index now maps to a (code, message) pair.
+    deselected: set[int] = set()
+    narrowed: dict[int, Issue] = {}
     if body.select is not None:
+        deselected = accept - set(body.select)
         # INTERSECTED, never substituted: a deselected row is skipped, and so is a row the
         # validator rejected even if the caller ticked it. `commit_preview`'s own comment has
         # always reasoned about "a row the caller deselected" — the seam was built for this
@@ -1322,10 +1410,14 @@ def import_commit(
             # and only the message's numbers can differ under a smaller batch. Dropping is
             # still shrink-only, and the drops are all SELLS (only the oversell guard reads
             # the batch), so surviving siblings were judged with LESS shares than they get.
-            accept -= {
-                r.index for r in preview.rows
-                if {i.kind for i in r.issues} - full_kinds.get(r.index, set())
-            }
+            for r in preview.rows:
+                new_kinds = {i.kind for i in r.issues} - full_kinds.get(r.index, set())
+                if not new_kinds:
+                    continue
+                if r.index in accept:
+                    # The finding the owner never saw — the reason this row is skipped.
+                    narrowed[r.index] = next(i for i in r.issues if i.kind in new_kinds)
+                accept.discard(r.index)
     # Provenance. The hashes are derived from the rows' own content, so re-uploading the
     # same export matches and skips rather than doubling the ledger, and the batch id makes
     # the whole import removable in one step. The batch INSERT sits inside commit_preview's
@@ -1368,6 +1460,24 @@ def import_commit(
         conn, preview, accept=accept, writer=writer, provenance=provenance)
     out: dict[str, Any] = {
         "written": len(summary.written), "skipped": len(summary.skipped)}
+    if summary.skipped:
+        # ADDITIVE and only when non-zero, like ``rejected_rows`` below. ``row`` is 1-based
+        # to match it; ``symbol`` is the row's own cell (blank for a kind without one).
+        by_index = {r.index: r for r in preview.rows}
+
+        def _why(idx: int) -> tuple[str, str]:
+            if idx in narrowed:
+                return narrowed[idx].kind, narrowed[idx].message
+            if idx in deselected:
+                return "deselected", "未勾選"
+            return "skipped", "未寫入"
+
+        out["skipped_rows"] = [
+            {"row": idx + 1,
+             "symbol": by_index[idx].raw.get("symbol", "") if idx in by_index else "",
+             "code": _why(idx)[0], "message": _why(idx)[1]}
+            for idx in summary.skipped
+        ]
     if summary.rejected:
         # ⚠ ADDITIVE and only when non-zero (the ``duplicates`` convention below), so the
         # four kinds that never reject keep a byte-identical payload.
@@ -1405,25 +1515,20 @@ def import_commit(
             {r.payload.get("from_symbol", "") for r in written_rows}
             | {r.payload.get("to_symbol", "") for r in written_rows},
         )
-        # The owner's per-symbol config follows a re-keyed position, at the same post-commit
-        # seam and for the same reason the prices do: an EXCHANGE changes what the symbol
-        # means, and anything still filed under the old one is now filed under nothing. The
-        # price-alert band moves inside the row writer (D47); the target weight moves here,
-        # because `data_ingestion -> strategy` is not an authorised edge (architecture.md)
-        # and re-deriving the weights format on that side would make it a second owner.
-        #
-        # Deduplicated by PAIR, not per row: one event is N rows, one per holding account
-        # (D13), and the move is idempotent anyway — the second call finds the source gone.
-        pairs = {
-            (str(r.payload.get("from_symbol", "")), str(r.payload.get("to_symbol", "")))
-            for r in written_rows
-            if str(r.payload.get("kind", "")).strip().upper() == "EXCHANGE"
-        }
+        # The owner's per-symbol config follows a re-keyed position: an EXCHANGE changes
+        # what the symbol means, and anything still filed under the old one is now filed
+        # under nothing. Both settings move INSIDE the batch's transaction now — the band in
+        # the row writer (D47), the target weight through the mover bound above (I-2) — and
+        # each EXCHANGE row records what it moved, so this report reads the RECORD rather
+        # than re-deriving it: what the response says moved is what the delete will offer
+        # to move back. One event is N rows (D13) and only the first row of a set records a
+        # move (the second finds the source already cleared), so the list is per event.
+        written_ids = set(summary.written)
         weights_moved = [
-            {"from_symbol": frm, "to_symbol": to, "weight": decimal_str(w)}
-            for frm, to in sorted(pairs)
-            if (w := move_target_weight(
-                conn, from_symbol=frm, to_symbol=to, now=now)) is not None
+            {"from_symbol": a.weight_move.from_symbol, "to_symbol": a.weight_move.to_symbol,
+             "weight": decimal_str(a.weight_move.weight)}
+            for a in list_corporate_actions(conn)
+            if a.id in written_ids and a.weight_move is not None
         ]
         if weights_moved:
             out["weights_moved"] = weights_moved
@@ -1438,18 +1543,18 @@ def import_batches(
 
     Read-only and cheap. It exists so the DELETE below is reachable by a human: a batch id
     that can only be discovered by opening the SQLite file is not an undo anyone will use.
+
+    DEF-017: ``row_count`` is LIVE (the rows that still carry the batch id) and a batch whose
+    rows were all deleted on their ledger tabs is not listed — see
+    :func:`~portfolio_dash.data_ingestion.provenance.list_batches`.
     """
-    rows = conn.execute(
-        "SELECT id, kind, broker, source_name, source_sha256, imported_at, row_count, status "
-        "FROM import_batches ORDER BY id DESC LIMIT ?",
-        (max(1, min(limit, 500)),),
-    ).fetchall()
-    return {"batches": [dict(r) for r in rows]}
+    return {"batches": list_batches(conn, limit=max(1, min(limit, 500)))}
 
 
 @router.delete("/import/batches/{batch_id}")
 def import_batch_delete(
-    batch_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    batch_id: int, conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Undo one import: delete exactly the ledger rows that batch wrote, and the batch.
 
@@ -1459,15 +1564,53 @@ def import_batch_delete(
 
     Rows entered by hand, or by a DIFFERENT batch, are untouched: the delete is keyed on
     ``import_batch_id``, which only this batch's rows carry.
+
+    I-3: the batch's corporate actions leave through the ledger tab's own delete
+    (``ledgers._delete_actions``, bound here as ``delete_batch``'s required seam), so an
+    undone EXCHANGE gives back its band and target weight and takes its linked fee, under
+    the same conditions and with the same verdicts as 刪除 on the 公司行動 tab; and a SPLIT
+    that leaves re-expresses its symbol's stored prices (the reconcile the ledger delete has
+    always run — the bare batch DELETE left the closes in post-split terms).
     """
     found = conn.execute(
-        "SELECT 1 FROM import_batches WHERE id=?", (batch_id,)
+        "SELECT kind FROM import_batches WHERE id=?", (batch_id,)
     ).fetchone()
     if found is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"找不到匯入批次 {batch_id}", field="batch_id"))
-    removed = delete_batch(conn, batch_id)
-    return {"deleted": removed, "import_batch_id": batch_id}
+    # DEF-017: an undo that cannot find its rows says so rather than 「已復原」-ing nothing.
+    if not is_undoable(str(found["kind"])):
+        # Openings upsert on (account, symbol) and carry no batch id — there is nothing this
+        # door can remove, and deleting the record alone would claim an undo that did not
+        # happen. Refused; the record stays as history.
+        return JSONResponse(status_code=422, content=error_body(
+            "batch_not_undoable",
+            "期初庫存的匯入不帶批次標記（同一帳戶＋代號會直接覆寫），無法依批次復原；"
+            "請到「期初庫存」分頁逐筆修正或刪除"))
+    outcomes: list[dict[str, Any]] = []
+    symbols: set[str] = set()
+
+    def _delete_event(rows: list[StoredCorporateAction]) -> None:
+        symbols.update({a.from_symbol for a in rows} | {a.to_symbol for a in rows})
+        outcomes.append(_delete_actions(conn, rows, now=now, commit=False))
+
+    removed = delete_batch(conn, batch_id, delete_actions=_delete_event)
+    out: dict[str, Any] = {"deleted": removed, "import_batch_id": batch_id}
+    if outcomes:
+        # ADDITIVE, and only when the batch held corporate actions — the other kinds keep a
+        # byte-identical payload. The same wire fields the ledger delete returns, one entry
+        # per event, so the undo can say what came back and what did not (and why).
+        out["prices_restated"] = reconcile_split_prices(conn, symbols)
+        out["fee_deleted"] = [f for o in outcomes for f in o["fee_deleted"]]
+        out["band_restore"] = [o["band_restore"] for o in outcomes
+                               if o["band_restore"] is not None]
+        out["weight_restore"] = [o["weight_restore"] for o in outcomes
+                                 if o["weight_restore"] is not None]
+    if removed == 0:
+        # Every row was already deleted on its ledger tab (a stale page's 復原 button). The
+        # empty record is cleared above; the answer names why nothing was deleted.
+        out["message"] = "此批次的列已在帳本中刪除"
+    return out
 
 
 @router.get("/import/template")
@@ -1540,6 +1683,9 @@ class AiBody(BaseModel):
     images: list[str] | None = None
     # explicit per-run model alias; must name an ENABLED model (+ vision when images present).
     model_alias: str | None = None
+    # DEF-035: the draft table's EDITED drafts. Present -> re-validate them through the same
+    # post-parse pipeline with NO model call (text/images/model_alias are then ignored).
+    drafts: AiDraftList | None = None
 
 
 @router.post("/input/ai/preview")
@@ -1548,6 +1694,10 @@ def ai_preview(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
+    if body.drafts is not None:
+        # DEF-035: an edit, not a parse — no LLM call, so no budget/activation gate applies.
+        return _ai_wire(revalidate_ai_drafts(
+            conn, body.drafts, pool=cash_pool_fn(conn), text=body.text))
     images, bad = _decode_ai_images(body.images or [])
     if bad is not None:
         return bad
@@ -1574,14 +1724,26 @@ def ai_preview(
     if result.error is not None:
         # The LLM-failure degrade path (pre-union: a single error row scanned for _LLM_HTTP
         # kinds; W4: one explicit field — the scan could not survive three preview buckets).
+        # I-5: ``message`` is ``str(LLMError)`` — English for a log («provider error (…)»)
+        # unless the raise site wrote Chinese — so it goes through the handlers' own rule.
         return JSONResponse(
             status_code=_LLM_HTTP.get(result.error.kind, 503),
-            content=error_body(result.error.kind, result.error.message))
+            content=error_body(result.error.kind, llm_refusal_message(
+                result.error.kind, result.error.message)))
+    return _ai_wire(result)
+
+
+def _ai_wire(result: AiInputResult) -> dict[str, Any]:
     wire: dict[str, Any] = {
         # One preview + one commit CSV PER KIND (transactions/dividends/cash); the frontend
         # commits each kind through the ORDINARY /api/import/commit (AI-D18).
         "previews": {kind: _preview_wire(p) for kind, p in result.previews.items()},
         "csv_texts": result.csv_texts,
+        # DEF-035: the editable drafts, row-aligned with each kind's preview rows, and the
+        # server-owned cash-kind vocabulary the draft table's 類型 select is built from.
+        "drafts": {kind: [d.model_dump(mode="json") for d in ds]
+                   for kind, ds in result.drafts.items()},
+        "cash_kinds": cash_kind_vocabulary(),
         "unparsed": [u.model_dump() for u in result.unparsed],
         "meta": {"model": result.meta.model, "via": result.meta.via,
                  "cost_usd": None if result.meta.cost_usd is None

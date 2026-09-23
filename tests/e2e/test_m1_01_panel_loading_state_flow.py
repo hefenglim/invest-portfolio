@@ -195,7 +195,11 @@ def test_an_empty_ledger_settles_into_its_empty_state_not_the_loading_text(
     for sel in _HOSTS:
         _assert_settled(page, sel, "an empty dashboard landed")
     _assert_nothing_loading(page, "an empty dashboard landed")
-    assert page.locator("#holdings-body tr").count() == 0, "a fresh install has no holdings"
+    # L23 (demo audit 2026-09-16) draws ONE hint row (`tr.holdings-empty`, 「尚無持倉」) into an
+    # empty table — that row IS the empty state this test wants, not a holding and not 載入中.
+    assert page.locator("#holdings-body tr:not(.holdings-empty)").count() == 0, (
+        "a fresh install has no holdings")
+    assert "尚無持倉" in page.inner_text("#holdings-body"), "the empty table must say so"
     trend = page.inner_text("#trend-chart")
     assert "尚無" in trend or "不足" in trend, f"trend host is not in its empty state: {trend!r}"
 

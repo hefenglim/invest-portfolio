@@ -109,6 +109,66 @@
     link.href = 'instruments.html';
     bar.appendChild(link);
     page.insertBefore(bar, page.firstChild);
+    renderUnappliedBanner();
+  }
+
+  /* DEF-023 (2026-09-23): corporate actions the replay REFUSED to book get a VISIBLE
+     block with an entry, not a tooltip. Measured: after a buy was deleted from under a
+     split, the XIRR card read 「— 資料不足」, the sentence naming the row lived only in
+     that card's hover title, the 公司行動 tab showed no mark on the row, and only the
+     symbol's drawer said 「⚠ 公司行動未套用」. One unapplied action blanks XIRR for the
+     WHOLE portfolio (D38), so the cause must be on the page, named per row, with a link to
+     the ledger row that carries it.
+
+     Every row uses the payload's STRUCTURED fields — account through pdNames (`acctZh`),
+     never the English `account` or the raw id — and links to `trades.html?ledger=action`
+     with the row's identifiers (`action_id` when the payload carries it, else the
+     account/symbol/date/kind tuple), which ledger.js turns into the flashed row. `reason`
+     is the server's sentence, rendered verbatim (its account tokens resolve in api.js).
+     Renders nothing when the list is empty, so a clean ledger shows no trace of it. */
+  function unappliedActionHref(u) {
+    const sym = u.symbol || u.from_symbol || '';
+    let href = 'trades.html?ledger=action';
+    if (u.action_id !== null && u.action_id !== undefined) {
+      href += '&action_id=' + encodeURIComponent(u.action_id);
+    }
+    href += '&account_id=' + encodeURIComponent(u.account_id || '')
+      + '&symbol=' + encodeURIComponent(sym)
+      + '&date=' + encodeURIComponent(u.date || '')
+      + '&kind=' + encodeURIComponent(u.kind || '');
+    return href;
+  }
+  function renderUnappliedBanner() {
+    const rows = D.unapplied_actions || [];
+    const page = document.querySelector('.page');
+    const old = document.getElementById('unapplied-banner');
+    if (old) old.remove();
+    if (!rows.length || !page) return;
+    const bar = el('div', 'unreg-banner unapplied-banner');
+    bar.id = 'unapplied-banner';
+    const head = el('div', 'unapplied-head');
+    head.appendChild(el('span', 'unreg-ico', '⚠'));
+    head.appendChild(el('span', 'unreg-text',
+      '帳本中有 ' + rows.length + ' 筆公司行動無法套用（待釐清）— 這些部位的股數仍是行動前的基準，'
+      + '整個投資組合的年化報酬率（XIRR）暫不計算。請到交易帳本修正該筆行動或補齊持倉紀錄。'));
+    bar.appendChild(head);
+    const list = el('ul', 'unapplied-list');
+    rows.forEach((u) => {
+      const li = el('li', 'unapplied-item');
+      const sym = u.symbol || u.from_symbol || '';
+      const ends = u.to_symbol && u.to_symbol !== sym ? sym + '→' + u.to_symbol : sym;
+      li.appendChild(el('span', 'unapplied-meta',
+        acctZh(u.account_id) + '・' + ends + '・' + f.date(u.date) + '・'
+        + (u.kind_label || u.kind)));   /* I-14: the server's word (KIND_ZH) */
+      li.appendChild(el('span', 'unapplied-reason', u.reason || ''));
+      const link = el('a', 'unreg-link', '前往該筆公司行動');
+      link.href = unappliedActionHref(u);
+      li.appendChild(link);
+      list.appendChild(li);
+    });
+    bar.appendChild(list);
+    const after = document.getElementById('unreg-banner');
+    page.insertBefore(bar, after ? after.nextSibling : page.firstChild);
   }
 
   /* ============ B. KPI band v3 — 7 cards, ONE grammar (方案 A, owner ruling 2026-09-01) ==

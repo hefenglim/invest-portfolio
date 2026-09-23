@@ -427,8 +427,9 @@ _BASE = "https://invest.example.com"
     ("/symbol/2330", "/index.html#sym=2330"),           # per-symbol → drawer anchor
     ("/symbol/^GSPC", "/index.html#sym=%5EGSPC"),        # encodeURIComponent-equivalent (^)
     ("index.html#sym=2330", "/index.html#sym=2330"),     # already anchored → pass through
-    ("/settings", "/settings.html"),
+    ("/settings", "/settings.html#alerts"),             # legacy bare href (I-15)
     ("/settings#llm", "/settings.html#llm"),
+    ("/settings#prompts/evolution", "/settings.html#prompts/evolution"),   # anchor kept
     ("/insights", "/insights.html"),
     ("/pipeline", "/pipeline-hub.html"),
     ("settings.html#alerts", "/settings.html#alerts"),   # already a static page → pass through
@@ -444,7 +445,8 @@ def test_frontend_url_none_when_base_empty() -> None:
 
 
 def test_frontend_url_strips_trailing_slash_on_base() -> None:
-    assert notify.frontend_url("https://x.co/", "/settings") == "https://x.co/settings.html"
+    assert notify.frontend_url("https://x.co/", "/settings#llm") == (
+        "https://x.co/settings.html#llm")
 
 
 # --- normalize_base_url validation (FU-D17) -----------------------------------

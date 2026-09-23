@@ -123,7 +123,7 @@ def test_build_dashboard_happy_path(conn: sqlite3.Connection) -> None:
     by_symbol = {h.symbol: h for h in data.holdings}
     tsmc = by_symbol["2330"]
     assert tsmc.name == "TSMC" and tsmc.sector == "Semiconductors"
-    assert tsmc.board == "TWSE" and tsmc.account_name == "TW Broker"
+    assert tsmc.board == "TWSE" and tsmc.account_name == "{account:tw_broker}"   # I-10
     assert tsmc.market_value == Decimal("600000")
     assert tsmc.unrealized_pnl == Decimal("105000")
     assert tsmc.price_as_of == date(2026, 6, 9) and tsmc.price_stale is False

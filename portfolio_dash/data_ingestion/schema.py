@@ -169,6 +169,32 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # likewise stores two amounts. NULL on every pre-existing row, and a NULL row behaves
     # exactly as before the migration (it just no longer counts as covered).
     _add_column_if_missing(conn, "cash_movements", "acq_home_amount", "TEXT")
+    # corporate_action_id (DEF-020, 2026-09-23): the corporate action a reorganisation-fee
+    # WITHDRAW belongs to. Until now the form booked the fee with a SECOND request after the
+    # action had already committed, so a failed second request left an action with no fee,
+    # and deleting the action left the fee standing (measured: TWD pool 6,067,545 after the
+    # delete against 6,067,595 before it). Additive and nullable — every hand-entered or
+    # imported movement keeps NULL and behaves exactly as before; only a fee written by
+    # `POST /api/ledgers/corporate-actions` carries the id, and `delete_corporate_action`
+    # removes exactly the rows that carry it, in the same transaction.
+    _add_column_if_missing(conn, "cash_movements", "corporate_action_id", "INTEGER")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cash_movements_corporate_action "
+        "ON cash_movements(corporate_action_id)"
+    )
+    # band_move_json (DEF-021, 2026-09-23): what `store.move_target_band` moved when this
+    # EXCHANGE was recorded — from/to symbol, the two levels and their `target_set_at` —
+    # as canonical JSON text. It exists so the delete can be CONDITIONALLY reversible: the
+    # band is moved back only when the destination still carries exactly this band and the
+    # source has none (`store.restore_target_band`). NULL on every pre-existing row and on
+    # every non-EXCHANGE row, and a NULL row's delete behaves exactly as before.
+    _add_column_if_missing(conn, "corporate_actions", "band_move_json", "TEXT")
+    # weight_move_json (F-3, 2026-09-23): the same record for the owner's OTHER per-symbol
+    # setting — the target weight `strategy.target_weights.move_target_weight` re-keyed —
+    # read by `restore_target_weight` when the EXCHANGE is deleted. Its own column, not a key
+    # inside band_move_json: a non-NULL band record MEANS "a band moved", and a weight-only
+    # move would have to forge an empty band into it. NULL on every pre-existing row.
+    _add_column_if_missing(conn, "corporate_actions", "weight_move_json", "TEXT")
     # Import provenance (2026-08-13). Additive and nullable on every ledger, so a row that
     # predates this — or one entered by hand through a form — is unchanged and simply has no
     # batch. ``opening_inventory`` is deliberately absent: its composite PK makes its writer

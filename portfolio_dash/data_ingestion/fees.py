@@ -20,6 +20,7 @@ PURE — the caller seam resolves the rate and passes it as ``stamp_fx``; when i
 the stamp is 0 and the seam surfaces the soft issue 「無 USD/MYR 匯率,印花稅未計」.
 """
 
+from collections.abc import Mapping
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
@@ -90,7 +91,9 @@ def etf_flag_issue_applies(rules: FeeRuleSet, side: Side, unknown: bool) -> bool
     """
     return unknown and side is Side.SELL and rules.tax_etf != rules.tax_normal
 
-def supplied_snapshot(fee: Decimal, tax: Decimal) -> dict[str, str]:
+def supplied_snapshot(
+    fee: Decimal, tax: Decimal, *, carried: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """Provenance for a row whose fee AND tax both came from the caller, not this engine.
 
     ``fee_rule_snapshot`` is PROVENANCE, not the replay's input — 重算 reads ``ev.fees`` /
@@ -107,7 +110,18 @@ def supplied_snapshot(fee: Decimal, tax: Decimal) -> dict[str, str]:
     Both entry seams (``manual.py``, ``csv_import.py``) call this ONE helper so the two
     cannot drift, which is the same reason the ETF-flag resolution is stated identically
     in both.
+
+    ``carried`` (DEF-026, 2026-09-23): the row's OWN snapshot, when the numbers arrive with
+    their provenance attached — a ledger export pasted back into the CSV door. It is
+    returned VERBATIM (``{}`` included), because it already answers *"where did these two
+    numbers come from?"* for exactly these two numbers, and answering "they were typed in"
+    instead is the round-trip loss the defect measured: every re-imported row's
+    ``{"brokerage": "0.001425", …}`` became ``{"engine": "supplied", …}``. The caller passes
+    it only when fee AND tax are both supplied; when the engine computes either, the engine's
+    own snapshot is the provenance and the carried one is discarded (``csv_import``).
     """
+    if carried is not None:
+        return dict(carried)
     return {"engine": "supplied", "fee": str(fee), "tax": str(tax)}
 
 

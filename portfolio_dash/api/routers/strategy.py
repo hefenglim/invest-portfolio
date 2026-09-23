@@ -14,6 +14,7 @@ from portfolio_dash.api import alert_inputs, insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.api.wire import alerts_wire
 from portfolio_dash.data_ingestion.holdings import current_shares
 from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
 from portfolio_dash.shared.enums import Currency
@@ -59,7 +60,7 @@ def get_alerts(conn: sqlite3.Connection = Depends(get_conn),
     # compute_alerts_full assembles the SAME P3 market-risk inputs as the dashboard embed.
     calib = insight_service.calibration_gap(conn)
     alerts = alert_inputs.compute_alerts_full(conn, now=now, reporting=reporting, calib_gap=calib)
-    return {"as_of": now.isoformat(), "alerts": to_wire([a.model_dump() for a in alerts])}
+    return {"as_of": now.isoformat(), "alerts": alerts_wire(alerts)}
 
 
 class RuleInput(BaseModel):
@@ -107,7 +108,7 @@ def put_rules(body: AlertRulesBody,
     calib = insight_service.calibration_gap(conn)
     alerts = alert_inputs.compute_alerts_full(conn, now=now, reporting=reporting, calib_gap=calib)
     return {"rules": _rules_wire(current),
-            "alerts": to_wire([a.model_dump() for a in alerts])}
+            "alerts": alerts_wire(alerts)}
 
 
 class WhatIfBody(BaseModel):

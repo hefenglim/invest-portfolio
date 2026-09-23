@@ -35,6 +35,13 @@ re-recording is deliberate behaviour, not drift:
   with a clock dated after the last row, so ``_EXPECTED_BALANCES`` keeps asserting what was
   WRITTEN (its whole purpose) rather than a figure that excludes it.
 
+⚠ EIGHT pins were re-recorded on 2026-09-23 for DEF-008, deliberately: the pool guards'
+refusals now share ONE sentence (``validate.cash_dip_sentence``). The account is the
+``{account:<id>}`` token the fetch layer resolves (never 「TW Broker」 or the bare id), the
+covering-balance branch names the withdrawal's OWN day with the cause 「出金當日」 instead of
+quoting the pool at four decimals, and every figure is at the currency's minor unit with
+thousands and a U+2212 minus. Same status, same code, same field, same verdict.
+
 The cases run as ONE ordered sequence against one ledger, because several of them only mean
 something in sequence: the withdraw messages quote a balance that earlier rows created, the
 self-exclusion edit needs a row to edit, and the REBATE lock needs a booked rebate. The final
@@ -156,22 +163,22 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "MYR", "amount": "1"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 1 MYR 超過 Moomoo MY 的 MYR 帳戶現金 0 — "
-                    "出金不可透支（請先補登入金或換匯）"}},
+         "message": "此筆出金會使 {account:moomoo_my} 的 MYR 現金於 2026-07-01 降至 −1.00"
+                    "（出金當日）— 出金不可透支，請先補登入金或換匯"}},
     {"n": "withdraw_negative_pool", "m": _POST, "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "withdraw",
         "ccy": "TWD", "amount": "100"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 100 TWD 超過 TW Broker 的 TWD 帳戶現金 -495000 — "
-                    "出金不可透支（請先補登入金或換匯）"}},
+         "message": "此筆出金會使 {account:tw_broker} 的 TWD 現金於 2026-07-01 降至 −495,100"
+                    "（出金當日）— 出金不可透支，請先補登入金或換匯"}},
     {"n": "withdraw_ack_does_not_bypass", "m": _POST, "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "withdraw",
         "ccy": "TWD", "amount": "100", "ack_negative": True},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 100 TWD 超過 TW Broker 的 TWD 帳戶現金 -495000 — "
-                    "出金不可透支（請先補登入金或換匯）"}},
+         "message": "此筆出金會使 {account:tw_broker} 的 TWD 現金於 2026-07-01 降至 −495,100"
+                    "（出金當日）— 出金不可透支，請先補登入金或換匯"}},
     # --- happy paths (the ids they mint are load-bearing for the edits below) ------------
     {"n": "deposit_ok", "m": _POST, "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
@@ -199,8 +206,8 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "999999"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 999999 TWD 超過 TW Broker 的 TWD 帳戶現金 55153 — "
-                    "出金不可透支（請先補登入金或換匯）"}},
+         "message": "此筆出金會使 {account:tw_broker} 的 TWD 現金於 2026-07-21 降至 −944,846"
+                    "（出金當日）— 出金不可透支，請先補登入金或換匯"}},
     # audit C3: the END balance covers it, but the pool had nothing on 2026-06-01. Since
     # M5-06 the covering balance is the one on the withdrawal's own date, so the primary
     # check refuses it outright (it used to fall through to the running-minimum sentence).
@@ -209,8 +216,8 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "USD", "amount": "400"},
      "status": 422, "err": {
          "code": "withdraw_insufficient_balance", "field": "amount",
-         "message": "出金金額 400 USD 超過 Moomoo MY 的 USD 帳戶現金 0 — "
-                    "出金不可透支（請先補登入金或換匯）"}},
+         "message": "此筆出金會使 {account:moomoo_my} 的 USD 現金於 2026-06-01 降至 −400.00"
+                    "（出金當日）— 出金不可透支，請先補登入金或換匯"}},
     {"n": "withdraw_exact_balance", "m": _POST, "b": {
         "account_id": "moomoo_my", "date": "2026-07-25", "kind": "withdraw",
         "ccy": "USD", "amount": "1500"}, "status": 201, "id": 7},
@@ -241,14 +248,14 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "200", "note": "改金額"},
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 tw_broker 的 TWD 現金於 2026-01-05 降至 -500000 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-01-05 降至 −500,000 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     {"n": "edit_deposit_shrinks_pool", "m": _PUT, "target": "deposit_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
         "ccy": "TWD", "amount": "1"},
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 tw_broker 的 TWD 現金於 2026-07-20 降至 -544846 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-07-20 降至 −544,846 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     # ...and the ack DOES still bypass the deposit-side guard (only the withdraw one is hard).
     {"n": "edit_deposit_shrinks_acked", "m": _PUT, "target": "deposit_ok", "b": {
@@ -261,7 +268,7 @@ _SEQUENCE: list[dict[str, Any]] = [
     {"n": "delete_rebate", "m": _DELETE, "target": "rebate_ok",
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 tw_broker 的 TWD 現金於 2026-07-20 降至 -544999 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-07-20 降至 −544,999 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     {"n": "delete_unknown_id", "m": _DELETE, "target": "__missing__",
      "status": 404, "err": {"code": "not_found", "message": "紀錄 #99999 不存在"}},

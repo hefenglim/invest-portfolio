@@ -72,7 +72,10 @@ def test_the_csv_import_writes_only_the_ticked_rows(
     expect(banner).to_be_visible(timeout=20000)
     text = banner.inner_text()
     assert "成功 1 筆" in text, f"wrote rows the user unticked — banner said: {text}"
-    assert "跳過 2 筆" in text, text
+    # DEF-024 (2026-09-23): the owner's own unticking is worded as the choice it was —
+    # 「跳過」 had also covered rows the server BLOCKED, under the same green headline.
+    assert "未勾選 2 筆" in text, text
+    assert "被擋下" not in text, text
 
 
 @pytest.mark.e2e

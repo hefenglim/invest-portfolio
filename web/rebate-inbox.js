@@ -154,7 +154,7 @@
     inp.value = r.expected;   /* prefill with the estimate STRING (editable) */
     body.appendChild(inp);
     body.appendChild(el('div', 'inbox-rule',
-      '以實際入帳金額為準，預估僅供參考；確認後記入該帳戶現金池，不影響成本。'));
+      '以實際入帳金額為準，預估僅供參考；確認後記入該帳戶現金池：不影響持倉成本，但會計入 XIRR 與含匯兌總損益。'));
     modal.appendChild(body);
 
     const foot = el('div', 'modal-foot');
@@ -218,7 +218,7 @@
         f.money(r.fee_total, r.ccy) + ' ' + r.ccy + ' → 預估退款 ' +
         f.money(r.expected, r.ccy) + ' ' + r.ccy + '（不計入成本）'));
       main.appendChild(el('span', 'inbox-rule',
-        '台股先收後退：預估僅供參考，確認後以實際金額記入該帳戶現金池，不計入成本／損益。'));
+        '台股先收後退：預估僅供參考，確認後以實際金額記入該帳戶現金池；不改變持倉成本與資產損益，但會計入 XIRR 與含匯兌總損益。'));
       item.appendChild(main);
       const acts = el('div', 'inbox-actions');
       const ok = el('button', 'btn btn-primary', '確認入帳');

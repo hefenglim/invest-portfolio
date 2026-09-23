@@ -422,7 +422,7 @@
       btn.appendChild(el('span', 'tb-lbl', '重新整理'));
       btn.appendChild(el('span', 'tb-caret', '▾'));
       btn.type = 'button';
-      btn.title = '更新報價或重建統計（後端接線後生效）';
+      btn.title = '更新報價或重建統計';
       const menu = el('div', 'refresh-menu');
       menu.hidden = true;
       const mkOpt = (label, sub, fn) => {
@@ -708,7 +708,21 @@
      same sentence three deep. */
   const OK_MS = 4200;
   const ATTENTION_MS = 30000;
+  /* DEF-008 (functional test 2026-09-22, A-05/A-06): the third argument is a SUB-LINE for
+     the owner, and most failure paths pass `err.code` there by convention (api.js's own
+     header documents `window.toast(err.message, 'fail', err.code)`) — so every red toast
+     printed 「withdraw_insufficient_balance」「validation_error」 under a zh sentence. Fixing
+     that at ~50 call sites is how the 51st comes back, so it is fixed HERE, once: a sub that
+     is a machine code (lower_snake ASCII, the api/errors.py vocabulary) is diagnostics — it
+     goes to the toast's tooltip and the console, never into the visible text. A zh sub-line
+     never matches the pattern and renders exactly as before. */
+  const DIAG_CODE = /^[a-z][a-z0-9_]*$/;
   window.toast = function (msg, kind, sub) {
+    const diag = (typeof sub === 'string' && DIAG_CODE.test(sub)) ? sub : null;
+    if (diag) {
+      sub = '';
+      if (window.console && console.debug) console.debug('[toast] code:', diag, msg);
+    }
     const cls = kind === 'fail' ? 'toast-fail' : (kind === 'warn' ? 'toast-warn' : 'toast-ok');
     const key = cls + ' ' + (msg || '') + ' ' + (sub || '');
     Array.from(host.querySelectorAll('.toast')).forEach((old) => {
@@ -716,6 +730,7 @@
     });
     const t = el('div', 'toast ' + cls);
     t.dataset.toastKey = key;
+    if (diag) t.title = '錯誤碼：' + diag;   // DEF-008: diagnostics on hover, not in the text
     t.appendChild(el('span', null, kind === 'fail' ? '✕' : (kind === 'warn' ? '!' : '✓')));
     const txt = el('div');
     txt.appendChild(el('div', 'msg', msg));

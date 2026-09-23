@@ -1078,7 +1078,10 @@
     return el('span', 'dir-chip dir-buy', '買');
   }
 
-  const ACTION_KIND_ZH = { SPLIT: '拆併股', EXCHANGE: '換股', SPINOFF: '分割' };
+  /* I-14: the kind's word is the SERVER's (`kind_label`, shared/corporate_actions.py::KIND_ZH —
+     分割／換股／分拆). This file used to keep its own table, and it disagreed with the ledger:
+     SPLIT 「拆併股」 and SPINOFF 「分割」, the ledger's word for SPLIT — two kinds under one
+     word on two screens. tests/contract/test_i14_one_action_vocabulary.py fails on a copy. */
 
   /* One-line description of a corporate-action activity row: what happened, at what ratio,
      and (when the two ends differ) which symbol it came from or went to. The row carries no
@@ -1086,7 +1089,7 @@
      share walker; re-deriving a per-row delta in the browser would be a third implementation
      of the ratio algebra AND client-side quantity math. */
   function actionLabel(t) {
-    const kind = ACTION_KIND_ZH[t.kind] || t.kind || '公司行動';
+    const kind = t.kind_label || t.kind || '公司行動';
     const ratio = t.ratio_to + '：' + t.ratio_from;
     if (t.role === 'self') return kind + ' ' + ratio;                 // SPLIT: in place
     if (t.role === 'destination') return kind + ' ' + ratio + '（來自 ' + t.from_symbol + '）';
@@ -1280,10 +1283,29 @@
       if (!issues) return;
       const keep = (r) => !filterAcct || r.account_id === filterAcct;
       const lines = [];
+      /* DEF-023: every field is the wire's STRUCTURED one — account through pdNames
+         (`acctZh`), symbol / date / kind as their own fields (the kind in the ledger's own
+         vocabulary, `KIND_ZH` server-side: 分割／換股／分拆) — and the line carries a link
+         to the row in 交易帳本 › 公司行動, so the drawer is an entry, not only a notice.
+         `u.reason` is the server's sentence; account references inside it resolve through
+         the fetch layer's account-token pass (web/api.js), never by string surgery here. */
       (issues.unapplied || []).filter(keep).forEach((u) => {
-        lines.push('⚠ 公司行動未套用（' + acctZh(u.account_id) + '・' + f.date(u.date) + '・'
-          + (ACTION_KIND_ZH[u.kind] || u.kind) + ' ' + u.from_symbol + '→' + u.to_symbol
-          + '）：' + u.reason);
+        const from = u.symbol || u.from_symbol;
+        const ends = u.to_symbol && u.to_symbol !== from ? from + '→' + u.to_symbol : from;
+        const row = el('div', 'sd-tx-issue');
+        row.style.cssText = 'margin-top:4px;color:var(--up)';
+        row.appendChild(el('span', null,
+          '⚠ 公司行動未套用（' + acctZh(u.account_id) + '・' + f.date(u.date) + '・'
+          + (u.kind_label || u.kind) + ' ' + ends + '）：' + u.reason + ' '));
+        const link = el('a', 'sd-tx-issue-link', '前往公司行動帳本');
+        link.href = 'trades.html?ledger=action'
+          + (u.action_id ? '&action_id=' + encodeURIComponent(u.action_id) : '')
+          + '&account_id=' + encodeURIComponent(u.account_id)
+          + '&symbol=' + encodeURIComponent(from)
+          + '&date=' + encodeURIComponent(u.date)
+          + '&kind=' + encodeURIComponent(u.kind);
+        row.appendChild(link);
+        footHost.appendChild(row);
       });
       (issues.depth_capped || []).filter(keep).forEach((d) => {
         lines.push('⚠ 公司行動鏈過長（' + acctZh(d.account_id)

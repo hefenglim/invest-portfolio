@@ -96,7 +96,7 @@
   } catch (err) {
     D.library = [];
   }
-  $('#sys-prompt').value = D.system_prompt;
+  window.pdField.writeIfUntouched($('#sys-prompt'), '', D.system_prompt);   // I-12
   $('#sys-prompt-meta').textContent =
     '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
   /* save the global system prompt -> PUT /api/system-prompt (toast + restamp meta). */
@@ -413,12 +413,15 @@
             '你的自訂修改將遺失，引用此策略的洞察任務下次執行即升版。',
           confirmLabel: '覆寫為官方版', danger: true,
           onConfirm: async () => {
+            const bodyAtConfirm = ta.value;   // I-12: the text the overwrite discards
             try {
               const sp = await api.post('/api/strategy-prompts/from-template',
                 { name: t.name, mode: 'replace', strategy_id: t.id });
               t.body = (sp && sp.body) || t.body;
               t.updated_at = (sp && sp.updated_at) || t.updated_at;
-              ta.value = t.body;
+              /* DEF-007 class: a reply that lands after the owner kept typing must not
+                 overwrite what they typed — only the text that was there at confirm. */
+              window.pdField.writeIfUntouched(ta, bodyAtConfirm, t.body);
               window.toast('已同步官方 ' + tpl.version, 'ok',
                 t.name + '：綁定的任務下次執行即使用新版');
             } catch (err) {
@@ -466,7 +469,7 @@
   D.strategies.filter((t) => !t.archived).forEach(addStrategyCard);
   syncTplEmpty();
 
-  /* ＋ 新增策略：表單 → 推入清單（後端接線後 POST /api/strategy-prompts） */
+  /* ＋ 新增策略：表單 → POST /api/strategy-prompts → 推入清單 */
   const tplAdd = document.getElementById('tpl-add');
   if (tplAdd) tplAdd.addEventListener('click', () => {
     openModal('新增策略提示詞', (body, close) => {
@@ -540,10 +543,11 @@
       confirmLabel: '重置回官方版', danger: true,
       onConfirm: async () => {
         try {
+          const sysAtConfirm = $('#sys-prompt').value;   // I-12: the text the reset discards
           const sp = await api.post('/api/system-prompt/reset');
           D.system_prompt = (sp && sp.body) || '';
           D.system_updated_at = (sp && sp.updated_at) || '';
-          $('#sys-prompt').value = D.system_prompt;
+          window.pdField.writeIfUntouched($('#sys-prompt'), sysAtConfirm, D.system_prompt);
           $('#sys-prompt-meta').textContent =
             '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') +
             '・套用於所有策略提示詞之前';
@@ -590,12 +594,12 @@
         newsSchema.hidden = true;
       }
     };
-    const newsApply = (wire) => {
+    const newsApply = (wire, sent) => {
       N.body = (wire && wire.body) || '';
       N.updated_at = (wire && wire.updated_at) || '';
       N.official_version = (wire && wire.official_version) || '';
       N.is_official = !!(wire && wire.is_official);
-      newsTa.value = N.body;
+      window.pdField.writeIfUntouched(newsTa, sent === undefined ? '' : sent, N.body);   // I-12
       newsBadgeSet(N.is_official ? '與官方版相同' : '已自訂', N.is_official);
       newsMetaSet();
       newsSchemaCheck(N.body);
@@ -615,7 +619,8 @@
     newsSave.addEventListener('click', async () => {
       const restore = window.pdBusy ? window.pdBusy(newsSave, '儲存中…') : () => {};
       try {
-        newsApply(await api.put('/api/news-prompt', { body: newsTa.value }));
+        const sent = newsTa.value;
+        newsApply(await api.put('/api/news-prompt', { body: sent }), sent);
         _toast('已儲存', 'ok', '新聞整理提示詞已更新，下次新聞管線執行生效');
       } catch (err) {
         /* 422 news_prompt_empty: the message is the server's zh sentence; the textarea
@@ -632,7 +637,8 @@
         confirmLabel: '重置回官方版', danger: true,
         onConfirm: async () => {
           try {
-            newsApply(await api.post('/api/news-prompt/reset'));
+            const sent = newsTa.value;
+            newsApply(await api.post('/api/news-prompt/reset'), sent);
             _toast('已重置', 'ok', '新聞整理提示詞已回到官方 ' + (N.official_version || ''));
           } catch (err) {
             _toast((err && err.message) || '重置失敗', 'fail', err && err.code);
@@ -697,6 +703,7 @@
     const panel = document.createElement('details');
     panel.className = 'panel freshness';
     panel.id = 'vars-panel';
+    panel.dataset.anchor = 'vars';        /* DEF-038: settings.html#prompts/vars lands here */
     const sum = el('summary');
     sum.appendChild(el('span', 'caret', '▶'));
     sum.appendChild(el('span', null, '數據變數總表'));
@@ -708,7 +715,9 @@
     chips.appendChild(c1);
     const c2 = el('span', 'ccy-chip');
     c2.appendChild(el('span', null, '其中 '));
-    c2.appendChild(el('b', null, nIngest + ' 個待後端新增'));
+    /* DEF-038 residual copy: these variables have been live since spec 20.2 / W3
+       (variables.py registers every one `available=True`) — 「待後端新增」 claimed otherwise. */
+    c2.appendChild(el('b', null, nIngest + ' 個取自外部資料快照'));
     chips.appendChild(c2);
     sum.appendChild(chips);
     panel.appendChild(sum);
@@ -719,8 +728,12 @@
       const head = el('div', 'vars-cat-head');
       head.appendChild(el('span', 'vars-cat-name', cat.name));
       head.appendChild(el('span', 'vars-src ' + (cat.source === 'ready' ? 'src-ready' : 'src-ingest'),
-        cat.source === 'ready' ? '後端已具備' : '需新增資料快照（spec 06）'));
+        cat.source === 'ready' ? '後端已具備' : '外部資料快照'));
       sec.appendChild(head);
+      /* DEF-002: the table scrolls inside its OWN `.table-wrap` (styles.css), like every other
+         table on this page — appended bare into the `.vars-cat` flex column it set the
+         document width (3,673px at 390px, 3,874px at 1,440px) the moment the panel opened. */
+      const tableWrap = el('div', 'table-wrap');
       const table = el('table', 'data vars-table');
       table.innerHTML = '<thead><tr><th class="col-text">變數</th><th class="col-text">名稱</th><th class="col-text">說明</th><th class="col-text">範圍</th><th class="col-text"></th></tr></thead>';
       const tb = el('tbody');
@@ -770,7 +783,8 @@
         tb.appendChild(tr);
       });
       table.appendChild(tb);
-      sec.appendChild(table);
+      tableWrap.appendChild(table);
+      sec.appendChild(tableWrap);
       wrap.appendChild(sec);
     });
     wrap.appendChild(el('div', 'cmp-note',
@@ -784,6 +798,8 @@
   /* ================= 自我進化設定 (GET/PUT /api/evolution-config) ================= */
   await (async function () {
     const panel = el('section', 'panel');
+    /* DEF-038: settings.html#prompts/evolution (洞察管線 › 進化設定) lands here. */
+    panel.dataset.anchor = 'evolution';
     const head = el('div', 'panel-head');
     head.appendChild(el('h2', 'panel-title', '自我進化設定'));
     head.appendChild(el('span', 'panel-sub', '安全邊界與成本上限 — 儲存後套用於下次校正產生批次'));

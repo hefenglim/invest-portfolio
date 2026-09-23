@@ -29,13 +29,16 @@ the same defect (one rule, one message).
 import csv
 import io
 import sqlite3
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from portfolio_dash.data_ingestion.csv_import import unread_columns_issues
 from portfolio_dash.data_ingestion.holdings import load_action_index
-from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
+from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, Writer
 from portfolio_dash.data_ingestion.register import autoregister_spinoff_child
 from portfolio_dash.data_ingestion.store import (
+    MovedWeight,
     insert_corporate_action,
     load_ledger_bundle,
     move_target_band,
@@ -48,7 +51,7 @@ from portfolio_dash.data_ingestion.validate import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book
-from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind
+from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind, kind_label
 from portfolio_dash.shared.models.ledger import LedgerBundle
 
 # Canonical CSV column order — SINGLE SOURCE for the downloadable template header
@@ -79,15 +82,41 @@ def _canonical_kind(raw: str) -> str:
     return aliased.value if aliased is not None else raw.strip().upper()
 
 
+class _CellError(ValueError):
+    """A vetted zh sentence naming the cell (I-5) — the only ``ValueError`` the parse arm
+    forwards verbatim. ``date.fromisoformat``'s own 「Invalid isoformat string: …」 and
+    pydantic's report for a ``NaN`` ratio both used to reach the 原因 column through the
+    same ``except ValueError: str(exc)`` arm."""
+
+
+def _finite(value: Decimal, column: str, label: str, text: str) -> Decimal:
+    if not value.is_finite():
+        raise _CellError(f"{label}（{column}）必須是有限數字，目前是「{text}」")
+    return value
+
+
+def _date_cell(raw: dict[str, str], column: str, label: str) -> date:
+    """The shared date sentence (cash / fx / dividend doors). Subscript read: an absent
+    HEADER is the 缺少必填欄位 arm's business."""
+    text = raw[column].strip()
+    if not text:
+        raise _CellError(f"{label}（{column}）不可空白")
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        raise _CellError(
+            f"{label}（{column}）格式不正確，須為 YYYY-MM-DD，目前是「{text}」") from None
+
+
 def _decimal(raw: dict[str, str], column: str, label: str) -> Decimal:
-    """One required Decimal cell, or a zh ``ValueError`` naming the column."""
+    """One required, finite Decimal cell, or a zh :class:`_CellError` naming the column."""
     text = raw.get(column, "").strip()
     if not text:
-        raise ValueError(f"{label}（{column}）不可空白")
+        raise _CellError(f"{label}（{column}）不可空白")
     try:
-        return Decimal(text)
+        return _finite(Decimal(text), column, label, text)
     except InvalidOperation:
-        raise ValueError(f"{label}（{column}）不是數字：{text}") from None
+        raise _CellError(f"{label}（{column}）不是數字：{text}") from None
 
 
 def _optional_decimal(raw: dict[str, str], column: str, label: str) -> Decimal | None:
@@ -95,9 +124,9 @@ def _optional_decimal(raw: dict[str, str], column: str, label: str) -> Decimal |
     if not text:
         return None
     try:
-        return Decimal(text)
+        return _finite(Decimal(text), column, label, text)
     except InvalidOperation:
-        raise ValueError(f"{label}（{column}）不是數字：{text}") from None
+        raise _CellError(f"{label}（{column}）不是數字：{text}") from None
 
 
 _SINGLE_RATIO = Issue(
@@ -116,7 +145,7 @@ def _parse_row(raw: dict[str, str]) -> tuple[CorporateActionInput | None, Issue 
     """One CSV row -> a validator input, or a hard ``parse_error`` issue."""
     try:
         account_id, alias_issue = alias_import_account(raw.get("account", "").strip())
-        action_date = date.fromisoformat(raw["date"].strip())
+        action_date = _date_cell(raw, "date", "日期")
         inp = CorporateActionInput(
             account_id=account_id,
             date=action_date,
@@ -130,8 +159,16 @@ def _parse_row(raw: dict[str, str]) -> tuple[CorporateActionInput | None, Issue 
         )
     except KeyError as exc:
         return None, Issue(kind="parse_error", message=f"缺少必填欄位 {exc.args[0]}")
-    except ValueError as exc:
+    except _CellError as exc:
+        # BEFORE the ``ValueError`` arm: ``_CellError`` IS a ``ValueError``. Its text is this
+        # module's own, written for the owner, so it is forwarded verbatim.
         return None, Issue(kind="parse_error", message=str(exc))
+    except ValueError:
+        # Pydantic's ``ValidationError`` is a ``ValueError`` too — its English report is the
+        # leak this arm used to forward. No cell the readers accept reaches here today; the
+        # arm exists so the next constraint on ``CorporateActionInput`` cannot re-open it.
+        return None, Issue(
+            kind="parse_error", message="此列有無法解析的欄位，請逐格檢查內容是否正確")
     return inp, alias_issue
 
 
@@ -150,6 +187,9 @@ def _payload(inp: CorporateActionInput) -> dict[str, str]:
         payload["cost_carry"] = str(inp.cost_carry)
     if inp.note:
         payload["note"] = inp.note
+    # I-14: the preview table's 類型 column prints the ledger's own word (read by
+    # web/input.js as `data.kind_label`); the writer never reads this key.
+    payload["kind_label"] = kind_label(inp.kind)
     return payload
 
 
@@ -192,6 +232,12 @@ def build_corporate_action_preview(
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("﻿")))  # tolerate a BOM
     header = {(h or "").strip() for h in (reader.fieldnames or [])}
     single_ratio = "ratio" in header and not {"ratio_to", "ratio_from"} <= header
+    # I-4 (DEF-026's seam, every kind): the columns this door will not read are NAMED on
+    # each row as an advisory (「已忽略欄位：…」), never dropped in silence. A lone ``ratio``
+    # column already has its own hard finding (``_SINGLE_RATIO``), so it is not named twice.
+    ignored = unread_columns_issues(
+        [(h or "").strip() for h in (reader.fieldnames or [])],
+        [*CORPORATE_ACTION_COLUMNS, *(["ratio"] if single_ratio else [])])
 
     parsed: list[tuple[int, dict[str, str], CorporateActionInput | None, list[Issue]]] = []
     for idx, raw0 in enumerate(reader):
@@ -262,7 +308,7 @@ def build_corporate_action_preview(
             PreviewRow(index=idx, raw=raw, issues=[Issue(
                 kind="ledger_unbookable",
                 message=("目前的帳本無法重播，因此無法檢核公司行動"
-                         f"（{exc}）。請先修正帳本中的錯誤紀錄再匯入"))])
+                         f"（{exc}）。請先修正帳本中的錯誤紀錄再匯入")), *ignored])
             for idx, raw, _inp, _issues in parsed
         ])
 
@@ -278,32 +324,68 @@ def build_corporate_action_preview(
         ]
         rows.append(
             PreviewRow(index=idx, raw=raw, payload=_payload(inp), issues=all_issues))
+    for row in rows:
+        row.issues.extend(ignored)
     return ImportPreview(rows=rows)
 
 
+#: I-2 (F-3's CSV half): re-key the owner's target WEIGHT for one EXCHANGE and return what
+#: moved (``None`` when nothing did). INJECTED, because the weights are owned by
+#: ``strategy/target_weights.py`` and ``data_ingestion -> strategy`` is not an authorised edge
+#: (``architecture.md``). The binder is ``api/routers/input_center.py`` — the layer above both —
+#: once per import. The callable closes over the request's connection and clock and **never
+#: commits**: the move rides the batch's single transaction, like the band move beside it.
+#:
+#: Rejected at this seam: **moving the weight after the commit, in the router** (what the CSV
+#: door did until 2026-09-23 — a failure there left the EXCHANGE standing with the weight on
+#: the dead ticker, and the row recorded no ``weight_move``, so deleting it could never move
+#: the weight back); **a direct SQL write of the weights config from here** (a second owner of
+#: that config's format, the ``shared/ledger_registry.py`` duplication again).
+WeightMover = Callable[[str, str], MovedWeight | None]
+
+
 def write_corporate_action_row(
-    conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True
+    conn: sqlite3.Connection, row: PreviewRow, *, move_weight: WeightMover,
+    commit: bool = True,
 ) -> int:
     """Persist one accepted corporate_actions row and return its autoincrement id.
 
-    ``commit`` is forwarded to the store insert; the batch path passes ``commit=False`` so
-    the whole batch commits once (all-or-nothing, #1). **The caller must run the price
-    reconcile afterwards** (``api.instrument_service.reconcile_price_basis``) — a SPLIT
-    moves the stored closes, and the writer has no business reaching into ``pricing/``.
+    ``commit`` is forwarded to EVERY write below — the band move, the SPINOFF child and the
+    insert itself; the batch path passes ``commit=False`` so the whole batch commits once
+    (all-or-nothing, #1). **The caller must run the price reconcile afterwards**
+    (``api.instrument_service.reconcile_price_basis``) — a SPLIT moves the stored closes,
+    and the writer has no business reaching into ``pricing/``.
 
     D47's band move happens HERE rather than at the caller, so the bulk door and the form
     reach it by the same rule (``architecture.md``'s cash-guard asymmetry). It is idempotent
     across an N-account set: the first row clears the source, and every row after it finds
-    nothing to move.
+    nothing to move. The target WEIGHT follows the same rule through *move_weight* (I-2),
+    which is required: a door that forgets to bind it is a ``TypeError``, not an EXCHANGE
+    whose weight silently stays behind.
     """
     p = row.payload
-    # Both defer their commit to *commit*, i.e. to the batch's single one. Committing here
-    # would defeat ``commit_preview``'s all-or-nothing gate SILENTLY: a later row's failure
-    # rolls back every action, and a band that had already moved — or a child instrument
-    # already created — would survive an event that never happened.
-    if p["kind"] == CorporateActionKind.EXCHANGE.value:
+    # All three defer their commit to *commit*, i.e. to the batch's single one. Committing
+    # here would defeat ``commit_preview``'s all-or-nothing gate SILENTLY: a later row's
+    # failure rolls back every action, and a band that had already moved — or a child
+    # instrument already created, or a row already inserted — would survive an event that
+    # never happened. (I-1, 2026-09-23: the insert below did not forward ``commit`` and so
+    # committed every row as it was written — a three-row file whose third row failed kept
+    # the first two. ``tests/architecture/test_commit_forwarding.py`` now guards the class.)
+    # DEF-021: the row that performed the move RECORDS it (band_move_json), so deleting the
+    # imported EXCHANGE can move the band back under the same conditions as the form's.
+    # Across an N-account set only the first row moves anything (the second call finds a
+    # cleared source and returns None), so only that row carries the record — and the
+    # delete (``ledgers._delete_actions``) restores from "the first row that recorded".
+    is_exchange = p["kind"] == CorporateActionKind.EXCHANGE.value
+    moved = (
         move_target_band(conn, from_symbol=p["from_symbol"], to_symbol=p["to_symbol"],
                          commit=commit)
+        if is_exchange
+        else None
+    )
+    # I-2: the weight, recorded the same way (weight_move_json) so the delete — and the
+    # batch undo (I-3) — can move it back.
+    weight_moved = move_weight(p["from_symbol"], p["to_symbol"]) if is_exchange else None
     if p["kind"] == CorporateActionKind.SPINOFF.value:
         autoregister_spinoff_child(conn, parent_symbol=p["from_symbol"],
                                    child_symbol=p["to_symbol"], commit=commit)
@@ -318,4 +400,18 @@ def write_corporate_action_row(
         ratio_from=Decimal(p["ratio_from"]),
         cost_carry=(Decimal(p["cost_carry"]) if "cost_carry" in p else None),
         note=p.get("note"),
+        band_move=moved,
+        weight_move=weight_moved,
+        commit=commit,
     )
+
+
+def corporate_action_writer(*, move_weight: WeightMover) -> Writer:
+    """:func:`write_corporate_action_row` with its weight mover bound — the
+    :class:`~data_ingestion.preview.Writer` ``commit_preview`` calls. ``move_weight`` is
+    required here too, for the reason given on :data:`WeightMover`."""
+
+    def write(conn: sqlite3.Connection, row: PreviewRow, *, commit: bool = True) -> int:
+        return write_corporate_action_row(conn, row, move_weight=move_weight, commit=commit)
+
+    return write

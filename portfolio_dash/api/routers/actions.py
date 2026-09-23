@@ -22,6 +22,7 @@ from portfolio_dash.portfolio.cost_basis import (
     build_book,
 )
 from portfolio_dash.scheduler.jobs import backfill_history_all, run_job_outcome
+from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 router = APIRouter()
 
@@ -135,18 +136,8 @@ def recompute(
         # ``web/ledger.js`` branch on (「賣超確認」 → re-send with ``ack_oversell``). 重算 has no
         # ack to offer, so it was never that signal.
         return JSONResponse(status_code=422, content=error_body(
-            "oversold_position",
-            f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
-            f"{exc.trade_date.isoformat()}）— 無法重算，請先修正該筆交易",
-            issues=[{
-                "sev": "error",
-                "code": "oversold_position",
-                "text": str(exc),
-                "field": None,
-                "account_id": exc.account_id,
-                "symbol": exc.symbol,
-                "trade_date": exc.trade_date.isoformat(),
-            }]))
+            "oversold_position", oversold_position_message(exc, "無法重算"),
+            issues=oversold_position_issues(exc, str(exc))))
     except UnbookableLedgerError as exc:
         # never-500 at EVERY build_book call site: the strict replay refuses an event it
         # cannot book honestly (e.g. a dividend inside an open-short window), and 重算

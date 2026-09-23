@@ -60,6 +60,13 @@
 
   const asId = (id) => (id === null || id === undefined ? '' : String(id));
 
+  /* Account REFERENCE token (DEF-023, 2026-09-23). The backend has no zh account name, so
+     every user-visible backend sentence that names an account embeds `{account:<id>}`
+     (portfolio_dash/shared/account_ref.py) and THIS resolver turns it into the display
+     name — through api.js, which walks every response, so no page does it by hand. The
+     grammar is pinned on both sides by tests/contract/test_account_ref_seam.py. */
+  const ACCOUNT_REF = /\{account:([^{}\s]+)\}/g;
+
   /* The currency each market trades in — for the <option> label below. */
   const MARKET_CCY = { TW: 'TWD', US: 'USD', MY: 'MYR' };
 
@@ -77,6 +84,12 @@
     /* zh display name for a broker-statement adapter id (unknown id -> the id itself). */
     broker(id) {
       return Object.prototype.hasOwnProperty.call(BROKERS, id) ? BROKERS[id] : asId(id);
+    },
+    /* Replace every `{account:<id>}` token in `text` with the account's display name.
+       Non-strings and strings without a token come back untouched (same object). */
+    resolveRefs(text) {
+      if (typeof text !== 'string' || text.indexOf('{account:') === -1) return text;
+      return text.replace(ACCOUNT_REF, (m, id) => window.pdNames.account(id));
     },
     /* Account <option> label for a `/api/input/context` account row `{id, ccy,
        settlement_ccy, markets}`: the zh name + the currencies the account actually TRADES

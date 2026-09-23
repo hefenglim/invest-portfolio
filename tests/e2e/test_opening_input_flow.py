@@ -151,9 +151,11 @@ def test_opening_inventory_simplified_form_downstream_and_ledger(
 
     # ===== the 期初 ledger tab lists both openings; avg is computed on read (total / shares) ==
     page.goto(base + "/trades.html", wait_until="load")
-    page.wait_for_selector("#open-body tr", state="attached")
+    # L16 (demo audit 2026-09-16): a ledger pane is fetched when its tab is shown, never all
+    # six on load — so show the 期初 tab first, then wait for its rows.
     page.click("#tab-lopen")
     page.wait_for_selector("#pane-lopen.active", state="attached")
+    page.wait_for_selector("#open-body tr", state="attached")
     page.wait_for_function(
         "() => { const t = document.querySelector('#open-body');"
         " return t && t.textContent.includes('2454') && t.textContent.includes('2317'); }"

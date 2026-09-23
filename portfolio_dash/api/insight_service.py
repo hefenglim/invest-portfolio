@@ -55,6 +55,7 @@ from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import Prediction
 from portfolio_dash.llm_insight.gating import GateContext, GateResult
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
+from portfolio_dash.llm_insight.insights_store import InsightTrigger
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.price_basis import price_in, series_in
@@ -128,6 +129,21 @@ def _all_registered_symbols(conn: sqlite3.Connection) -> list[str]:
     return sorted({i.symbol for i in list_instruments(conn)})
 
 
+def _custom_symbols(syms: object) -> list[str]:
+    """A ``mode:custom`` universe as a list of DISTINCT symbols, first occurrence kept.
+
+    DEF-032 (2026-09-23): the create wizard listed one checkbox per HOLDING ROW, so a symbol
+    held in two accounts (AAPL at 嘉信 and Moomoo) could be ticked twice and was stored as
+    ``["AAPL", "AAPL"]`` — two cards and two LLM charges for one symbol, and 「N 檔標的」
+    over-counted. The wizard is fixed, but rows already written keep the duplicate, so the
+    read side de-duplicates: a universe is a SET of symbols, and ``mode:all`` /
+    ``all_registered`` were always resolved through one (``sorted({...})``).
+    """
+    if not isinstance(syms, list):
+        return []
+    return list(dict.fromkeys(str(s) for s in syms))
+
+
 def _resolve_universe(
     conn: sqlite3.Connection, it: cs.InsightType, data: DashboardData
 ) -> list[str]:
@@ -138,8 +154,7 @@ def _resolve_universe(
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":
-            syms = universe.get("symbols")
-            return list(syms) if isinstance(syms, list) else []
+            return _custom_symbols(universe.get("symbols"))
         if mode == "all_registered":
             return _all_registered_symbols(conn)
         if mode == "all":
@@ -251,12 +266,15 @@ def run_for_id(
     fired_symbol: str | None = None,
     is_shadow: bool = False,
     run_id: int | None = None,
+    trigger: InsightTrigger | None = None,
 ) -> RunResult:
     """Load conn-bearing inputs and run one insight_type generation (the api seam).
 
     Builds the per-target VarContexts + the fed gate inputs, then delegates to the pure
     ``generate.run_insight_type``. ``fired_rule``/``fired_symbol`` are set for an on_alert
     dispatch (R7). ``run_id`` finalizes a pre-inserted running row (async manual run).
+    ``trigger`` (DEF-037) is what started the run — every door passes it (the scheduler's
+    ``_execute_insight``, the alert dispatcher) — and every card this run stores records it.
     Returns the run result.
 
     H2 fix (decision Q2a): a DISABLED or ARCHIVED task is enforced HERE, at the execution
@@ -334,6 +352,7 @@ def run_for_id(
         is_shadow=is_shadow,
         fired_rule=fired_rule,
         fired_symbol=fired_symbol,
+        trigger=trigger,
     )
     result = run_insight_type(
         conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now,
@@ -914,8 +933,10 @@ def _check_regression(conn: sqlite3.Connection, it: cs.InsightType, *, now: date
         baseline_miss=sum(1 for r in baseline if r["miss"]), baseline_n=len(baseline),
     ):
         alerts_bridge.ensure_tables(conn)
+        # DEF-037: the subject is an insight TASK, not a symbol — say so, so the on_alert
+        # dispatcher never hands a task id to a per-symbol card as its "symbol".
         alerts_bridge.record_event(
-            conn, rule_id="calibration_regression", symbol=str(it.id), now=now
+            conn, rule_id="calibration_regression", symbol=str(it.id), now=now, scope="task"
         )
 
 
@@ -1227,8 +1248,7 @@ def _resolve_universe_raw(
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":
-            syms = universe.get("symbols")
-            return list(syms) if isinstance(syms, list) else []
+            return _custom_symbols(universe.get("symbols"))
         if mode == "all_registered":
             return _all_registered_symbols(conn)
         if mode == "all":

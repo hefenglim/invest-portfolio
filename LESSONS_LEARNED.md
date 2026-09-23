@@ -1741,3 +1741,28 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   the new guard on the pre-fix file (it fails) and prove the old guard was blind to it (the
   old detector returned 0 hits on the pre-fix `digest_service.py`), so the report can say
   why the class fix had escaped, not just that it had.
+
+- **2026-09-24 — Functional-test manual R1 → R2 (29 defects, 9 agents, 3 rate-limit outages).**
+  **Context:** the verifier's 120-case pass found 38 defects; 29 were fixed under the manual's
+  §4 contract (root cause to a line, class scan with numbers, a failing test plus a recorded
+  mutation, the missed defence repaired). **What went wrong, three ways.** (a) **Tests that pin
+  a defect as the spec.** Five guards were green over the defect because they asserted the wrong
+  behaviour: `BUY < SELL` same-day order, the broker e2e's `commit == 200` on an oversell, the
+  overdraft sentence with 「TW Broker」 and `3033798.0000`, `row.as_of == date.today()`, and
+  `fired_symbol == "schwab"` for an account-level alert. A pinned expectation is only as right as
+  the day it was recorded. (b) **A scan that stops at its owner's files.** Every agent's class
+  scan found members outside its scope (43 account-name sites, 45 late field writes, 45 table
+  builders, 26 `commit` forwarders); a sweep agent had to close them or the verifier would
+  rightly call the fix an instance. (c) **A mutation test interrupted by a 429.** Agent G died
+  mid-mutation with the OLD worker body possibly on disk; the resume had to prove the tree was
+  the fixed state (grep the mutation markers, then the fixed-state signatures) before doing
+  anything else. Agent D's replace script also truncated `agents.py` to 0 bytes on an encoding
+  error and had to restore from HEAD plus another agent's uncommitted hunk.
+  **Rules:** (1) When a fix flips an assertion, say so in the test's docstring — 「新行為即裁定」
+  — and look for the OTHER assertions that pinned the same wrong rule (grep the value, not the
+  test name). (2) A class scan's hit list is a work list, not a report: route every out-of-scope
+  hit to an owner in the same round, and keep the guard's pending list executable (it must
+  shrink to zero or fail). (3) A mutation script restores in `finally`, writes a marker while
+  the mutant is on disk, and the resume protocol after any interruption is: markers = 0, fixed
+  signatures present, then re-run the mutations. (4) Never edit a source file with a script that
+  rewrites the whole file through a text codec; edit in place and verify the blob hash.

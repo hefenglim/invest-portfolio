@@ -8,6 +8,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 _URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
@@ -38,7 +39,7 @@ class TwseProvider(ProviderBase):
 
     def fetch_quote_latest(self, instruments: list[InstrumentRef]) -> list[PriceRow]:
         out: list[PriceRow] = []
-        today = date.today().strftime("%Y%m%d")
+        today = app_now().date().strftime("%Y%m%d")
         for ref in instruments:
             resp = requests.get(
                 _URL,

@@ -10,7 +10,6 @@ HTML I/O is isolated in ``_view_html`` for monkeypatching (the repo bans sockets
 tests).
 """
 
-from datetime import date
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -20,6 +19,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 _URL = "https://www.klsescreener.com/v2/stocks/view/{code}"
@@ -69,7 +69,7 @@ class KlseScreenerProvider(ProviderBase):
             if not close.is_finite():
                 continue
             out.append(PriceRow(
-                instrument=ref.symbol, market=Market.MY, as_of=date.today(),
+                instrument=ref.symbol, market=Market.MY, as_of=app_now().date(),
                 close=close, source=self.name,
             ))
         return out

@@ -221,7 +221,9 @@ def test_withdraw_over_balance_is_hard_and_writes_nothing(
     preview = _built(seeded, _HEADER + "moomoo_my,2026-02-01,WITHDRAW,MYR,1500,,\n")
     issue = preview.rows[0].issues[0]
     assert issue.kind == "withdraw_insufficient_balance"
-    assert "1000" in issue.message  # the available balance is stated
+    # DEF-008 (2026-09-23): the sentence states the resulting dip on the withdrawal's own
+    # day (1,000 − 1,500), at the MYR minor unit, instead of quoting the balance.
+    assert "於 2026-02-01 降至 −500.00（出金當日）" in issue.message
     assert preview.rows[0].has_hard_issue
     summary = commit_preview(seeded, preview, accept={0}, writer=write_cash_movement_row)
     # REJECTED, not skipped: the importer refused it (C3, 2026-08-14).
@@ -376,7 +378,11 @@ def test_there_is_no_rate_column(seeded: sqlite3.Connection) -> None:
         "moomoo_my,2026-07-01,OPENING,USD,1000,4.4\n",
         pool=_pool_fn(seeded),
     )
-    assert _kinds(preview) == []
+    # Since I-4 (2026-09-23) "ignored" is SAID: the row carries the advisory 「已忽略欄位：
+    # acq_rate」 — informational, never gating — instead of dropping the column in silence.
+    assert _kinds(preview) == ["unknown_columns_ignored"]
+    (issue,) = preview.rows[0].issues
+    assert issue.info and "acq_rate" in issue.message
     assert "acq_home_amount" not in preview.rows[0].payload
 
 

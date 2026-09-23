@@ -62,4 +62,8 @@ class FxRead(BaseModel):
 class RefreshSummary(BaseModel):
     ok: dict[str, str] = Field(default_factory=dict)  # key -> winning source
     failed: list[str] = Field(default_factory=list)  # keys with no data
+    #: key -> WHY it failed, in zh (DEF-015, 2026-09-23). Additive and optional: only the
+    #: dividend path records reasons today, and a summary without them still renders — the
+    #: formatter then says the source gave none rather than inventing one.
+    failed_reasons: dict[str, str] = Field(default_factory=dict)
     fetched_at: datetime

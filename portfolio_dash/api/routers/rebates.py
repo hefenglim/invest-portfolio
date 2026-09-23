@@ -24,6 +24,7 @@ from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import rule_sets_for
 from portfolio_dash.data_ingestion.store import insert_cash_movement, list_accounts
 from portfolio_dash.data_ingestion.validate import unknown_account_message
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.wire import decimal_str, to_wire
 
 router = APIRouter()
@@ -109,7 +110,8 @@ def confirm(
             break
     if rebate_rate <= _ZERO:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {body.account_id} 無折讓款設定", field="account_id"))
+            "validation_error", f"帳戶 {account_ref(body.account_id)} 無折讓款設定",
+            field="account_id"))
 
     # include_older: the default list is windowed for readability, but a month the user
     # revealed via 「顯示更早」 must stay bookable — the window is a view, not a cap (L4).

@@ -164,6 +164,24 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   net across all dates. A net-only check let a back-dated sell through whenever a LATER buy
   covered it — and the replay then discarded that symbol's cost basis permanently. Mirrors
   the cash ledger's `running_min` guard (audit C3).
+- **Same-day trades replay in WRITE order — the ledger id — never buys-before-sells**
+  (DEF-012, recorded 2026-09-23). A transaction has no time-of-day column, so the only
+  evidence of intraday order is the row id: the order the owner entered the rows, or the
+  order the statement listed them. `shared/ledger_events.py` therefore has ONE `TRADE`
+  priority (`BUY`/`SELL` are aliases of it) and `build_book` sorts `(date, priority, id
+  order)`; OPENING and CORPORATE_ACTION still precede the day's trades and DIVIDEND still
+  follows them. Measured before the rule (functional test B-18): 2884 held 100 @ 9,320, then
+  buy 200@44 → sell 100@45 → buy 100@46 on one day previewed the sell at realized −1,580 and
+  booked −1,223 once the third row landed, cost 17,070 where the entry order gives 16,713.33.
+  Consequences: **(1)** the manual preview appends its draft LAST and so agrees with the
+  replay; **(2)** a CSV file's rows take ids in file order, so its preview counts a same-day
+  sibling as cover only when it is listed ABOVE the sell (`validate.siblings_booked_before`)
+  — a file with the sell above its buy is a 賣超 in both the preview and the replay, not a
+  clean preview followed by a discarded basis; **(3)** a broker statement listed newest-first
+  must be re-ordered chronologically WITHIN the day by its converter, or its ids encode the
+  reverse of what happened; **(4)** the stress-audit oracle keeps its own transcription. Demo
+  data is unaffected: the one same-day buy+sell pair on the demo ledger (tw_broker 2603
+  2026-07-02) already had the buy's id below the sell's.
 - **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —

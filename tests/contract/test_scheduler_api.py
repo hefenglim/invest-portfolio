@@ -155,9 +155,10 @@ def test_runs_row_shape_and_filter(
     row = rows[0]
     assert set(row) == {
         "id", "job_id", "started_at", "finished_at", "status", "detail",
-        "duration_s", "cost_usd",
+        "duration_s", "cost_usd", "label",   # label: DEF-030 (the insight task's name)
     }
     assert row["status"] == "error" and row["cost_usd"] is None
+    assert row["label"] is None  # a system job is named by the page's JOB_ZH table
     assert row["duration_s"] == 30.0
 
 

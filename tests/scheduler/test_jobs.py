@@ -44,7 +44,7 @@ def test_quotes_job_passes_market_worklist(
     detail = quotes_us(conn, now=_NOW).detail  # M10-02: the job returns a JobOutcome
     assert captured["registry"] == "REG"
     assert captured["symbols"] == ["AAPL"]  # only US, not TW
-    assert "1 ok" in detail and "0 failed" in detail
+    assert detail.startswith("1 項已更新") and "失敗" not in detail
 
 
 def test_refresh_quotes_for_filters_by_market(
@@ -108,6 +108,24 @@ def test_summarize_names_sources_and_failures() -> None:
     s = RefreshSummary(ok={"2330": "twse", "2603": "twse", "AAPL": "yfinance"},
                        failed=["8299"], fetched_at=datetime(2026, 7, 3, tzinfo=UTC))
     out = _summarize(s)
-    assert out.startswith("3 ok, 1 failed")
-    assert "twse: 2330, 2603" in out and "yfinance: AAPL" in out
-    assert "failed: 8299" in out
+    # DEF-030 follow-up (2026-09-23, coordinator ruling): the zh sentence, full-width marks.
+    assert out == "3 項已更新，1 項失敗（來源 twse：2330、2603；yfinance：AAPL）；失敗：8299"
+
+
+def test_summarize_prints_a_recorded_reason_and_never_invents_one() -> None:
+    """A failed key carries its reason when the fetch recorded one (DEF-015's field); a key
+    without one is printed bare — never 「原因不明」 or any other invented text."""
+    from datetime import UTC, datetime
+
+    from portfolio_dash.pricing.results import RefreshSummary
+    from portfolio_dash.scheduler.jobs import _summarize
+
+    s = RefreshSummary(ok={}, failed=["TSLA", "AAPL"],
+                       failed_reasons={"TSLA": "yfinance 逾時"},
+                       fetched_at=datetime(2026, 9, 23, tzinfo=UTC))
+    assert _summarize(s) == "0 項已更新，2 項失敗；失敗：AAPL；TSLA：yfinance 逾時"
+    clean = RefreshSummary(ok={f"S{i:02d}": "twse" for i in range(10)},
+                           fetched_at=datetime(2026, 9, 23, tzinfo=UTC))
+    out = _summarize(clean)
+    assert out.startswith("10 項已更新（來源 twse：S00、S01") and out.endswith(" 等 10 項）")
+    assert not any(c in out for c in ",;:[]"), f"a half-width mark survived: {out!r}"

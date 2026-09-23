@@ -29,6 +29,26 @@ _ADAPTERS: Final[dict[str, Adapter]] = {
 #: Broker ids this build can read, for a CLI's ``--broker`` help and its validation.
 BROKER_IDS: Final[tuple[str, ...]] = tuple(sorted(_ADAPTERS))
 
+#: Adapter id -> the ``accounts.broker`` values (lower-cased) whose statements it reads.
+#:
+#: A statement FORMAT belongs to a broker, and an account belongs to a broker, so the two
+#: must agree before a single row is converted: a Schwab export converted "into" the Moomoo
+#: account wrote a real AAPL buy under the wrong broker with every check green (DEF-029,
+#: 2026-09-23), and converted into the TW account it reached the market-rule refusal only
+#: at commit time, after the owner had already read 「對帳通過」. The pairing lives HERE, next
+#: to the adapter table, so a second broker is still one module plus lines in this file.
+#: The seed spelling is ``config_seed.DEFAULT_ACCOUNTS[*].broker``; the compare is
+#: case-insensitive because the column is a display string, not a key.
+ACCOUNT_BROKERS: Final[dict[str, frozenset[str]]] = {
+    "schwab": frozenset({"schwab", "charles schwab"}),
+}
+
+
+def serves_account(broker: str, account_broker: str) -> bool:
+    """Does adapter *broker* read the statements of an account whose broker is
+    *account_broker* (the ``accounts.broker`` column)? Unknown adapter -> ``False``."""
+    return account_broker.strip().lower() in ACCOUNT_BROKERS.get(broker, frozenset())
+
 
 def get_adapter(broker: str) -> Adapter:
     """The adapter for *broker*; raises ``KeyError`` naming the ids that do exist."""

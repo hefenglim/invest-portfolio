@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.data_ingestion.validate import unknown_account_message
 from portfolio_dash.export.ai_predictions import build_ai_predictions_csv
 from portfolio_dash.export.artifact import ExportArtifact, content_disposition
 from portfolio_dash.export.cash_statement import (
@@ -39,6 +40,7 @@ from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
 from portfolio_dash.portfolio.cost_basis import OversellError, UnbookableLedgerError
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.ledger_registry import EXPORT_KINDS
+from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 router = APIRouter()
 
@@ -277,18 +279,8 @@ def export_tax_package(
         # REASON rather than relaxing the strictness, and names the offending row (the error
         # carries account/symbol/date precisely so no caller has to regex a sentence for them).
         return JSONResponse(status_code=422, content=error_body(
-            "oversold_position",
-            f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
-            f"{exc.trade_date.isoformat()}）— 無法產生稅務套件，請先修正該筆交易",
-            issues=[{
-                "sev": "error",
-                "code": "oversold_position",
-                "text": str(exc),
-                "field": None,
-                "account_id": exc.account_id,
-                "symbol": exc.symbol,
-                "trade_date": exc.trade_date.isoformat(),
-            }]))
+            "oversold_position", oversold_position_message(exc, "無法產生稅務套件"),
+            issues=oversold_position_issues(exc, str(exc))))
     return _respond(art)
 
 
@@ -309,7 +301,8 @@ def export_cash_statement(
     if art is None:
         return JSONResponse(
             status_code=400,
-            content=error_body("validation_error", f"未知帳戶：{body.account}", field="account"),
+            content=error_body("validation_error", unknown_account_message(body.account),
+                               field="account"),
         )
     return _respond(art)
 
@@ -325,7 +318,8 @@ def export_cash_statement_report(
     if art is None:
         return JSONResponse(
             status_code=400,
-            content=error_body("validation_error", f"未知帳戶：{body.account}", field="account"),
+            content=error_body("validation_error", unknown_account_message(body.account),
+                               field="account"),
         )
     return _respond(art)
 

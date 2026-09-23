@@ -117,7 +117,7 @@ def test_the_real_probe_refuses_the_same_conversion(seeded: sqlite3.Connection) 
         seeded, _HEADER + "schwab,2026-02-01,TWD,320000,USD,10000\n", pool=_pool_fn(seeded))
     issue = preview.rows[0].issues[0]
     assert issue.kind == "fx_insufficient_balance"
-    assert "可用餘額" in issue.message
+    assert "（換匯當日）" in issue.message   # DEF-008: the covering-balance branch's cause
 
 
 def test_the_row_that_will_not_be_written_does_not_fund_its_sibling(

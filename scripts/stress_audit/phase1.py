@@ -1012,7 +1012,14 @@ def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
             continue
         ev.check("ledger.fx.from_amt", f"id={c.id}", c.from_amt, a["from_amt"], phase)
         ev.check("ledger.fx.to_amt", f"id={c.id}", c.to_amt, a["to_amt"], phase)
-        ev.check("ledger.fx.implied", f"id={c.id}", c.from_amt / c.to_amt, a["implied_rate"], phase)
+        # L6 (demo audit 2026-09-16): the wire quotes the implied rate the conventional way —
+        # the more valuable currency is the unit, so the figure is >= 1 whichever side was
+        # sold (a USD→TWD row and a TWD→USD row both read 32.4). The oracle transcribes that
+        # rule here (2026-09-24) rather than the old from/to figure, which is now only the
+        # store's internal `StoredFxConversion.implied_rate`.
+        ratio = c.from_amt / c.to_amt
+        conventional = ratio if ratio >= 1 else c.to_amt / c.from_amt
+        ev.check("ledger.fx.implied", f"id={c.id}", conventional, a["implied_rate"], phase)
 
 
 def _reconcile_exports(ev, api, res, prices, phase, valuation):

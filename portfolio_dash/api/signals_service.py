@@ -460,8 +460,9 @@ def scan_signals(
         else:
             result = signal_states.detect_transitions(stored.derived, new_state, stored.hold)
             for rule_id in result.events:
+                # I-16: the subject IS a symbol — said so, so no consumer has to guess.
                 _, inserted = alerts_bridge.record_event_ex(
-                    conn, rule_id=rule_id, symbol=symbol, now=now
+                    conn, rule_id=rule_id, symbol=symbol, now=now, scope="symbol"
                 )
                 if inserted:  # coalesced same-day repeats do not inflate the count (F2)
                     recorded += 1

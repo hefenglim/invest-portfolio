@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v24 (2026-08-28)"
+    assert ot.LIBRARY_VERSION == "official-v26 (2026-09-23)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -41,7 +41,17 @@ def test_ai_input_prompt_v6_pins_local_exchange_code_rule() -> None:
     # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance);
     # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field;
     # v6 (W4, AI-D17/D19) turns the door into the three-kind discriminated union.
-    assert ot.AI_INPUT_PROMPT_VERSION == "v7.4"
+    assert ot.AI_INPUT_PROMPT_VERSION == "v8"
+    # v8 IS the DEF-036 stated_amount rule + its CONTRASTIVE one-shot: one total that
+    # agrees with shares × price and one that does not, BOTH copied verbatim. Pin the
+    # example and the two prohibitions, not just the version string — a prose-only rule
+    # did not hold for daytrade, and a lone agreeing example would teach "make it fit".
+    body8 = ot.AI_INPUT_PROMPT_BODY
+    assert '"market","stated_amount"}}' in body8        # in the txn row shape itself
+    assert '"stated_amount":"21000"' in body8 and '"stated_amount":"5180"' in body8
+    assert '"shares":"1000","price":"52"' in body8      # left as written, not bent
+    assert "NEVER compute it from shares" in body8
+    assert "NEVER change shares or price" in body8
     # v7.1 IS the negative one-shot: the W4 live corpus measured the prose rule
     # 「never infer it from two same-day opposite drafts」 failing on the exact case it
     # names (daytrade 0/2 before, 11/11 after). A wrongly-set daytrade halves the TW
@@ -177,7 +187,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v24 (2026-08-28)"
+    assert wire["library_version"] == "official-v26 (2026-09-23)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

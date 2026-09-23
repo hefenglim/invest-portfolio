@@ -135,6 +135,16 @@ class RawEvent(BaseModel):
     #: "the totals disagree" is only actionable once it can name a line.
     line_no: int
     source_file: str
+    #: The row's CHRONOLOGICAL rank within its source file — 0 is the earliest row, and a
+    #: larger value happened later. Set by the adapter, which is the only party that knows
+    #: the broker's file order: Schwab prints its history NEWEST FIRST, so line order is the
+    #: reverse of time order, and a same-day buy-then-sell read in line order becomes a
+    #: sell-then-buy — which the replay (ordered by write id since 2026-09-23) books as an
+    #: oversell that discards the cost basis. Every downstream sort goes through
+    #: :func:`chrono_key`, never through ``line_no`` (which orders diagnostics, not events).
+    #: Defaults to 0 so hand-built events in tests keep their construction order; the
+    #: adapter conformance test pins that a real parse sets it.
+    seq: int = 0
 
     kind: EventKind
     #: The date the ledger uses. Where the broker prints ``post as of trade`` this is the
@@ -188,6 +198,23 @@ class RawEvent(BaseModel):
     @property
     def is_option(self) -> bool:
         return bool(self.option_symbol)
+
+
+def chrono_key(e: RawEvent) -> tuple[date, str, int, int]:
+    """The ONE sort key for putting events in the order they HAPPENED.
+
+    Trade date first; then, within one file, the adapter's :attr:`RawEvent.seq`; then the
+    line number as the tiebreak for events whose adapter set no ``seq`` (hand-built test
+    events), which keeps their pre-2026-09-23 line order. The file name sits between the
+    date and the rank because ``seq`` is only comparable within one file — two overlapping
+    exports each start their own count.
+
+    ⚠ Every sort of ledger-bound events in ``grouping`` and ``convert`` uses this key. A
+    ``(trade_date, line_no)`` sort was the DEF-027 companion defect: it wrote a Schwab
+    same-day buy-then-sell as sell-then-buy, and the replay ordered by write id books that
+    as an oversell.
+    """
+    return (e.trade_date, e.source_file, e.seq, e.line_no)
 
 
 class UnmappedRow(Exception):

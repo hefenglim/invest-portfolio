@@ -110,7 +110,7 @@ def test_smart_backfill_windows(
     assert windows[("WATCH",)] == _DEFAULT_START           # watch-only -> default window
     # FX from the earliest ledger flow (OLD's first buy, older than 12mo)
     assert fx_calls == [date(2024, 1, 10)]
-    assert "fx(from 2024-01-10)" in detail
+    assert "匯率（自 2024-01-10）" in detail   # DEF-030 follow-up: the zh sentence
 
 
 def test_explicit_days_keeps_uniform_window(

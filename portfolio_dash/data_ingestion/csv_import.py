@@ -9,9 +9,10 @@ normalizes first, so annotated templates and Excel-reformatted dates parse throu
 
 import csv
 import io
+import json
 import re
 import sqlite3
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -38,8 +39,8 @@ from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.data_ingestion.validate import (
     Issue,
     TxnInput,
+    advisory_issue,
     alias_import_account,
-    transaction_structural_issues,
     validate_transaction,
 )
 from portfolio_dash.shared.corporate_actions import ActionIndex
@@ -54,6 +55,67 @@ TRANSACTION_COLUMNS: list[str] = [
     "account", "symbol", "side", "date", "shares", "price",
     "fee", "tax", "daytrade", "short_sale", "note",
 ]
+
+#: Columns the transaction door reads BEYOND its template (DEF-026, 2026-09-23). Not in
+#: :data:`TRANSACTION_COLUMNS` on purpose — the template is what an owner fills in, and a
+#: provenance record is not something anyone types — but a ledger EXPORT carries it, and an
+#: export pasted back must keep it: ``fee_rule_snapshot`` is kept verbatim when the row's fee
+#: AND tax are both supplied (``fees.supplied_snapshot(carried=…)``), discarded with a named
+#: advisory otherwise (the engine then computes new numbers and records its own regime).
+TRANSACTION_IMPORT_ONLY_COLUMNS: frozenset[str] = frozenset({"fee_rule_snapshot"})
+
+#: Ledger-EXPORT column name -> import-TEMPLATE column name (DEF-026, 2026-09-23). The ONE
+#: alias table; applied at the shared import seam (:func:`normalize_import_csv`), so every
+#: kind's builder sees template names whichever file it was handed.
+#:
+#: ``export/ledgers.py::build_ledger_csv`` dumps the raw TABLE (``SELECT *``) so that a
+#: reconciliation reproduces history byte for byte, and four table columns are spelled
+#: differently from the template. Until this table existed a ledger exported from 交易帳本
+#: could not be imported back — 56 rows, 56 × 「缺少必要欄位（欄位 account）」 — in all six
+#: ledgers, not only the one that was measured. 匯出欄名 ↔ 範本欄名:
+#:
+#: ======================  ===============================================================
+#: 匯出 (tab → 匯入 kind)   欄名對應
+#: ======================  ===============================================================
+#: transactions            account_id→account · quantity→shares · fees→fee · trade_date→date
+#: dividends               account_id→account（其餘欄名與範本相同）
+#: fx                      account_id→account
+#: opening → openings      account_id→account
+#: cash                    account_id→account
+#: actions →               account_id→account（ratio_to / ratio_from / from_symbol 與範本相同）
+#: corporate_actions
+#: ======================  ===============================================================
+#:
+#: An alias never overrides a template column the file ALSO carries (``account`` beside
+#: ``account_id`` keeps ``account``; the other is reported as ignored). Every export column
+#: must reach a template column through here, be read beyond the template
+#: (:data:`TRANSACTION_IMPORT_ONLY_COLUMNS`), or be declared in :data:`EXPORT_ONLY_COLUMNS`
+#: — ``tests/contract/test_def026_ledger_export_reimports.py`` fails on a column that is
+#: none of the three.
+EXPORT_COLUMN_ALIASES: dict[str, str] = {
+    "account_id": "account",
+    "quantity": "shares",
+    "fees": "fee",
+    "trade_date": "date",
+}
+
+#: Export columns NO importer reads, each with the reason it cannot come back (DEF-026).
+#: Declared rather than merely unread, so an export -> import round trip NAMES what it drops
+#: (the row's 「已忽略欄位」 advisory) instead of dropping it in silence.
+EXPORT_ONLY_COLUMNS: dict[str, str] = {
+    # The row's own identity and provenance — a re-import is a NEW row in a NEW batch.
+    "id": "資料列編號，寫入時重新編號",
+    "import_batch_id": "匯入批次，寫入時歸入這一次的匯入批次",
+    "source_row_hash": "來源列雜湊，寫入時依這一列重新計算",
+    # A reference to ANOTHER row's id (DEF-020): the reorganisation fee's corporate action.
+    # Ids are renumbered on the way in, so the old number would point at the wrong row.
+    "corporate_action_id": "指向公司行動的編號，寫入後編號不同，連結不會保留",
+    # What an EXCHANGE moved when it was first recorded (DEF-021 band / F-3 weight). The
+    # import door re-performs the move against the destination's OWN settings and records
+    # what IT moved; replaying the old record would describe settings the file never set.
+    "band_move_json": "換股時目標價的搬移紀錄，匯入換股時依目前設定重新處理，不沿用舊紀錄",
+    "weight_move_json": "換股時目標權重的搬移紀錄，匯入換股時依目前設定重新處理，不沿用舊紀錄",
+}
 
 # A column-name annotation from the downloadable template — half- or full-width parentheses,
 # e.g. ``date(YYYY-MM-DD)`` / ``fee（選填）``. Stripped so annotated templates parse like plain.
@@ -86,12 +148,60 @@ class NormalizedImport:
     ambiguity: DateAmbiguity | None
 
 
+def export_aliased_headers(headers: Sequence[str]) -> dict[str, str]:
+    """Canonical header -> the name the builders read: :data:`EXPORT_COLUMN_ALIASES` applied.
+
+    An alias is applied only when the file does not ALSO carry the template name it maps to
+    (``account`` beside ``account_id``): the template column is the canonical door and wins,
+    and the export spelling is then left as it is — an unread column the builder names in its
+    「已忽略欄位」 advisory rather than a second value silently merged into the first.
+    """
+    present = set(headers)
+    return {
+        h: (EXPORT_COLUMN_ALIASES[h]
+            if h in EXPORT_COLUMN_ALIASES and EXPORT_COLUMN_ALIASES[h] not in present
+            else h)
+        for h in headers
+    }
+
+
+def unread_columns_issues(
+    headers: Sequence[str], read: Collection[str]
+) -> list[Issue]:
+    """The 「已忽略欄位」 advisories for a file's columns that *read* does not include.
+
+    A shared import-seam helper (DEF-026) for every kind's builder: ``csv.DictReader`` keeps
+    unknown columns and every builder simply never looks at them, so a column an owner
+    expected to land — an export's ``id``, a mistyped ``fees2`` — vanished with no word on
+    screen. Two advisories, because they ask different things of the reader: an export's own
+    system columns (:data:`EXPORT_ONLY_COLUMNS`) are EXPECTED to be dropped and need no
+    action; any other unread column is probably a typo and does. Advisory tier (``info``):
+    never gating, never a tick — the row itself is fine.
+    """
+    unread = [h for h in headers if h and h not in read]
+    system = [h for h in unread if h in EXPORT_ONLY_COLUMNS]
+    other = [h for h in unread if h not in EXPORT_ONLY_COLUMNS]
+    out: list[Issue] = []
+    if system:
+        out.append(advisory_issue(
+            "export_columns_ignored",
+            f"已忽略欄位：{'、'.join(system)}（匯出檔的系統欄位，寫入時由系統重新產生）"))
+    if other:
+        out.append(advisory_issue(
+            "unknown_columns_ignored",
+            f"已忽略欄位：{'、'.join(other)}（不是此類帳本的匯入欄位，內容不會寫入，"
+            "請對照範本檢查欄名）"))
+    return out
+
+
 def normalize_import_csv(
     csv_text: str, date_col: str, *, date_format: str | None = None
 ) -> NormalizedImport:
     """Rewrite *csv_text* to canonical headers + ISO dates for the per-kind builder.
 
-    Headers are canonicalized (annotation + case stripped) so annotated templates parse; the
+    Headers are canonicalized (annotation + case stripped) so annotated templates parse, and
+    a ledger EXPORT's column names are mapped onto the template's
+    (:func:`export_aliased_headers`, DEF-026) so an exported file imports back as it is; the
     *date_col* is inferred at COLUMN level (:func:`dateparse.resolve_date_column`) and each cell
     rewritten to ISO.  A genuine M/D-vs-D/M ambiguity is NOT guessed: ``ambiguity`` is returned
     and the date cells are left as-is so the ISO-only builder errors each row until the caller
@@ -104,9 +214,11 @@ def normalize_import_csv(
     fieldnames = reader.fieldnames
     if not fieldnames:
         return NormalizedImport(text=csv_text, ambiguity=None)  # header-only / empty: nothing to do
-    canon = [canonical_header(f) for f in fieldnames]
+    canon_of = export_aliased_headers([canonical_header(f) for f in fieldnames])
+    canon = list(canon_of.values())
     rows: list[dict[str, str]] = [
-        {canonical_header(k): (v or "").strip() for k, v in row.items() if k is not None}
+        {canon_of[canonical_header(k)]: (v or "").strip()
+         for k, v in row.items() if k is not None}
         for row in reader
     ]
 
@@ -137,6 +249,7 @@ def txn_preview_row(
     *,
     batch: Sequence[TxnInput] = (),
     action_index: ActionIndex | None = None,
+    carried_snapshot: Mapping[str, str] | None = None,
 ) -> PreviewRow:
     """Build a :class:`PreviewRow` for a single transaction input.
 
@@ -153,6 +266,10 @@ def txn_preview_row(
                flagged 賣超. Empty (the default) is the single-row behaviour.
         action_index: One :class:`ActionIndex` for the whole file (D23 rule 2 / trap #21).
                Omitted, ``validate_transaction`` reads one PER ROW.
+        carried_snapshot: the row's own ``fee_rule_snapshot``, when the CSV carried one (a
+               ledger export pasted back, DEF-026). Kept VERBATIM when fee AND tax are both
+               supplied — it is the provenance of exactly those two numbers — and discarded
+               with a named advisory when the engine computes either of them instead.
 
     Returns:
         A fully populated :class:`PreviewRow`.
@@ -239,6 +356,14 @@ def txn_preview_row(
             if tax is None:
                 tax = fr.tax
             snap = dict(fr.snapshot)
+            if carried_snapshot is not None:
+                # The carried record describes the numbers it was booked with; the engine is
+                # computing new ones here, so keeping it would attribute them to a regime
+                # that did not produce them. Dropped — and said, never silently.
+                issues.append(advisory_issue(
+                    "snapshot_not_carried",
+                    "已忽略欄位：fee_rule_snapshot（手續費或稅額有空白，改由費用規則計算，"
+                    "並記錄這次計算的快照）"))
             if etf_unknown:
                 snap["etf_flag"] = "unknown"
             supplied = [k for k, v in (("fee", inp.fee), ("tax", inp.tax))
@@ -249,8 +374,9 @@ def txn_preview_row(
                 snap["supplied"] = ",".join(supplied)
     elif fee is not None and tax is not None:
         # Both supplied (the broker-import shape) — record the provenance instead of
-        # leaving {}, which reads as "no rule applied". See fees.supplied_snapshot.
-        snap = supplied_snapshot(fee, tax)
+        # leaving {}, which reads as "no rule applied". See fees.supplied_snapshot. A
+        # carried snapshot (an export pasted back, DEF-026) IS that provenance and is kept.
+        snap = supplied_snapshot(fee, tax, carried=carried_snapshot)
 
     # Build payload for the writer (string dict + prefixed snapshot entries)
     payload: dict[str, str] = {
@@ -353,6 +479,31 @@ def _optional_decimal_cell(raw: dict[str, str], column: str) -> Decimal | None:
         raise _CellError(column, value, _NOT_A_NUMBER) from None
 
 
+_NOT_A_SNAPSHOT = ("不是有效的費用規則快照（須為匯出檔原樣的 JSON 物件，"
+                   "不確定時請清空此欄，改由費用規則記錄）")
+
+
+def _snapshot_cell(raw: dict[str, str], column: str) -> dict[str, str] | None:
+    """``fee_rule_snapshot``: absent or blank -> ``None``; otherwise a flat str -> str object.
+
+    Only the shape this app WRITES is accepted (``store.insert_transaction`` dumps a
+    ``dict[str, str]``), so a carried record re-serialises to the same TEXT it was exported
+    as. Anything else is refused loudly rather than coerced — a provenance record that has
+    been edited into a different shape is no longer the record of anything.
+    """
+    value = raw.get(column, "")
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        raise _CellError(column, value, _NOT_A_SNAPSHOT) from None
+    if not isinstance(parsed, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()):
+        raise _CellError(column, value, _NOT_A_SNAPSHOT)
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
 def _date_cell(raw: dict[str, str], column: str) -> date:
     value = _cell(raw, column)
     try:
@@ -419,9 +570,15 @@ def build_transaction_preview(
     # download->re-upload (or paste) round-trip must not turn the first header into a BOM+account.
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
     rows: list[PreviewRow] = []
-    #: Pass 1's output: ``(index, raw, parsed-or-None)``. Pass 2 validates each entry
-    #: against ALL of it.
-    parsed: list[tuple[int, dict[str, str], TxnInput | None, Issue | None]] = []
+    #: Pass 1's output: ``(index, raw, parsed-or-None, issue, carried snapshot)``. Pass 2
+    #: validates each entry against ALL of it.
+    parsed: list[tuple[int, dict[str, str], TxnInput | None, Issue | None,
+                       dict[str, str] | None]] = []
+    #: DEF-026: the columns this door will not read, named on every row (a file-level fact,
+    #: but the row is where the preview shows a reason).
+    ignored = unread_columns_issues(
+        [h.strip() for h in (reader.fieldnames or [])],
+        {*TRANSACTION_COLUMNS, *TRANSACTION_IMPORT_ONLY_COLUMNS})
 
     for idx, raw_row in enumerate(reader):
         raw = {k.strip(): (v or "").strip() for k, v in raw_row.items()}
@@ -449,8 +606,10 @@ def build_transaction_preview(
                 short_sale=raw.get("short_sale", "").lower() in ("1", "true", "y", "yes"),
                 note=raw.get("note") or None,
             )
+            carried = _snapshot_cell(raw, "fee_rule_snapshot")
         except _CellError as exc:
-            parsed.append((idx, raw, None, Issue(kind="parse_error", message=exc.message)))
+            parsed.append(
+                (idx, raw, None, Issue(kind="parse_error", message=exc.message), None))
             continue
         except (KeyError, ValueError, InvalidOperation):
             # Belt and braces. Everything above is read through a typed cell reader, so this
@@ -460,10 +619,10 @@ def build_transaction_preview(
             # which is exactly how the Python internals got onto the screen in the first place.
             parsed.append((idx, raw, None, Issue(
                 kind="parse_error",
-                message="這一列的內容無法解析，請對照範本檢查各欄位格式")))
+                message="這一列的內容無法解析，請對照範本檢查各欄位格式"), None))
             continue
 
-        parsed.append((idx, raw, inp, alias_issue))
+        parsed.append((idx, raw, inp, alias_issue, carried))
 
     # --- pass 2: validate each row against the ledger PLUS its siblings ---
     # Only rows that PARSED are siblings. An unparseable row has no account, symbol,
@@ -481,28 +640,29 @@ def build_transaction_preview(
     # a deposit of −500 never funds a withdrawal. Here a buy priced −50.00 — a hard
     # ``error`` on its own line — still covered its sell, which then previewed ``ok`` and a
     # no-select commit wrote it ALONE: 200 / written 1 / a lone unacked oversold SELL.
-    # Membership is the row-level structural prefix ONLY (decidable from the TxnInput,
-    # no second validation pass); the ledger-dependent hard kinds stay in on the shared-key
-    # argument — see :func:`~data_ingestion.validate.transaction_structural_issues`. The
-    # row's own verdict is still rendered against the narrowed batch, exactly as cash does
-    # for its excluded rows, and the exclusion errs conservative in both directions: a bad
-    # buy stops lending shares it will never book, and a bad SELL stops draining shares it
-    # will never book — either way siblings are judged against what the ledger will hold.
+    # ⚠ Membership by row validity is NOT decided here (I-13, 2026-09-23): the owner is
+    # ``validate.pending_share_flows``, which excludes every row that can never be written
+    # (``row_cannot_be_written`` — the structural prefix AND the whole-share rule, DEF-024).
+    # This builder used to pre-filter on the structural prefix alone, a second, narrower
+    # copy of that predicate; the share guard never needed it and a 1.5-股 buy passed it.
+    # The batch is the rows that will be WRITTEN — parsed and selected — nothing more.
     batch = [
         parsed_in
-        for row_idx, _raw, parsed_in, _issue in parsed
+        for row_idx, _raw, parsed_in, _issue, _snap in parsed
         if parsed_in is not None
         and (select is None or row_idx in select)
-        and not transaction_structural_issues(parsed_in)
     ]
     action_index = pending_actions if pending_actions is not None else load_action_index(conn)
-    for idx, raw, row_inp, extra in parsed:
+    for idx, raw, row_inp, extra, carried_snap in parsed:
         if row_inp is None:
-            rows.append(PreviewRow(index=idx, raw=raw, issues=[extra] if extra else []))
+            rows.append(PreviewRow(
+                index=idx, raw=raw, issues=([extra] if extra else []) + ignored))
             continue
-        row = txn_preview_row(conn, idx, raw, row_inp, batch=batch, action_index=action_index)
+        row = txn_preview_row(conn, idx, raw, row_inp, batch=batch, action_index=action_index,
+                              carried_snapshot=carried_snap)
         if extra is not None:
             row.issues.append(extra)
+        row.issues.extend(ignored)
         rows.append(row)
 
     return ImportPreview(rows=rows)

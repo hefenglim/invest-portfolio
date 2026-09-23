@@ -71,7 +71,7 @@ def dispatch_notifications(
     base = cfg.public_base_url  # FU-D17: empty ⇒ frontend_url returns None ⇒ legacy text
 
     rows = conn.execute(
-        "SELECT id, rule_id, symbol, href FROM alert_events "
+        "SELECT * FROM alert_events "
         "WHERE notified_at IS NULL AND notify_attempts < ? ORDER BY id LIMIT ?",
         (_MAX_ATTEMPTS, _CAP),
     ).fetchall()
@@ -90,8 +90,11 @@ def dispatch_notifications(
         # dashboard fallback inside frontend_url). Empty base URL ⇒ link is None ⇒ the
         # body keeps its legacy 「請至儀表板查看詳情」 tail (byte-identical legacy behaviour).
         link = notify.frontend_url(base, row["href"])
+        # I-16: the subject is named by what it IS (``scope``, DEF-037) — an account is not a
+        # ticker. ``SELECT *`` so a legacy table without the column reads as "not recorded".
+        scope = row["scope"] if "scope" in row.keys() else None
         title, body, severity = notify.format_event(
-            rule_id, row["symbol"], linked=link is not None
+            rule_id, row["symbol"], scope=scope, linked=link is not None
         )
         outcome = sender(channels, title, body, severity, link)
         if any(result == "ok" for result in outcome.values()):

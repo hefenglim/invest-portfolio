@@ -58,7 +58,7 @@ def test_history_daily_includes_benchmarks(
     seen = {s for group in calls for s in group}
     assert _BENCH <= seen  # both benchmark keys were fetched
     assert "2330" in seen  # instruments still fetched
-    assert "benchmarks:" in detail
+    assert "基準指數：" in detail   # DEF-030 follow-up: the zh sentence
 
 
 def test_history_daily_benchmark_failure_degrades_silently(
@@ -75,7 +75,7 @@ def test_history_daily_benchmark_failure_degrades_silently(
     monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
     monkeypatch.setattr(jobs_mod, "refresh_history", fake_history)
     detail = history_daily(conn, now=_NOW)  # must NOT raise (instrument refresh protected)
-    assert "benchmarks: error" in detail
+    assert "基準指數：更新失敗，已略過" in detail
 
 
 def test_backfill_all_includes_benchmarks_smart_window(
@@ -98,7 +98,7 @@ def test_backfill_all_includes_benchmarks_smart_window(
 
     seen = {s for group in hist_calls for s in group}
     assert _BENCH <= seen
-    assert "benchmarks(from" in detail
+    assert "基準指數（自" in detail
 
 
 def test_backfill_all_includes_benchmarks_explicit_days(
@@ -122,7 +122,7 @@ def test_backfill_all_includes_benchmarks_explicit_days(
 
     seen = {s for group in hist_calls for s in group}
     assert _BENCH <= seen
-    assert "benchmarks:" in detail
+    assert "基準指數：" in detail   # DEF-030 follow-up: the zh sentence
 
 
 # --- D-11 (site-architecture map, 2026-09-10): the benchmark writer binds the ledger --------

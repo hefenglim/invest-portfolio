@@ -20,6 +20,7 @@ from portfolio_dash.shared.llm_config import (
     LLMBudgetExceeded,
     LLMUnavailable,
 )
+from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,26 @@ _BUDGET_ZH = "AI 額度已用盡，請調整預算或稍後再試"
 _INACTIVE_ZH = "AI 功能尚未啟用，請先於設定中啟用模型"
 _UNAVAILABLE_ZH = "AI 服務暫時無法使用，請稍後再試"
 
+#: ``LLMError.kind`` -> its floor. The handlers below dispatch on the exception CLASS; a door
+#: that catches the exception itself and carries only its ``kind`` (the AI input door —
+#: ``data_ingestion/agents.py`` returns it as an ``Issue``) reads the same floor here.
+_LLM_ZH: dict[str, str] = {
+    "budget_exceeded": _BUDGET_ZH,
+    "ai_not_activated": _INACTIVE_ZH,
+    "llm_unavailable": _UNAVAILABLE_ZH,
+    "llm_error": _UNAVAILABLE_ZH,
+}
+
+
+def llm_refusal_message(kind: str, text: str) -> str:
+    """The owner-facing sentence for an LLM refusal the caller caught itself (I-5).
+
+    ``str(exc)`` of an ``LLMUnavailable`` is 「provider error (<model>): …」 — English written
+    for a log. The AI door forwarded it verbatim into ``error_body``; this is the same
+    ``_prefer_zh`` rule the exception handlers apply, keyed by ``kind`` instead of class.
+    """
+    return _prefer_zh(text, _LLM_ZH.get(kind, _UNAVAILABLE_ZH))
+
 #: Fallback for an un-bookable ledger. Every raise site in ``portfolio/cost_basis.py`` and
 #: ``portfolio/dashboard.py`` already writes its own Chinese sentence naming the row, so
 #: ``_prefer_zh`` forwards those verbatim and this is the floor if one ever stops.
@@ -229,19 +250,10 @@ def register_error_handlers(app: FastAPI) -> None:
         # ``issues[].text`` and NEVER in ``message`` — the frontend renders ``message``
         # verbatim as a red toast. The row travels as FIELDS, the same shape
         # ``export.py`` / ``whatif.py`` emit, so no caller has to regex a sentence for it.
+        # DEF-008: the ONE sentence + issue (``shared/oversold.py``), the account as a token.
         return JSONResponse(status_code=422, content=error_body(
-            "oversold_position",
-            f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
-            f"{exc.trade_date.isoformat()}）— 請先修正該筆交易",
-            issues=[{
-                "sev": "error",
-                "code": "oversold_position",
-                "text": str(exc),
-                "field": None,
-                "account_id": exc.account_id,
-                "symbol": exc.symbol,
-                "trade_date": exc.trade_date.isoformat(),
-            }]))
+            "oversold_position", oversold_position_message(exc),
+            issues=oversold_position_issues(exc, str(exc))))
 
     # --- the same floor for the CLASS the two owners re-type, at its LAST shared seam ----
     #

@@ -26,6 +26,7 @@ from portfolio_dash.data_ingestion.broker.ir import (
     SUPPRESSIBLE_KINDS,
     EventKind,
     RawEvent,
+    chrono_key,
     looks_like_cusip,
 )
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
@@ -260,10 +261,7 @@ def suppress(
             )
         )
 
-    kept = sorted(
-        (e for e in events if e.ref not in removed),
-        key=lambda e: (e.trade_date, e.line_no),
-    )
+    kept = sorted((e for e in events if e.ref not in removed), key=chrono_key)
     return kept, dropped, vetoed
 
 
@@ -453,7 +451,10 @@ def prehistory_shares(events: list[RawEvent]) -> dict[str, Decimal]:
 
     needed: dict[str, Decimal] = {}
     for symbol, rows in sorted(by_symbol.items()):
-        rows.sort(key=lambda e: (e.trade_date, e.line_no))
+        # In the order the rows HAPPENED (``chrono_key``), never in line order: a Schwab
+        # export prints newest first, so a same-day buy-then-sell walked by line number
+        # dips negative and fabricates an opening position for shares the file explains.
+        rows.sort(key=chrono_key)
         balance = _ZERO
         low = _ZERO
         for e in rows:

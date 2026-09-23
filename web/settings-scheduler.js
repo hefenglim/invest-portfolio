@@ -121,7 +121,15 @@
     digest_daily: '每日收盤摘要',
     digest_weekly: '每週行動清單',
   };
-  const jobLabel = (id, desc) => JOB_ZH[id] || desc || id;
+  /* DEF-030: a dynamic row (`insight:<id>`) has no JOB_ZH entry — the server names it by
+     its TASK (`label` on GET /api/scheduler/jobs and on each /runs row). Remembered per id
+     so the run-history rows and the result modal read the same name as the job row; it
+     used to fall back to the raw id 「insight:10」 everywhere. */
+  const labelById = {};
+  const rememberLabels = (list, idKey) => (list || []).forEach((x) => {
+    if (x && x.label) labelById[x[idKey]] = x.label;
+  });
+  const jobLabel = (id, desc) => JOB_ZH[id] || labelById[id] || desc || id;
 
   /* ===== FU-D36 (需求七): per-row live run status ==============================
      renderJobs stores each row's 狀態 slot + run button by job_id; GET /api/scheduler/
@@ -427,11 +435,29 @@
       tdJob.appendChild(el('div', 'sym-name cron-code', j.id));
       tr.appendChild(tdJob);
 
+      /* DEF-030: a task paused in the AI 洞察管線 keeps its schedule row ON (`enabled` is the
+         row's stored intent) but will not execute — the server combines the two into
+         `effective_enabled` + `paused_reason`; this page only displays them. The switch
+         reads OFF and is locked with the reason, and the row says where to resume it. */
+      if (j.paused_reason) {
+        const note = el('div', 'sym-name paused-note', j.paused_reason + ' ');
+        const go = el('a', null, '前往洞察管線 →');
+        go.href = 'pipeline-hub.html';
+        note.appendChild(go);
+        tdJob.appendChild(note);
+      }
+
       /* enable toggle -> PUT /api/scheduler/jobs/{id} {enabled} */
       const tdTog = el('td');
-      const t = el('button', 'toggle' + (j.enabled ? ' on' : ''));
+      const isOn = j.effective_enabled != null ? j.effective_enabled : j.enabled;
+      const t = el('button', 'toggle' + (isOn ? ' on' : ''));
       t.type = 'button';
       t.setAttribute('role', 'switch');
+      t.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      if (j.paused_reason) {
+        t.disabled = true;
+        t.title = j.paused_reason;
+      }
       t.addEventListener('click', async () => {
         const next = !t.classList.contains('on');
         t.disabled = true;
@@ -619,6 +645,7 @@
     try {
       const resp = await api.get('/api/scheduler/runs', params);
       runs = (resp && resp.rows) || [];
+      rememberLabels(runs, 'job_id');
       if (runsPager) {
         runsPager.update({
           offset: runState.offset,
@@ -710,6 +737,7 @@
       return null;
     });
     jobs = (jobsResp && jobsResp.jobs) || [];
+    rememberLabels(jobs, 'id');
     schedState = (jobsResp && jobsResp.scheduler) || null;
     renderSchedBanner();
     renderJobs();
@@ -729,6 +757,7 @@
     const jobsResp = await api.get('/api/scheduler/jobs').catch(() => null);
     if (jobsResp && jobsResp.jobs) {
       jobs = jobsResp.jobs;
+      rememberLabels(jobs, 'id');
       schedState = jobsResp.scheduler || null;
       renderSchedBanner();
       renderJobs();

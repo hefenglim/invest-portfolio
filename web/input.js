@@ -868,7 +868,10 @@
       reason: '這筆賣出被判為賣超：' + msg
         + '。若原因是漏登公司行動，補登後股數就會對上，成本基礎不會被捨棄。',
       /* Re-preview rather than auto-commit: the repaired draft must come back through the
-         same validation and be pressed by the owner, never written on their behalf. */
+         same validation and be pressed by the owner, never written on their behalf. The
+         caches the saved action made stale (holdings, a SPINOFF child in ctx) were already
+         refreshed: corp-action-form.js calls window.pdLedgerRefresh before onSaved, and that
+         seam IS refreshAfterLedgerChange once adoptLedgerSeam has run (DEF-019). */
       onSaved: () => { schedulePreview(); }
     });
   }
@@ -1018,10 +1021,12 @@
        hint clears, the symbol resolves in the preview, and it appears in every picker (manual /
        opening read ctx.instruments live). Awaited before schedulePreview so renderSymbolHint
        resolves the now-registered symbol. */
-    if (resp && resp.auto_registered) await reloadContext();
-    /* FU-D45 + #10: ledger tables + holdings caches (可賣 just changed); a manual write is
-       always a full-success transaction row -> flash + auto-switch the 交易 tab. */
-    afterCommitRefresh('transactions');
+    /* FU-D45 + #10 + DEF-019: the ONE post-change refresh — ledger tables + holdings caches
+       (可賣 just changed); a manual write is always a full-success transaction row -> flash +
+       auto-switch the 交易 tab. `context` only when the commit auto-registered a symbol, and
+       awaited, so schedulePreview below resolves the now-registered symbol (Fable F8). */
+    await refreshAfterLedgerChange('transactions',
+      { context: !!(resp && resp.auto_registered) });
     schedulePreview();
   }
 
@@ -1041,6 +1046,9 @@
      ambiguous date column; null = let the backend infer. Reset whenever the CSV text or
      the kind changes so a new file re-detects from scratch. */
   let csvDateFormat = null;
+  /* DEF-017 (2026-09-23): the file name the paste came from, sent as the batch's
+     `source_name` so 最近匯入 can say WHICH file a batch was; '' once the text is hand-edited. */
+  let csvSourceName = '';
 
   /* Shown in #csv-kind-note: the expected date shape + the never-guess promise (FU-D19). */
   const CSV_DATE_NOTE = '日期欄位建議 YYYY-MM-DD；2026/7/10、20260710 等常見格式亦可自動辨識，'
@@ -1078,6 +1086,7 @@
         if (note) note.textContent = CSV_DATE_NOTE + (kind === 'transactions' ? '' : '（' + label + ' CSV：解析同此模式）');
         const hint = $('#csv-dz-hint');
         if (hint) hint.textContent = CSV_HINTS[kind] || '';
+        renderCsvHead(kind);       // DEF-004: this kind's own columns, before the preview lands
         scheduleCsvPreview();      // re-run so any prior ambiguity re-evaluates for this kind
       });
       bar.appendChild(c);
@@ -1088,6 +1097,7 @@
     if (dzHint0) dzHint0.textContent = CSV_HINTS[csvKind] || '';
     const note0 = $('#csv-kind-note');
     if (note0) note0.textContent = CSV_DATE_NOTE;
+    renderCsvHead(csvKind);
 
     /* FU-D19: picking a date format pins it and re-previews (which now resolves cleanly). */
     const fmtSel = $('#csv-datefmt-select');
@@ -1115,7 +1125,11 @@
 
     const paste = $('#csv-paste');
     /* a manual edit invalidates any pinned date format — re-detect from the new text. */
-    if (paste) paste.addEventListener('input', () => { csvDateFormat = null; scheduleCsvPreview(); });
+    if (paste) paste.addEventListener('input', () => {
+      csvDateFormat = null;
+      csvSourceName = '';          // DEF-017: hand-edited text is no longer that file
+      scheduleCsvPreview();
+    });
     $('#csv-confirm').addEventListener('click', commitCsv);
     $('#csv-confirm').disabled = true;
 
@@ -1130,6 +1144,7 @@
       r.onload = () => {
         if (paste) paste.value = String(r.result || '').trim();
         csvDateFormat = null;      // FU-D19: a fresh file re-detects the date format
+        csvSourceName = f.name;    // DEF-017: the batch's source label in 最近匯入
         $('#csv-file').textContent = f.name;
         if (window.toast) window.toast('已載入 ' + f.name, 'ok', '解析預覽已更新，確認後寫入');
         scheduleCsvPreview();
@@ -1188,6 +1203,7 @@
       $('#csv-file').textContent = '';
       $('#csv-confirm').disabled = true;
       csvDateFormat = null;
+      csvSourceName = '';
       hideDateFmtChooser();
       return;
     }
@@ -1200,14 +1216,161 @@
       if (window.toast) window.toast((err && err.message) || '解析失敗', 'fail', err && err.code);
       return;
     }
-    renderCsvPreview(resp);
+    renderCsvPreview(resp, reqBody.kind);
   }
 
-  /* Render the REAL preview table from the server rows {n, status, reason, data}.
-     The per-row money in `data` (price / shares / fee / tax) is Decimal STRINGS now,
-     so amounts go through fmt / Number — NOT `.toFixed()` on a wire string (Finding 5). */
-  function renderCsvPreview(preview) {
-    $('#csv-file').textContent = '貼上 CSV';
+  /* ===== DEF-004 (2026-09-23): the CSV preview's columns, PER KIND =====
+     The table had ONE header — # 日期 帳戶 買賣 代號 股數 價格 — written for trades and reused
+     by all six kinds, so a 資金 row printed 「DEPOSIT — —」 with its 600,000 TWD nowhere, a 股利
+     row lost its gross, a 換匯 row both of its amounts, an 期初 row its build date and its cost,
+     and a 公司行動 row its ratio. Every one of those values was already in `rows[].data`; no
+     column asked for it. Each kind now declares its own columns as [header, td class,
+     cell(d)]: the cell reads ONLY that kind's own `data` keys and returns text or a node.
+     Amounts are server Decimal STRINGS rendered through window.fmt — never arithmetic — and
+     the date column reads the kind's OWN date key (build_date for 期初).
+     tests/contract/test_def004_csv_preview_columns.py holds every key the backend emits for a
+     kind to a column here (or to a named exclusion), so a new payload field cannot go dark. */
+  const csvAmt = (v, ccy) => (v === undefined || v === null || v === ''
+    ? f.NULL_GLYPH : (ccy ? f.money(v, ccy) : f.exact(v)));
+  /* One currency leg of a conversion: 「32,000 TWD」. */
+  const csvLeg = (v, ccy) => (v === undefined || v === null || v === ''
+    ? f.NULL_GLYPH : csvAmt(v, ccy) + (ccy ? ' ' + ccy : ''));
+  /* A row's display currency: the registered instrument's quote ccy, else the account's. */
+  const csvCcy = (d) => {
+    const it = inst(d.symbol || '');
+    if (it && it.ccy) return it.ccy;
+    const a = acc(d.account_id);
+    return a ? (a.ccy || a.settlement_ccy || '') : '';
+  };
+  const csvFundingCcy = (d) => {
+    const a = acc(d.account_id);
+    return a ? (a.funding_ccy || a.settlement_ccy || a.ccy || '') : '';
+  };
+  /* Display-only zh labels for the two kinds whose preview row carries a bare code. Each is a
+     COPY of its backend owner (shared/corporate_actions.py KIND_ZH, shared/cash_kinds.py
+     CASH_KIND_ZH), and the contract test above compares them key for key, so the copy cannot
+     drift; a server-supplied `kind_label` (the AI door's cash rows) still wins. */
+  const CSV_CASH_KIND_ZH = {
+    DEPOSIT: '入金', WITHDRAW: '出金', OPENING: '期初資金', REBATE: '折讓款',
+    INTEREST: '利息', INTEREST_EXPENSE: '融資利息', BROKER_FEE: '券商費用',
+  };
+  /* The 買/賣 chip, plus the two flags that move money (當沖 halves the TW sell tax; a
+     declared short is exempt from the 賣超 guard) — a flag the owner cannot see is one they
+     cannot correct. */
+  function csvSideChips(sideRaw, daytrade, shortSale) {
+    const frag = document.createDocumentFragment();
+    const side = String(sideRaw || '').toLowerCase();
+    if (!side) return frag;
+    frag.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
+      side === 'buy' ? '買' : '賣'));
+    if (String(daytrade) === '1') frag.appendChild(el('span', 'dir-chip dir-daytrade', '當沖'));
+    if (String(shortSale) === '1') frag.appendChild(el('span', 'dir-chip dir-short', '放空'));
+    return frag;
+  }
+  /* The two ratio terms side by side in the ledger's own phrasing (ledgers.py ratio_label) —
+     never divided: they are stored as two integers precisely so nobody has to (§3.1(ii)). */
+  const csvRatio = (from, to) => (from && to
+    ? '每 ' + f.exact(from) + ' 股 → ' + f.exact(to) + ' 股' : f.NULL_GLYPH);
+  const CSV_COLS = {
+    transactions: [
+      ['日期', 'num', (d) => f.date(d.trade_date)],
+      ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
+      ['買賣', 'col-text', (d) => csvSideChips(d.side, d.daytrade, d.short_sale)],
+      ['代號', 'col-text num', (d) => d.symbol || ''],
+      ['股數', 'num', (d) => f.shares(d.quantity)],
+      ['價格', 'num', (d) => f.price(d.price, csvCcy(d))],
+      ['手續費', 'num', (d) => csvAmt(d.fee, csvCcy(d))],
+      ['稅', 'num', (d) => csvAmt(d.tax, csvCcy(d))],
+    ],
+    dividends: [
+      ['發放日', 'num', (d) => f.date(d.date)],
+      ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
+      ['代號', 'col-text num', (d) => d.symbol || ''],
+      ['類型', 'col-text', (d) => {
+        const ty = String(d.type || '').toUpperCase();
+        return AI_DIV_TYPE_ZH[ty] || ty;
+      }],
+      ['毛額', 'num', (d) => csvAmt(d.gross, csvCcy(d))],
+      ['扣繳', 'num', (d) => csvAmt(d.withholding, csvCcy(d))],
+      ['淨額', 'num', (d) => csvAmt(d.net, csvCcy(d))],
+      ['再投資股數', 'num', (d) => (d.reinvest_shares ? f.shares(d.reinvest_shares) : f.NULL_GLYPH)],
+      ['再投資價格', 'num', (d) => (d.reinvest_price ? f.price(d.reinvest_price, csvCcy(d)) : f.NULL_GLYPH)],
+      ['除息日', 'num', (d) => (d.ex_date ? f.date(d.ex_date) : f.NULL_GLYPH)],
+    ],
+    fx: [
+      ['日期', 'num', (d) => f.date(d.date)],
+      ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
+      ['換匯', 'num', (d) => (d.from_amount === undefined && d.to_amount === undefined
+        ? f.NULL_GLYPH
+        : csvLeg(d.from_amount, d.from_ccy) + ' → ' + csvLeg(d.to_amount, d.to_ccy))],
+    ],
+    openings: [
+      ['建檔日', 'num', (d) => f.date(d.build_date)],
+      ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
+      ['代號', 'col-text num', (d) => d.symbol || ''],
+      ['股數', 'num', (d) => f.shares(d.shares)],
+      ['原始總成本', 'num', (d) => csvAmt(d.original_cost_total, csvCcy(d))],
+    ],
+    corporate_actions: [
+      ['日期', 'num', (d) => f.date(d.date)],
+      ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
+      /* I-14: the server's word for the kind (preview payload `kind_label`). */
+      ['類型', 'col-text', (d) => d.kind_label || d.kind || ''],
+      ['來源代號', 'col-text num', (d) => d.from_symbol || ''],
+      ['目的代號', 'col-text num', (d) => d.to_symbol || ''],
+      ['比例', 'col-text num', (d) => csvRatio(d.ratio_from, d.ratio_to)],
+      ['成本分攤', 'num', (d) => (d.cost_carry !== undefined && d.cost_carry !== null && d.cost_carry !== ''
+        ? f.exact(d.cost_carry) : f.NULL_GLYPH)],
+      ['備註', 'col-text', (d) => d.note || ''],
+    ],
+    cash: [
+      ['日期', 'num', (d) => f.date(d.date)],
+      ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
+      ['類型', 'col-text', (d) => d.kind_label || CSV_CASH_KIND_ZH[d.kind] || d.kind || ''],
+      ['幣別', 'col-text', (d) => d.ccy || ''],
+      ['金額', 'num', (d) => csvAmt(d.amount, d.ccy)],
+      ['取得成本（家幣）', 'num', (d) => csvAmt(d.acq_home_amount, csvFundingCcy(d))],
+      ['備註', 'col-text', (d) => d.note || ''],
+    ],
+  };
+
+  /* The header row for `kind` (called on every chip switch and every render). */
+  function renderCsvHead(kind) {
+    const head = $('#csv-head');
+    if (!head) return;
+    const tr = el('tr');
+    tr.appendChild(el('th'));
+    tr.appendChild(el('th', null, '#'));
+    (CSV_COLS[kind] || CSV_COLS.transactions).forEach((c) => {
+      tr.appendChild(el('th', c[1].indexOf('col-text') >= 0 ? 'col-text' : null, c[0]));
+    });
+    tr.appendChild(el('th', 'col-text', '狀態'));
+    tr.appendChild(el('th', 'col-text', '原因'));
+    head.replaceChildren(tr);
+  }
+
+  /* DEF-024 (2026-09-23): a row's GATING reason and its ADVISORIES (`info`, DEF-014) are
+     different things — the first is why the row needs a tick or cannot be written, the second
+     is a grey note that asks for nothing. The wire puts an advisory into `reason` only when
+     nothing gates the row, so an advisory is recognised by membership in `info`, not by its
+     position, and it is never painted as a warning. */
+  function rowReasonParts(r) {
+    const info = Array.isArray(r.info) ? r.info : [];
+    const gating = r.reason && info.indexOf(r.reason) < 0 ? r.reason : '';
+    return { gating: gating, info: info };
+  }
+  function appendInfoLines(td, info) {
+    info.forEach((t) => td.appendChild(el('div', 'row-info', 'ⓘ ' + t)));
+  }
+
+  /* Render the REAL preview table from the server rows {n, status, reason, info, data} with
+     the columns of the kind the preview was made FOR (a chip switch while a request is in
+     flight must not print one kind's rows under another's header). */
+  function renderCsvPreview(preview, kind) {
+    $('#csv-file').textContent = csvSourceName || '貼上 CSV';
+    const k = CSV_COLS[kind] ? kind : 'transactions';
+    renderCsvHead(k);
+    const cols = CSV_COLS[k];
     const tbody = $('#csv-body');
     tbody.replaceChildren();
     const ST = { ok: ['✓ 可寫入', 'st-ok'], warn: ['⚠ 警告', 'st-warn'], error: ['✕ 錯誤', 'st-error'] };
@@ -1227,37 +1390,19 @@
       tdCb.appendChild(cb);
       tr.appendChild(tdCb);
       tr.appendChild(el('td', 'num', '#' + ((r.n || 0) + 1)));
-      tr.appendChild(el('td', 'num', f.date(d.trade_date || d.date)));
-      /* The row's account is an ID (the CSV column is `account`, normalised to `account_id`
-         by the parser); it printed raw — 「tw_broker」 in a table whose neighbours say
-         「台灣券商」 (M5, demo audit 2026-09-16). Resolve through the single naming authority. */
-      tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
-      /* The 買/賣 chip is TRANSACTION-shaped, and only a transaction row carries a `side`.
-         Every other kind's payload has none, and `side || ''` is not 'buy', so the chip fell
-         through to its else branch and stamped a red 「賣」 on rows that are not sells at all
-         — an fx conversion, an 期初 row, a corporate action, and now a cash DEPOSIT. A
-         deposit displayed as 賣 is the kind of wrong that looks deliberate. Show the chip
-         only when there IS a side; otherwise show the row's own `kind` (cash movement /
-         corporate action) as plain text, and nothing when the kind has neither. The AI
-         preview's copy below is left alone: that path only ever emits transaction rows. */
-      const side = (d.side || '').toString().toLowerCase();
-      const tdSide = el('td', 'col-text');
-      if (side) {
-        tdSide.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
-          side === 'buy' ? '買' : '賣'));
-      } else if (d.kind) {
-        tdSide.textContent = d.kind;
-      }
-      tr.appendChild(tdSide);
-      const symbol = d.symbol || '';
-      tr.appendChild(el('td', 'col-text num', symbol));
-      const it = inst(symbol);
-      const ccy = it ? it.ccy : '';
-      tr.appendChild(el('td', 'num', f.shares(d.quantity !== undefined ? d.quantity : d.shares)));
-      tr.appendChild(el('td', 'num', f.price(d.price, ccy)));   // Decimal string -> fmt
+      cols.forEach((c) => {
+        const td = el('td', c[1]);
+        const v = c[2](d);
+        if (v && typeof v === 'object') td.appendChild(v);
+        else td.textContent = v === undefined || v === null ? '' : String(v);
+        tr.appendChild(td);
+      });
       const st = ST[r.status] || ST.ok;
       tr.appendChild(el('td', 'col-text ' + st[1], st[0]));
-      tr.appendChild(el('td', 'err-msg', r.reason || ''));
+      const why = rowReasonParts(r);
+      const tdWhy = el('td', 'err-msg', why.gating);
+      appendInfoLines(tdWhy, why.info);
+      tr.appendChild(tdWhy);
       tbody.appendChild(tr);
     });
     const s = preview.summary || { ok: 0, warn: 0, error: 0 };
@@ -1305,7 +1450,8 @@
     if (!csvText) return;
     const commitBody = (ack) => {
       const b = { kind: csvKind, csv_text: csvText, ack_warnings: ack,
-                  select: csvSelectedRows() };
+                  select: csvSelectedRows(),
+                  source_name: csvSourceName || '貼上 CSV' };   // DEF-017
       if (csvDateFormat) b.date_format = csvDateFormat;  // FU-D19: carry the pinned format
       return b;
     };
@@ -1338,72 +1484,107 @@
     }
   }
 
-  /* CSV-import success handler (C7): full success (skipped == 0) clears the paste + resets the
-     date-format select; a PARTIAL success keeps the ENTIRE raw paste (the user's data is never
-     rewritten) plus the banner. Failure paths return before reaching here. The AI 寫入 path has
-     its OWN handler (onAiCommitted) so its banner + clear target the AI pane. */
+  /* ===== DEF-024 (2026-09-23): what a commit response says happened =====
+     `skipped` used to be ONE number for two opposite events: a row the owner left unticked
+     (their choice) and a ticked row the server's re-check dropped because a finding surfaced
+     that the preview never showed (the QA-01 / FIX-A1 narrowing — e.g. an unticked buy no
+     longer covering the ticked sell). This page rendered both as 「跳過」 under a green
+     「✓ 寫入成功」, and a commit that wrote nothing announced 「成功 0 筆・跳過 2 筆」.
+     `skipped_rows[].code` now says which: `deselected` is the owner's choice (「未勾選」);
+     anything else was BLOCKED and is listed row by row with the server's own sentence, next
+     to the rows the importer refused outright (`rejected_rows`). A response WITHOUT
+     `skipped_rows` (an older server) keeps the old meaning — every skip a deselection —
+     rather than inventing a reason. Shared by the CSV, AI and one-row doors. */
+  function commitOutcome(resp) {
+    const r = resp || {};
+    const skippedRows = Array.isArray(r.skipped_rows) ? r.skipped_rows : [];
+    const blocked = skippedRows.filter((x) => x && x.code !== 'deselected');
+    const skipped = r.skipped !== undefined ? r.skipped : 0;
+    return {
+      written: r.written !== undefined ? r.written : 0,
+      deselected: Math.max(0, skipped - blocked.length),
+      blocked: blocked,
+      rejected: r.rejected !== undefined ? r.rejected : 0,
+      rejectedRows: Array.isArray(r.rejected_rows) ? r.rejected_rows : [],
+      duplicates: r.duplicates !== undefined ? r.duplicates : 0,
+    };
+  }
+  /* Rows that did not reach the ledger although the owner wanted them to. */
+  const outcomeStopped = (o) => o.rejected + o.blocked.length;
+  /* 「成功 3 筆・未勾選 1 筆・被擋下 1 筆・已匯入過 2 筆」 — each part only when non-zero. */
+  function outcomeText(o) {
+    const stopped = outcomeStopped(o);
+    return '成功 ' + o.written + ' 筆'
+      + (o.deselected > 0 ? '・未勾選 ' + o.deselected + ' 筆' : '')
+      + (stopped > 0 ? '・被擋下 ' + stopped + ' 筆' : '')
+      + (o.duplicates > 0 ? '・已匯入過 ' + o.duplicates + ' 筆' : '');
+  }
+  /* One line per stopped row: 「第 3 列 2884：賣出 150 股，超過…」 (the server's sentence). */
+  function outcomeLines(o) {
+    const lines = o.rejectedRows.map((r) => '第 ' + r.row + ' 列：' + r.message);
+    o.blocked.forEach((b) => {
+      lines.push('第 ' + b.row + ' 列' + (b.symbol ? ' ' + b.symbol : '') + '：' + b.message);
+    });
+    return lines;
+  }
+
+  /* CSV-import success handler (C7): full success (nothing unwritten) clears the paste + resets
+     the date-format select; a PARTIAL result keeps the ENTIRE raw paste (the user's data is
+     never rewritten) plus the banner. Failure paths return before reaching here. The AI 寫入
+     path has its OWN handler (onAiCommitted) so its banner + clear target the AI pane. */
   function onCsvWritten(resp) {
-    const written = resp && resp.written !== undefined ? resp.written : 0;
-    const skipped = resp && resp.skipped !== undefined ? resp.skipped : 0;
-    /* Rows the provenance layer recognised as already imported. WITHOUT this line, re-uploading
-       a file the ledger already holds reads 「成功 0 筆・跳過 0 筆」 — technically true and
-       completely uninformative, because a duplicate is neither written nor "skipped" (skipped
-       means the user deselected it). The whole point of import batches is that a second upload
-       is SAFE; a screen that cannot say so leaves the user to conclude the upload failed and
-       try again. */
-    const duplicates = resp && resp.duplicates !== undefined ? resp.duplicates : 0;
-    const dupText = duplicates > 0 ? '・已匯入過 ' + duplicates + ' 筆' : '';
-    /* Rows the importer REFUSED (a hard issue), as opposed to rows the user deselected.
-       They shared 「跳過」 until 2026-08-14, and the two readings are opposite: 跳過 says
-       "you didn't tick it", 擋下 says "the ledger is now missing this and here is why".
-       The measured cost of the conflation was an import of 5 corporate actions that wrote
-       2, announced 「跳過 3 筆」, and left every share count for those symbols wrong by a
-       split ratio with nothing anywhere saying so. */
-    const rejected = resp && resp.rejected !== undefined ? resp.rejected : 0;
-    const rejText = rejected > 0 ? '・擋下 ' + rejected + ' 筆' : '';
-    const rejRows = (resp && resp.rejected_rows) || [];
+    const o = commitOutcome(resp);
+    const stopped = outcomeStopped(o);
+    const summary = outcomeText(o);
+    const lines = outcomeLines(o);
     const banner = $('#csv-result');
     if (banner) {
       banner.hidden = false;
       banner.replaceChildren();
-      banner.appendChild(
-        el('div', null, (rejected > 0 ? '⚠ 寫入完成（有列被擋下）：成功 ' : '✓ 寫入完成：成功 ')
-          + written + ' 筆・跳過 ' + skipped + ' 筆' + rejText + dupText)
-      );
-      if (duplicates > 0) {
+      banner.appendChild(el('div', null,
+        (stopped > 0 ? '⚠ 寫入完成（有列被擋下）：' : '✓ 寫入完成：') + summary));
+      if (o.duplicates > 0) {
         banner.appendChild(
           el('div', 'panel-sub', '重複的列來自先前的匯入批次，已自動略過，帳本沒有變成兩筆。')
         );
       }
-      if (rejected > 0) {
+      if (o.rejected > 0) {
         banner.appendChild(el('div', 'panel-sub',
           '被擋下的列沒有寫入帳本 —— 這不是「你沒有勾選」，是這幾列無法登錄。'
           + '修正後重新上傳整個檔案即可（已寫入的列會自動略過，不會重複）。'));
-        rejRows.slice(0, 20).forEach(function (r) {
-          banner.appendChild(el('div', 'panel-sub', '第 ' + r.row + ' 列：' + r.message));
-        });
-        if (rejRows.length > 20) {
-          banner.appendChild(el('div', 'panel-sub',
-            '…另有 ' + (rejRows.length - 20) + ' 列，內容相同的問題不再逐列列出。'));
-        }
+      }
+      if (o.blocked.length > 0) {
+        banner.appendChild(el('div', 'panel-sub',
+          '有勾選的列在寫入前重新檢核時出現了預覽沒有顯示的問題（例如沒被勾選的買入不再支撐'
+          + '這筆賣出），因此沒有寫入 —— 請重新預覽，確認後再寫入。'));
+      }
+      lines.slice(0, 20).forEach((line) => banner.appendChild(el('div', 'panel-sub', line)));
+      if (lines.length > 20) {
+        banner.appendChild(el('div', 'panel-sub',
+          '…另有 ' + (lines.length - 20) + ' 列，內容相同的問題不再逐列列出。'));
       }
     }
     if (window.toast) {
-      window.toast(rejected > 0 ? '部分列被擋下' : '寫入成功', rejected > 0 ? 'warn' : 'ok',
-        '成功 ' + written + ' 筆・跳過 ' + skipped + ' 筆' + rejText + dupText);
+      if (stopped > 0) {
+        window.toast('⚠ 寫入完成（有列被擋下）', 'warn',
+          summary + '：' + lines.slice(0, 3).join('；') + (lines.length > 3 ? '；…' : ''));
+      } else {
+        window.toast('寫入成功', 'ok', summary);
+      }
     }
-    /* FU-D45 + #10: refresh always; flash + auto-switch only on FULL success, matching the
-       Batch-A clear-on-success rule (a partial import keeps its paste + banner).
-       ⚠ `rejected` belongs in this test. Splitting it out of `skipped` (2026-08-14) would
-       otherwise have made a file with refused rows look like a clean run and CLEAR the
-       paste box — taking with it the text the owner needs to fix those rows. */
-    const clean = skipped === 0 && rejected === 0;
-    afterCommitRefresh(csvKind, clean);
+    /* FU-D45 + #10 + DEF-019: refresh always; flash + auto-switch only on FULL success,
+       matching the Batch-A clear-on-success rule (a partial import keeps its paste + banner).
+       ⚠ The refused and blocked rows belong in this test. Splitting them out of the old
+       `skipped` would otherwise make a file with refused rows look like a clean run and CLEAR
+       the paste box — taking with it the text the owner needs to fix those rows. */
+    const clean = o.deselected === 0 && stopped === 0;
+    refreshAfterLedgerChange(csvKind, { highlight: clean });
     if (clean) {
       /* full success -> clear the input so a second identical commit is impossible. */
       const paste = $('#csv-paste');
       if (paste) paste.value = '';
       csvDateFormat = null;
+      csvSourceName = '';
       hideDateFmtChooser();
       const tbody = $('#csv-body');
       if (tbody) tbody.replaceChildren();
@@ -1413,6 +1594,11 @@
     }
     /* partial -> keep the entire pasted text + preview + banner (never rewrite raw paste). */
   }
+
+  /* I-8: the ONE reading of a commit response, shared with broker-import.js (the 券商匯出檔
+     door on this page), so both doors split 「未勾選」 from 「被擋下」 the same way and list the
+     same per-row reasons. Read at call time there — this file loads after it. */
+  window.pdCommitOutcome = { read: commitOutcome, lines: outcomeLines };
 
   /* ================= Tab 3 AI 輸入 =================
      The design-review state switcher is RETIRED (2026-07-03, item 3): the three
@@ -1448,6 +1634,19 @@
   const AI_DIV_TYPE_ZH = { CASH: '現金', STOCK: '配股', DRIP: 'DRIP', NET: '淨額' };
   let aiCsvTexts = {};
   let aiRows = { transactions: [], dividends: [], cash: [] };
+  /* DEF-035 (2026-09-23): the EDITABLE drafts, row-aligned with aiRows[kind] (row n is
+     aiDrafts[kind][n]); the server-owned cash-kind vocabulary for the 類型 select; and the
+     per-kind edit state — typed values that do not parse (aiFieldErr), an in-flight
+     re-validation (aiPending, with a sequence number so a stale answer is dropped), and a
+     re-validation that failed (aiStale). A kind in any of those states is not written: its
+     commit CSV no longer describes the rows on screen. */
+  let aiDrafts = { transactions: [], dividends: [], cash: [] };
+  let aiCashKinds = [];
+  let aiFieldErr = { transactions: {}, dividends: {}, cash: {} };
+  const aiPending = { transactions: false, dividends: false, cash: false };
+  const aiStale = { transactions: false, dividends: false, cash: false };
+  const aiRevalSeq = { transactions: 0, dividends: 0, cash: 0 };
+  const aiRevalTimer = { transactions: null, dividends: null, cash: null };
   /* FU-D20 attached screenshots for the current run: {name, dataUrl}. The dataUrl is the
      FileReader readAsDataURL result (a full `data:image/...;base64,` string) sent as-is —
      the server tolerates + strips the prefix. Money/quantity of record NEVER come from
@@ -1542,6 +1741,7 @@
   async function loadAiModels() {
     const sel = $('#ai-model-select');
     if (!sel) return;
+    const before = sel.value;   // I-12: a pick made while the config loads is the owner's
     let cfg;
     try { cfg = await api.get('/api/llm/config'); } catch (e) { return; }
     const models = (cfg && cfg.models) || [];
@@ -1554,7 +1754,7 @@
     try {
       const saved = localStorage.getItem('pd_ai_model');
       if (saved && Array.prototype.some.call(sel.options, (o) => o.value === saved)) {
-        sel.value = saved;
+        window.pdField.writeIfUntouched(sel, before, saved);
       }
     } catch (e) { /* noop */ }
     sel.addEventListener('change', () => {
@@ -1626,7 +1826,13 @@
           healed = true;
         }
       });
-      if (healed) { renderAiRows(kind, rows, prevChecked); healedAny = true; }
+      if (healed) {
+        renderAiRows(kind, rows, prevChecked);
+        healedAny = true;
+        /* DEF-035: with the drafts in hand the server can confirm the local heal (fee/tax
+           under the now-registered instrument's own rule) — no model call, so it is free. */
+        if ((aiDrafts[kind] || []).length) scheduleAiRevalidate(kind);
+      }
     });
     if (healedAny) refreshAiWriteBtn();
   }
@@ -1680,6 +1886,17 @@
     $('#ai-normal').hidden = false;
     clearAiBanner();                    // a fresh parse retires any prior success banner
     aiCsvTexts = preview.csv_texts || {};
+    /* DEF-035: a fresh parse replaces every draft and retires any edit still in flight. */
+    const drafts = preview.drafts || {};
+    AI_KINDS.forEach((kind) => {
+      aiDrafts[kind] = Array.isArray(drafts[kind]) ? drafts[kind] : [];
+      aiRevalSeq[kind] += 1;
+      aiPending[kind] = false;
+      aiStale[kind] = false;
+      if (aiRevalTimer[kind]) { clearTimeout(aiRevalTimer[kind]); aiRevalTimer[kind] = null; }
+    });
+    aiFieldErr = { transactions: {}, dividends: {}, cash: {} };
+    aiCashKinds = Array.isArray(preview.cash_kinds) ? preview.cash_kinds : [];
     const meta = preview.meta || {};
     if ($('#ai-source')) {
       const cost = meta.cost_usd !== undefined && meta.cost_usd !== null
@@ -1718,17 +1935,65 @@
     if (window.toast) window.toast('解析完成', 'ok', '共 ' + total + ' 筆草稿');
   }
 
+  /* ===== DEF-035 (2026-09-23): the AI draft table is EDITABLE, per row =====
+     Every cell used to be text (and the 帳戶 cell the raw id, 「tw_broker」, beside a CSV
+     preview reading 「台灣券商」), so a mis-read share count could only be unticked and typed
+     again in the manual form — the functional manual's F-04 ① asks for 「解析成結構化列並可
+     逐列編輯」. The server now answers `drafts`, row-aligned with each kind's preview rows; an
+     edit changes that draft's field and sends the kind's drafts back through the SAME door
+     (`POST /api/input/ai/preview` with `drafts` — agents.revalidate_ai_drafts, no model call).
+     The server re-runs the whole post-parse pipeline — fee/tax, the DEF-036 amount check, the
+     AI-D21 cash label — and regenerates the commit CSV, so the row that gets written is the
+     row on screen, and this file still never assembles or parses a CSV line.
+
+     A typed value is never rewritten (DEF-005): a number that does not parse keeps its text,
+     the box is flagged, the row says why, and the kind's re-validation — and every write —
+     waits until it is fixed. Computed columns (費用／稅) stay read-only: they are the fee
+     engine's answer to the edited shares and price, not an input; overriding a fee is the
+     manual form's pencil. A response WITHOUT `drafts` (an older server) renders the old
+     read-only row — there is nothing to send back. */
+  const AI_NUMERIC = {
+    transactions: { shares: ['股數', true], price: ['價格', true] },
+    dividends: {
+      gross: ['毛額', true], withholding: ['扣繳', false], net: ['淨額', false],
+      reinvest_shares: ['再投資股數', false], reinvest_price: ['再投資價格', false],
+    },
+    cash: { amount: ['金額', true], acq_home_amount: ['取得成本', false] },
+  };
+  const AI_PLAIN_NUMBER = /^\d+(\.\d+)?$/;
+  const AI_REQUIRED_TEXT = { date: '日期', symbol: '代號', account_id: '帳戶' };
+  const AI_CCYS = ['TWD', 'USD', 'MYR'];
+  const aiDraftOf = (kind, r) => {
+    const list = aiDrafts[kind] || [];
+    return list[r.n] || null;
+  };
+  const aiIsMismatch = (r) => !!(r && r.data && String(r.data.amount_mismatch) === '1');
+  /* The first unresolved typed-value problem on row n of `kind`, or ''. */
+  const aiRowErr = (kind, n) => {
+    const errs = (aiFieldErr[kind] || {})[n];
+    if (!errs) return '';
+    const keys = Object.keys(errs);
+    return keys.length ? errs[keys[0]] : '';
+  };
+  const aiKindHasFieldErr = (kind) => Object.keys(aiFieldErr[kind] || {}).length > 0;
+
   /* The checkbox cell: dataset.n is the 0-based draft index IN ITS KIND — commitAi rebuilds
      each kind's committed csv from ONLY its checked rows (csv data line n+1), so an
      unchecked row is never written (C7, per kind). `prevChecked` (Fable F4d) preserves the
-     state across a LOCAL re-render (an inline register heals rows without re-parsing). */
-  function aiCheckboxCell(r, prevChecked) {
+     state across a LOCAL re-render (an inline register or an edit re-validation).
+     DEF-036: a row whose own text contradicts its shares × price is never PRE-ticked — the
+     owner ticks it after reading why, and commitAi asks once more before writing it. */
+  function aiCheckboxCell(kind, r, prevChecked) {
     const td = el('td');
     const cb = el('input'); cb.type = 'checkbox';
-    cb.disabled = r.status === 'error';
-    cb.checked = cb.disabled ? false
-      : (prevChecked && (String(r.n) in prevChecked)
-        ? !!prevChecked[String(r.n)] : r.status !== 'error');
+    const localErr = !!aiRowErr(kind, r.n);
+    cb.disabled = r.status === 'error' || localErr;
+    const wanted = prevChecked && (String(r.n) in prevChecked)
+      ? !!prevChecked[String(r.n)] : (r.status !== 'error' && !aiIsMismatch(r));
+    cb.checked = cb.disabled ? false : wanted;
+    /* A typo in one box disables the tick for as long as it stands; the owner's own choice
+       is remembered on the box and comes back when the value is fixed. */
+    if (localErr && r.status !== 'error') cb.dataset.wanted = wanted ? '1' : '0';
     cb.dataset.n = String(r.n || 0);
     cb.addEventListener('change', refreshAiWriteBtn);
     td.appendChild(cb);
@@ -1744,11 +2009,20 @@
     return td;
   }
 
-  function aiStatusCell(r) {
+  function aiStatusCell(kind, r) {
     const td = el('td', 'err-msg');
-    if (r.status === 'error') td.appendChild(el('span', 'st-error', '✕ ' + (r.reason || '無法寫入')));
-    else if (r.reason) td.appendChild(el('span', 'st-warn', '⚠ ' + r.reason));
+    const localErr = aiRowErr(kind, r.n);
+    const why = rowReasonParts(r);
+    if (localErr) td.appendChild(el('span', 'st-error', '✕ ' + localErr));
+    else if (r.status === 'error') td.appendChild(el('span', 'st-error', '✕ ' + (why.gating || r.reason || '無法寫入')));
+    else if (why.gating) td.appendChild(el('span', 'st-warn', '⚠ ' + why.gating));
     else td.appendChild(el('span', 'st-ok', '✓ 解析完整'));
+    /* DEF-036: the contradiction must stay visible even when another finding leads the row. */
+    if (!localErr && aiIsMismatch(r) && why.gating.indexOf('金額矛盾') !== 0) {
+      td.appendChild(el('div', 'st-warn', '⚠ 金額矛盾：文字寫成交金額 '
+        + f.exact(r.data.stated_amount) + '，與股數 × 價格不符'));
+    }
+    appendInfoLines(td, why.info);
     return td;
   }
 
@@ -1768,14 +2042,78 @@
     return td;
   }
 
+  /* ---- DEF-035 editors: every control writes ONE draft field through onAiEdit ---- */
+  const tdOf = (node, cls) => { const td = el('td', cls || null); td.appendChild(node); return td; };
+  function aiEditInput(kind, n, field, value, opts) {
+    const o = opts || {};
+    const inp = el('input', 'ai-edit' + (o.num ? ' num' : '') + (o.cls ? ' ' + o.cls : ''));
+    inp.type = o.type || 'text';
+    if (o.num) inp.inputMode = 'decimal';
+    inp.value = value === null || value === undefined ? '' : String(value);
+    if (o.placeholder) inp.placeholder = o.placeholder;
+    inp.dataset.field = field;
+    inp.setAttribute('aria-label', o.label || field);
+    const errs = (aiFieldErr[kind] || {})[n];
+    if (errs && errs[field]) { inp.classList.add('invalid'); inp.title = errs[field]; }
+    inp.addEventListener('change', () => onAiEdit(kind, n, field, inp.value));
+    return inp;
+  }
+  function aiEditSelect(kind, n, field, options, value, label) {
+    const sel = el('select', 'ai-edit');
+    options.forEach((op) => { const o = el('option', null, op[1]); o.value = op[0]; sel.appendChild(o); });
+    /* A value outside the list (an id the model invented, a kind spelled in zh) is SHOWN, never
+       silently swapped for the first option — that would be an edit nobody made. */
+    if (value && !options.some((op) => op[0] === value)) {
+      const o = el('option', null, value + '（不在清單中）'); o.value = value; sel.appendChild(o);
+    }
+    sel.value = value || '';
+    sel.dataset.field = field;
+    sel.setAttribute('aria-label', label);
+    sel.addEventListener('change', () => onAiEdit(kind, n, field, sel.value));
+    return sel;
+  }
+  function aiAccountSelect(kind, n, accountId) {
+    const opts = ctx.accounts.map((a) => [a.id,
+      window.pdNames ? window.pdNames.accountOption(a) : acctZh(a.id)]);
+    return aiEditSelect(kind, n, 'account_id', opts, accountId, '帳戶');
+  }
+  function aiSymbolEditCell(kind, r, dr) {
+    const td = el('td', 'col-text');
+    const cell = el('div', 'sym-cell');
+    cell.appendChild(aiEditInput(kind, r.n, 'symbol', dr.symbol, { cls: 'ai-edit-sym', label: '代號' }));
+    const it = inst((r.data && r.data.symbol) || dr.symbol);
+    cell.appendChild(el('span', 'sym-name', it ? it.name : ''));
+    td.appendChild(cell);
+    return td;
+  }
+  /* The server's computed value as the placeholder of an OPTIONAL box left blank (扣繳 auto-
+     computed from the account's model, for instance) — shown, not written back. */
+  const aiAutoHint = (v, ccy) => (v === undefined || v === null || v === ''
+    ? '' : '自動 ' + csvAmt(v, ccy));
+
   function aiTxnCells(tr, r) {
     const d = r.data || {};
-    tr.appendChild(el('td', 'col-text', d.account_id || ''));
-    tr.appendChild(el('td', 'col-text', f.date(d.trade_date || d.date)));
-    const side = (d.side || '').toString().toLowerCase();
+    const dr = aiDraftOf('transactions', r);
+    const symbol = d.symbol || (dr && dr.symbol) || '';
+    const it = inst(symbol);
+    const ccy = it ? it.ccy : '';
+    if (dr) {
+      tr.appendChild(tdOf(aiAccountSelect('transactions', r.n, dr.account_id), 'col-text'));
+      tr.appendChild(tdOf(aiEditInput('transactions', r.n, 'date', dr.date,
+        { type: 'date', cls: 'ai-edit-date', label: '日期' }), 'col-text'));
+    } else {
+      tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
+      tr.appendChild(el('td', 'col-text', f.date(d.trade_date || d.date)));
+    }
+    const side = String((dr ? dr.side : d.side) || '').toLowerCase();
     const tdSide = el('td', 'col-text');
-    tdSide.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
-      side === 'buy' ? '買' : '賣'));
+    if (dr) {
+      tdSide.appendChild(aiEditSelect('transactions', r.n, 'side',
+        [['BUY', '買'], ['SELL', '賣']], String(dr.side || '').toUpperCase(), '買賣'));
+    } else {
+      tdSide.appendChild(el('span', 'dir-chip ' + (side === 'buy' ? 'dir-buy' : 'dir-sell'),
+        side === 'buy' ? '買' : '賣'));
+    }
     /* The model may mark a row 當沖, and that HALVES the TW sell tax (0.3% -> 0.15%). It
        used to be dropped before the write, so it was invisible and harmless; now it reaches
        the ledger, so it has to be visible — a flag the user cannot see is a flag the user
@@ -1793,74 +2131,241 @@
       tdSide.appendChild(ss);
     }
     tr.appendChild(tdSide);
-    const symbol = d.symbol || '';
-    const it = inst(symbol);
-    const ccy = it ? it.ccy : '';
-    tr.appendChild(aiSymbolCell(symbol, it));
-    tr.appendChild(el('td', 'num', f.shares(d.quantity !== undefined ? d.quantity : d.shares)));
-    tr.appendChild(el('td', 'num', f.price(d.price, ccy)));        // Decimal string -> fmt
+    if (dr) {
+      tr.appendChild(aiSymbolEditCell('transactions', r, dr));
+      tr.appendChild(tdOf(aiEditInput('transactions', r.n, 'shares', dr.shares,
+        { num: true, label: '股數' }), 'num'));
+      tr.appendChild(tdOf(aiEditInput('transactions', r.n, 'price', dr.price,
+        { num: true, label: '價格' }), 'num'));
+    } else {
+      tr.appendChild(aiSymbolCell(symbol, it));
+      tr.appendChild(el('td', 'num', f.shares(d.quantity !== undefined ? d.quantity : d.shares)));
+      tr.appendChild(el('td', 'num', f.price(d.price, ccy)));        // Decimal string -> fmt
+    }
     tr.appendChild(el('td', 'num', d.fee !== undefined ? f.money(d.fee, ccy) : f.NULL_GLYPH));
     tr.appendChild(el('td', 'num', d.tax !== undefined ? f.money(d.tax, ccy) : f.NULL_GLYPH));
   }
 
   function aiDivCells(tr, r) {
     const d = r.data || {};
-    tr.appendChild(el('td', 'col-text', d.account_id || ''));
-    tr.appendChild(el('td', 'col-text', f.date(d.date)));
-    const symbol = d.symbol || '';
+    const dr = aiDraftOf('dividends', r);
+    const symbol = d.symbol || (dr && dr.symbol) || '';
     const it = inst(symbol);
     const ccy = it ? it.ccy : '';
-    tr.appendChild(aiSymbolCell(symbol, it));
-    const ty = (d.type || '').toString().toUpperCase();
-    tr.appendChild(el('td', 'col-text', AI_DIV_TYPE_ZH[ty] || ty));
-    tr.appendChild(el('td', 'num', d.gross !== undefined ? f.money(d.gross, ccy) : f.NULL_GLYPH));
-    tr.appendChild(el('td', 'num', d.withholding ? f.money(d.withholding, ccy) : f.NULL_GLYPH));
-    tr.appendChild(el('td', 'num', d.net ? f.money(d.net, ccy) : f.NULL_GLYPH));
-    tr.appendChild(el('td', 'num', d.reinvest_shares ? f.shares(d.reinvest_shares) : f.NULL_GLYPH));
-    tr.appendChild(el('td', 'num', d.reinvest_price ? f.price(d.reinvest_price, ccy) : f.NULL_GLYPH));
+    if (!dr) {
+      tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
+      tr.appendChild(el('td', 'col-text', f.date(d.date)));
+      tr.appendChild(aiSymbolCell(symbol, it));
+      const ty = (d.type || '').toString().toUpperCase();
+      tr.appendChild(el('td', 'col-text', AI_DIV_TYPE_ZH[ty] || ty));
+      tr.appendChild(el('td', 'num', d.gross !== undefined ? f.money(d.gross, ccy) : f.NULL_GLYPH));
+      tr.appendChild(el('td', 'num', d.withholding ? f.money(d.withholding, ccy) : f.NULL_GLYPH));
+      tr.appendChild(el('td', 'num', d.net ? f.money(d.net, ccy) : f.NULL_GLYPH));
+      tr.appendChild(el('td', 'num', d.reinvest_shares ? f.shares(d.reinvest_shares) : f.NULL_GLYPH));
+      tr.appendChild(el('td', 'num', d.reinvest_price ? f.price(d.reinvest_price, ccy) : f.NULL_GLYPH));
+      return;
+    }
+    const k = 'dividends';
+    tr.appendChild(tdOf(aiAccountSelect(k, r.n, dr.account_id), 'col-text'));
+    tr.appendChild(tdOf(aiEditInput(k, r.n, 'date', dr.date,
+      { type: 'date', cls: 'ai-edit-date', label: '發放日' }), 'col-text'));
+    tr.appendChild(aiSymbolEditCell(k, r, dr));
+    tr.appendChild(tdOf(aiEditSelect(k, r.n, 'type',
+      Object.keys(AI_DIV_TYPE_ZH).map((t) => [t, AI_DIV_TYPE_ZH[t]]),
+      String(dr.type || '').toUpperCase(), '類型'), 'col-text'));
+    tr.appendChild(tdOf(aiEditInput(k, r.n, 'gross', dr.gross, { num: true, label: '毛額' }), 'num'));
+    tr.appendChild(tdOf(aiEditInput(k, r.n, 'withholding', dr.withholding,
+      { num: true, label: '扣繳', placeholder: aiAutoHint(d.withholding, ccy) }), 'num'));
+    tr.appendChild(tdOf(aiEditInput(k, r.n, 'net', dr.net,
+      { num: true, label: '淨額', placeholder: aiAutoHint(d.net, ccy) }), 'num'));
+    tr.appendChild(tdOf(aiEditInput(k, r.n, 'reinvest_shares', dr.reinvest_shares,
+      { num: true, label: '再投資股數', placeholder: d.reinvest_shares ? '自動 ' + f.shares(d.reinvest_shares) : '' }), 'num'));
+    tr.appendChild(tdOf(aiEditInput(k, r.n, 'reinvest_price', dr.reinvest_price,
+      { num: true, label: '再投資價格' }), 'num'));
   }
 
   function aiCashCells(tr, r) {
     const d = r.data || {};
-    tr.appendChild(el('td', 'col-text', d.account_id || ''));
-    tr.appendChild(el('td', 'col-text', f.date(d.date)));
+    const dr = aiDraftOf('cash', r);
+    const acct = acc((dr && dr.account_id) || d.account_id);
+    const fundCcy = acct ? (acct.funding_ccy || acct.settlement_ccy || acct.ccy) : undefined;
+    if (dr) {
+      tr.appendChild(tdOf(aiAccountSelect('cash', r.n, dr.account_id), 'col-text'));
+      tr.appendChild(tdOf(aiEditInput('cash', r.n, 'date', dr.date,
+        { type: 'date', cls: 'ai-edit-date', label: '日期' }), 'col-text'));
+    } else {
+      tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
+      tr.appendChild(el('td', 'col-text', f.date(d.date)));
+    }
     /* AI-D21: the direction lives in the KIND (amounts are unsigned) — render the
        server-owned zh label (kind_label) AND an explicit sign, so a mislabelled kind
-       (券商費用 read as 入金) is visible before it moves the pool by twice the amount. */
+       (券商費用 read as 入金) is visible before it moves the pool by twice the amount.
+       Editable, the options carry the same label AND sign, from the server's vocabulary. */
     const label = d.kind_label || d.kind || '';
     const debit = String(d.sign) === '-1';
     const tdKind = el('td', 'col-text');
-    const chip = el('span', 'dir-chip ' + (debit ? 'dir-sell' : 'dir-buy'),
-      (debit ? '− ' : '＋ ') + label);
-    chip.title = debit ? '資金流出（金額以無號存入，方向由此類型決定）'
-                       : '資金流入（金額以無號存入，方向由此類型決定）';
-    tdKind.appendChild(chip);
+    if (dr && aiCashKinds.length) {
+      tdKind.appendChild(aiEditSelect('cash', r.n, 'cash_kind',
+        aiCashKinds.map((v) => [v.kind, (String(v.sign) === '-1' ? '− ' : '＋ ') + v.label]),
+        d.kind || String(dr.cash_kind || ''), '類型'));
+    } else {
+      const chip = el('span', 'dir-chip ' + (debit ? 'dir-sell' : 'dir-buy'),
+        (debit ? '− ' : '＋ ') + label);
+      chip.title = debit ? '資金流出（金額以無號存入，方向由此類型決定）'
+                         : '資金流入（金額以無號存入，方向由此類型決定）';
+      tdKind.appendChild(chip);
+    }
     tr.appendChild(tdKind);
+    if (dr) {
+      tr.appendChild(tdOf(aiEditSelect('cash', r.n, 'ccy', AI_CCYS.map((c) => [c, c]),
+        String(dr.ccy || ''), '幣別'), 'col-text'));
+      tr.appendChild(tdOf(aiEditInput('cash', r.n, 'amount', dr.amount,
+        { num: true, label: '金額' }), 'num'));
+      tr.appendChild(tdOf(aiEditInput('cash', r.n, 'acq_home_amount', dr.acq_home_amount,
+        { num: true, label: '取得成本（家幣）' }), 'num'));
+      return;
+    }
     tr.appendChild(el('td', 'col-text', d.ccy || ''));
     tr.appendChild(el('td', 'num', d.amount !== undefined
       ? (debit ? '−' : '＋') + f.money(d.amount, d.ccy) : f.NULL_GLYPH));
-    const acct = acc(d.account_id);
-    const fundCcy = acct ? (acct.funding_ccy || acct.settlement_ccy || acct.ccy) : undefined;
     tr.appendChild(el('td', 'num',
       d.acq_home_amount ? f.money(d.acq_home_amount, fundCcy) : f.NULL_GLYPH));
   }
 
-  /* Render one kind's preview rows {n, status, reason, code, data} into its section tbody. */
+  /* The checkbox state of `kind`'s rendered rows, keyed by draft index. */
+  function aiCapturedChecks(kind) {
+    const out = {};
+    const body = $('#ai-body-' + kind);
+    const boxes = body ? body.querySelectorAll('input[type=checkbox]') : [];
+    Array.prototype.forEach.call(boxes, (cb) => {
+      out[cb.dataset.n] = cb.disabled && cb.dataset.wanted !== undefined
+        ? cb.dataset.wanted === '1' : cb.checked;
+    });
+    return out;
+  }
+
+  /* Render one kind's preview rows {n, status, reason, info, code, data} into its section
+     tbody. An editor the owner is typing in survives the re-render (a re-validation of a
+     sibling row can land mid-keystroke): its row + field are found again and refocused with
+     the text as it stood. */
   function renderAiRows(kind, rows, prevChecked) {
     aiRows[kind] = rows || [];
     const tbody = $('#ai-body-' + kind);
     if (!tbody) return;
+    const active = document.activeElement;
+    let keep = null;
+    if (active && tbody.contains(active) && active.dataset && active.dataset.field) {
+      const tr0 = active.closest('tr');
+      keep = { n: tr0 ? tr0.dataset.n : null, field: active.dataset.field, value: active.value };
+    }
     tbody.replaceChildren();
     (rows || []).forEach((r) => {
       const tr = el('tr');
-      tr.appendChild(aiCheckboxCell(r, prevChecked));
+      tr.dataset.n = String(r.n || 0);
+      tr.appendChild(aiCheckboxCell(kind, r, prevChecked));
       if (kind === 'transactions') aiTxnCells(tr, r);
       else if (kind === 'dividends') aiDivCells(tr, r);
       else aiCashCells(tr, r);
-      tr.appendChild(aiStatusCell(r));
+      tr.appendChild(aiStatusCell(kind, r));
       tr.appendChild(aiActionCell(r));
       tbody.appendChild(tr);
     });
+    if (keep && keep.n !== null) {
+      const again = tbody.querySelector('tr[data-n="' + keep.n + '"] [data-field="' + keep.field + '"]');
+      if (again) { again.value = keep.value; again.focus(); }
+    }
+  }
+
+  /* One edited field. The typed text is kept exactly as typed (DEF-005); a value that cannot
+     be a quantity or an amount flags its box and holds the whole kind back — its CSV no
+     longer describes the row on screen — until it is fixed. Otherwise the kind goes back to
+     the server for a re-validation (debounced: tabbing through three boxes is one request). */
+  function onAiEdit(kind, n, field, raw) {
+    const d = (aiDrafts[kind] || [])[n];
+    if (!d) return;
+    const v = String(raw === null || raw === undefined ? '' : raw).trim();
+    const spec = (AI_NUMERIC[kind] || {})[field];
+    let err = '';
+    if (spec) {
+      if (v === '') {
+        if (spec[1]) err = spec[0] + '為必填';
+      } else if (!AI_PLAIN_NUMBER.test(v)) {
+        err = spec[0] + '「' + v + '」不是有效的數字——請只填數字與小數點，不要千分位逗號或正負號';
+      }
+    } else if (AI_REQUIRED_TEXT[field] && v === '') {
+      err = AI_REQUIRED_TEXT[field] + '為必填';
+    }
+    d[field] = (spec && !spec[1] && v === '') ? null : v;
+    const errs = aiFieldErr[kind][n] || {};
+    if (err) errs[field] = err; else delete errs[field];
+    if (Object.keys(errs).length) aiFieldErr[kind][n] = errs; else delete aiFieldErr[kind][n];
+    if (aiKindHasFieldErr(kind)) {
+      if (aiRevalTimer[kind]) { clearTimeout(aiRevalTimer[kind]); aiRevalTimer[kind] = null; }
+      aiRevalSeq[kind] += 1;            // an answer for the previous values is now stale
+      aiPending[kind] = false;
+      renderAiRows(kind, aiRows[kind], aiCapturedChecks(kind));
+      refreshAiWriteBtn();
+      return;
+    }
+    scheduleAiRevalidate(kind);
+  }
+
+  function scheduleAiRevalidate(kind) {
+    aiPending[kind] = true;
+    refreshAiWriteBtn();
+    if (aiRevalTimer[kind]) clearTimeout(aiRevalTimer[kind]);
+    aiRevalTimer[kind] = setTimeout(() => {
+      aiRevalTimer[kind] = null;
+      revalidateAiKind(kind);
+    }, 250);
+  }
+
+  /* Send `kind`'s drafts back through the AI door (no model call) and re-render from the
+     answer. `fresh` = the row set itself changed (a partial commit kept only the unwritten
+     rows), so the old checkbox states do not map onto it. */
+  async function revalidateAiKind(kind, fresh) {
+    const seq = ++aiRevalSeq[kind];
+    aiPending[kind] = true;
+    refreshAiWriteBtn();
+    let resp;
+    try {
+      resp = await api.post('/api/input/ai/preview', { drafts: { rows: aiDrafts[kind] || [] } });
+    } catch (err) {
+      if (seq !== aiRevalSeq[kind]) return;
+      aiPending[kind] = false;
+      aiStale[kind] = true;             // the CSV on hand no longer matches the drafts
+      refreshAiWriteBtn();
+      if (window.toast) {
+        window.toast((err && err.message) || '重新檢核失敗', 'fail',
+          '修正後再改一次欄位即可重新檢核；在那之前這一類不會寫入');
+      }
+      return;
+    }
+    if (seq !== aiRevalSeq[kind]) return;   // a newer edit superseded this answer
+    aiPending[kind] = false;
+    aiStale[kind] = false;
+    const pv = (resp.previews || {})[kind];
+    const rows = pv ? (pv.rows || []) : [];
+    const before = aiRows[kind] || [];
+    const prev = fresh ? null : aiCapturedChecks(kind);
+    if (prev) {
+      rows.forEach((r) => {
+        const old = before[r.n];
+        if (!old) return;
+        const key = String(r.n);
+        /* newly valid -> ticked; newly contradicted (DEF-036) -> unticked */
+        if (old.status === 'error' && r.status !== 'error' && !aiIsMismatch(r)) prev[key] = true;
+        if (aiIsMismatch(r) && !aiIsMismatch(old)) prev[key] = false;
+      });
+    }
+    aiCsvTexts[kind] = ((resp.csv_texts || {})[kind]) || '';
+    const back = (resp.drafts || {})[kind];
+    if (Array.isArray(back)) aiDrafts[kind] = back;
+    if (Array.isArray(resp.cash_kinds) && resp.cash_kinds.length) aiCashKinds = resp.cash_kinds;
+    const sec = $('#ai-sec-' + kind);
+    if (sec) sec.hidden = rows.length === 0;
+    renderAiRows(kind, rows, prev);
+    refreshAiWriteBtn();
   }
 
   /* Rebuild ONE KIND's committed csv from ONLY its checked rows (header + their source
@@ -1882,15 +2387,25 @@
     const text = picked.length
       ? header + '\n' + picked.map((p) => p.line).join('\n') + '\n'
       : '';
-    return { count: picked.length, text: text };
+    /* `ns`: the draft index of each committed line, in order — a commit response's 1-based
+       `row` is a position in THIS text, and ns maps it back to the draft it came from. */
+    return { count: picked.length, text: text, ns: picked.map((p) => p.n) };
   }
 
+  /* DEF-035: a kind whose drafts were edited and not yet re-validated — a box that does not
+     parse, a request in flight, or one that failed — has a commit CSV that no longer
+     describes the rows on screen, so NOTHING is written until it settles. */
+  const aiKindBlocked = (kind) => !!(aiPending[kind] || aiStale[kind] || aiKindHasFieldErr(kind));
+
   /* 寫入 is disabled unless at least one kind has a parsed csv AND a checked row (no empty
-     commit, no double-submit after a full-success clear). */
+     commit, no double-submit after a full-success clear), and no kind is mid-edit. */
   function refreshAiWriteBtn() {
     const btn = $('#ai-write-all');
-    if (btn) btn.disabled = !AI_KINDS.some(
+    if (!btn) return;
+    const blocked = AI_KINDS.some(aiKindBlocked);
+    btn.disabled = blocked || !AI_KINDS.some(
       (kind) => aiCsvTexts[kind] && aiCheckedCsv(kind).count > 0);
+    btn.title = blocked ? '草稿有欄位待修正或正在重新檢核，完成後才能寫入' : '';
   }
 
   function aiBanner(text) {
@@ -1911,6 +2426,13 @@
   function clearAiInputs() {
     const t = $('#ai-text'); if (t) t.value = '';
     aiCsvTexts = {};
+    AI_KINDS.forEach((kind) => {
+      aiDrafts[kind] = [];
+      aiRevalSeq[kind] += 1;
+      aiPending[kind] = false;
+      aiStale[kind] = false;
+    });
+    aiFieldErr = { transactions: {}, dividends: {}, cash: {} };
     aiImages = [];
     renderAiThumbs();
     AI_KINDS.forEach((kind) => {
@@ -1928,8 +2450,17 @@
      doors (W4, AI-D18: no new endpoint; each kind's commit is its own all-or-nothing batch,
      so undo stays per-kind granular). Kinds that trip 422 warnings-unacknowledged are
      collected and retried together after ONE confirm dialog; kinds that committed clean
-     finish immediately — partial progress is reported, never silently skipped. */
-  async function commitAi() {
+     finish immediately — partial progress is reported, never silently skipped.
+
+     DEF-036: a ticked transaction whose own text states a total that contradicts its
+     shares × price is asked about ONCE MORE before anything is written. The flag is
+     preview-only (the stated total is evidence, not a ledger column, so the commit door
+     cannot see it) — which is exactly why the acknowledgement has to happen here. */
+  function commitAi() {
+    if (AI_KINDS.some(aiKindBlocked)) {
+      if (window.toast) window.toast('草稿尚未檢核完成', 'fail', '有欄位待修正或正在重新檢核，完成後再寫入');
+      return;
+    }
     const plan = AI_KINDS
       .map((kind) => ({ kind: kind, picked: aiCheckedCsv(kind) }))
       .filter((p) => aiCsvTexts[p.kind] && p.picked.count > 0);
@@ -1937,15 +2468,40 @@
       if (window.toast) window.toast('請先解析並勾選至少一列', 'fail');
       return;
     }
+    const contradicted = [];
+    plan.forEach((p) => {
+      if (p.kind !== 'transactions') return;
+      p.picked.ns.forEach((n) => {
+        const r = (aiRows.transactions || []).find((x) => x.n === n);
+        if (aiIsMismatch(r)) {
+          contradicted.push((r.data.symbol || '') + ' ' + f.shares(r.data.quantity) + ' 股 × '
+            + f.exact(r.data.price) + '，文字寫成交金額 ' + f.exact(r.data.stated_amount));
+        }
+      });
+    });
+    if (!contradicted.length) { runAiCommit(plan); return; }
+    window.confirmDialog({
+      title: '金額矛盾確認',
+      body: '以下勾選的交易，文字所寫的成交金額與股數 × 價格不符：' + contradicted.join('；')
+        + '。系統不會替你選擇哪一個數字正確——請確認股數與價格無誤後再寫入。',
+      confirmLabel: '股數價格無誤，仍要寫入',
+      onConfirm: () => { runAiCommit(plan); },
+    });
+  }
+
+  /* DEF-017: every AI batch says where it came from in 最近匯入. */
+  const aiCommitBody = (p, ack) => ({ kind: p.kind, csv_text: p.picked.text,
+    ack_warnings: ack, source_name: 'AI 輸入' });
+
+  async function runAiCommit(plan) {
     const restore = window.pdBusy ? window.pdBusy($('#ai-write-all'), '寫入中…') : () => {};
     const done = [];
     const needAck = [];
     let failed = null;
     for (const p of plan) {
       try {
-        const resp = await api.post('/api/import/commit',
-          { kind: p.kind, csv_text: p.picked.text, ack_warnings: false });
-        done.push({ kind: p.kind, resp: resp, text: p.picked.text });
+        const resp = await api.post('/api/import/commit', aiCommitBody(p, false));
+        done.push({ kind: p.kind, resp: resp, text: p.picked.text, ns: p.picked.ns });
       } catch (err) {
         if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
           needAck.push(p);
@@ -1979,9 +2535,8 @@
         let failed2 = null;
         for (const p of needAck) {
           try {
-            const resp = await api.post('/api/import/commit',
-              { kind: p.kind, csv_text: p.picked.text, ack_warnings: true });
-            acked.push({ kind: p.kind, resp: resp, text: p.picked.text });
+            const resp = await api.post('/api/import/commit', aiCommitBody(p, true));
+            acked.push({ kind: p.kind, resp: resp, text: p.picked.text, ns: p.picked.ns });
           } catch (e2) {
             failed2 = e2;
             break;
@@ -2000,54 +2555,89 @@
   }
 
   /* Apply each kind's commit result: toast + per-kind ledger refresh + section cleanup.
-     When every kind's section is empty afterwards, the whole pane resets (C7). */
+     When every kind's section is empty afterwards, the whole pane resets (C7).
+     DEF-024: a row the importer refused, or dropped at its re-check, is a WARNING with its
+     reason — never folded into a green 「寫入成功」. */
   async function finishAiCommits(commits) {
     let totalWritten = 0;
-    let totalSkipped = 0;
+    let totalDup = 0;
+    let totalNotWritten = 0;
+    const lines = [];
     for (const c of commits) {
-      totalWritten += c.resp && c.resp.written !== undefined ? c.resp.written : 0;
-      totalSkipped += c.resp && c.resp.skipped !== undefined ? c.resp.skipped : 0;
-      await onAiCommitted(c.kind, c.resp, c.text);
+      const o = commitOutcome(c.resp);
+      totalWritten += o.written;
+      totalDup += o.duplicates;
+      /* only ticked rows are sent here, so ANY skip is a row that did not land */
+      totalNotWritten += o.deselected + outcomeStopped(o);
+      outcomeLines(o).forEach((line) => lines.push(AI_KIND_ZH[c.kind] + ' ' + line));
+      await onAiCommitted(c.kind, c.resp, c.text, c.ns);
     }
+    const dupText = totalDup > 0 ? '・已匯入過 ' + totalDup + ' 筆' : '';
     if (window.toast) {
-      window.toast('寫入成功', 'ok', '成功 ' + totalWritten + ' 筆・略過 ' + totalSkipped + ' 筆');
+      if (totalNotWritten > 0) {
+        window.toast('⚠ 寫入完成（有列被擋下）', 'warn',
+          '成功 ' + totalWritten + ' 筆・未寫入 ' + totalNotWritten + ' 筆' + dupText
+          + (lines.length ? '：' + lines.slice(0, 3).join('；') + (lines.length > 3 ? '；…' : '')
+            : ''));
+      } else {
+        window.toast('寫入成功', 'ok', '成功 ' + totalWritten + ' 筆' + dupText);
+      }
     }
     const anyRowsLeft = AI_KINDS.some((kind) => (aiRows[kind] || []).length > 0);
     if (!anyRowsLeft) {
       clearAiInputs();
-      aiBanner('✓ 寫入完成：成功 ' + totalWritten + ' 筆');
+      aiBanner('✓ 寫入完成：成功 ' + totalWritten + ' 筆' + dupText);
     }
     refreshAiWriteBtn();
   }
 
-  /* Per-kind AI commit success handler (C7). Full success (skipped == 0) clears THAT kind's
-     section + csv. On a PARTIAL success the committed csv is re-previewed to identify the
-     rows that could NOT be written; only those remain visible (with statuses) and the kind's
-     csv is rebuilt to just them (re-indexed) so a retry targets the remainder without
-     re-writing the rows already committed. A failed re-preview degrades to keeping the
-     current table (the banner still reports the counts). */
-  async function onAiCommitted(kind, resp, committedCsv) {
-    const written = resp && resp.written !== undefined ? resp.written : 0;
-    const skipped = resp && resp.skipped !== undefined ? resp.skipped : 0;
-    /* FU-D45 + #10: flash + auto-switch only on FULL success. `cash` has no ledger tab on
-       this page (highlightCommitted no-ops for it by design); the refresh still runs. */
-    afterCommitRefresh(kind, skipped === 0);
-    if (skipped === 0) {
+  /* Per-kind AI commit success handler (C7). Full success clears THAT kind's section + csv.
+     On a PARTIAL result only the rows that were NOT written stay (re-indexed), so a retry
+     targets the remainder without re-writing the rows already committed. Which rows those
+     are comes from the response itself (`rejected_rows` / `skipped_rows`, 1-based over the
+     committed text; `ns` maps them back to drafts) — the old way, a re-preview keeping every
+     row not `ok`, also kept acknowledged WARNING rows that had in fact been written. With
+     drafts in hand the remainder is re-validated through the AI door (DEF-035); without, the
+     committed csv is re-previewed. A failed re-preview keeps the current table (never
+     fabricate). */
+  async function onAiCommitted(kind, resp, committedCsv, ns) {
+    const o = commitOutcome(resp);
+    const stoppedAt = o.rejectedRows.map((x) => x.row - 1)
+      .concat(o.blocked.map((x) => x.row - 1));
+    const partial = o.deselected > 0 || outcomeStopped(o) > 0;
+    /* FU-D45 + #10 + DEF-019: flash + auto-switch only on FULL success. `cash` has no ledger
+       tab on this page (highlightCommitted no-ops for it by design); the refresh still runs. */
+    refreshAfterLedgerChange(kind, { highlight: !partial });
+    if (!partial) {
       aiCsvTexts[kind] = '';
       aiRows[kind] = [];
+      aiDrafts[kind] = [];
       const tb = $('#ai-body-' + kind); if (tb) tb.replaceChildren();
       const sec = $('#ai-sec-' + kind); if (sec) sec.hidden = true;
       return;
     }
-    aiBanner(AI_KIND_ZH[kind] + '：已寫入 ' + written + ' 筆／略過 ' + skipped + ' 筆');
+    /* The AI door commits only ticked rows, so a skip here was never the owner's choice:
+       the banner says 未寫入, with each row's reason when the server gave one. */
+    aiBanner(AI_KIND_ZH[kind] + '：已寫入 ' + o.written + ' 筆／未寫入 '
+      + (o.deselected + outcomeStopped(o)) + ' 筆'
+      + (outcomeLines(o).length ? '——' + outcomeLines(o).join('；') : ''));
+    const drafts = aiDrafts[kind] || [];
+    if (stoppedAt.length && Array.isArray(ns) && drafts.length) {
+      aiDrafts[kind] = stoppedAt.map((i) => drafts[ns[i]]).filter((d) => d);
+      aiFieldErr[kind] = {};
+      await revalidateAiKind(kind, true);
+      return;
+    }
     try {
       const pv = await api.post('/api/import/preview',
         { kind: kind, csv_text: committedCsv });
       const lines = committedCsv.split('\n');
       const header = lines[0] || '';
-      const remaining = (pv.rows || []).filter((r) => r.status !== 'ok');
+      const remaining = (pv.rows || []).filter((r) => (stoppedAt.length
+        ? stoppedAt.indexOf(r.n) >= 0 : r.status !== 'ok'));
       const kept = remaining.map((r) => lines[(r.n || 0) + 1]).filter((l) => l !== undefined);
       aiCsvTexts[kind] = kept.length ? header + '\n' + kept.join('\n') + '\n' : '';
+      aiDrafts[kind] = [];              // no drafts to keep aligned: this path renders read-only
       renderAiRows(kind, remaining.map((r, i) => Object.assign({}, r, { n: i })));
       refreshAiWriteBtn();
     } catch (e) { /* degrade: keep the current table + banner (never fabricate) */ }
@@ -2108,52 +2698,113 @@
     row.classList.add('ledger-added-row');
   }
 
-  async function afterCommitRefresh(kind, highlight) {
+  /* ===== DEF-019 (2026-09-23): ONE answer to "the ledger just changed — what is stale?" =====
+     Measured: 最近匯入 › 復原 took back a 0.028-share DRIP, and the manual picker went on
+     annotating the symbol 「85.067255 股 均價 158.87」 until a page reload, while
+     /api/input/holdings already said 85.039255 / 158.9266. The undo lives in broker-import.js
+     and refreshed what IT knew about — its batch list and the ledger tables — while this
+     file's per-account holdings cache, read by the manual picker, the sell hints and the
+     dividend/opening pickers, was dropped only by THIS file's own commits. Every write path
+     had grown its own list of things to re-fetch (the manual commit re-read the context only
+     after an auto-register; the corporate-action repair re-read nothing), and the lists
+     drifted.
+
+     Every ledger change on this page now ends here:
+       * this file's commits call it directly — manual (and its 賣超 ack), CSV, AI, and the
+         股利／期初 one-row forms;
+       * every OTHER module reaches it through `window.pdLedgerRefresh`, the seam
+         broker-import.js (最近匯入 › 復原, the one-click import) and corp-action-form.js
+         (公司行動 save) already call after a write. adoptLedgerSeam() re-points that global
+         at this function and keeps ledger.js's own table refresh as `ledgerTables`, so those
+         callers need no change and cannot skip the holdings refresh.
+     In order: the structural context when an instrument may have been registered (an
+     auto-register here; any change made elsewhere, e.g. a SPINOFF child), the holdings cache
+     (dropped, then re-warmed for the selected accounts, the open picker re-rendered), the
+     最近匯入 list (unless the caller already reloaded it), the ledger tables, the sell hints;
+     the flash + auto-switch only for a full-success commit made here.
+     tests/contract/test_def019_single_ledger_refresh.py pins every path to it. */
+  let ledgerTables = null;
+  let ledgerSeamAdopted = false;
+  function adoptLedgerSeam() {
+    if (ledgerSeamAdopted) return;
+    const own = window.pdLedgerRefresh;
+    if (typeof own !== 'function') return;   // ledger.js not loaded (yet) — retried on use
+    ledgerSeamAdopted = true;
+    ledgerTables = own;
+    window.pdLedgerRefresh = (kind) =>
+      refreshAfterLedgerChange(kind, { external: true, context: true, highlight: false });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', adoptLedgerSeam);
+  } else {
+    adoptLedgerSeam();
+  }
+
+  async function refreshAfterLedgerChange(kind, opts) {
+    const o = opts || {};
+    adoptLedgerSeam();
+    if (o.context) await reloadContext();
     Object.keys(acctHoldingsCache).forEach((k) => { delete acctHoldingsCache[k]; });
     /* The 最近匯入 card (broker-import.js) serves BOTH import modes, so an ordinary CSV
        commit has to refresh it too — otherwise the undo control goes stale at exactly the
-       moment it is wanted, right after an import that looks wrong. */
-    if (window.pdReloadImportBatches) {
+       moment it is wanted, right after an import that looks wrong. An EXTERNAL caller
+       (broker-import.js itself) has already reloaded it. */
+    if (!o.external && window.pdReloadImportBatches) {
       try { await window.pdReloadImportBatches(); } catch (e) { /* degrade silently */ }
     }
-    if (window.pdLedgerRefresh) {
+    if (ledgerTables) {
       /* AWAIT the in-place table refresh so the flash targets the ACTUAL new row (was a
          fixed-300ms guess wired to #m-confirm). A refresh failure must not break the commit
          flow — the caller already toasted success. */
-      try { await window.pdLedgerRefresh(kind); } catch (e) { /* degrade silently */ }
+      try { await ledgerTables(kind); } catch (e) { /* degrade silently */ }
     }
     renderSellHints();   // cache miss -> refetch for the selected manual account
-    /* M4 (demo audit 2026-09-16): the only warm-up here read `#d-account` — the DIVIDEND
-       form's select — so after a TW buy the request on the wire was
-       `holdings?account=moomoo_my` while `#m-account` said tw_broker, and the next entry's
-       picker still annotated 2884 with the pre-trade 100 股 / 93.20. Warm the account the
-       commit was written TO (the manual select), then re-render the picker if it is open so
-       the annotation changes in front of the user; the dividend warm-up stays. */
+    /* M4 (demo audit 2026-09-16): warm the account the commit was written TO (the manual
+       select), then re-render the picker if it is open so the annotation changes in front of
+       the user; the dividend and opening accounts are re-warmed too. */
     const mSel = $('#m-account');
     if (mSel && mSel.value) {
       loadAcctHoldings(mSel.value, false).then(() => {
         if (manualPicker && manualPicker.render) manualPicker.render();
       }).catch(() => {});
     }
-    const dSel = $('#d-account');
-    if (dSel && dSel.value) loadAcctHoldings(dSel.value, false).catch(() => {});
+    ['#d-account', '#o-account'].forEach((sel) => {
+      const node = $(sel);
+      if (node && node.value) loadAcctHoldings(node.value, false).catch(() => {});
+    });
     /* #10: flash + auto-switch on FULL success only (highlight !== false); partial/failed
        commits still refresh the tables above but never switch tabs or flash. */
-    if (highlight !== false) highlightCommitted(kind);
+    if (!o.external && o.highlight !== false) highlightCommitted(kind);
+  }
+
+  /* The one-row forms (股利, 期初庫存) commit a single-row CSV through the import door.
+     DEF-017 (2026-09-23): the batch they create says it was typed by hand — 最近匯入 lists
+     every batch, and one with no source reads as an unexplained import.
+     DEF-024: a commit that wrote nothing says WHY (the refused row's reason, the re-check's
+     finding, or 「已寫入過」), instead of the fixed 「資料列被跳過，請檢查欄位」. */
+  const ONE_ROW_SOURCE = '手動輸入';
+  function oneRowNotWrittenReason(resp) {
+    const o = commitOutcome(resp);
+    if (o.rejectedRows.length) return o.rejectedRows[0].message;
+    if (o.blocked.length) return o.blocked[0].message;
+    if (o.duplicates > 0) return '這筆資料先前已寫入過帳本，未重複寫入';
+    return '資料列未寫入，請檢查欄位';
   }
   async function commitOneRow(kind, csvText, btn, okSub, onDone) {
     const restore = window.pdBusy ? window.pdBusy(btn, '寫入中…') : () => {};
     const finishOk = (resp) => {
       if (resp && resp.written >= 1) {
         if (window.toast) window.toast('寫入成功', 'ok', okSub);
-        /* FU-D45 + #10: dividend / opening single-row commits — a written>=1 row here is a
-           full success, so flash + auto-switch the matching ledger tab (kind in scope). */
-        afterCommitRefresh(kind);
+        /* FU-D45 + #10 + DEF-019: a written>=1 row here is a full success, so flash +
+           auto-switch the matching ledger tab (kind in scope). */
+        refreshAfterLedgerChange(kind);
         if (onDone) onDone();
       } else if (window.toast) {
-        window.toast('未寫入', 'fail', '資料列被跳過，請檢查欄位');
+        window.toast('未寫入', 'fail', oneRowNotWrittenReason(resp));
       }
     };
+    const body = (ack) => ({ kind: kind, csv_text: csvText, ack_warnings: ack,
+      source_name: ONE_ROW_SOURCE });
     try {
       const pv = await api.post('/api/import/preview', { kind: kind, csv_text: csvText });
       const row = pv && pv.rows && pv.rows[0];
@@ -2171,8 +2822,7 @@
           confirmLabel: '確認寫入',
           onConfirm: async () => {
             try {
-              finishOk(await api.post('/api/import/commit',
-                { kind: kind, csv_text: csvText, ack_warnings: true }));
+              finishOk(await api.post('/api/import/commit', body(true)));
             } catch (e2) {
               if (window.toast) window.toast((e2 && e2.message) || '寫入失敗', 'fail', e2 && e2.code);
             }
@@ -2180,8 +2830,7 @@
         });
         return;
       }
-      const resp = await api.post('/api/import/commit',
-        { kind: kind, csv_text: csvText, ack_warnings: false });
+      const resp = await api.post('/api/import/commit', body(false));
       restore();
       finishOk(resp);
     } catch (err) {
@@ -2350,8 +2999,8 @@
           /* Clear the OVERRIDE too, not just the value: a pencil left pressed over an
              empty field silently sends a blank withholding on the NEXT dividend. */
           if (divUsState) divUsState.reset();
-          /* holdings refresh (STOCK/DRIP can grow shares) now rides afterCommitRefresh
-             (FU-D45): the shared cache is dropped + this account re-warmed on success. */
+          /* holdings refresh (STOCK/DRIP can grow shares) rides refreshAfterLedgerChange
+             (FU-D45, DEF-019): the shared cache is dropped + this account re-warmed. */
         });
     });
   }
@@ -2397,7 +3046,7 @@
      types (the commit reads #d-symbol.value directly — an unlisted symbol still submits). */
   /* Shared per-account holdings cache (dividend/manual/opening pickers + FU-D44 sell hints).
      Held entries carry shares + adjusted_avg as Decimal STRINGS; dropped after every successful
-     commit (FU-D45, afterCommitRefresh). */
+     commit (FU-D45; since DEF-019 by refreshAfterLedgerChange, whoever made the change). */
   const acctHoldingsCache = {};   // { [accountId]: {held:[{symbol,name,shares,adjusted_avg}], closed:[{symbol,name}]} }
   /* Fable F9a in-flight dedup: focus + click on a cold cache both call the picker's open, which
      each call loadAcctHoldings; a shared in-flight promise collapses those into ONE fetch. */

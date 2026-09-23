@@ -248,7 +248,35 @@ def refresh_dividends(
     degradation contract: failed symbols are recorded in the summary, never
     raised (`data-and-pricing.md` — never crash, never fabricate).
     """
-    events, sources, failed = registry.fetch_dividends(instruments)
+    events, sources, failed, reasons = registry.fetch_dividends_explained(instruments)
     if events:
         upsert_dividend_events(conn, events, fetched_at=now)
-    return RefreshSummary(ok=sources, failed=failed, fetched_at=now)
+    return RefreshSummary(ok=sources, failed=failed, failed_reasons=reasons, fetched_at=now)
+
+
+def describe_refresh(summary: RefreshSummary) -> str:
+    """THE sentence for a dividend-event refresh (DEF-015, 2026-09-23).
+
+    「14 檔事件已更新，1 檔失敗（TSLA：yfinance 無配息資料）」. Every surface that reports a
+    dividend refresh renders it here — the 收件匣 重新偵測 toast, ``dividend_inbox_scan``'s
+    ``job_runs`` detail and ``dividends_daily``'s — because they used to be three formats for
+    one operation, and the one the owner read (「1 檔失敗」) named nothing. The failure list is
+    never truncated (M10-02: a lost symbol written nowhere is the defect), and a clean run
+    says only what was updated.
+    """
+    head = f"{len(summary.ok)} 檔事件已更新"
+    if not summary.failed:
+        return head
+    detail = "；".join(
+        f"{sym}：{summary.failed_reasons.get(sym, '來源未說明原因')}"
+        for sym in sorted(summary.failed)
+    )
+    return f"{head}，{len(summary.failed)} 檔失敗（{detail}）"
+
+
+def refresh_failures(summary: RefreshSummary) -> list[dict[str, str]]:
+    """The failures as data — ``[{symbol, reason}]``, sorted — for a wire payload."""
+    return [
+        {"symbol": sym, "reason": summary.failed_reasons.get(sym, "來源未說明原因")}
+        for sym in sorted(summary.failed)
+    ]

@@ -225,10 +225,13 @@ def test_get_history_pages_newest_first() -> None:
 
 def test_drift_symbols_extracts_targets() -> None:
     alerts = [
-        Alert(id="rebalance_drift:2330", sev="risk", rule="rebalance_drift", title="", detail=""),
-        Alert(id="rebalance_drift:AAPL", sev="risk", rule="rebalance_drift", title="", detail=""),
+        Alert(id="rebalance_drift:2330", sev="risk", rule="rebalance_drift", title="", detail="",
+              scope="symbol", subject="2330"),
+        Alert(id="rebalance_drift:AAPL", sev="risk", rule="rebalance_drift", title="", detail="",
+              scope="symbol", subject="AAPL"),
         # a global (no-symbol) drift id must be skipped
-        Alert(id="rebalance_drift", sev="risk", rule="rebalance_drift", title="", detail=""),
+        Alert(id="rebalance_drift", sev="risk", rule="rebalance_drift", title="", detail="",
+              scope="portfolio"),
     ]
     assert ds._drift_symbols(alerts) == ["2330", "AAPL"]
 

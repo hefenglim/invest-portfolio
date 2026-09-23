@@ -46,6 +46,7 @@ import requests
 from pydantic import BaseModel, Field
 
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.account_ref import account_ref, resolve_account_refs
 from portfolio_dash.shared.clock import app_now
 
 logger = logging.getLogger(__name__)
@@ -323,13 +324,39 @@ def dispatch(
 # --- message formatting (pure) ------------------------------------------------
 
 
+#: I-16: how a push names a NON-symbol subject (``alert_events.scope``, DEF-037). The column
+#: ``alert_events.symbol`` holds the subject whatever it is — an account id for ``fx_drift``,
+#: a sector for ``sector_weight``, a currency for ``currency_weight`` — and this text used to
+#: print every one of them as a ticker (「schwab 匯率曝險偏移」).
+_SCOPE_LEAD: dict[str, str] = {"sector": "產業", "currency": "幣別", "task": "洞察任務"}
+
+
+def _push_account_label(account_id: str) -> str:
+    """How a push names an account. A push leaves through an external channel — no
+    ``web/api.js`` resolves the token there, and the backend holds no zh name
+    (``web/names.js`` is the one authority) — so the account is named EXPLICITLY as an
+    account, by id: 「帳戶 schwab」. Never ``accounts.name``: that is the English label the
+    owner never chose. The sentence is built with the shared token grammar and resolved
+    here, so a server-side display name, when it exists, changes this one function."""
+    return f"帳戶 {account_id}"
+
+
+def _subject_text(subject: str, scope: str | None) -> str:
+    if scope == "account":
+        return resolve_account_refs(account_ref(subject), _push_account_label)
+    lead = _SCOPE_LEAD.get(scope or "")
+    return f"{lead} {subject}" if lead else subject
+
+
 def format_event(
-    rule_id: str, symbol: str | None, *, linked: bool = False
+    rule_id: str, symbol: str | None, *, scope: str | None = None, linked: bool = False
 ) -> tuple[str, str, str]:
     """A fired alert event → ``(title, body, severity)`` in zh-TW (deterministic, pure).
 
-    Uses only the rule_id + symbol carried by the ``alert_events`` row — NO account
-    balances or amounts. An unknown rule id degrades to ``(rule_id, info)`` (never crashes).
+    Uses only the rule_id + subject (+ its ``scope``) carried by the ``alert_events`` row —
+    NO account balances or amounts. An unknown rule id degrades to ``(rule_id, info)`` (never
+    crashes). ``symbol`` is the row's subject column: a ticker when ``scope`` is ``symbol``
+    or unrecorded (a legacy row), otherwise labelled by what it is (I-16).
 
     When ``linked`` is True a clickable deep link WILL be attached by the channel (ntfy
     ``click`` / Telegram + Email append the URL), so the body drops the now-redundant
@@ -339,9 +366,10 @@ def format_event(
     """
     label, severity = _RULE_LABEL.get(rule_id, (rule_id, "info"))
     tail = "。" if linked else "，請至儀表板查看詳情。"
-    if symbol:
-        title = f"portfolio-dash · {symbol} {label}"
-        body = f"{symbol}：觸發「{label}」預警{tail}"
+    if symbol and scope != "portfolio":
+        who = _subject_text(symbol, scope)
+        title = f"portfolio-dash · {who} {label}"
+        body = f"{who}：觸發「{label}」預警{tail}"
     else:
         title = f"portfolio-dash · {label}"
         body = f"觸發「{label}」預警{tail}"
@@ -373,10 +401,13 @@ def _frontend_path(href: str | None) -> str:
         return "index.html#sym=" + quote(m.group(1), safe="!*'()")
     if re.search(r"#sym=(.+)$", href):
         return href  # already carries a drawer anchor → pass through
-    if href == "/settings":
-        return "settings.html"
-    if href == "/settings#llm":
-        return "settings.html#llm"
+    # I-15: a settings deep link KEEPS its `#<tab>[/<anchor>]` (quota_low → #llm, calib_gap
+    # → #prompts/evolution). A bare "/settings" is a LEGACY href — stored on an alert_event
+    # before the fix and still pushable — and lands on the 預警 tab, where every global
+    # alert's rule lives, rather than on the default 帳戶與費率 tab.
+    m = re.match(r"^/settings(?:#([\w/-]+))?$", href)
+    if m:
+        return "settings.html#" + (m.group(1) or "alerts")
     if href == "/insights":
         return "insights.html"
     if href == "/pipeline":

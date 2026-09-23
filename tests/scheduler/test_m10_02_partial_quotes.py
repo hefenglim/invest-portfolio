@@ -90,7 +90,7 @@ def test_partial_when_a_held_symbol_fails(
     assert isinstance(out, JobOutcome)
     assert out.status == "partial"
     assert out.results["held_failed"] == ["AAPL"]
-    assert "failed: AAPL" in out.detail
+    assert "失敗：AAPL" in out.detail
 
 
 def test_ok_when_only_an_fx_pair_fails(
@@ -105,7 +105,7 @@ def test_ok_when_only_an_fx_pair_fails(
     assert out.status == "ok"
     assert out.results["held_failed"] == []
     assert out.results["fx_failed"] == ["USDMYR"]
-    assert "failed: USDMYR" in out.detail  # still disclosed in the detail
+    assert "失敗：USDMYR" in out.detail  # still disclosed in the detail
 
 
 def test_ok_when_only_a_watchlist_symbol_fails(
@@ -223,7 +223,8 @@ def test_summarize_keeps_the_whole_failed_list() -> None:
 
     failed = [f"SYM{i:02d}" for i in range(18)]
     out = _summarize(RefreshSummary(ok={"AAPL": "yfinance"}, failed=failed, fetched_at=_NOW))
-    assert "…" not in out.split("failed: ")[1]
+    tail = out.split("失敗：")[1]
+    assert "…" not in tail and "等" not in tail
     for key in failed:
         assert key in out
 

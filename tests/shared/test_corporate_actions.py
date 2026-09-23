@@ -350,9 +350,17 @@ def test_split_factor_is_symbol_scoped() -> None:
 
 def test_event_priority_places_actions_before_the_day_s_trades() -> None:
     """An action re-denominates a position before that day's trades, which are quoted in
-    post-action terms; opening inventory must already be seeded."""
-    assert EventPriority.OPENING < EventPriority.CORPORATE_ACTION < EventPriority.BUY
-    assert EventPriority.BUY < EventPriority.SELL < EventPriority.DIVIDEND
+    post-action terms; opening inventory must already be seeded. The day's trades are ONE
+    rank (DEF-012, 2026-09-23): a buy and a sell of one day are ordered by ledger id, never
+    by side — ``BUY`` and ``SELL`` are aliases of ``TRADE``, kept for the read paths that
+    name the side. This test asserted ``BUY < SELL`` until then; that was the retired rule."""
+    assert EventPriority.OPENING < EventPriority.CORPORATE_ACTION < EventPriority.TRADE
+    assert EventPriority.TRADE < EventPriority.DIVIDEND
+    # Aliases: the same member and the same integer (mypy types the two literals apart,
+    # so this is asserted by name and value rather than by identity).
+    assert EventPriority["BUY"] is EventPriority["TRADE"] and int(EventPriority.BUY) == 20
+    assert EventPriority["SELL"] is EventPriority["TRADE"] and int(EventPriority.SELL) == 20
+    assert [p.name for p in EventPriority] == ["OPENING", "CORPORATE_ACTION", "TRADE", "DIVIDEND"]
 
 
 def test_event_priority_is_spaced_so_the_next_insert_moves_nothing() -> None:

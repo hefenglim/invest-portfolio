@@ -6,6 +6,7 @@ rows are never summed across currencies. Reporting conversion uses trade-date FX
 
 import sqlite3
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -18,10 +19,12 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.export.artifact import ExportArtifact, csv_blob, zip_artifact
 from portfolio_dash.forex.fx_pnl import realized_fx_rows_as_of
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.results import RealizedRow
 from portfolio_dash.pricing.store import get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import FXConversion
+from portfolio_dash.shared.wire import decimal_str
 
 _ONE = Decimal("1")
 _ZERO = Decimal("0")
@@ -77,9 +80,26 @@ def build_tax_package_zip(
     realized_rows: list[list[str]] = []
     realized_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     adjusted_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
+    # ⚠ The RECONCILIATION figure is summed BEFORE the capital-gains filter below, over every
+    # realized row of the year and in the replay's own row order (DEF-001, 2026-09-23). Its
+    # only job is to equal the dashboard's ``returns.by_currency.<ccy>.realized``, which is
+    # ``Book.realized.by_currency`` — Σ ``r.realized`` over ALL kinds, post-close dividends
+    # included. It used to be ``adjusted_subtotal``, summed after the filter, so the one
+    # figure labelled 「與儀表板核對」 applied the FILING definition: a 2412 dividend paid after
+    # the sell-out (5,200) left it 5,200 short of the dashboard, and nothing said why.
+    # Same accumulator shape as ``cost_basis`` (``defaultdict(Decimal("0"))``, ``+=`` in row
+    # order), so on a single-year ledger the two sums are the same operations and therefore
+    # the same digits.
+    recon_year: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
+    recon_other_years: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
+    post_close_divs: list[RealizedRow] = []
     for r in book.realized.rows:
         if r.sell_date.year != year:
+            recon_other_years[r.quote_ccy] += r.realized
             continue
+        recon_year[r.quote_ccy] += r.realized
+        if r.kind == "dividend":
+            post_close_divs.append(r)
         # CAPITAL GAINS ONLY. A post-close cash dividend also rides in `realized.rows`
         # (kind="dividend", audit H2) so it reaches 總報酬, but for tax it is INCOME and is
         # already reported on the dividends sheet below, straight from the dividend ledger.
@@ -145,7 +165,11 @@ def build_tax_package_zip(
         f"dividends_{year}.csv": csv_blob(_DIV_COLS, div_rows),
         f"fx_realized_{year}.csv": csv_blob(_FX_COLS, fx_rows),
         "summary.md": _summary_md(year, realized_subtotal, div_subtotal, fx_subtotal,
-                                  adjusted_subtotal),
+                                  _Reconciliation(
+                                      year=recon_year, sales=adjusted_subtotal,
+                                      post_close_dividends=post_close_divs,
+                                      other_years=recon_other_years,
+                                      cumulative=book.realized.by_currency)),
     }
     return zip_artifact(f"tax_package_{year}.zip", files)
 
@@ -159,15 +183,92 @@ def _subtotal_lines(subtotal: dict[Currency, Decimal]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _Reconciliation:
+    """Everything the 對帳 section prints — each figure in the dashboard's own definition.
+
+    ``year`` — Σ realized of every kind in the year (the dashboard's definition, year-cut);
+    ``sales`` — the sale / short-cover part of it (the adjusted twin of the filing column);
+    ``post_close_dividends`` — the rest: the ``kind="dividend"`` rows, named so the gap
+    between those two lines can be found on the dividends sheet; ``other_years`` and
+    ``cumulative`` — the dashboard figure is CUMULATIVE, so a ledger with realized rows
+    outside the year cannot reconcile on the year slice alone: the package prints the gap
+    and ``Book.realized.by_currency`` itself (the very mapping the dashboard serialises).
+    """
+
+    year: dict[Currency, Decimal]
+    sales: dict[Currency, Decimal]
+    post_close_dividends: list[RealizedRow]
+    other_years: dict[Currency, Decimal]
+    cumulative: dict[Currency, Decimal]
+
+
+def _wire_lines(subtotal: dict[Currency, Decimal], *, suffix: str = "") -> str:
+    """:func:`_subtotal_lines` in the DASHBOARD's rendering (``decimal_str``).
+
+    ``str(Decimal)`` switches to scientific notation for some exponents (``0E-26``) while the
+    wire never does (``format(v, "f")``), so a line whose contract is 「equals the dashboard,
+    byte for byte」 must use the wire's formatter. The filing lines keep ``str``: they are not
+    reconciled against a screen, and the DEF-001 ruling forbids moving them.
+    """
+    if not subtotal:
+        return "- （無）\n"
+    return "".join(
+        f"- {ccy.value}: {decimal_str(amt)}{suffix}\n"
+        for ccy, amt in sorted(subtotal.items(), key=lambda kv: kv[0].value)
+    )
+
+
+def _dividend_lines(rows: list[RealizedRow]) -> str:
+    """Per currency: the post-close dividends' total, then which rows make it up."""
+    by_ccy: dict[Currency, list[RealizedRow]] = defaultdict(list)
+    for r in rows:
+        by_ccy[r.quote_ccy].append(r)
+    out: list[str] = []
+    for ccy in sorted(by_ccy, key=lambda c: c.value):
+        total = sum((r.realized for r in by_ccy[ccy]), _ZERO)
+        where = "、".join(f"{r.symbol} {r.sell_date.isoformat()}" for r in by_ccy[ccy])
+        out.append(f"- {ccy.value}: {decimal_str(total)}（{where}）\n")
+    return "".join(out)
+
+
+def _reconciliation_md(recon: _Reconciliation) -> str:
+    """The 對帳 section: the dashboard's figure first, then every step back to the filing one."""
+    md = (
+        "## 對帳用：績效基礎已實現（調整後成本，股利已折抵）\n"
+        "⚠ 非申報數字。此欄的股利已折抵進成本，而上方股利表已就同一筆股利申報一次；"
+        "兩者相加會把同一筆錢課兩次。列出僅供與儀表板核對。\n"
+        "口徑與儀表板各幣別的「已實現」相同，含已結清部位於結清後才入帳的配息。\n"
+        f"{_wire_lines(recon.year)}"
+    )
+    if recon.post_close_dividends:
+        md += (
+            "其中 出售／回補（調整後成本）：\n"
+            f"{_wire_lines(recon.sales)}"
+            "其中 結清後配息（不列入申報，已列於股利表）：\n"
+            f"{_dividend_lines(recon.post_close_dividends)}"
+        )
+    if recon.other_years:
+        md += (
+            "儀表板的已實現為歷年累計；本年度以外的已實現：\n"
+            f"{_wire_lines(recon.other_years)}"
+            "歷年累計：\n"
+            f"{_wire_lines(recon.cumulative, suffix='（= 儀表板）')}"
+        )
+    return md
+
+
 def _summary_md(year: int, realized: dict[Currency, Decimal],
                 dividends: dict[Currency, Decimal],
                 fx: dict[Currency, Decimal],
-                adjusted: dict[Currency, Decimal]) -> bytes:
+                recon: _Reconciliation) -> bytes:
     """The filing subtotal is the ORIGINAL-basis one; the adjusted basis rides along, labelled.
 
     Both figures are true, of different questions. Printing only the adjusted one (as this
     package did until 2026-08-24) hands a filer a capital gain that already has the year's
     dividends netted out of it, next to a dividends sheet declaring those same dividends.
+    The 對帳 section is the dashboard's own figure and names every step between it and the
+    filing one (DEF-001) — see :class:`_Reconciliation`.
     """
     md = (
         f"# Tax Package {year}\n\n"
@@ -177,9 +278,6 @@ def _summary_md(year: int, realized: dict[Currency, Decimal],
         f"{_subtotal_lines(realized)}\n"
         f"## Dividends (net)\n{_subtotal_lines(dividends)}\n"
         f"## Realized FX P&L\n{_subtotal_lines(fx)}\n"
-        "## 對帳用：績效基礎已實現（調整後成本，股利已折抵）\n"
-        "⚠ 非申報數字。此欄的股利已折抵進成本，而上方股利表已就同一筆股利申報一次；"
-        "兩者相加會把同一筆錢課兩次。列出僅供與儀表板核對。\n"
-        f"{_subtotal_lines(adjusted)}"
+        f"{_reconciliation_md(recon)}"
     )
     return md.encode("utf-8")

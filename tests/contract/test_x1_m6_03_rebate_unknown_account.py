@@ -36,7 +36,8 @@ def test_a_real_account_without_a_rebate_setting_keeps_its_own_sentence(
     r = api_client.post("/api/rebates/confirm",
                         json={"account_id": "schwab", "month": "2026-05", "amount": "10"})
     assert r.status_code == 400, r.json()
-    assert r.json()["error"]["message"] == "帳戶 schwab 無折讓款設定", r.json()
+    # DEF-008 (2026-09-23): the account is a token the fetch layer resolves (never the id).
+    assert r.json()["error"]["message"] == "帳戶 {account:schwab} 無折讓款設定", r.json()
     assert r.json()["error"]["field"] == "account_id"
 
 

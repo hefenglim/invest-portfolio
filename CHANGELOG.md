@@ -9,6 +9,194 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R1 → R2 remediation — 29 defects, 2 H / 17 M / 10 L (2026-09-23).**
+The verifier's first black-box pass over the 120-case manual (`docs/audit/2026-09-22-functional-
+test-manual.md` + `.xlsx`) on `755c88a` ran every case (PASS 86 / FAIL 19 / OBSERVE 6 / BLOCKED 8 /
+N/A 1) and opened DEF-001 … DEF-038. The 9 `待裁定` items (DEF-003 / 006 / 009 / 010 / 013 / 016 /
+018 / 025 / 033) are owner rulings and are untouched here. The other 29 are fixed under the manual's
+§4 contract: root cause to a line, class-scan numbers, a test that fails on the old code with the
+mutation recorded, and the defence that should have caught it repaired. The developer half of the
+workbook (缺陷登記 H/I, 來回記錄 R2 rows, 交接紀錄) records each one.
+
+*Money of record*
+
+- **Same-day trades replay in WRITE order — the ledger id — never buys-before-sells (DEF-012, H;
+  B-18).** `EventPriority` ranked `BUY=20 < SELL=30`, so a sell entered between two same-day buys was
+  replayed after both: 2884 held 100 @ 9,320, then buy 200@44 → sell 100@45 → buy 100@46 previewed the
+  sell at realized −1,579.67 and booked −1,223.00 once the third row landed (cost 17,070 where the
+  entry order gives 16,713.33). `shared/ledger_events.py` now has ONE `TRADE` priority (`BUY`/`SELL`
+  are aliases) and `build_book` sorts `(date, priority, id order)`; OPENING and CORPORATE_ACTION
+  still precede the day's trades and DIVIDEND still follows. The manual preview appends its draft
+  last and so agrees with the replay; the CSV preview counts a same-day sibling as cover only when
+  it is listed ABOVE the sell (`validate.siblings_booked_before`); the stress-audit oracle keeps its
+  own transcription; `domain-ledger.md` records the rule. The demo ledger's one same-day pair
+  (2603, 2026-07-02) already had the buy's id below the sell's, so no stored figure moves.
+- **A broker statement listed newest-first is re-ordered chronologically WITHIN the day (DEF-027 c).**
+  Schwab exports newest-first; the converter sorted `(trade_date, line_no)`, which under the rule
+  above would have written a same-day round trip as sell-then-buy. `RawEvent.seq` + `chrono_key`
+  now rank the lower row as the earlier event; the direction is read from the posted-date trend and
+  never falls back to line order.
+- **The tax package's reconciliation line is the dashboard figure byte for byte (DEF-001; I-03).**
+  `export/tax.py` applied the filing filter (sale / short_cover only) to the 對帳用 subtotal too, so a
+  post-close dividend (2412, 5,200 TWD) made the two disagree with no explanation. The
+  reconciliation now sums every realized row in replay order, prints the split (出售／回補 vs 結清後
+  配息), and adds the multi-year lines when the ledger spans years; the filing lines are untouched.
+
+*Corporate actions*
+
+- **A reorganisation fee is written in the SAME transaction as its action and deleted with it
+  (DEF-020; D-10).** The form sent two requests and the fee stayed behind on delete (TWD pool −50).
+  `cash_movements.corporate_action_id` (additive) links the two; the action POST validates the fee
+  through the cash door's overdraft guard before writing anything, PUT syncs it, DELETE removes it in
+  one commit and names it in the confirm dialog.
+- **Deleting an EXCHANGE moves the target-price band — and the target weight — back when they were
+  not touched since (DEF-021 + F-3; D-10).** `corporate_actions.band_move_json` / `weight_move_json`
+  (additive) record what was moved; `_delete_actions` restores when the destination still carries
+  the recorded values and the source has none, and says why when it cannot (`band_restored`,
+  `weight_restored`, `band_restore.reason`). The entry hint and the delete dialog now state the rule
+  the old docstring only claimed the entry surface stated. Both moves run inside the action's
+  transaction instead of after its commit.
+- **A ratio typed as `1.5` is refused inline instead of being silently rewritten to `15` (DEF-005;
+  D-02).** `corp-action-form.js` stripped non-digits on input, turning a 1:2 split into a 5:1
+  consolidation the backend never saw. Inputs are never rewritten now (the broker-import ratio cells
+  had the same `parseInt` truncation); `tests/contract/test_web_inputs_never_silently_rewritten.py`
+  guards every web/*.js.
+- **An unapplied corporate action has a visible entry (DEF-023; D-11).** The dashboard shows a
+  banner per refused action with a deep link to its ledger row, the ledger row carries an 未套用
+  badge (`GET` rows gain `unapplied`), the transaction delete dialog warns when a later action would
+  lose its position, and the reason names the account through the token seam below rather than as
+  `tw_broker`.
+- **Business dates come from the app clock (DEF-022; D-11).** `target_set_at` was stamped
+  `datetime.now(UTC).date()`, so a band set at 04:40 Taipei was dated yesterday and a same-day split
+  falsely warned it predated the band. 11 sites across 10 files (`date.today()` in seven price
+  providers, two UTC `.date()` calls, one private `_TAIPEI` constant) now use `app_now()`;
+  `tests/architecture/test_business_dates_use_app_clock.py` forbids the patterns outside
+  `shared/clock.py`.
+
+*Entry and import doors*
+
+- **Backend sentences name an account by TOKEN, resolved once in `web/api.js` (DEF-008 / 023 / 035
+  class).** The backend has no zh account names, so every author picked a bare id or the English
+  `accounts.name`. `shared/account_ref.py::account_ref()` emits `{account:<id>}`; `api.js` resolves
+  it on every 2xx payload and every error envelope through `pdNames`; `tests/contract/
+  test_account_ref_seam.py` scans every backend f-string (with keyword and default-value forms) and
+  its pending list is now empty. 43 sites were touched across the round.
+- **Overdraft refusals name the day, the account and a settlement-precision amount, and the toast
+  no longer prints the error code (DEF-008; A-05 / A-06).** One `cash_dip_sentence` serves the
+  withdraw, FX and negative-cash guards: 「此筆出金會使 台灣券商 的 TWD 現金於 2026-09-23 降至 −1
+  （出金當日）…」. The four copies of the oversell sentence collapse into `shared/oversold.py`.
+  `window.toast` drops machine-code sub-lines into the title and `console.debug`.
+- **A trade dated before the position's opening-inventory build date needs confirmation; one
+  dated before the account's first record gets an advisory (DEF-014; B-17).** `Issue.info` adds the
+  advisory tier (never blocking); the check lives in `validate_transaction`, so the manual, CSV, AI
+  and broker doors all raise it.
+- **An error row never covers a sibling sell, and a skipped row says why (DEF-024; I-06).**
+  `pending_share_flows` excludes every row that cannot be written (the whole-share rule was
+  row-level but outside the structural set); `commit` returns `skipped_rows` with a code
+  (`deselected` vs the re-derived issue) and the page says 「未勾選 N 筆」 or 「⚠ 寫入完成（有列被擋下）」
+  with the server's sentence per row instead of 「✓ 寫入成功」.
+- **The CSV preview shows each ledger kind's own columns (DEF-004; I-04)** — amounts, currencies,
+  ratios and build dates instead of 「—」 — and **an exported ledger CSV imports back as-is
+  (DEF-026; I-13)**: `csv_import.py` accepts the export column names as aliases for all six kinds,
+  carries `fee_rule_snapshot` through verbatim when fee and tax are supplied, and names ignored
+  system columns per row instead of dropping them silently.
+- **Broker-statement import acknowledges warnings per row, lists every converted row, and refuses
+  a statement aimed at another broker's account (DEF-027 / 028 / 029, H/M/M; I-10 / I-11).**
+  `broker-import.js` hard-coded `ack_warnings: true`, so an oversell was written — cost basis
+  discarded — under 「✓ 全部寫入完成」; the commit now stops on 422 and opens a per-row dialog
+  (unticked by default, consequences stated). The conversion report is a table per kind with source
+  line numbers, per-row selection and the merged / cancelled / dropped rows with their destination.
+  The opening-inventory hint subtracts what the ledger already holds. `registry.ACCOUNT_BROKERS`
+  binds a statement format to `accounts.broker`; a mismatch is a blocking issue and the account
+  picker lists only matching accounts.
+- **AI-input drafts are editable row by row and re-validated by the server without a model call;
+  a stated amount that contradicts shares × price is flagged, never reconciled (DEF-035 / 036;
+  F-04 / F-05).** `TxnDraft.stated_amount` is copied, not computed; a > 1 % gap against shares ×
+  price (± engine fees) becomes `amount_mismatch`, unticked by default. Prompt `AI_INPUT` v8,
+  corpus 40 → 45 cases. Draft account cells render through `pdNames`.
+- **A late reference-rate reply never overwrites what the owner typed (DEF-007; A-02).**
+  `cash.js` guards every post-await field write with `writeIfUntouched` / `autoFill`, never switches
+  the 取得成本 mode, and dates the hint by the rate's own `as_of`. The same guard now covers the
+  other pages' late writes.
+- **After any ledger change the input page refreshes through ONE function (DEF-019; C-04b).**
+  `refreshAfterLedgerChange()` re-warms the holdings caches, batches, tables and sell hints, and
+  takes over `window.pdLedgerRefresh` so the broker-import undo and the corporate-action form ride it.
+- **Import batches follow the ledger (DEF-017; C-04).** `row_count` is derived live, a batch with no
+  rows left is not listed, undo of an emptied batch says so, manual forms label their batch
+  「手動輸入」, and an openings batch is marked not undoable.
+- **The dividend re-detect names each failed symbol and why (DEF-015; C-01)** —
+  「14 檔事件已更新，1 檔失敗（TSLA：yfinance 無配息資料）」 — through one formatter shared by the inbox
+  and the scheduler jobs; the registry keeps the reason it used to swallow.
+- **The rebate inbox copy matches AI-D42 (DEF-011; A-16):** a confirmed rebate 「不改變持倉成本與資產損益，
+  但會計入 XIRR 與含匯兌總損益」; the 「三種都不列入 XIRR」 what's-new line was wrong the same way.
+
+*Settings, pipeline and layout*
+
+- **The prompt variable tables scroll inside their own wrap at 390 px (DEF-002; J-05)** and the
+  overflow guard now expands every `<details>` and walks all eight settings tabs from a fresh
+  document — its three blind spots were why 11 tables 3,673 px wide passed.
+- **「編輯標的」 opens a universe dialog (DEF-031; H-04 / H-05)** shared with the wizard, which now
+  counts symbols, not holding rows (AAPL in two accounts is one symbol, one card — DEF-032); the
+  server de-duplicates a custom universe on read.
+- **The auto-AI-resolve switch binds once (DEF-034; F-03)** — `boot()` no longer re-adds the click
+  listener on every reload — and the residual 「（後端接線後生效）」 tooltip is gone while the
+  pipeline asset cards deep-link to `settings.html#prompts/<anchor>` (DEF-038; E-01). The
+  quota / calibration alerts link to their own settings tab the same way.
+
+*Scheduler and insight cards*
+
+- **「立即執行」 on an `insight:N` schedule row runs the task (DEF-030; H-04).** The manual worker
+  looked the id up in the static job table only (`KeyError('insight:10')` written verbatim as the
+  run detail); cron had dispatched by kind all along. One `_execute_insight()` now serves cron, the
+  scheduler centre and the task page; an unrunnable id is a 404 with a sentence, a failure is
+  「執行失敗：<class>：<message>」, a runner that raises can no longer leave a row stuck in `running`.
+  Rows carry `label` (the task's name), `effective_enabled` and `paused_reason`, so a paused task's
+  switch shows paused. The nine remaining English `_summarize` run lines are zh-TW with the
+  recorded failure reason per symbol.
+- **An alert knows its scope, and a card knows which alert produced it (DEF-037; G-09).**
+  `fx_drift:moomoo_my` was split on the colon and dispatched as a stock, producing a card whose
+  symbol was an account id. `Alert` carries a required `scope` (symbol / sector / account /
+  currency / portfolio) and `subject`, checked by a validator and an AST guard on every
+  constructor; only symbol-scoped alerts reach a per-symbol card and the scan detail lists what it
+  skipped. `insights.trigger_json` (additive) records source / rule / alert id / fired-at, the API
+  exposes it with the rule's label, the card footer says 「由預警「目標價穿越」觸發」, and the
+  `on_alert` prompt addendum (v2) hands the model the fired alert's own title and detail instead of
+  letting it guess 「RSI過熱」. The bell, the digest and the push text stopped treating an account
+  or sector suffix as a symbol.
+
+*Sweep of what the class scans found outside their owners' files*
+
+- CSV-imported corporate actions are all-or-nothing (`commit=` was not forwarded; an
+  architecture test now checks every `commit` parameter is forwarded), a CSV EXCHANGE records and
+  restores its weight move like the manual door, and a batch undo deletes actions through the same
+  function as the ledger page (fee, band, weight and price restatement included — the bare `DELETE`
+  had left split-adjusted closes behind).
+- All six import kinds name ignored export-only columns; an opening-inventory parse error reads in
+  Chinese instead of `'account'`; the AI door forwards a provider refusal through the zh message
+  path.
+- One `kind_label` vocabulary for corporate actions on every wire (the drawer's own table had
+  called a SPLIT 「拆併股」 and a SPINOFF 「分割」); `sev: "info"` is part of `issue_wire`; preview
+  rows carry issue `kinds` so the broker dialog no longer pattern-matches a sentence.
+- The late-write guard lives in `web/format.js` (`pdField`) and covers the 11 other sites the
+  DEF-007 scan found; the ledger page's edit / delete refresh rides the input page's seam; a
+  downloaded print report resolves account tokens at the `api.js` download seam; the account-token
+  pending list is empty; `LIBRARY_VERSION` is official-v26 and a test binds every built-in prompt
+  version to it.
+
+*Gates that were red on HEAD before this round touched them*
+
+- Three e2e files and one oracle check had pinned the behaviour the 2026-09-16 demo-audit rulings
+  replaced, and had not been run since: the empty holdings table now draws ONE 「尚無持倉」 hint
+  row (L23; `test_m1_01` asserted zero rows), a ledger pane is fetched when its tab is shown
+  (L16; `test_opening_input_flow` waited for the 期初 rows before showing the tab), a code-like
+  input of up to six characters no longer auto-fires the AI resolve (L13; the three
+  `test_quickadd_ai_resolve_flow` cases typed `UMC` / `MULTI` / `PICKME` and now press the
+  never-gated 「AI 辨識」 button), and the FX ledger quotes its implied rate the conventional way
+  (L6; the stress-audit oracle expected the old from/to figure). Each assertion was updated to
+  the ruling it post-dates, with the ruling named beside it. Gates at delivery: ruff clean ·
+  `mypy --strict` 860 files, 0 issues · pytest (non-e2e) 5,900 passed / 2 skipped · e2e 66
+  files, 260 passed · stress-audit phase 1 ops=128, pass=6,025, fail=0.
+
 **Demo black-box audit remediation — 37 findings, 1 H / 9 M / 27 L (2026-09-16).**
 A full-site click-through of the demo on `85dfafd` (real browser, three widths, every form
 submitted and reverted) found no money-of-record defect — 93 identities held, three write/undo

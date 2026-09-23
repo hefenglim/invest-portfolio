@@ -209,7 +209,7 @@ def test_the_one_pass_actually_WRITES_both_rows(conn: sqlite3.Connection) -> Non
     """The defect was measured at the commit (written 1 / rejected 1, then pass 2), so the
     pin is on the commit's buckets, not only on the preview's issue sets."""
     from portfolio_dash.data_ingestion.corporate_action_import import (
-        write_corporate_action_row,
+        corporate_action_writer,
     )
     from portfolio_dash.data_ingestion.preview import commit_preview
 
@@ -219,7 +219,8 @@ def test_the_one_pass_actually_WRITES_both_rows(conn: sqlite3.Connection) -> Non
         "schwab,2025-10-06,SPLIT,NEWCO,NEWCO,10,200,,",
     ))
     summary = commit_preview(conn, preview, accept={0, 1},
-                             writer=write_corporate_action_row)
+                             writer=corporate_action_writer(
+                                 move_weight=lambda _frm, _to: None))
     assert len(summary.written) == 2
     assert summary.rejected == []
 

@@ -236,21 +236,24 @@ def test_debounce_key_helper() -> None:
 
 
 def test_dispatch_runs_each_subscriber_once_and_debounces(conn: sqlite3.Connection) -> None:
+    # DEF-037: a per-SYMBOL event (recorded with its scope). This test used fx_drift/schwab
+    # and so pinned an account id reaching the card as its symbol — the defect.
     sub = cs.create_insight_type(
-        conn, name="FX", scope="on_alert", alert_rules=["fx_drift"], enabled=True, now=NOW
+        conn, name="W", scope="on_alert", alert_rules=["single_weight"], enabled=True, now=NOW
     )
-    ab.record_event(conn, rule_id="fx_drift", symbol="schwab", now=NOW)
+    ab.record_event(conn, rule_id="single_weight", symbol="2330", now=NOW, scope="symbol")
     calls: list[tuple[int, str, str]] = []
 
     def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime,
-               fired_rule: str, fired_symbol: str) -> None:
+               fired_rule: str, fired_symbol: str, trigger: object) -> None:
         calls.append((insight_type_id, fired_rule, fired_symbol))
 
     ab.dispatch_alert_events(conn, runner, now=NOW)
-    assert calls == [(sub.id, "fx_drift", "schwab")]
+    assert calls == [(sub.id, "single_weight", "2330")]
     # a second dispatch (same event consumed; debounce holds) does not re-run
     calls.clear()
-    ab.record_event(conn, rule_id="fx_drift", symbol="schwab", now=NOW + timedelta(hours=1))
+    ab.record_event(conn, rule_id="single_weight", symbol="2330",
+                    now=NOW + timedelta(hours=1), scope="symbol")
     ab.dispatch_alert_events(conn, runner, now=NOW + timedelta(hours=1))
     assert calls == []  # debounced within 24h
 

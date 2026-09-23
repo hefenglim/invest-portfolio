@@ -109,6 +109,15 @@ EXPECTED_CALL_SITES = {
     # unchanged and structural: an action-free symbol short-circuits inside `_shares_at`,
     # the walk never runs, and both answers are byte-identical to pre-feature.
     ("portfolio_dash/api/routers/ledgers.py", "shares_through"),
+    # DEF-027 (2026-09-23): the broker-statement converter's opening-inventory hint measures
+    # the pre-history gap against what the LEDGER already holds at the close of the day
+    # before the statement starts — `_opening_gaps` reads `shares_through(on=build)`, the
+    # same date-aware count the sell guard uses, so the hint and the guard agree on the
+    # 85.04 shares an account already held. Containment holds the same structural way as
+    # for the other `shares_through` sites: an action-free symbol short-circuits inside
+    # `_shares_at`, the walk never runs, and the count is the naive one. Read-only — the
+    # converter writes nothing. Proven by `test_the_BROKER_openings_hint_stays_out_of_the_walk`.
+    ("portfolio_dash/api/routers/broker_import.py", "shares_through"),
 }
 
 
@@ -358,3 +367,23 @@ def test_the_one_deliberate_change_to_the_naive_path(blank: sqlite3.Connection) 
                     div_type="STOCK", gross=D("0"), withholding=D("0"), net=D("0"),
                     reinvest_shares=D("5"), reinvest_price=D("0"))
     assert current_shares(blank, "schwab", "AAA") == D("108")
+
+
+def test_the_BROKER_openings_hint_stays_out_of_the_walk(
+    blank: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEF-027's ledger read (`broker_import._opening_gaps` → `shares_through`), driven
+    with the same landmine as the trade door: on an action-free ledger the action-aware
+    walk must NOT run, and the gap is the naive count — 15 needed, 10 held, 5 missing."""
+    from portfolio_dash.api.routers.broker_import import _opening_gaps
+
+    insert_transaction(blank, account_id="schwab", symbol="AAA", side=Side.BUY,
+                       quantity=D("10"), price=D("10"), fees=D("0"), tax=D("0"),
+                       trade_date=date(2026, 1, 5))
+
+    def landmine(*a: object, **kw: object) -> None:
+        raise AssertionError("the action-aware walk ran for an action-free ledger")
+
+    monkeypatch.setattr(holdings_mod, "_Walk", landmine)
+    [gap] = _opening_gaps(blank, "schwab", {"AAA": D("15")}, date(2026, 3, 1))
+    assert (gap["ledger_shares"], gap["gap"], gap["satisfied"]) == ("10", "5", False)

@@ -7,7 +7,6 @@ skipped so the registry falls through. The network call is isolated in ``_realti
 for monkeypatching (the repo bans sockets in tests).
 """
 
-from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -15,6 +14,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 
@@ -33,7 +33,7 @@ class TwStockProvider(ProviderBase):
 
     def _row(self, symbol: str, close: Decimal) -> PriceRow:
         return PriceRow(
-            instrument=symbol, market=Market.TW, as_of=date.today(),
+            instrument=symbol, market=Market.TW, as_of=app_now().date(),
             close=close, source=self.name,
         )
 

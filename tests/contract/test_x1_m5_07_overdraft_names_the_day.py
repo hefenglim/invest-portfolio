@@ -62,7 +62,7 @@ def test_withdraw_guard_names_the_day_a_later_flow_is_stranded(api_client: TestC
         "ccy": "USD", "amount": "400"})
     assert r.status_code == 422, r.json()
     msg = r.json()["error"]["message"]
-    assert "於 2026-06-20 降至 -400" in msg, msg
+    assert "於 2026-06-20 降至 −400.00" in msg, msg  # DEF-008: minor unit, U+2212
     assert "某時點" not in msg
 
 
@@ -78,7 +78,7 @@ def test_fx_guard_names_the_day(api_client: TestClient) -> None:
     assert r.status_code == 422, r.json()
     msg = r.json()["error"]["message"]
     assert r.json()["error"]["code"] == "fx_insufficient_balance"
-    assert "於 2026-01-08 降至 -22000" in msg, msg
+    assert "於 2026-01-08 降至 −22,000" in msg, msg  # DEF-008: thousands, U+2212
     assert "某時點" not in msg
 
 
@@ -93,5 +93,5 @@ def test_negative_cash_envelope_names_the_day(api_client: TestClient) -> None:
     assert r.status_code == 422, r.json()
     msg = r.json()["error"]["message"]
     assert r.json()["error"]["code"] == "negative_cash"
-    assert "於 2026-01-05 降至 -500000" in msg, msg
+    assert "於 2026-01-05 降至 −500,000" in msg, msg  # DEF-008: thousands, U+2212
     assert "某時點" not in msg

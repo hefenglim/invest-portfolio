@@ -56,7 +56,8 @@ def test_withdraw_over_balance_hard_block(api_client: TestClient) -> None:
     err = r.json()["error"]
     assert err["code"] == "withdraw_insufficient_balance"
     assert err["field"] == "amount"
-    assert "1000" in err["message"]  # the available balance is stated in the message
+    # DEF-008: the resulting dip on its own day, minor unit, U+2212
+    assert "於 2026-02-01 降至 −500.00（出金當日）" in err["message"]
     r2 = api_client.post("/api/cash/movements", json={
         "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "MYR", "amount": "1500", "ack_negative": True})
@@ -93,7 +94,8 @@ def test_fx_over_balance_hard_block(api_client: TestClient) -> None:
     err = r.json()["error"]
     assert err["code"] == "fx_insufficient_balance"
     assert err["field"] == "from_amt"
-    assert "-32000" in err["message"]  # the available balance is stated in the message
+    # DEF-008: the resulting dip on its own day, minor unit, U+2212
+    assert "於 2026-06-01 降至 −42,000（換匯當日）" in err["message"]
     # Fund the pool so the balance covers the sell amount -> the conversion now passes and
     # lands in the SAME fx ledger the CSV path writes.
     api_client.post("/api/cash/movements", json={
@@ -395,7 +397,9 @@ def test_withdraw_put_edit_self_exclusion(api_client: TestClient) -> None:
         "ccy": "USD", "amount": "1000.01", "ack_negative": True})
     assert over.status_code == 422
     err = over.json()["error"]
-    assert err["code"] == "withdraw_insufficient_balance" and "1000" in err["message"]
+    assert err["code"] == "withdraw_insufficient_balance"
+    # DEF-008: the resulting dip on its own day, minor unit, U+2212
+    assert "於 2026-02-01 降至 −0.01（出金當日）" in err["message"]
     assert _balance(api_client, "moomoo_my", "USD") == "200"  # unchanged
     # exactly the row-free balance -> allowed (NOT falsely blocked by its own old amount)
     ok = api_client.put(f"/api/cash/movements/{wid}", json={

@@ -48,6 +48,34 @@ _ALL_PAGES = (
     "settings-scheduler.html", "login.html",
 )   # this is now every shipped page — keep it that way when adding one.
 
+# DEF-002 (2026-09-23): settings.html is EIGHT pages behind one URL. Only the default tab
+# (帳戶與費率) and the five that still have a redirect stub (settings-*.html above) were ever
+# measured; 預警規則 / 通知中心 / 匯出中心 have no stub, so the sweep never displayed them.
+# `display: none` has no layout, so a hidden tab can never fail a width check.
+_SETTINGS_TABS = (
+    "llm", "prompts", "scheduler", "accounts", "datasources", "alerts", "notify", "exports",
+)
+
+# DEF-002: expand every disclosure BEFORE measuring. A closed <details> keeps its content out
+# of layout, so the 11 variable tables under 「設定 › AI 提示詞 › 數據變數總表」 (1,780-3,652px
+# each at 390px) sat behind a closed summary and this guard measured a page without them —
+# green for two months on a page that scrolled 3,673px the moment a user opened the panel.
+# `[aria-expanded="false"]` covers the JS disclosures (折讓款明細, grouped alert rows) that
+# hide their body with `[hidden]` instead of a <details>. Returns the counts so a caller can
+# prove the expansion actually happened (a guard that expands nothing is the old guard).
+_EXPAND = """
+() => {
+  let opened = 0, clicked = 0;
+  document.querySelectorAll('details').forEach((d) => {
+    if (!d.open) { d.open = true; opened++; }
+  });
+  document.querySelectorAll('[aria-expanded="false"]').forEach((b) => {
+    b.click(); clicked++;
+  });
+  return {opened, clicked};
+}
+"""
+
 _MEASURE = """
 () => {
   const se = document.scrollingElement;
@@ -72,14 +100,33 @@ _MEASURE = """
 
 def _assert_no_h_scroll(page: Page, base_url: str, path: str, width: int) -> None:
     page.set_viewport_size({"width": width, "height": 900})
+    # DEF-002: always a FRESH document. The settings-*.html stubs redirect to
+    # `settings.html#<tab>`, and from an already-open settings.html that is a same-document
+    # hash change — the previous visit's expanded disclosures then leaked into the next
+    # measurement, so one page's result depended on which page the loop visited before it.
+    page.goto("about:blank")
     page.goto(f"{base_url}/{path}", wait_until="networkidle")
     # Charts/cards render after the payload lands; measure the settled layout.
     page.wait_for_timeout(600)
+    _measure_expanded(page, path, width)
+
+
+def _measure_expanded(page: Page, path: str, width: int) -> dict[str, int]:
+    """Measure the page twice: as it loads, then with every disclosure expanded (DEF-002)."""
     m = page.evaluate(_MEASURE)
     assert m["sw"] <= m["cw"] + 1, (
         f"{path} @ {width}px scrolls horizontally: document scrollWidth={m['sw']} > "
         f"clientWidth={m['cw']}. Widest offenders: {m['widest']}"
     )
+    counts: dict[str, int] = page.evaluate(_EXPAND)
+    page.wait_for_timeout(250)
+    m = page.evaluate(_MEASURE)
+    assert m["sw"] <= m["cw"] + 1, (
+        f"{path} @ {width}px scrolls horizontally once its disclosures are expanded "
+        f"({counts}): document scrollWidth={m['sw']} > clientWidth={m['cw']}. "
+        f"Widest offenders: {m['widest']}"
+    )
+    return counts
 
 
 @pytest.mark.e2e
@@ -104,6 +151,44 @@ def test_every_page_never_scrolls_sideways(
     """
     for path in _ALL_PAGES:
         _assert_no_h_scroll(browser_page, live_server, path, width)
+    for tab in _SETTINGS_TABS:
+        _assert_no_h_scroll(browser_page, live_server, f"settings.html?tab={tab}#{tab}", width)
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("width", (1440, 390))
+def test_prompt_variable_tables_scroll_inside_their_own_wrap(
+    live_server: str, browser_page: Page, width: int
+) -> None:
+    """DEF-002 reproduction, pinned to the exact path the verifier walked.
+
+    「設定 › AI 提示詞 › 數據變數總表」 appended 11 bare tables straight into a flex column,
+    with no `.table-wrap` between them and the document, and `table.data td` is `nowrap` —
+    so the description column alone set the page width (3,673px at 390px). The sweep above
+    now expands every disclosure; this test additionally proves it REACHED the panel (a
+    sweep that silently stops finding `#vars-panel` would otherwise go green again), and
+    that every one of its tables sits inside a horizontal scroller.
+    """
+    page = browser_page
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto("about:blank")   # a fresh document per width (see _assert_no_h_scroll)
+    page.goto(f"{live_server}/settings.html#prompts", wait_until="networkidle")
+    page.wait_for_selector("#vars-panel", state="attached")
+    page.wait_for_timeout(400)
+    counts = _measure_expanded(page, "settings.html#prompts", width)
+    assert counts["opened"] >= 1, f"no disclosure was expanded ({counts}) — the guard is blind"
+    tables = page.evaluate(
+        "() => [...document.querySelectorAll('#vars-panel table')].map((t) => {"
+        " let p = t.parentElement, scroller = null;"
+        " while (p && p !== document.body) {"
+        "   if (/auto|scroll/.test(getComputedStyle(p).overflowX)) { scroller = p; break; }"
+        "   p = p.parentElement; }"
+        " return {w: Math.round(t.getBoundingClientRect().width),"
+        "         scroller: scroller ? scroller.className : null}; })"
+    )
+    assert len(tables) >= 10, f"the variable tables did not render: {tables}"
+    unwrapped = [t for t in tables if t["scroller"] is None]
+    assert not unwrapped, f"{len(unwrapped)} variable tables have no horizontal scroller: {tables}"
 
 
 @pytest.mark.e2e

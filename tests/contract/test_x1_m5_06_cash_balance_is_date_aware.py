@@ -152,8 +152,10 @@ def test_a_future_deposit_cannot_fund_a_withdrawal_today(api_client: TestClient)
     assert r.status_code == 422, r.json()
     err = r.json()["error"]
     assert err["code"] == "withdraw_insufficient_balance"
-    # The balance quoted is the pool's balance ON THE WITHDRAWAL'S DATE.
-    assert "帳戶現金 -495000" in err["message"], err["message"]
+    # The figure is the pool ON THE WITHDRAWAL'S DATE less the withdrawal (−495,000 − 100) —
+    # the END balance (+505,000) would have left no dip to report at all. DEF-008
+    # (2026-09-23) states the resulting dip instead of quoting the balance.
+    assert "於 2026-06-01 降至 −495,100（出金當日）" in err["message"], err["message"]
     assert _pools(_cash(api_client)) == [
         ("schwab", "TWD", "-32000"), ("schwab", "USD", "0"), ("tw_broker", "TWD", "-495000")]
 
@@ -174,7 +176,7 @@ def test_a_future_dated_flow_still_enters_the_running_minimum(api_client: TestCl
         "ccy": "USD", "amount": "1"})
     assert r.status_code == 422, r.json()
     assert r.json()["error"]["code"] == "negative_cash"
-    assert "-999" in r.json()["error"]["message"]
+    assert "降至 −999.00" in r.json()["error"]["message"]  # DEF-008: minor unit, U+2212
 
 
 def test_a_back_dated_withdrawal_before_its_funding_is_still_refused(

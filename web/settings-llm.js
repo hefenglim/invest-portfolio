@@ -608,13 +608,20 @@
     renderQuota();
     renderUsageTable(); /* table + chips render now */
     maybeRenderLlmChart(); /* chart only if the tab is visible (standalone page = yes) */
-    initAutoAiToggle();
+    /* DEF-034: NO listener binding in here. boot() is the page's RELOAD — every threshold /
+       model / role / top-up save ends in `await boot()` — and it used to finish with
+       initAutoAiToggle(), which added one more click listener to the SAME settings.html
+       switch each time: after two threshold saves one click sent three PUT /api/ui-prefs and
+       three toasts. Page elements are bound ONCE at init (below); boot() only reloads data
+       and re-renders nodes it creates itself (tests/contract/test_def034_rebinding_listeners.py). */
   }
 
   /* L13 (owner ruling 2026-09-16, 3(d)): the automatic AI-resolve switch — persisted in
      GET/PUT /api/ui-prefs as `auto_ai_resolve` (subset merge, so page_size is untouched).
-     The quick-add modal reads it on every open. Same toggle grammar as the scheduler rows. */
-  function initAutoAiToggle() {
+     The quick-add modal reads it on every open. Same toggle grammar as the scheduler rows.
+     DEF-034: runs ONCE at page init (an IIFE, like initThreshold / initTopup above), never
+     from boot(). The switch paints from its own PUT response, so no reload re-reads it. */
+  (function initAutoAiToggle() {
     const t = $('#pref-auto-ai');
     if (!t) return;
     const paint = (on) => {
@@ -636,7 +643,7 @@
       }
       t.disabled = false;
     });
-  }
+  })();
 
   boot();
 

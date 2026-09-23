@@ -54,7 +54,9 @@ def test_list_shape_and_decimal_strings(
     assert body["window_months"] == 12
     assert body["older_count"] == 0  # the seeded trade is inside the window
     hit = next(r for r in body["rows"] if r["account_id"] == _TW and r["month"] == "2026-05")
-    assert hit["account_name"] == "TW Broker"
+    # DEF-008 (2026-09-23): a TOKEN, not the English `accounts.name` — web/api.js resolves it
+    # to the pdNames spelling, so no inbox wire field carries 「TW Broker」 any more.
+    assert hit["account_name"] == "{account:tw_broker}"
     assert hit["trade_count"] == 1
     # money/forecast are Decimal STRINGS: fee_total 142, expected floor(142×0.77)=109
     assert hit["fee_total"] == "142" and hit["expected"] == "109"

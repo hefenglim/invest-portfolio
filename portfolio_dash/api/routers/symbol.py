@@ -69,7 +69,7 @@ from portfolio_dash.portfolio.position_aggregate import aggregate_position
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
 from portfolio_dash.pricing.store import get_price_history
-from portfolio_dash.shared.corporate_actions import ActionIndex
+from portfolio_dash.shared.corporate_actions import ActionIndex, kind_label
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Instrument
@@ -322,6 +322,9 @@ def _action_wire(
         "total": decimal_str(_ZERO),  # a corporate action moves no cash
         "ccy": ccy,
         "kind": a.kind,
+        # I-14: the ledger's own word (分割／換股／分拆), so the drawer prints the server's
+        # vocabulary instead of a private table (detail.js's said 「拆併股」 and SPINOFF 「分割」).
+        "kind_label": kind_label(a.kind),
         "role": role,
         "from_symbol": a.from_symbol,
         "to_symbol": a.to_symbol,
@@ -373,6 +376,11 @@ def _action_issues(
                 # StrEnum -> its value ("SPLIT"/"EXCHANGE"/"SPINOFF"); this router builds
                 # plain dicts and never passes through `to_wire`, so the cast is explicit.
                 "kind": str(u.kind),
+                # I-11: the same two structured fields the dashboard's unapplied_actions
+                # carries — the row id (the drawer's link targets it; it was read and never
+                # sent) and the ledger's word for the kind.
+                "kind_label": kind_label(str(u.kind)),
+                "action_id": u.action_id,
                 "from_symbol": u.from_symbol,
                 "to_symbol": u.to_symbol,
                 # The same zh sentence the strict path raises, so both paths explain the

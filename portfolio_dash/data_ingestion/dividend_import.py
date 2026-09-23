@@ -6,6 +6,7 @@ import sqlite3
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from portfolio_dash.data_ingestion.csv_import import unread_columns_issues
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model, check_amounts
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
@@ -191,6 +192,10 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
     """
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))  # tolerate a leading BOM
     rows: list[PreviewRow] = []
+    # I-4 (DEF-026's seam, every kind): the columns this door will not read are NAMED on
+    # each row as an advisory (「已忽略欄位：…」), never dropped in silence.
+    ignored = unread_columns_issues(
+        [(h or "").strip() for h in (reader.fieldnames or [])], DIVIDEND_COLUMNS)
     for idx, raw0 in enumerate(reader):
         raw: dict[str, str] = {k.strip(): (v or "").strip() for k, v in raw0.items()}
         issues: list[Issue] = []
@@ -392,6 +397,8 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
 
         rows.append(PreviewRow(index=idx, raw=raw, payload=payload, issues=issues))
 
+    for row in rows:
+        row.issues.extend(ignored)
     return ImportPreview(rows=rows)
 
 

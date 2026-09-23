@@ -353,6 +353,18 @@ textarea.input { font-family: var(--font-num); line-height: 1.6; resize: vertica
 table.vars-table td { height: auto; padding: 6px 8px; }
 .vars-name { font-weight: 600; white-space: nowrap; }
 .vars-desc { color: var(--text-2); font-size: 11px; }
+/* DEF-002: `table.data td` is `nowrap`, so the 說明 column alone laid each table out at
+   1,780-3,652px. The description is prose — let it wrap (with a readable floor) so the
+   `.table-wrap` scroller only has to carry the short code/name/scope columns. */
+table.vars-table td.vars-desc { white-space: normal; min-width: 220px; }
+/* DEF-002 class sweep: settings-users.js renders its 授權用戶 table straight into this host
+   (the host is shared with the empty-state sentence, so the scroller is the host itself). */
+#users-wrap { overflow-x: auto; }
+/* DEF-002: a `.table-wrap` only scrolls if its box is allowed to be narrower than the table.
+   A grid item's automatic minimum is its min-content width, and `.table-wrap table` is
+   `min-width: 640px` at phone widths — so wrapping the 加值歷史 table grew the 1fr track to
+   640px and pushed the page 283px sideways at 390px (measured by the expanded sweep). */
+.billing-grid > * { min-width: 0; }
 .vars-scope { white-space: nowrap; color: var(--text-3); font-size: 10.5px; }
 .tpl-var-sel { max-width: 240px; font-size: 11px; }
 

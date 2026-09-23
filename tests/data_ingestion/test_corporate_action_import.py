@@ -27,7 +27,7 @@ from portfolio_dash.data_ingestion import validate as validate_module
 from portfolio_dash.data_ingestion.corporate_action_import import (
     CORPORATE_ACTION_COLUMNS,
     build_corporate_action_preview,
-    write_corporate_action_row,
+    corporate_action_writer,
 )
 from portfolio_dash.data_ingestion.preview import ImportPreview, commit_preview
 from portfolio_dash.data_ingestion.store import (
@@ -43,6 +43,8 @@ D = Decimal
 ACTION_DAY = date(2026, 6, 15)
 BUY_DAY = date(2026, 1, 10)
 _HEADER = ",".join(CORPORATE_ACTION_COLUMNS) + "\n"
+# No target weights in these fixtures: the injected mover (I-2) finds nothing to move.
+_WRITER = corporate_action_writer(move_weight=lambda _frm, _to: None)
 
 
 @pytest.fixture
@@ -234,7 +236,7 @@ def test_commit_writes_every_accepted_row(conn: sqlite3.Connection) -> None:
     preview = build_corporate_action_preview(
         conn, _HEADER + _row("schwab") + _row("moomoo_my"))
     summary = commit_preview(
-        conn, preview, accept={0, 1}, writer=write_corporate_action_row)
+        conn, preview, accept={0, 1}, writer=_WRITER)
     assert len(summary.written) == 2 and not summary.skipped
     stored = list_corporate_actions(conn)
     assert {s.account_id for s in stored} == {"schwab", "moomoo_my"}
@@ -250,5 +252,5 @@ def test_a_spinoff_carries_its_cost_carry_through_the_writer(
                           ratio_from="2", cost_carry="0.4")
     preview = build_corporate_action_preview(conn, text)
     assert not any(r.has_hard_issue for r in preview.rows)
-    commit_preview(conn, preview, accept={0, 1}, writer=write_corporate_action_row)
+    commit_preview(conn, preview, accept={0, 1}, writer=_WRITER)
     assert {s.cost_carry for s in list_corporate_actions(conn)} == {D("0.4")}

@@ -39,6 +39,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 
+from portfolio_dash.data_ingestion.csv_import import unread_columns_issues
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.store import insert_fx_conversion, list_accounts
 from portfolio_dash.data_ingestion.validate import (
@@ -47,12 +48,11 @@ from portfolio_dash.data_ingestion.validate import (
     Issue,
     alias_import_account,
     amount_too_large_issue,
-    dip_phrase,
+    cash_dip_sentence,
     unknown_account_issue,
 )
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Account
-from portfolio_dash.shared.wire import decimal_str
 
 # Canonical CSV column order for the fx_conversions import — SINGLE SOURCE for the downloadable
 # template header (see data_ingestion.import_templates). Kept in lockstep with the DictReader
@@ -175,21 +175,25 @@ def fx_balance_issues(
     rule, and a door that offered one would be financing.
     """
     before = pool(account.account_id, from_ccy, include=siblings, as_of=on)
+    # DEF-008: the withdraw guard's ONE sentence (``validate.cash_dip_sentence``) — the
+    # account as a token, the day in both branches, the figure at the minor unit.
     if from_amount > before.balance:
         return [Issue(
             kind="fx_insufficient_balance",
-            message=(f"換出金額 {decimal_str(from_amount)} {from_ccy.value} 超過 "
-                     f"{account.name} 的 {from_ccy.value} 可用餘額 "
-                     f"{decimal_str(before.balance)} — 換匯不可透支（不提供融資）"))]
+            message=cash_dip_sentence(
+                what="換匯", account_id=account.account_id, ccy=from_ccy, on=on,
+                low=before.balance - from_amount, cause="換匯當日",
+            ) + "— 換匯不可透支（不提供融資）")]
     legs = fx_legs(account_id=account.account_id, on=on, from_ccy=from_ccy,
                    from_amount=from_amount, to_ccy=to_ccy, to_amount=to_amount)
     after = pool(account.account_id, from_ccy, include=[*siblings, *legs])
     if after.low < min(before.low, _ZERO):
         return [Issue(
             kind="fx_insufficient_balance",
-            message=(f"此筆換匯會使 {account.name} 的 {from_ccy.value} 現金"
-                     f"{dip_phrase(after.low_date)} {decimal_str(after.low)}"
-                     "（換匯日早於資金到位）— 換匯不可透支，請先補登入金或換匯"))]
+            message=cash_dip_sentence(
+                what="換匯", account_id=account.account_id, ccy=from_ccy,
+                on=after.low_date, low=after.low, cause="換匯日早於資金到位",
+            ) + "— 換匯不可透支，請先補登入金或換匯")]
     return []
 
 
@@ -431,6 +435,10 @@ def build_fx_preview(
     deselected row still gets its own verdict, it simply stops funding its siblings.
     """
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("﻿")))  # tolerate a leading BOM
+    # I-4 (DEF-026's seam, every kind): the columns this door will not read are NAMED on
+    # each row as an advisory (「已忽略欄位：…」), never dropped in silence.
+    ignored = unread_columns_issues(
+        [(h or "").strip() for h in (reader.fieldnames or [])], FX_COLUMNS)
     parsed_rows: list[tuple[int, dict[str, str], _ParsedFx | None, list[Issue]]] = []
     for idx, raw0 in enumerate(reader):
         raw: dict[str, str] = {k.strip(): (v or "").strip()
@@ -486,6 +494,8 @@ def build_fx_preview(
         rows.append(PreviewRow(index=idx, raw=raw, payload=_payload(parsed),
                                issues=all_issues))
 
+    for row in rows:
+        row.issues.extend(ignored)
     return ImportPreview(rows=rows)
 
 

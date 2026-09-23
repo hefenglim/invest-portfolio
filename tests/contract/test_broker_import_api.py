@@ -211,3 +211,149 @@ def test_a_blocking_issue_withholds_EVERY_csv(
     # The counts still come back: the owner needs to see what WOULD have been written in
     # order to judge whether the complaint is about the file or about this code.
     assert body["counts"]["transactions"] > 0
+
+
+# --- DEF-029: the statement's broker must be the account's broker ------------------------
+
+
+@pytest.mark.parametrize("account", ["tw_broker", "moomoo_my"])
+def test_a_statement_aimed_at_another_brokers_account_is_a_BLOCKING_refusal(
+    api_client: TestClient, account: str
+) -> None:
+    """Measured 2026-09-23: a Schwab export converted 「into」 the Moomoo account read
+    「對帳通過」 and wrote a real AAPL buy under the wrong broker; into the TW account it
+    reached the market-rule refusal only at commit, after the verdict had said 通過. The
+    pairing is refused BEFORE a row is parsed, in the all-or-nothing shape the page already
+    renders — no files, no rows, no counts."""
+    body = _convert(api_client, account=account).json()
+    assert body["ok"] is False
+    assert "files" not in body and body["rows"] == {} and body["counts"] == {}
+    [issue] = body["blocking"]
+    assert issue["code"] == "account_broker_mismatch" and issue["severity"] == "blocking"
+    assert issue["account_id"] == account and issue["broker_id"] == "schwab"
+    # The account is named by its MARKER (resolved to the zh name by the frontend), never
+    # by the English accounts.name / accounts.broker column.
+    assert f"{{account:{account}}}" in issue["detail"]
+    for english in ("TW Broker", "Moomoo MY", "Charles Schwab"):
+        assert english not in issue["detail"]
+
+
+def test_the_matching_account_converts(api_client: TestClient) -> None:
+    body = _convert(api_client, account="schwab").json()
+    assert body["ok"] is True and body["blocking"] == []
+
+
+def test_the_adapter_list_names_the_accounts_each_broker_serves(api_client: TestClient) -> None:
+    """The page filters its account picker from THIS, so it holds no broker→account table
+    of its own and cannot disagree with the server's refusal."""
+    body = api_client.get("/api/broker/adapters").json()
+    assert body["brokers"] == ["schwab"]
+    assert body["accounts_by_broker"] == {"schwab": ["schwab"]}
+
+
+# --- DEF-028: every row, and every row that went elsewhere -------------------------------
+
+
+def test_every_converted_row_is_listed_and_its_cells_render_the_file_byte_for_byte(
+    api_client: TestClient,
+) -> None:
+    """``rows[kind]`` is the file as structure. Rendering the cells through the template
+    header must reproduce ``files[kind]`` exactly — one list, two views — so a page that
+    commits a ticked subset by index is looking at the same rows the server will parse."""
+    from portfolio_dash.data_ingestion.broker.convert import render_kind
+
+    body = _convert(api_client).json()
+    for kind, text in body["files"].items():
+        rows = body["rows"][kind]
+        assert len(rows) == body["counts"][kind] > 0
+        assert [r["i"] for r in rows] == list(range(len(rows)))
+        assert render_kind(kind, [r["cells"] for r in rows]) == text
+        for r in rows:
+            assert {"refs", "date", "type", "symbol", "shares", "price", "amount",
+                    "currency", "note", "cells"} <= set(r)
+            assert r["refs"] and r["date"]
+            for money in ("shares", "price", "amount"):
+                assert isinstance(r[money], str)          # Decimal strings, never numbers
+
+
+def test_every_source_row_is_either_a_row_or_named_as_dropped_with_its_destination(
+    api_client: TestClient,
+) -> None:
+    """15 in, 9 out, and the 6 that went elsewhere used to be a number to reconcile by
+    hand. Conservation by REF: the rows plus the dropped list cover every line of both
+    exports, and a dropped row that lives on inside another row says which one."""
+    from portfolio_dash.data_ingestion.broker.registry import parse_export
+
+    body = _convert(api_client).json()
+    every_ref = {
+        e.ref
+        for f in _files()
+        for e in parse_export("schwab", f["text"], source_file=f["name"])
+    }
+    in_rows = {ref for rows in body["rows"].values() for r in rows for ref in r["refs"]}
+    dropped = body["dropped"]
+    in_dropped = {ref for d in dropped for ref in d["refs"]}
+    assert in_rows | in_dropped == every_ref
+    # A ref in BOTH is a row that was merged into another (its `into` says where); a ref
+    # that left the conversion for good is in the dropped list only.
+    for d in dropped:
+        overlap = set(d["refs"]) & in_rows
+        assert bool(overlap) == bool(d["into"]) or d["why"] == "action_needs_input", d
+    whys = {d["why"] for d in dropped}
+    assert {"suppressed", "merged_dividend", "option_row_unsupported",
+            "unconvertible", "action_needs_input"} <= whys
+    [merged] = [d for d in dropped if d["why"] == "merged_dividend"]
+    assert merged["into"] == "dividends:0" and len(merged["refs"]) == 3
+    assert body["rows"]["dividends"][0]["refs"] == merged["refs"]
+    [worksheet] = [d for d in dropped if d["why"] == "action_needs_input"]
+    assert worksheet["into"] == "actions_needing_input:0"
+
+
+# --- DEF-027: the opening gap is measured against the LEDGER -----------------------------
+
+_SCHWAB_HEADER = (
+    '"Date","Action","Symbol","Description","Quantity","Price","Fees & Comm","Amount"\n'
+)
+
+
+def _statement(*rows: str) -> list[dict[str, str]]:
+    return [{"name": "aapl.csv", "text": _SCHWAB_HEADER + "".join(r + "\n" for r in rows)}]
+
+
+def test_the_opening_hint_subtracts_what_the_ledger_already_holds(
+    api_client: TestClient,
+) -> None:
+    """The golden ledger holds 10 AAPL in schwab (bought 2026-01-10). A statement that
+    sells 15 on 2026-03-02 needs 15 the file never bought — but only 5 are missing. The
+    file-only hint asked for 15 on top of the 10 (measured 2026-09-23 as −914.96 shares
+    after a 1,000-share sell into an 85.04 position)."""
+    body = _convert(api_client, exports=_statement(
+        '"03/02/2026","Sell","AAPL","APPLE INC","15","$200.00","$0.01","$2,999.99"',
+    )).json()
+    assert body["ok"] is True
+    assert body["openings_build_date"] == "2026-03-01"
+    assert body["openings_needing_cost"] == [{
+        "symbol": "AAPL", "shares": "15", "ledger_shares": "10", "gap": "5",
+        "satisfied": False, "as_of": "2026-03-01",
+    }]
+
+
+def test_a_position_the_ledger_already_covers_needs_no_opening(api_client: TestClient) -> None:
+    body = _convert(api_client, exports=_statement(
+        '"03/02/2026","Sell","AAPL","APPLE INC","8","$200.00","$0.01","$1,599.99"',
+    )).json()
+    [o] = body["openings_needing_cost"]
+    assert o["satisfied"] is True and o["gap"] == "0" and o["ledger_shares"] == "10"
+
+
+def test_ledger_shares_are_counted_at_the_day_BEFORE_the_statement_starts(
+    api_client: TestClient,
+) -> None:
+    """Date-aware, like the sell guard: a ledger buy dated AFTER the statement's first day
+    was not held when the statement starts, so it does not shrink the gap."""
+    body = _convert(api_client, exports=_statement(
+        '"01/05/2026","Sell","AAPL","APPLE INC","15","$200.00","$0.01","$2,999.99"',
+    )).json()
+    [o] = body["openings_needing_cost"]
+    assert o == {"symbol": "AAPL", "shares": "15", "ledger_shares": "0", "gap": "15",
+                 "satisfied": False, "as_of": "2026-01-04"}

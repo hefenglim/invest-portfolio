@@ -160,6 +160,60 @@ def test_the_pending_list_is_not_stale() -> None:
         )
 
 
+#: G-01's SECOND blind spot (DEF-035, 2026-09-23). The scan above flags reads of the English
+#: display NAME and deliberately passes `.account_id` — resolving the id IS the fix. Nothing
+#: checked that it WAS resolved before reaching the screen: the AI draft tables printed
+#: `el('td', 'col-text', d.account_id || '')` three times, so the verifier read 「tw_broker」
+#: in a table directly above a CSV preview reading 「台灣券商」, with this file green. A raw id
+#: RENDERED — as an `el(...)` text argument, a `textContent`, or glued into a sentence — is the
+#: same defect as a raw name; a line that resolves it through pdNames / acctZh is not flagged.
+_RAW_ID_RENDER = re.compile(
+    r"\bel\([^;\n]*?,\s*(?:[\w$]+\.)+account_id\s*(?:\|\|\s*'[^']*')?\s*\)"
+    r"|\.(?:textContent|innerText)\s*=\s*[^;\n]*?\b(?:[\w$]+\.)+account_id\b"
+    r"|['`][^'`\n]*['`]\s*\+\s*(?:[\w$]+\.)+account_id\b"
+    r"|\b(?:[\w$]+\.)+account_id\s*\+\s*['`]"
+)
+_RESOLVED = re.compile(r"pdNames|acctZh\(|accountName\(")
+#: Known raw-id renders OUTSIDE the current change's scope, with the reason. Shrinks only.
+_ID_PENDING: dict[str, str] = {}
+
+
+def _raw_id_renders(src: str) -> list[str]:
+    return [line.strip() for line in _strip_js_comments(src).splitlines()
+            if _RAW_ID_RENDER.search(line) and not _RESOLVED.search(line)]
+
+
+def test_the_raw_id_detector_sees_the_measured_lines() -> None:
+    """Positive control: the three DEF-035 lines, verbatim, and their fixed forms."""
+    for measured in ("tr.appendChild(el('td', 'col-text', d.account_id || ''));",
+                     "cell.textContent = row.account_id;",
+                     "title = '帳戶 ' + r.account_id;"):
+        assert _raw_id_renders(measured), measured
+    for fixed in ("tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));",
+                  "o.value = a.account_id;",
+                  "loadAcctHoldings(d.account_id, false);"):
+        assert not _raw_id_renders(fixed), fixed
+
+
+def test_no_surface_renders_a_raw_account_id() -> None:
+    offenders = {p.name: found for p in _web_js()
+                 if p.name not in _ID_PENDING
+                 and (found := _raw_id_renders(p.read_text(encoding="utf-8")))}
+    assert not offenders, (
+        "raw account id(s) rendered to the screen: "
+        + "; ".join(f"{k}: {v}" for k, v in offenders.items())
+        + " — resolve through window.pdNames.account(id)."
+    )
+
+
+def test_the_id_pending_list_is_not_stale() -> None:
+    for name in _ID_PENDING:
+        path = _WEB_DIR / name
+        assert path.exists(), f"_ID_PENDING lists web/{name}, which no longer exists"
+        assert _raw_id_renders(path.read_text(encoding="utf-8")), (
+            f"web/{name} no longer renders a raw account id — remove it from _ID_PENDING")
+
+
 #: The two endpoints that list accounts with the English `name`, as a page fetches them.
 _ACCOUNT_LIST_FETCH = re.compile(r"""['"`]/api/(?:input/context|accounts)['"`]""")
 #: `symCell(x.symbol, x.name)` — an instrument's code + name cell, whatever the row is called.

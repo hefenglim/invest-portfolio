@@ -13,10 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from portfolio_dash.data_ingestion.store import list_corporate_actions
 from portfolio_dash.llm_insight import alerts_bridge
+from portfolio_dash.llm_insight.insights_store import InsightTrigger
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.ops import notify_dispatch
 from portfolio_dash.pricing import datasources_store, ingest
@@ -25,6 +26,7 @@ from portfolio_dash.pricing.cross import fetched_pairs
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
 from portfolio_dash.pricing.refresh import (
+    describe_refresh,
     refresh_dividends,
     refresh_fx_history,
     refresh_history,
@@ -35,6 +37,7 @@ from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.pricing.store import SplitFactorFn
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
@@ -350,30 +353,58 @@ def unbind_insight_schedule(conn: sqlite3.Connection, insight_type_id: int) -> N
 
 _HISTORY_LOOKBACK_DAYS = 7
 
+# A benchmark fetch never fails its job (FU-D27): the sentence says it was skipped instead.
+_BENCHMARK_FAILED = "更新失敗，已略過（不影響其他標的）"
+
+
+_OK_PER_SOURCE_SHOWN = 8
+
+
+def _failed_item(key: str, reasons: dict[str, str]) -> str:
+    """One failed key, with its reason when the fetch recorded one (never invented)."""
+    reason = reasons.get(key)
+    return f"{key}：{reason}" if reason else key
+
 
 def _summarize(summary: RefreshSummary) -> str:
-    """Human-readable run detail: counts + WHICH source answered WHAT (item 8).
+    """THE run-detail sentence for a quote / history / FX / benchmark refresh (zh).
 
-    The old "N ok, M failed" told the user nothing about data sources or targets;
-    now: ``3 ok, 1 failed [twse: 2330, 2603; yfinance: AAPL] failed: 8299``.
-    The per-source OK list still truncates at 8 (it is colour, not evidence); the FAILED
-    list never does (M10-02, owner ruling 2026-09-06) — 18 lost holdings used to store 8
-    names and an ellipsis, and the other 10 were written nowhere. ``detail`` is TEXT, and
-    the scheduler center already puts the full text in a tooltip.
+    「3 項已更新，1 項失敗（來源 twse：2330、2603；yfinance：AAPL）；失敗：8299」.
+
+    DEF-030 follow-up (2026-09-23): this was the last English sentence the 排程中心 printed —
+    「3 ok, 1 failed [twse: 2330, 2603; yfinance: AAPL] failed: 8299」 — beside the dividend
+    jobs that DEF-015 had already moved to 「14 檔事件已更新，1 檔失敗（TSLA：…）」. Nine call
+    sites in this module (quotes, the one-symbol quote, history, benchmarks, backfill) render
+    through here, so one formatter owns the wording. ``項`` rather than ``檔``: the worklist
+    carries FX pairs and benchmark indices beside the symbols.
+
+    Item 8 (2026-07-03) still holds — the sentence names WHICH source answered WHAT. The
+    per-source OK list truncates at 8 with 「等 N 項」 (it is colour, not evidence); the
+    FAILED list never does (M10-02, owner ruling 2026-09-06). A failed key carries its reason
+    when the fetch recorded one in ``failed_reasons`` (DEF-015); otherwise the key alone —
+    ``failed`` may already hold a zh refusal line such as 「2330：收盤價非正數（0），已拒絕
+    寫入」, which is printed as it is.
     """
-    parts = [f"{len(summary.ok)} ok, {len(summary.failed)} failed"]
+    head = f"{len(summary.ok)} 項已更新"
+    if summary.failed:
+        head += f"，{len(summary.failed)} 項失敗"
     if summary.ok:
         by_src: dict[str, list[str]] = {}
         for key, src in summary.ok.items():
             by_src.setdefault(src, []).append(key)
-        srcs = "; ".join(
-            f"{src}: {', '.join(sorted(keys)[:8])}" + ("…" if len(keys) > 8 else "")
+        srcs = "；".join(
+            f"{src}：{'、'.join(sorted(keys)[:_OK_PER_SOURCE_SHOWN])}"
+            + (f" 等 {len(keys)} 項" if len(keys) > _OK_PER_SOURCE_SHOWN else "")
             for src, keys in sorted(by_src.items())
         )
-        parts.append(f"[{srcs}]")
+        head += f"（來源 {srcs}）"
     if summary.failed:
-        parts.append("failed: " + ", ".join(sorted(summary.failed)))
-    return " ".join(parts)
+        # getattr: the scheduler's own test doubles predate the DEF-015 field.
+        reasons: dict[str, str] = getattr(summary, "failed_reasons", None) or {}
+        items = [_failed_item(k, reasons) for k in sorted(summary.failed)]
+        sep = "；" if any("：" in i for i in items) else "、"
+        head += "；失敗：" + sep.join(items)
+    return head
 
 
 # Held-symbols seam (M10-02): the partial verdict below asks "did a HELD instrument fail?",
@@ -546,7 +577,7 @@ def _refresh_benchmark_history(conn: sqlite3.Connection, start: date, *, now: da
         return _summarize(summary)
     except Exception as exc:  # noqa: BLE001 - benchmark fetch must never block instrument refresh
         logger.warning("benchmark history refresh failed: %s", exc)
-        return "error"
+        return _BENCHMARK_FAILED
 
 
 def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
@@ -573,7 +604,7 @@ def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     summary = RefreshSummary(ok=ok, failed=failed, fetched_at=now)
     set_progress("history_daily", "回補基準指數")
     bench = _refresh_benchmark_history(conn, start, now=now)
-    return f"{_summarize(summary)} · benchmarks: {bench}"
+    return f"{_summarize(summary)}・基準指數：{bench}"
 
 
 def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
@@ -581,7 +612,8 @@ def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     instruments, _ = build_worklist(conn, None)
     set_progress("dividends_daily", f"掃描 {len(instruments)} 檔股利事件")
     summary = refresh_dividends(conn, default_registry(conn), instruments, now=now)
-    return _summarize(summary)
+    # DEF-015: the SAME sentence as the 收件匣 scan — which symbol failed, and why.
+    return describe_refresh(summary)
 
 
 # --- 待確認匯入 daily scan (R5 item 2, 2026-07-03) ------------------------------
@@ -674,7 +706,7 @@ def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     if not refs:
         return "no acquired symbols"
     summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
-    return _summarize(summary)
+    return describe_refresh(summary)   # DEF-015: the one dividend-refresh sentence
 
 
 # --- External-snapshot ingest jobs (spec 20.4) --------------------------------
@@ -885,22 +917,24 @@ def _compute_alerts_for_scan(conn: sqlite3.Connection, *, now: datetime) -> list
     return compute_alerts(conn, now=now, reporting=Currency.TWD)
 
 
-def _alert_symbol(alert: Alert) -> str | None:
-    """The symbol an alert pertains to: the suffix of ``rule:symbol`` ids, else None.
+# What a skipped (non-card) alert is about, for the run detail (DEF-037).
+_SCOPE_ZH: dict[str | None, str] = {
+    "account": "帳戶", "sector": "產業", "currency": "幣別", "task": "洞察任務",
+    None: "範圍未標示",
+}
 
-    Per-target alerts use ``f"{rule}:{symbol}"`` ids (e.g. ``fx_drift:schwab``); a global
-    alert's id equals its rule (e.g. ``quota_low``) and has no symbol.
-    """
-    prefix = f"{alert.rule}:"
-    if alert.id.startswith(prefix):
-        symbol = alert.id[len(prefix):]
-        # target_cross ids are 3-part (``target_cross:{sym}:low|high``) so per-leg events
-        # dedup independently — strip the leg suffix for the human-facing symbol (FU-D28).
-        for leg in (":low", ":high"):
-            if symbol.endswith(leg):
-                return symbol[: -len(leg)]
-        return symbol
-    return None
+
+def _skipped_note(skipped: list[alerts_bridge.AlertEvent]) -> str:
+    """「；略過 N 條非個股預警（不產個股卡）：fx_drift 帳戶 {account:moomoo_my}、…」 or ""."""
+    if not skipped:
+        return ""
+    items = []
+    for ev in skipped:
+        subject = ev.symbol or ""
+        if ev.scope == "account" and subject:
+            subject = account_ref(subject)  # the fetch layer renders the display name
+        items.append(f"{ev.rule_id} {_SCOPE_ZH.get(ev.scope, ev.scope or '')} {subject}".strip())
+    return f"；略過 {len(skipped)} 條非個股預警（不產個股卡）：{'、'.join(items)}"
 
 
 def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
@@ -908,6 +942,13 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
 
     The registered insight runner produces one short-horizon card per subscribing combo
     per (rule, symbol), 24h-debounced. Returns a short summary for the ``job_runs`` detail.
+
+    DEF-037 (2026-09-23): each event is recorded with its STRUCTURED scope + subject + the
+    rule engine's own title/detail (``Alert.scope`` / ``Alert.subject``), never with a
+    subject recovered from the id's suffix. That recovery (``_alert_symbol``, now deleted)
+    handed ``fx_drift:moomoo_my``'s account id to the per-symbol card as its symbol; the
+    dispatcher now sends only ``symbol`` / ``portfolio`` scopes to a card, and this detail
+    names every alert it therefore skipped.
     """
     alerts_bridge.ensure_tables(conn)
     set_progress("alert_scan", "計算預警規則")
@@ -915,16 +956,19 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     rules_seen: list[str] = []
     for alert in alerts:
         alerts_bridge.record_event(
-            conn, rule_id=alert.rule, symbol=_alert_symbol(alert), now=now,
+            conn, rule_id=alert.rule, symbol=alert.subject, now=now,
             href=alert.href,  # FU-D17: stored so the push can carry a clickable deep link
+            scope=alert.scope, title=alert.title, detail=alert.detail,
         )
         if alert.rule not in rules_seen:
             rules_seen.append(alert.rule)
     runner = _INSIGHT_RUNNER
     dispatched = 0
+    skipped: list[alerts_bridge.AlertEvent] = []
     if runner is not None:
         set_progress("alert_scan", "派發 AI 預警卡")
-        dispatched = alerts_bridge.dispatch_alert_events(conn, runner, now=now)
+        result = alerts_bridge.dispatch_alert_events_ex(conn, runner, now=now)
+        dispatched, skipped = result.dispatched, result.skipped
     else:
         # No runner wired (scheduler-only process): still consume events so they do not
         # pile up; cards are produced once the app wires the runner on the next scan.
@@ -941,7 +985,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
         notify_detail = "notify: error"
     return (
         f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched; "
-        f"{notify_detail}"
+        f"{notify_detail}{_skipped_note(skipped)}"
     )
 
 
@@ -1287,7 +1331,7 @@ def _backfill_benchmarks(
         return _summarize(summary)
     except Exception as exc:  # noqa: BLE001 - benchmark backfill must never fail the job
         logger.warning("benchmark backfill failed: %s", exc)
-        return "error"
+        return _BENCHMARK_FAILED
 
 
 # FU-D46: the pseudo job id backfill progress reports under. The manual action
@@ -1355,8 +1399,8 @@ def backfill_history_all(
         set_progress(_BACKFILL_PROGRESS_ID, "回補基準指數")
         b_summary = _backfill_benchmarks(conn, registry, default_start, now=now)
         return (
-            f"prices: {_summarize(p_summary)} · fx: {_summarize(f_summary)} · "
-            f"benchmarks: {b_summary}"
+            f"價格：{_summarize(p_summary)}・匯率：{_summarize(f_summary)}・"
+            f"基準指數：{b_summary}"
         )
 
     acq = earliest_acquisitions(conn)
@@ -1379,13 +1423,59 @@ def backfill_history_all(
     set_progress(_BACKFILL_PROGRESS_ID, "回補基準指數")
     b_summary = _backfill_benchmarks(conn, registry, fx_start, now=now)
     return (
-        f"prices: {_summarize(p_summary)} · fx(from {fx_start.isoformat()}): "
-        f"{_summarize(f_summary)} · benchmarks(from {fx_start.isoformat()}): {b_summary}"
+        f"價格：{_summarize(p_summary)}・匯率（自 {fx_start.isoformat()}）："
+        f"{_summarize(f_summary)}・基準指數（自 {fx_start.isoformat()}）：{b_summary}"
     )
 
 
 def _jobs_by_id() -> dict[str, JobSpec]:
     return {j.id: j for j in JOBS}
+
+
+def failure_detail(exc: BaseException) -> str:
+    """The ``job_runs.detail`` of a run that raised — a sentence, never the bare ``str(exc)``.
+
+    DEF-030 (2026-09-23): the 排程中心 printed 「失敗 'insight:10'」 because the async worker
+    wrote ``str(KeyError('insight:10'))`` — the repr of a dict key — straight into the status
+    chip. The class name stays (it is what an operator searches the log for); the message
+    follows when there is one. Every worker in this module finalizes a failed row here.
+    """
+    name = type(exc).__name__
+    msg = str(exc).strip()
+    return f"執行失敗：{name}：{msg}" if msg else f"執行失敗：{name}"
+
+
+JobKind = Literal["system", "insight"]
+
+
+def job_kind(conn: sqlite3.Connection, job_id: str) -> JobKind | None:
+    """What runs *job_id*: ``insight`` (a kind=insight binding), ``system`` (a registered
+    static job), or None — nothing in this process can run it.
+
+    DEF-030: the ONE dispatch question. The cron path (:func:`dispatch_job`) always asked
+    it; the manual 立即執行 worker (:func:`run_job_func`) looked every id up in the STATIC
+    registry, which by construction never holds a dynamic ``insight:<id>`` row — so every
+    manual run of a scheduled insight task failed with ``KeyError``. The router asks this
+    before it accepts a run, so an id nothing can run is a 404, not a background failure.
+    """
+    if _insight_payload(conn, job_id) is not None:
+        return "insight"
+    if job_id in _jobs_by_id():
+        return "system"
+    return None
+
+
+def insight_task_of(conn: sqlite3.Connection, job_id: str) -> int | None:
+    """The insight task a kind=insight schedule row runs (its ``payload``), or None."""
+    return _insight_payload(conn, job_id)
+
+
+def unknown_job_message(job_id: str) -> str:
+    """The zh sentence for an id nothing can run (the 404 message and the worker's detail)."""
+    return f"找不到排程工作「{job_id}」：它不是已登錄的系統工作，也不是 AI 洞察任務的排程"
+
+
+_NO_INSIGHT_RUNNER = "執行失敗：AI 洞察執行器未載入（此程序未註冊 insight runner）"
 
 
 # --- In-flight job registry (FU-D36 / FU-D46) ---------------------------------
@@ -1489,7 +1579,7 @@ def run_job_outcome(
         try:
             outcome = _outcome_of(spec.func(conn, now=now))
         except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
-            outcome = JobOutcome("error", str(exc))
+            outcome = JobOutcome("error", failure_detail(exc))
         # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
         # reads as a negative-duration run in any naive display.
         conn.execute(
@@ -1546,14 +1636,33 @@ def latest_run_unfinished(conn: sqlite3.Connection, job_id: str) -> bool:
     return row is not None and row["finished_at"] is None
 
 
+def start_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
+    """Pre-insert the ``running`` row of a manual run, in the shape its KIND writes (DEF-030).
+
+    A kind=insight row gets :func:`start_insight_run`'s shape (``payload`` = the task id), so
+    a run started from the 排程中心 is the same row the task door and the cron path write —
+    the per-task run history (``GET /api/insight-tasks/{id}/runs``) reads it by payload.
+    """
+    payload = _insight_payload(conn, job_id)
+    if payload is not None:
+        return start_insight_run(conn, payload, now=now)
+    return start_job_run(conn, job_id, now=now)
+
+
 def run_job_func(job_id: str, *, now: datetime) -> None:
     """Execute a job in a fresh session, finalizing its latest running row.
 
     For the async ``/run`` endpoint: the request handler already inserted the running
-    row via ``start_job_run``; this opens its OWN connection (the request conn is closed
+    row via :func:`start_run`; this opens its OWN connection (the request conn is closed
     by then) and finalizes it. This is a fire-and-forget daemon-thread target, so the
     WHOLE body is exception-safe — any failure (job func, or even the surrounding DB
     access) is swallowed so it never crashes the worker thread.
+
+    DEF-030: dispatches by KIND, exactly like the cron path — a kind=insight row goes to
+    :func:`_execute_insight` (the registered insight runner finalizes THIS row), a static
+    job to its registry func. It used to look every id up in the static registry and write
+    the resulting ``KeyError`` text into the row. An id nothing can run is finalized as an
+    error sentence rather than left ``running`` (the router refuses it with 404 first).
     """
     try:
         with session() as conn:
@@ -1564,17 +1673,32 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             ).fetchone()
             if rid is None:
                 return
+            run_id = int(rid["id"])
+            payload = _insight_payload(conn, job_id)
+            if payload is not None:
+                _execute_insight(
+                    conn, job_id, payload, now=now, run_id=run_id,
+                    trigger=InsightTrigger(source="manual"),
+                )
+                return
+            spec = _jobs_by_id().get(job_id)
+            if spec is None:
+                finish_job_run(
+                    conn, run_id, status="error",
+                    detail=f"執行失敗：{unknown_job_message(job_id)}", now=now,
+                )
+                return
             # FU-D36: mark 執行中 once we own the row; the window before this (from
-            # start_job_run inserting the row) is the honest 已排入 state. Clear only
+            # start_run inserting the row) is the honest 已排入 state. Clear only
             # after finish_job_run commits, so the poll never reads a done run as queued.
             _mark_running(job_id)
             try:
                 try:
-                    outcome = _outcome_of(_jobs_by_id()[job_id].func(conn, now=now))
+                    outcome = _outcome_of(spec.func(conn, now=now))
                 except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
-                    outcome = JobOutcome("error", str(exc))
+                    outcome = JobOutcome("error", failure_detail(exc))
                 finish_job_run(
-                    conn, int(rid["id"]), status=outcome.status, detail=outcome.detail, now=now
+                    conn, run_id, status=outcome.status, detail=outcome.detail, now=now
                 )
             finally:
                 _clear_running(job_id)
@@ -1601,26 +1725,107 @@ def run_insight_func(insight_type_id: int, *, now: datetime, run_id: int) -> Non
     """Daemon target: dispatch the registered insight runner in a fresh session.
 
     The request handler already inserted the running row via :func:`start_insight_run`; this
-    opens its OWN connection and calls the runner with ``run_id`` so the same row is
-    finalized. Fully exception-safe (a fire-and-forget worker must never raise out).
+    opens its OWN connection and runs :func:`_execute_insight` with ``run_id`` so the same row
+    is finalized. Fully exception-safe (a fire-and-forget worker must never raise out).
+    DEF-030: it used to return silently with no runner registered (or swallow a raising
+    runner), leaving the row ``running`` forever — and the 409 overlap guard then refused
+    every later run of the task.
     """
     try:
-        runner = _INSIGHT_RUNNER
-        if runner is None:
-            return
-        # FU-D36: mark the kind=insight row 執行中 so the status endpoint reflects it
-        # uniformly with the static jobs; the runner finalizes its own job_runs row, so
-        # clear only after it returns (finalize-then-clear, matching run_job_func).
-        job_id = insight_job_id(insight_type_id)
-        _mark_running(job_id)
-        try:
-            set_progress(job_id, "產生 AI 洞察卡")
-            with session() as conn:
-                runner(conn, insight_type_id, now=now, run_id=run_id)
-        finally:
-            _clear_running(job_id)
+        with session() as conn:
+            _execute_insight(
+                conn, insight_job_id(insight_type_id), insight_type_id, now=now,
+                run_id=run_id, trigger=InsightTrigger(source="manual"),
+            )
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return
+
+
+def _execute_insight(
+    conn: sqlite3.Connection,
+    job_id: str,
+    insight_type_id: int,
+    *,
+    now: datetime,
+    run_id: int | None,
+    trigger: InsightTrigger,
+) -> None:
+    """Run one kind=insight job — the ONE executor behind every door (DEF-030).
+
+    Three doors reach it: the cron fire (:func:`dispatch_job`, ``run_id=None`` — the runner
+    inserts its own completed row, ``trigger.source="schedule"``), the 排程中心's 立即執行
+    (:func:`run_job_func`) and the task door (:func:`run_insight_func`), both with the id of
+    the row the request pre-inserted (``source="manual"``). The runner writes the row the
+    same way on all three (``generate._write_job_run``), and a failure is recorded the same
+    way on all three: the pre-inserted row is finalized with :func:`failure_detail`; on the
+    cron path a completed error row is written when the runner wrote none — before, a
+    failing SCHEDULED task logged an exception and left nothing in the 排程中心 at all.
+    """
+    runner = _INSIGHT_RUNNER
+    if runner is None:
+        if run_id is not None:
+            finish_job_run(conn, run_id, status="error", detail=_NO_INSIGHT_RUNNER, now=now)
+        else:
+            logger.info("kind=insight job %s fired but no runner is registered; skipping", job_id)
+        return
+    before = _latest_run_id(conn, job_id)
+    # FU-D36/D46: mark 執行中 (+ progress) for the status endpoint, on every door alike; the
+    # runner finalizes its own row, so clear only after it returns (finalize-then-clear).
+    _mark_running(job_id)
+    try:
+        set_progress(job_id, "產生 AI 洞察卡")
+        kwargs: dict[str, Any] = {"now": now, "trigger": trigger}
+        if run_id is not None:
+            kwargs["run_id"] = run_id
+        try:
+            runner(conn, insight_type_id, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — a runner failure must never crash the caller
+            logger.exception("insight runner failed for %s", job_id)
+            _record_insight_failure(
+                conn, job_id, insight_type_id, exc, now=now, run_id=run_id, since_id=before
+            )
+    finally:
+        _clear_running(job_id)
+
+
+def _latest_run_id(conn: sqlite3.Connection, job_id: str) -> int:
+    row = conn.execute("SELECT MAX(id) AS m FROM job_runs WHERE job_id = ?", (job_id,)).fetchone()
+    return int(row["m"]) if row is not None and row["m"] is not None else 0
+
+
+def _record_insight_failure(
+    conn: sqlite3.Connection,
+    job_id: str,
+    insight_type_id: int,
+    exc: BaseException,
+    *,
+    now: datetime,
+    run_id: int | None,
+    since_id: int,
+) -> None:
+    """Write the failed insight run to ``job_runs`` exactly once (DEF-030).
+
+    Pre-inserted row (manual doors): finalize it unless the runner already did. Cron door:
+    insert a completed ``error`` row unless the runner wrote one for this invocation (a row
+    newer than ``since_id`` — e.g. the main run was recorded and a later shadow pass raised).
+    """
+    detail = failure_detail(exc)
+    if run_id is not None:
+        row = conn.execute(
+            "SELECT finished_at FROM job_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is not None and row["finished_at"] is None:
+            finish_job_run(conn, run_id, status="error", detail=detail, now=now)
+        return
+    if _latest_run_id(conn, job_id) > since_id:
+        return
+    finished = datetime.now(tz=now.tzinfo or UTC).isoformat()
+    conn.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
+        "cost_usd, is_shadow) VALUES (?, ?, ?, 'error', ?, ?, '0', 0)",
+        (job_id, now.isoformat(), finished, detail, str(insight_type_id)),
+    )
+    conn.commit()
 
 
 # log_export_run REMOVED (2026-07-03, human decision): exports are user actions,
@@ -1676,8 +1881,7 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
     """
     payload = _insight_payload(conn, job_id)
     if payload is not None:
-        runner = _INSIGHT_RUNNER
-        if runner is None:
+        if _INSIGHT_RUNNER is None:
             logger.info("kind=insight job %s fired but no runner is registered; skipping", job_id)
             return None
         if latest_run_unfinished(conn, job_id):
@@ -1687,18 +1891,12 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
             )
             _record_skipped_overlap(conn, job_id, payload, now=now)
             return None
-        # FU-D46: mark the cron-fired insight run in the in-flight registry too (the
-        # manual path marks in run_insight_func) so the status endpoint shows 執行中 +
-        # progress uniformly regardless of the trigger.
-        _mark_running(job_id)
-        try:
-            set_progress(job_id, "產生 AI 洞察卡")
-            try:
-                runner(conn, payload, now=now)
-            except Exception:  # noqa: BLE001 — a runner failure must never crash the scheduler
-                logger.exception("insight runner failed for %s", job_id)
-        finally:
-            _clear_running(job_id)
+        # DEF-030: the SAME executor as both manual doors (in-flight mark + progress, the
+        # runner call, the failure record) — only the trigger and the absent run_id differ.
+        _execute_insight(
+            conn, job_id, payload, now=now, run_id=None,
+            trigger=InsightTrigger(source="schedule"),
+        )
         return None
     if job_id not in _jobs_by_id():
         logger.warning(

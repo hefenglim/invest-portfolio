@@ -60,8 +60,9 @@ oversight; the five append-only ledgers are the ones that needed this.
 
 import hashlib
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
+from portfolio_dash.data_ingestion.store import StoredCorporateAction, list_corporate_actions
 from portfolio_dash.shared.clock import app_now
 
 #: import kind -> the ledger table its writer inserts into. ``openings`` is absent on
@@ -182,20 +183,125 @@ def close_batch(conn: sqlite3.Connection, batch_id: int, *, row_count: int) -> N
     )
 
 
-def delete_batch(conn: sqlite3.Connection, batch_id: int, *, commit: bool = True) -> int:
+def is_undoable(kind: str) -> bool:
+    """Whether a batch of *kind* can be undone by batch — i.e. its rows carry the batch id.
+
+    ``openings`` cannot (see the module docstring: its table upserts on ``(account, symbol)``
+    and has no surrogate id to stamp), so its batch record is history, not a handle.
+    """
+    return kind in TABLE_BY_KIND
+
+
+def list_batches(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, object]]:
+    """The import history, newest first, with each batch's row count read LIVE (DEF-017).
+
+    ``import_batches.row_count`` is what the commit WROTE, and nothing ever updated it: a
+    row deleted on its own ledger tab (six DELETE doors, none of which knows a batch exists)
+    left the batch claiming rows it no longer owned — the verifier deleted a hand-entered
+    dividend and the history kept 「1 筆」 with a 復原 that then deleted 0. The count is
+    therefore derived from the rows that still carry the batch id, whichever door removed
+    the others, and a batch with nothing left is not listed: it has nothing to undo.
+
+    Each entry: the stored columns, ``written_count`` (the stored count, as written),
+    ``row_count`` (live; the stored count for a kind that cannot be tracked) and
+    ``undoable``. A kind without a provenance table (``openings``) is listed with its
+    stored count and ``undoable: False``, since no live count exists for it.
+    """
+    tables = sorted(set(TABLE_BY_KIND.values()))
+    live = " + ".join(
+        f"(SELECT COUNT(*) FROM {t} WHERE import_batch_id = b.id)"  # noqa: S608 - fixed map
+        for t in tables
+    )
+    rows = conn.execute(
+        "SELECT b.id, b.kind, b.broker, b.source_name, b.source_sha256, b.imported_at, "
+        f"b.row_count, b.status, {live} AS live "  # noqa: S608 - fixed map
+        "FROM import_batches b ORDER BY b.id DESC"
+    ).fetchall()
+    out: list[dict[str, object]] = []
+    for r in rows:
+        kind = str(r["kind"])
+        undoable = is_undoable(kind)
+        remaining = int(r["live"]) if undoable else int(r["row_count"])
+        if undoable and remaining == 0:
+            continue
+        out.append({
+            "id": r["id"], "kind": kind, "broker": r["broker"],
+            "source_name": r["source_name"], "source_sha256": r["source_sha256"],
+            "imported_at": r["imported_at"], "row_count": remaining,
+            "written_count": int(r["row_count"]), "status": r["status"],
+            "undoable": undoable,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+#: I-3: how one corporate-action EVENT (the rows of one ``(from_symbol, date, kind)`` set) of
+#: an undone batch leaves the ledger — INJECTED, never defaulted. A corporate-action row is
+#: not a plain row: deleting it must also take its linked reorganisation fee (DEF-020) and
+#: move back the price-alert band (DEF-021) and the target weight (F-3) its EXCHANGE carried
+#: across, and the weight lives in ``strategy/``, which ``data_ingestion`` may not import. The
+#: binder is ``api/routers/input_center.py::import_batch_delete``, which binds the ledger tab's
+#: own ``ledgers._delete_actions`` (with ``commit=False``) — so the undo and the 刪除 button are
+#: ONE delete, not two that agree today. The callable closes over the request's connection and
+#: must not commit: this function owns the transaction.
+#:
+#: Rejected: **the bare ``DELETE … WHERE import_batch_id=?``** this table used to get (the
+#: band and weight stayed on the new ticker, a linked fee survived its action, and no audit
+#: row was written — measured 2026-09-23); **a second copy of the restore logic here** (a
+#: second owner of "what leaves with an action", which is exactly how the two doors drifted).
+ActionSetDeleter = Callable[[list[StoredCorporateAction]], None]
+
+
+def _action_events(rows: list[StoredCorporateAction]) -> list[list[StoredCorporateAction]]:
+    """The batch's corporate-action rows grouped into events, NEWEST FIRST.
+
+    One event per ``(from_symbol, date, kind)`` — the ledger's own set key (F-32) — because
+    the set delete restores a band/weight ONCE per set. Newest first because a chain's moves
+    must be undone in reverse: ``A→B`` then ``B→C`` carried a band A→B→C, and only C→B then
+    B→A finds each destination still holding exactly the band it recorded.
+    """
+    events: dict[tuple[str, str, str], list[StoredCorporateAction]] = {}
+    for a in rows:
+        events.setdefault((a.from_symbol, a.date.isoformat(), a.kind), []).append(a)
+    return sorted(events.values(),
+                  key=lambda g: (max(a.date for a in g), max(a.id for a in g)),
+                  reverse=True)
+
+
+def delete_batch(
+    conn: sqlite3.Connection, batch_id: int, *, delete_actions: ActionSetDeleter,
+    commit: bool = True,
+) -> int:
     """Delete every ledger row this batch wrote, and the batch record. Returns rows removed.
 
     This is the half that makes an import safe to attempt on real data: a bad batch is
     undone exactly, rather than by restoring a backup and losing everything entered since.
+
+    The batch's corporate actions go through *delete_actions* (see :data:`ActionSetDeleter`),
+    one event at a time, newest first; every other table is a plain keyed DELETE. All of it
+    is ONE transaction: a failure part-way rolls the whole undo back.
     """
     removed = 0
-    for table in sorted(set(TABLE_BY_KIND.values())):
-        cur = conn.execute(
-            f"DELETE FROM {table} WHERE import_batch_id=?",  # noqa: S608 - fixed map
-            (batch_id,),
-        )
-        removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-    conn.execute("DELETE FROM import_batches WHERE id=?", (batch_id,))
-    if commit:
-        conn.commit()
+    try:
+        ids = {int(r[0]) for r in conn.execute(
+            "SELECT id FROM corporate_actions WHERE import_batch_id=?", (batch_id,))}
+        if ids:
+            owned = [a for a in list_corporate_actions(conn) if a.id in ids]
+            for event in _action_events(owned):
+                delete_actions(event)
+                removed += len(event)
+        for table in sorted(set(TABLE_BY_KIND.values()) - {"corporate_actions"}):
+            cur = conn.execute(
+                f"DELETE FROM {table} WHERE import_batch_id=?",  # noqa: S608 - fixed map
+                (batch_id,),
+            )
+            removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        conn.execute("DELETE FROM import_batches WHERE id=?", (batch_id,))
+        if commit:
+            conn.commit()
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
     return removed

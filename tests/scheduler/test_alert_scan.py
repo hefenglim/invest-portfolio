@@ -44,28 +44,32 @@ def _clear_runner() -> Iterator[None]:
 def test_alert_scan_records_events_and_dispatches(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Stub the alert computation so the job sees a single fx_drift event.
+    # Stub the alert computation so the job sees a single per-symbol event. (Until DEF-037
+    # this test used ``fx_drift:schwab`` and asserted the ACCOUNT id reached the card as its
+    # symbol — the defect itself, pinned; tests/scheduler/test_def037_alert_scope_dispatch.py
+    # now pins the opposite.)
     monkeypatch.setattr(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
-            Alert(id="fx_drift:schwab", sev="info", rule="fx_drift", title="t", detail="d")
+            Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d",
+                  href="/symbol/2330", scope="symbol", subject="2330")
         ],
     )
     sub = cs.create_insight_type(
-        conn, name="FX", scope="on_alert", alert_rules=["fx_drift"], enabled=True, now=NOW
+        conn, name="Vol", scope="on_alert", alert_rules=["vol_spike"], enabled=True, now=NOW
     )
     calls: list[tuple[int, str, str | None]] = []
 
     def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime,
-               fired_rule: str, fired_symbol: str | None) -> None:
+               fired_rule: str, fired_symbol: str | None, trigger: object) -> None:
         calls.append((insight_type_id, fired_rule, fired_symbol))
 
     jobs.register_insight_runner(runner)
     detail = jobs.alert_scan(conn, now=NOW)
     # event recorded + consumed; subscriber dispatched once
-    assert calls == [(sub.id, "fx_drift", "schwab")]
+    assert calls == [(sub.id, "vol_spike", "2330")]
     assert ab.unconsumed_events(conn) == []
-    assert "fx_drift" in detail
+    assert "vol_spike" in detail
 
 
 def test_alert_scan_no_subscribers_records_but_no_dispatch(
@@ -75,7 +79,7 @@ def test_alert_scan_no_subscribers_records_but_no_dispatch(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
             Alert(id="single_weight:2330", sev="risk", rule="single_weight",
-                  title="t", detail="d")
+                  title="t", detail="d", scope="symbol", subject="2330")
         ],
     )
     calls: list[int] = []
@@ -95,7 +99,7 @@ def test_alert_scan_records_new_market_risk_rule_event(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
             Alert(id="drawdown_from_peak:2330", sev="risk", rule="drawdown_from_peak",
-                  title="t", detail="d")
+                  title="t", detail="d", scope="symbol", subject="2330")
         ],
     )
     jobs.alert_scan(conn, now=NOW)
@@ -109,7 +113,8 @@ def test_compute_alerts_for_scan_uses_registered_runner(
     # The runner seam: when the app registers the alert-compute runner, the scan delegates to
     # it (the full P3 rule set). A scheduler-only process (no runner) falls back to the base
     # engine — proven here by clearing the runner and asserting the fallback returns a list.
-    sentinel = [Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d")]
+    sentinel = [Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d",
+                      scope="symbol", subject="2330")]
     jobs.register_alert_compute_runner(lambda c, *, now: sentinel)
     try:
         assert jobs._compute_alerts_for_scan(conn, now=NOW) == sentinel
@@ -132,7 +137,8 @@ def test_alert_scan_symbol_extracted_from_alert_id(
     monkeypatch.setattr(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
-            Alert(id="quota_low", sev="warn", rule="quota_low", title="t", detail="d")
+            Alert(id="quota_low", sev="warn", rule="quota_low", title="t", detail="d",
+                  scope="portfolio")
         ],
     )
     jobs.alert_scan(conn, now=NOW)

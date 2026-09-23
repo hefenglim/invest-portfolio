@@ -13,6 +13,7 @@ from portfolio_dash.portfolio.results import (
     RealizedRow,
     UnappliedAction,
 )
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import (
     CorporateAction,
     CorporateActionKind,
@@ -219,6 +220,7 @@ def _reject(
             from_symbol=action.from_symbol,
             to_symbol=action.to_symbol,
             reason=message,
+            action_id=action.id,
         )
     )
     if position is not None:
@@ -251,22 +253,27 @@ def _apply_action(
     """
     src_key = (action.account_id, action.from_symbol)
     source = positions.get(src_key)
+    # Every sentence below names the account through :func:`account_ref` — the backend has
+    # no display name for an account (``web/names.js`` is the one authority), so a bare id
+    # here reached the XIRR badge as 「tw_broker」 (functional test 2026-09-22, D-11). The
+    # fetch layer resolves the token; nothing in this module knows what it resolves to.
+    acct_ref = account_ref(action.account_id)
     try:
         # --- E1 / E2: the source must be a live position on this date ---
         if source is None:
-            _reject(f"{action.from_symbol}（{action.account_id}）於 "
+            _reject(f"{action.from_symbol}（{acct_ref}）於 "
                     f"{action.date.isoformat()} 沒有持倉，無法套用公司行動 — "
                     "請確認該日之前的買進或期初庫存是否遺漏",
                     None, action, unapplied, allow_oversell=allow_oversell)
             return
         if source.shares == _ZERO and source.short_shares == _ZERO:
-            _reject(f"{action.from_symbol}（{action.account_id}）於 "
+            _reject(f"{action.from_symbol}（{acct_ref}）於 "
                     f"{action.date.isoformat()} 已無持倉（部位已結清），無法套用公司行動",
                     source, action, unapplied, allow_oversell=allow_oversell)
 
         # --- E3: an oversold source has no basis left to scale ---
         if source.ever_oversold:
-            _reject(f"{action.from_symbol}（{action.account_id}）是賣超（待釐清）部位，"
+            _reject(f"{action.from_symbol}（{acct_ref}）是賣超（待釐清）部位，"
                     "成本基礎已被捨棄 — 縮放一個未定義的基礎仍是未定義",
                     source, action, unapplied, allow_oversell=allow_oversell)
 
@@ -284,7 +291,7 @@ def _apply_action(
         # --- EXCHANGE / SPINOFF share a destination and its guards ---
         # E5: no honest booking exists for moving an open short to another symbol.
         if source.short_shares > _ZERO:
-            _reject(f"{action.from_symbol}（{action.account_id}）有未回補的放空部位，"
+            _reject(f"{action.from_symbol}（{acct_ref}）有未回補的放空部位，"
                     "換股／分拆沒有可誠實記錄的分錄 — 請先回補",
                     source, action, unapplied, allow_oversell=allow_oversell)
 
@@ -294,7 +301,7 @@ def _apply_action(
             # E18: long and short are mutually exclusive BY CONSTRUCTION; `Q.shares +=`
             # onto a short destination breaks the invariant the whole replay rests on.
             if dest.short_shares > _ZERO:
-                _reject(f"目的標的 {action.to_symbol}（{action.account_id}）有未回補的"
+                _reject(f"目的標的 {action.to_symbol}（{acct_ref}）有未回補的"
                         "放空部位，多空混在一個部位裡會使均價失去意義",
                         source, action, unapplied, allow_oversell=allow_oversell)
             # E22 (D16): the mirror of E18 one level deeper. E19 stops a FLAG being
@@ -302,7 +309,7 @@ def _apply_action(
             # the sticky 賣超 guard deliberately discarded — which reads as an entirely
             # ordinary average over shares that have none.
             if dest.ever_oversold:
-                _reject(f"目的標的 {action.to_symbol}（{action.account_id}）是賣超"
+                _reject(f"目的標的 {action.to_symbol}（{acct_ref}）是賣超"
                         "（待釐清）部位，移轉成本過去會讓已捨棄的成本基礎「復活」，"
                         "並算出一個看似正常、實際上沒有依據的均價",
                         source, action, unapplied, allow_oversell=allow_oversell)
@@ -398,7 +405,8 @@ def _uncomputable_message(booking: object | None) -> str:
             or getattr(booking, "build_date", None))
     if account_id is None or symbol is None or when is None:
         return _UNCOMPUTABLE_ZH
-    return (f"{symbol}（{account_id}）於 {when.isoformat()} 的帳本資料數值無法計算"
+    return (f"{symbol}（{account_ref(account_id)}）於 {when.isoformat()} "
+            "的帳本資料數值無法計算"
             "（數值過大或除以零）— 請於交易帳本修正該列後重試")
 
 
@@ -409,10 +417,12 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     one signature every replay call site shares, so a new ledger is a field on the bundle
     instead of an edit at eight sites, seven of which fail silently when missed.
 
-    Same-day ordering is :class:`EventPriority` — opening, CORPORATE ACTION, buy, sell,
-    dividend. An action is effective at the START of its date: a same-day trade is quoted
-    in post-action terms (post-split price, new ticker), so the action applies first, and
-    opening inventory dated on an action date describes the position as it stood BEFORE.
+    Same-day ordering is :class:`EventPriority` — opening, CORPORATE ACTION, the day's
+    TRADES in ledger-id order (buys and sells interleaved exactly as they were entered —
+    DEF-012, 2026-09-23), dividend. An action is effective at the START of its date: a
+    same-day trade is quoted in post-action terms (post-split price, new ticker), so the
+    action applies first, and opening inventory dated on an action date describes the
+    position as it stood BEFORE.
 
     Oversell (a sell exceeding holdings): by default raise ``OversellError`` (validation
     callers — e.g. the 重算/rebuild action — want to reject it). With ``allow_oversell=True``
@@ -462,23 +472,33 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
         unapplied.append(
             UnappliedAction(account_id=bad.account_id, date=bad.date,
                             kind=bad.kind, from_symbol=bad.from_symbol,
-                            to_symbol=bad.to_symbol, reason=bad.reason)
+                            to_symbol=bad.to_symbol, reason=bad.reason,
+                            action_id=bad.id)
         )
 
-    events: list[tuple[date, int, str, object]] = []
-    for oi in bundle.opening:
-        events.append((oi.build_date, EventPriority.OPENING, "open", oi))
-    for tx in bundle.transactions:
-        events.append((tx.trade_date,
-                       EventPriority.BUY if tx.side is Side.BUY else EventPriority.SELL,
-                       "tx", tx))
-    for dv in bundle.dividends:
+    # (date, priority, sequence, kind, event). The THIRD key is the row's position within
+    # its own ledger list — for transactions that is ledger-id order, because
+    # ``store.list_transactions`` selects ``ORDER BY trade_date ASC, id ASC`` and every
+    # caller that appends a draft appends it LAST (the id the write will take). Until
+    # DEF-012 (2026-09-23) a day's buys ranked ahead of its sells regardless of the order
+    # they were entered, so a buy added after a same-day sell re-priced that sell's realized
+    # row (B-18: −1,580 previewed, −1,223 booked). Python's sort is stable, so the sequence
+    # key is what the old code relied on implicitly; it is explicit now because the rule
+    # is "write order", and a rule that exists only as an unstated sort property is not a
+    # rule. Same-priority dividends and actions keep list order for the same reason
+    # (``ORDER BY date ASC, id ASC`` on both), and openings are keyed ``(account, symbol)``.
+    events: list[tuple[date, int, int, str, object]] = []
+    for seq, oi in enumerate(bundle.opening):
+        events.append((oi.build_date, EventPriority.OPENING, seq, "open", oi))
+    for seq, tx in enumerate(bundle.transactions):
+        events.append((tx.trade_date, EventPriority.TRADE, seq, "tx", tx))
+    for seq, dv in enumerate(bundle.dividends):
         # R6: ordered by `effective_date`, so a STOCK dividend with a known ex-date is
         # replayed on the ex-date — where the price already reflects it.
-        events.append((dv.effective_date, EventPriority.DIVIDEND, "div", dv))
-    for ca in bundle.actions:
-        events.append((ca.date, EventPriority.CORPORATE_ACTION, "action", ca))
-    events.sort(key=lambda e: (e[0], e[1]))
+        events.append((dv.effective_date, EventPriority.DIVIDEND, seq, "div", dv))
+    for seq, ca in enumerate(bundle.actions):
+        events.append((ca.date, EventPriority.CORPORATE_ACTION, seq, "action", ca))
+    events.sort(key=lambda e: (e[0], e[1], e[2]))
 
     # -- ONE OWNER for the never-500 re-typing (2026-08-29) ---------------------------
     # A decimal fault on ledger data is an ``ArithmeticError``, NOT a ``ValueError``, so it
@@ -500,7 +520,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     # when the loop ends so that fault is not blamed on the last row read.
     booking: object | None = None
     try:
-        for _d, _p, kind, ev in events:
+        for _d, _p, _seq, kind, ev in events:
             booking = ev
             if kind == "action":
                 assert isinstance(ev, CorporateAction)
@@ -558,7 +578,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # the drawer 試算 (`strategy/whatif.py`) and `api/errors.py`'s handler each
                     # turn this into a 4xx envelope carrying `str(exc)` verbatim.
                     raise UnbookableLedgerError(
-                        f"{ev.symbol}（{ev.account_id}）於 {ev.trade_date.isoformat()} 的交易"
+                        f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+                        f"{ev.trade_date.isoformat()} 的交易"
                         f"股數為負（{ev.quantity}）— 負股數在買進與賣出兩側都沒有定義，"
                         "請於交易帳本修正該列"
                     )
@@ -723,7 +744,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # rather than crash (the same posture as the oversell degradation).
                     if not allow_oversell:
                         raise UnbookableLedgerError(
-                            f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
+                            f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+                            f"{ev.date.isoformat()} 有股利紀錄，"
                             "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
                             "請刪除該筆股利，或改以現金收支登錄。"
                         )
@@ -746,7 +768,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     successor = _follow_exchange_chain(positions, ev.account_id, existing)
                     if not allow_oversell:
                         raise UnbookableLedgerError(
-                            f"{ev.symbol}（{ev.account_id}）於 {ev.date.isoformat()} 有股利紀錄，"
+                            f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+                            f"{ev.date.isoformat()} 有股利紀錄，"
                             f"但該部位已於此之前換股為 {existing.vacated_to} — "
                             "已換出的標的不再有持倉可歸屬這筆配息，"
                             "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"

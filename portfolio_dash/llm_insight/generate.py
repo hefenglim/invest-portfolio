@@ -37,9 +37,11 @@ from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import InsightCard
 from portfolio_dash.llm_insight.gating import GateContext, GateResult, evaluate_gates, skip_reasons
-from portfolio_dash.llm_insight.insights_store import HorizonBasis
+from portfolio_dash.llm_insight.insights_store import HorizonBasis, InsightTrigger
+from portfolio_dash.llm_insight.official_templates import ON_ALERT_CONTEXT as _ON_ALERT_CONTEXT
 from portfolio_dash.llm_insight.official_templates import ON_ALERT_NOTE as _ON_ALERT_NOTE
 from portfolio_dash.shared import llm
+from portfolio_dash.shared.account_ref import resolve_account_refs
 from portfolio_dash.shared.llm_config import LLMBudgetExceeded, LLMError
 
 # The agent tag recorded in llm_usage for an insight generation call.
@@ -79,6 +81,33 @@ class RunInputs(BaseModel):
     # on_alert (R7): the fired event the dispatcher is acting on.
     fired_rule: str | None = None
     fired_symbol: str | None = None
+    # DEF-037 (2026-09-23): what started this run — stamped on every card it stores, and for
+    # an alert the source of the fired alert's facts in the prompt (see ``_alert_note``).
+    trigger: InsightTrigger | None = None
+
+
+def _alert_note(trigger: InsightTrigger | None) -> str:
+    """The on_alert prompt addendum: the ≤3-day rule, plus WHICH alert fired (DEF-037).
+
+    The fired alert's title and detail are the rule engine's own computed text (the same
+    words the bell showed), so the model describes the alert it was handed instead of
+    guessing one — measured on the demo, a ``target_cross`` card came back as 「RSI過熱警示」.
+    Only the DATE of ``fired_at`` goes in: the note is part of the cache fingerprint, and a
+    same-day re-dispatch of the same alert must stay a cache hit. A run without an alert
+    trigger (a legacy caller) keeps the bare note.
+    """
+    if trigger is None or trigger.source != "alert":
+        return _ON_ALERT_NOTE
+    # An account-level alert's title carries the backend's `{account:<id>}` token (the
+    # frontend resolves it in api.js). The model has no resolver, so spell the account out
+    # here — the LLM must never see, or echo, a wire token.
+    plain = "帳戶 {}".format
+    return _ON_ALERT_NOTE + _ON_ALERT_CONTEXT.format(
+        rule=trigger.rule or "（未記錄）",
+        title=resolve_account_refs(trigger.title or "（未記錄）", plain),
+        detail=resolve_account_refs(trigger.detail or "（未記錄）", plain),
+        fired_on=(trigger.fired_at or "")[:10] or "（未記錄）",
+    )
 
 
 class RunResult(BaseModel):
@@ -346,7 +375,7 @@ def run_insight_type(
                     fingerprint=fp, calibration_version=stamp_version,
                     horizon_days=effective_horizon, input_snapshot=snapshot, model="(none)",
                     cost_usd=Decimal("0"), now=now, is_shadow=inputs.is_shadow,
-                    horizon_basis=inputs.horizon_basis,
+                    horizon_basis=inputs.horizon_basis, trigger=inputs.trigger,
                 )
                 created += 1
             continue
@@ -365,7 +394,7 @@ def run_insight_type(
             conn, insight_type_id, ctx,
             calibration_version=inputs.calibration_version_override,
         )
-        alert_note = _ON_ALERT_NOTE if is_alert else ""
+        alert_note = _alert_note(inputs.trigger) if is_alert else ""
         prompt = assembled.prompt + alert_note
         snapshot = _snapshot_for(inputs, target, ctx)
         canon_prompt = _canonical_fingerprint_prompt(
@@ -434,6 +463,7 @@ def run_insight_type(
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
             price_at_create=seen_price, ceiling_at_create=seen_ceiling,
             tokens_in=completion.tokens_in, tokens_out=completion.tokens_out,
+            trigger=inputs.trigger,  # DEF-037: what produced this card
             # M9 (2026-09-17): the numbers this card was FED, taken from the very string
             # handed to the model above — the figure check's comparison population. Same
             # reason as price_at_create / ceiling_at_create: unrecoverable after the fact.

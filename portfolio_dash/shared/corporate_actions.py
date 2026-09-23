@@ -45,12 +45,24 @@ class CorporateActionKind(StrEnum):
 #:
 #: Moved here from ``api/routers/ledgers.py`` on 2026-08-16 so the printable 帳本報告 could
 #: use it: ``export/`` may not import ``api/`` (``architecture.md``), and copying three
-#: strings would have been the second copy. ⚠ There is already a THIRD, in
-#: ``web/detail.js``, and it disagrees — it labels SPINOFF 「分割」, which is this table's
-#: word for SPLIT. Two different kinds under one word, on two screens of the same app.
-#: Left alone here deliberately: a frontend label is a separate change with its own
-#: browser check, and silently swapping it would move a word the owner has been reading.
+#: strings would have been the second copy. There WAS a third, in ``web/detail.js``, and it
+#: disagreed — it labelled SPINOFF 「分割」, this table's word for SPLIT. Resolved 2026-09-23
+#: (I-14): the frontend prints the wire's ``kind_label`` (:func:`kind_label`) instead of
+#: keeping a table of its own.
 KIND_ZH: dict[str, str] = {"SPLIT": "分割", "EXCHANGE": "換股", "SPINOFF": "分拆"}
+
+
+def kind_label(kind: str) -> str:
+    """The zh word for a corporate-action kind, as every wire field ``kind_label`` carries it
+    (I-11 / I-14, 2026-09-23). Tolerates case and padding like the ledger reader; a kind this
+    table does not know (an unreadable row's raw string) is returned as it is, never guessed.
+
+    The frontend's three private copies of this table are gone — ``web/detail.js`` was the one
+    that disagreed (SPINOFF 「分割」, SPLIT 「拆併股」) — and every surface now prints the
+    server's ``kind_label``. ``tests/contract/test_i14_one_action_vocabulary.py`` fails on a
+    new copy, or on any remaining one that disagrees with this table."""
+    text = str(kind)
+    return KIND_ZH.get(text.strip().upper(), text)
 
 
 def is_ratio_term(value: Decimal) -> bool:
@@ -89,6 +101,12 @@ class CorporateAction(BaseModel):
     ratio_from: Decimal
     cost_carry: Decimal | None = None
     note: str | None = None
+    #: The ``corporate_actions.id`` of the stored row this model was read from, or ``None``
+    #: for an action that is being VALIDATED and not yet written (DEF-023, 2026-09-23). It
+    #: exists so a refusal can name the row — ``UnappliedAction.action_id`` — and the
+    #: dashboard can link the owner to it instead of describing it. Not part of the
+    #: arithmetic and not compared by any rule: two rows with equal terms are the same event.
+    id: int | None = None
 
     @model_validator(mode="after")
     def _check_terms(self) -> "CorporateAction":
@@ -215,6 +233,8 @@ class UnreadableAction(BaseModel):
     from_symbol: str
     to_symbol: str
     reason: str
+    #: See :attr:`CorporateAction.id` — the stored row id, so the refusal can be linked.
+    id: int | None = None
 
 
 def convert_stored(
@@ -235,6 +255,9 @@ def convert_stored(
     good: list[CorporateAction] = []
     bad: list[UnreadableAction] = []
     for r in rows:
+        # The row id rides along when the source has one (``StoredCorporateAction`` does;
+        # the protocol does not require it, so a test's bare row still converts).
+        row_id = getattr(r, "id", None)
         try:
             good.append(
                 CorporateAction(
@@ -247,6 +270,7 @@ def convert_stored(
                     ratio_from=r.ratio_from,
                     cost_carry=r.cost_carry,
                     note=r.note,
+                    id=row_id if isinstance(row_id, int) else None,
                 )
             )
         except (ValidationError, ValueError) as exc:
@@ -257,6 +281,7 @@ def convert_stored(
                     kind=str(r.kind),
                     from_symbol=r.from_symbol,
                     to_symbol=r.to_symbol,
+                    id=row_id if isinstance(row_id, int) else None,
                     reason=(
                         f"{r.from_symbol} 在 {r.date.isoformat()} 的公司行動資料不完整，"
                         f"無法套用（{r.kind} {r.ratio_to}/{r.ratio_from}）— "

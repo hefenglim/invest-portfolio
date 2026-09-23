@@ -131,8 +131,12 @@
      we tell the user login is now required (NOT a faked client session). */
   async function add() {
     if (LOCKED) return;
-    const name = $('#nu-name').value.trim();
-    const user = $('#nu-user').value.trim();
+    /* I-12: the raw values as submitted — the post-commit clear below may only clear what
+       was sent; a field retyped during the round trip is the next entry, not this one. */
+    const sentName = $('#nu-name').value;
+    const sentUser = $('#nu-user').value;
+    const name = sentName.trim();
+    const user = sentUser.trim();
     const pass = $('#nu-pass').value;
     if (!user || !pass) {
       _toast('資料不完整', 'fail', '帳號與密碼為必填');
@@ -143,9 +147,9 @@
     if (addBtn) addBtn.disabled = true;
     try {
       await api.post('/api/users', { name: name || user, username: user, password: pass });
-      $('#nu-name').value = '';
-      $('#nu-user').value = '';
-      $('#nu-pass').value = '';
+      window.pdField.writeIfUntouched($('#nu-name'), sentName, '');
+      window.pdField.writeIfUntouched($('#nu-user'), sentUser, '');
+      window.pdField.writeIfUntouched($('#nu-pass'), pass, '');
       if (wasEmpty) {
         /* M9-06: do NOT boot() here. Protection is live from this instant, this browser has
            no session, so GET /api/users answers 401 and api.js replaces the location with

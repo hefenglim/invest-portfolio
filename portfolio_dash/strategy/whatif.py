@@ -28,6 +28,7 @@ from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 _ZERO = Decimal("0")
 
@@ -196,17 +197,8 @@ def compute_whatif(
             # floor by the router and then again by the drawer. The KPI band's XIRR, reading
             # the same book, has been naming it out loud the whole time.
             raise WhatIfError(
-                f"帳本中有賣超部位待釐清（{exc.account_id}／{exc.symbol}，"
-                f"{exc.trade_date.isoformat()}）— 無法試算，請先修正該筆交易",
-                issues=[{
-                    "sev": "error",
-                    "code": "oversold_position",
-                    "text": str(exc),
-                    "field": None,
-                    "account_id": exc.account_id,
-                    "symbol": exc.symbol,
-                    "trade_date": exc.trade_date.isoformat(),
-                }],
+                oversold_position_message(exc, "無法試算"),
+                issues=oversold_position_issues(exc, str(exc)),
             ) from exc
         raise WhatIfError(str(exc)) from exc
 

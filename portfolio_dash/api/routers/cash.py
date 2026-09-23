@@ -58,10 +58,11 @@ from portfolio_dash.data_ingestion.validate import (
     CashPool,
     CashPoolFn,
     Issue,
+    cash_dip_sentence,
     cash_movement_kind,
-    dip_phrase,
     exceeds_magnitude,
     resolve_acq_home_amount,
+    unknown_account_message,
     validate_cash_movement,
 )
 from portfolio_dash.portfolio.cash import (
@@ -256,10 +257,13 @@ def _movement_error(issues: Sequence[Issue]) -> JSONResponse | None:
 def _negative_response(
     account_id: str, ccy: Currency, low: Decimal, on: date | None
 ) -> JSONResponse:
+    # DEF-008: the pool guards' ONE sentence — the account as a token, the figure at the
+    # currency's minor unit — with this door's own remedy (it is the ack-able one).
     return JSONResponse(status_code=422, content=error_body(
         "negative_cash",
-        f"此筆會使 {account_id} 的 {ccy.value} 現金{dip_phrase(on)} {decimal_str(low)} — "
-        "通常代表漏記入金或換匯；確認無誤可強制寫入"))
+        cash_dip_sentence(what="", account_id=account_id, ccy=ccy, on=on, low=low,
+                          cause=None)
+        + " — 通常代表漏記入金或換匯；確認無誤可強制寫入"))
 
 
 def fx_change_guard(
@@ -302,7 +306,7 @@ def fx_change_guard(
     acct = _accounts(conn).get(account_id)
     if acct is None:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
+            "validation_error", unknown_account_message(account_id), field="account_id"))
     ccy_issues = fx_ccy_issues(acct, from_ccy, to_ccy)  # audit C2: both legs
     if ccy_issues:
         # The issues come back in leg order, so the first one names the from-leg whenever the
@@ -499,7 +503,7 @@ def cash_statement(
     acct = accounts.get(account)
     if acct is None:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"帳戶 {account} 不存在", field="account"))
+            "not_found", unknown_account_message(account), field="account"))
     as_of = now.date()
     statements = account_statement(
         account, list_cash_movements(conn), list_fx_conversions(conn),
@@ -794,7 +798,7 @@ def cash_acq_rate(
     acct = _accounts(conn).get(account_id)
     if acct is None:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
+            "validation_error", unknown_account_message(account_id), field="account_id"))
     home = acct.funding_ccy
     if ccy == home:
         return {"available": False, "reason": "本幣入金不需要取得成本",

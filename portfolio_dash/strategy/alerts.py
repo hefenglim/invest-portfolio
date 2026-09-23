@@ -18,11 +18,12 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, TrendPoint
 from portfolio_dash.portfolio.results import CombinedView
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy.rules_config import AlertRules, get_alert_rules
@@ -44,6 +45,16 @@ _CONSENSUS_PRICE_CUT = Decimal("0.10")
 _DRAWDOWN_MIN_WINDOW = 30
 
 
+# DEF-037 (2026-09-23): what an alert is ABOUT, as structure. The id stays
+# ``f"{rule}:{subject}"`` (``rule`` alone for a portfolio-wide alert) — the push, the digest,
+# the bell and the event coalescing all key on it — but no consumer may recover the subject
+# from the id's suffix any more: that suffix is a symbol for ten rules, an ACCOUNT for
+# ``fx_drift``, a sector name for ``sector_weight`` and a currency code for
+# ``currency_weight``, and ``scheduler/jobs.py::_alert_symbol`` handed all of them to the
+# per-symbol AI card as a "symbol" (measured: a card for ``moomoo_my``).
+AlertScope = Literal["symbol", "sector", "account", "currency", "portfolio"]
+
+
 class Alert(BaseModel):
     id: str
     sev: Severity
@@ -51,6 +62,28 @@ class Alert(BaseModel):
     title: str
     detail: str
     href: str | None = None
+    # DEF-037: REQUIRED — the rule engine is where the subject is known, so every
+    # construction states it (tests/scheduler/test_def037_alert_scope_dispatch.py holds the
+    # AST guard). ``exclude=True`` keeps both fields off the wire: GET /api/alerts and the
+    # spec-17 golden dashboard payload are byte-identical, and the in-process consumer (the
+    # alert scan) reads the attributes.
+    scope: AlertScope = Field(exclude=True)
+    subject: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _id_agrees_with_subject(self) -> "Alert":
+        """The string id and the structure must say the same thing (string compat)."""
+        if self.scope == "portfolio":
+            if self.subject is not None or self.id != self.rule:
+                raise ValueError(f"portfolio-wide alert {self.id!r} carries a subject")
+        elif not self.subject or not (
+            self.id == f"{self.rule}:{self.subject}"
+            or self.id.startswith(f"{self.rule}:{self.subject}:")
+        ):
+            raise ValueError(
+                f"alert id {self.id!r} does not name its {self.scope} subject {self.subject!r}"
+            )
+        return self
 
 
 # --- fed market-risk inputs (P3 batch 2) --------------------------------------
@@ -222,7 +255,6 @@ def compute_alerts_from(
     quota_remaining: Decimal, quota_threshold: Decimal,
     ai_active: bool = True,
     calib_gap: Decimal | None = None,
-    account_names: dict[str, str] | None = None,
     symbol_metrics: dict[str, SymbolMetric] | None = None,
     target_weights: dict[str, Decimal] | None = None,
     consensus_deltas: dict[str, ConsensusDelta] | None = None,
@@ -236,8 +268,10 @@ def compute_alerts_from(
     pure and never imports the model registry itself. Defaults to ``True`` so callers that
     predate the gate keep firing quota_low.
 
-    ``account_names`` maps account_id → the accounts table's display name (fed by the
-    conn-bearing wrapper); an unknown/absent id falls back to the raw id.
+    An ACCOUNT is named by its ``{account:<id>}`` token (I-16, 2026-09-23), resolved to the
+    display name by the fetch layer (``web/api.js``) like every other backend sentence. The
+    ``account_names`` map this took (``accounts.name`` — 「Charles Schwab」, the English label
+    the owner never chose) is retired with it.
 
     The P3-batch-2 market-risk rules read three FED maps (assembled at the api/scheduler
     seam, never here — strategy/ cannot import pricing): ``symbol_metrics`` (per-symbol
@@ -249,7 +283,6 @@ def compute_alerts_from(
     """
     alerts: list[Alert] = []
     as_of = data.as_of.date()
-    names = account_names or {}
     metrics = symbol_metrics or {}
     targets = target_weights or {}
     consensus = consensus_deltas or {}
@@ -261,6 +294,7 @@ def compute_alerts_from(
             if h.weight is not None and h.weight > thr:
                 alerts.append(Alert(
                     id=f"single_weight:{h.symbol}", sev="risk", rule="single_weight",
+                    scope="symbol", subject=h.symbol,
                     title=f"{h.symbol} 單一持股權重偏高",
                     detail=f"單一持股權重 {_pct(h.weight)}＞門檻 {_pct(thr)}",
                     href=f"/symbol/{h.symbol}"))
@@ -271,6 +305,7 @@ def compute_alerts_from(
             if w > thr:
                 alerts.append(Alert(
                     id=f"sector_weight:{sector}", sev="risk", rule="sector_weight",
+                    scope="sector", subject=sector,
                     title=f"{sector} 產業權重偏高",
                     detail=f"產業權重 {_pct(w)}＞門檻 {_pct(thr)}",
                     href="index.html#sector-chart"))
@@ -280,6 +315,7 @@ def compute_alerts_from(
             if p.stale:
                 alerts.append(Alert(
                     id=f"stale_price:{p.symbol}", sev="warn", rule="stale_price",
+                    scope="symbol", subject=p.symbol,
                     title=f"{p.symbol} 報價過期", detail="庫存報價已過期，尚未更新",
                     href=f"/symbol/{p.symbol}"))
 
@@ -287,6 +323,7 @@ def compute_alerts_from(
         for sym in data.freshness.missing_prices:
             alerts.append(Alert(
                 id=f"missing_price:{sym}", sev="warn", rule="missing_price",
+                scope="symbol", subject=sym,
                 title=f"{sym} 無報價", detail="無庫存報價，無法評價",
                 href=f"/symbol/{sym}"))
 
@@ -298,7 +335,8 @@ def compute_alerts_from(
                 if drift > thr:
                     alerts.append(Alert(
                         id=f"fx_drift:{acct_id}", sev="info", rule="fx_drift",
-                        title=f"{names.get(acct_id, acct_id)} 匯率偏離成本",
+                        scope="account", subject=acct_id,
+                        title=f"{account_ref(acct_id)} 匯率偏離成本",   # I-16: token
                         detail=f"即期匯率偏離成本匯率 {_pct(drift)}＞門檻 {_pct(thr)}",
                         href="cash.html#fx"))
 
@@ -309,6 +347,7 @@ def compute_alerts_from(
             if 0 <= delta <= days:
                 alerts.append(Alert(
                     id=f"exdiv_upcoming:{item.symbol}", sev="info", rule="exdiv_upcoming",
+                    scope="symbol", subject=item.symbol,
                     title=f"{item.symbol} 即將除息", detail=_exdiv_phrase(delta),
                     href=f"/symbol/{item.symbol}"))
 
@@ -316,8 +355,11 @@ def compute_alerts_from(
         sev: Severity = "risk" if quota_remaining == _ZERO else "warn"
         alerts.append(Alert(
             id="quota_low", sev=sev, rule="quota_low", title="LLM 額度偏低",
+            scope="portfolio",
             detail=f"剩餘額度 {_usd(quota_remaining)}＜警戒值 {_usd(quota_threshold)}",
-            href="/settings"))
+            # I-15: straight to 設定 › AI 模型 (the quota lives there). A bare "/settings" landed
+            # on the default tab, 帳戶與費率 — the DEF-038 class, reached from the backend.
+            href="/settings#llm"))
 
     # calib_gap: pp-vs-pp comparison (both `calib_gap` and the threshold are percentage
     # points). None → below the global min_samples gate → silent (no alert). Single global
@@ -326,8 +368,11 @@ def compute_alerts_from(
             and calib_gap is not None and calib_gap > rules.calib_gap.value):
         alerts.append(Alert(
             id="calib_gap", sev="warn", rule="calib_gap", title="AI 校準誤差偏高",
+            scope="portfolio",
             detail=f"校準誤差 {_pp(calib_gap)}＞門檻 {_pp(rules.calib_gap.value)}",
-            href="/settings"))
+            # I-15: the 自我進化設定 block on 設定 › AI 提示詞 (settings.html resolves
+            # `#<tab>/<anchor>` to the element carrying data-anchor="evolution").
+            href="/settings#prompts/evolution"))
 
     # --- P3 batch 2: market-risk rules (held + watch universe; fed inputs) -----------------
 
@@ -354,6 +399,7 @@ def compute_alerts_from(
                 continue
             alerts.append(Alert(
                 id=f"drawdown_from_peak:{sym}", sev=sev_dd, rule="drawdown_from_peak",
+                scope="symbol", subject=sym,
                 title=f"{sym} 自高點回撤",
                 detail=(f"自 52 週高點回撤 {_pct(dd)}（{m.window_days} 日視窗）"
                         f"＞門檻 {_pct(thr_dd)}"),
@@ -369,6 +415,7 @@ def compute_alerts_from(
             if ratio >= mult:
                 alerts.append(Alert(
                     id=f"vol_spike:{sym}", sev="warn", rule="vol_spike",
+                    scope="symbol", subject=sym,
                     title=f"{sym} 波動突升",
                     detail=(f"30 日年化波動 {_pct(m.vol_30d)}，達 90 日基準 "
                             f"{_pct(m.vol_90d)} 的 {_mult(ratio)}＞門檻 {_mult(mult)}"),
@@ -397,6 +444,7 @@ def compute_alerts_from(
             if drift > band:
                 alerts.append(Alert(
                     id=f"rebalance_drift:{sym}", sev="risk", rule="rebalance_drift",
+                    scope="symbol", subject=sym,
                     title=f"{sym} 偏離目標配置",
                     detail=(f"現權重 {_pct(cur)} 偏離目標 {_pct(target)} 達 {_pct(drift)}"
                             f"＞帶寬 {_pct(band)}"),
@@ -430,6 +478,7 @@ def compute_alerts_from(
             window = f"（對比 {d.days_apart} 日前）" if d.days_apart is not None else ""
             alerts.append(Alert(
                 id=f"consensus_change:{sym}", sev="info", rule="consensus_change",
+                scope="symbol", subject=sym,
                 title=f"{sym} 分析師共識轉弱",
                 detail="；".join(parts) + window,
                 href=f"/symbol/{sym}"))
@@ -449,12 +498,14 @@ def compute_alerts_from(
             if t.target_low is not None and t.price <= t.target_low:
                 alerts.append(Alert(
                     id=f"target_cross:{sym}:low", sev="warn", rule="target_cross",
+                    scope="symbol", subject=sym,
                     title=f"{sym} 跌破目標價",
                     detail=f"現價 {t.price} ≤ 目標下限 {t.target_low}",
                     href=f"/symbol/{sym}"))
             if t.target_high is not None and t.price >= t.target_high:
                 alerts.append(Alert(
                     id=f"target_cross:{sym}:high", sev="warn", rule="target_cross",
+                    scope="symbol", subject=sym,
                     title=f"{sym} 突破目標價",
                     detail=f"現價 {t.price} ≥ 目標上限 {t.target_high}",
                     href=f"/symbol/{sym}"))
@@ -487,6 +538,7 @@ def compute_alerts_from(
             if sev_pd is not None:
                 alerts.append(Alert(
                     id="portfolio_drawdown", sev=sev_pd, rule="portfolio_drawdown",
+                    scope="portfolio",
                     title="組合自高點回撤",
                     detail=(f"目前自高點回撤 {_pct(pdd.current_depth)}＞門檻 {_pct(thr_pd)}"
                             f"（歷史最大 {_pct(pdd.max_depth)}，"
@@ -506,6 +558,7 @@ def compute_alerts_from(
             if w > thr_cw:
                 alerts.append(Alert(
                     id=f"currency_weight:{ccy.value}", sev="risk", rule="currency_weight",
+                    scope="currency", subject=ccy.value,
                     title=f"{ccy.value} 幣別權重偏高",
                     detail=f"幣別權重 {_pct(w)}＞門檻 {_pct(thr_cw)}（以報告幣計）",
                     href="index.html#ccy-content"))
@@ -523,9 +576,7 @@ def compute_alerts(
     layer (``api.insight_service.calibration_gap`` — strategy/ never imports llm_insight).
     The scheduler's ``_compute_alerts_for_scan`` calls this WITHOUT ``calib_gap`` → None →
     no calib_gap alert in the scan; that is intentional/acceptable (the calib_gap rule is
-    a dashboard/settings surface, not a scan trigger). Account display names are read
-    here and fed into the pure core (FH2 fix: the bell shows「Moomoo MY (US)」, never
-    the raw ``moomoo_my_us``).
+    a dashboard/settings surface, not a scan trigger). An account is named by token (I-16).
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     return compute_alerts_from(
@@ -534,16 +585,4 @@ def compute_alerts(
         quota_threshold=get_alert_threshold(conn),
         ai_active=ai_active(conn),
         calib_gap=calib_gap,
-        account_names=account_display_names(conn),
     )
-
-
-def account_display_names(conn: sqlite3.Connection) -> dict[str, str]:
-    """account_id → display name from the accounts table ({} when the table is absent)."""
-    try:
-        return {
-            str(r["account_id"]): str(r["name"])
-            for r in conn.execute("SELECT account_id, name FROM accounts")
-        }
-    except sqlite3.OperationalError:
-        return {}

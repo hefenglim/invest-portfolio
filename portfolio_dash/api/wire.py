@@ -1,7 +1,7 @@
 """Shared API wire mappers: enum case, Issue shape, fee-rule + dividend-model serialization."""
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from fastapi import HTTPException
@@ -12,7 +12,8 @@ from portfolio_dash.data_ingestion.validate import Issue
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import MarketRule
 from portfolio_dash.shared.models.enums import Side
-from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.shared.wire import decimal_str, to_wire
+from portfolio_dash.strategy.alerts import Alert
 
 _ISSUE_FIELD = {
     "sell_exceeds_holdings": "shares",
@@ -68,10 +69,32 @@ def parse_side(value: str) -> Side:
         raise HTTPException(status_code=400, detail=exc.message) from None
 
 
+def alerts_wire(alerts: Sequence[Alert]) -> list[Any]:
+    """Alerts on the wire WITH what each is about — ``scope`` + ``subject`` (I-16).
+
+    DEF-037 made both required on :class:`~strategy.alerts.Alert` and kept them off the wire
+    (``exclude=True``), so the bell went on recovering the subject from the id's suffix — a
+    symbol for ten rules, an ACCOUNT for ``fx_drift``, a sector for ``sector_weight``, a
+    currency for ``currency_weight`` — and listed all of them as 「檔」. ADDITIVE fields, the
+    one mapper for every route that serves alerts (the dashboard embed and GET /api/alerts).
+    """
+    return [
+        {**to_wire(a.model_dump()), "scope": a.scope, "subject": a.subject} for a in alerts
+    ]
+
+
 def issue_wire(issue: Issue) -> dict[str, Any]:
-    """Map the core Issue to the frontend's {sev, code, text, field} shape."""
+    """Map the core Issue to the frontend's {sev, code, text, field} shape.
+
+    Three severities, one per tier of :class:`Issue`: ``info`` (advisory — shown, never
+    gating, never acknowledged; DEF-014), ``warn`` (``needs_confirm``) and ``error``. The
+    advisory tier rides ``needs_confirm=True`` so the shared hard/soft predicates keep their
+    answer, which is why ``info`` is tested FIRST. It lived in a wrapper in
+    ``input_center.py`` (``_wire_issue``) until I-13 (2026-09-23), so the ledger routes' own
+    issue lists still rendered an advisory as a warning; every door reads this one now.
+    """
     return {
-        "sev": "warn" if issue.needs_confirm else "error",
+        "sev": "info" if issue.info else "warn" if issue.needs_confirm else "error",
         "code": issue.kind,
         "text": issue.message,
         "field": _ISSUE_FIELD.get(issue.kind),

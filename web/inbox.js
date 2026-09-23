@@ -320,6 +320,21 @@
     return resp;
   }
 
+  /* DEF-015: the last manual detection's outcome, kept on the panel (the toast leaves after
+     30 s; which symbol failed, and why, is what the owner has to go and check). */
+  function renderRefreshStatus(text, partial) {
+    let line = $('#inbox-refresh-status');
+    if (!line) {
+      line = el('div', 'inbox-note');
+      line.id = 'inbox-refresh-status';
+      const strip = $('#inbox-confirmed-strip');
+      if (strip && strip.parentNode) strip.parentNode.insertBefore(line, strip);
+      else section.appendChild(line);
+    }
+    line.textContent = '上次偵測：' + text;
+    line.classList.toggle('warn', !!partial);
+  }
+
   /* 重新偵測 button in the panel head */
   const head = section.querySelector('.panel-head');
   if (head) {
@@ -334,8 +349,20 @@
         : { done: () => {}, fail: () => {} };
       const resp = await boot(true);
       restore();
-      if (resp) prog.done('偵測完成', (resp.refreshed || '') + '・待確認 ' + resp.total_count + ' 筆');
-      else prog.fail('偵測失敗', '請稍後再試');
+      /* DEF-015: `refreshed` is {updated, failed: [{symbol, reason}], text}, and `text` is the
+         SAME sentence the scheduled scan writes into its run history (the server builds it,
+         with the pending count). A partial refresh is not a success: it gets the warn face
+         and stays on the panel, naming each failed symbol and why. */
+      if (resp) {
+        const r = resp.refreshed || null;
+        const text = (r && r.text) || ('待確認 ' + resp.total_count + ' 筆');
+        const failed = (r && r.failed) || [];
+        renderRefreshStatus(text, failed.length > 0);
+        if (failed.length && prog.warn) prog.warn('偵測完成（部分標的失敗）', text);
+        else prog.done('偵測完成', text);
+      } else {
+        prog.fail('偵測失敗', '請稍後再試');
+      }
     });
     head.appendChild(btn);
   }

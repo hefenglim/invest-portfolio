@@ -136,6 +136,30 @@ _TRAILING_TICKER = re.compile(r"\(([A-Z][A-Z0-9./]{0,7})\)(?:\s*@\s*[0-9.,]+)?\s
 _DUAL_DATE = " as of "
 
 
+def newest_first(posted_dates: list[date]) -> bool:
+    """Is this export printed newest row first — Schwab's own convention?
+
+    Schwab's transaction history downloads with the most recent row at the top, so the row
+    printed LOWER in the file happened EARLIER, and a same-day buy-then-sell reads as
+    sell-then-buy in line order. The direction is read off the file rather than assumed,
+    because a file a human re-sorted in a spreadsheet (and the synthetic regression corpus,
+    which is generated oldest-first) is still a Schwab file: a run of posted dates that
+    never increases is newest-first; one that never decreases is oldest-first. Anything
+    else — every row on one day, or a mixed order no export produces — falls back to the
+    broker's convention, and the fallback is the convention rather than the file's line
+    order because the convention is the documented fact and line order is not.
+    """
+    increases = decreases = 0
+    for earlier, later in zip(posted_dates, posted_dates[1:], strict=False):
+        if later > earlier:
+            increases += 1
+        elif later < earlier:
+            decreases += 1
+    if increases and not decreases:
+        return False
+    return True
+
+
 
 def classify(action: str, description: str) -> EventKind | None:
     """The ``(action, description)`` verdict, or ``None`` when no rule matches.
@@ -302,4 +326,14 @@ def parse(
                 description=description,
             )
         )
-    return events
+    # The chronological rank (``RawEvent.seq``): the row printed LOWEST in a newest-first
+    # export is the earliest, so it gets rank 0. Stamped in a second pass because the
+    # direction is a property of the whole file, read off the broker's own posted dates.
+    if newest_first([e.posted_date for e in events]):
+        ranks = range(len(events) - 1, -1, -1)
+    else:
+        ranks = range(len(events))
+    return [
+        e.model_copy(update={"seq": rank})
+        for e, rank in zip(events, ranks, strict=True)
+    ]

@@ -5,7 +5,8 @@
    資料來源（全部經 window.pdApi）：
    - 分析模板  ← GET /api/strategy-prompts  ([{id,name,body,enabled,...}])
    - 預警規則  ← GET /api/alert-rules        ({rules:[{id,...}]})
-   - 持倉標的  ← GET /api/dashboard          (holdings[].symbol)
+   - 標的宇宙  ← GET /api/dashboard + /api/instruments，經 window.ppUniverseSource（pipeline.js，
+                 以代號去重 — DEF-032；與「編輯標的」對話框同一個定義）
    - 額度      ← GET /api/insight-tasks/status (health.quota_remaining, Decimal STRING)
    建立：POST /api/insight-tasks（InsightTypeIn）→（排程則）POST .../{id}/schedule → 預檢。
 
@@ -29,7 +30,7 @@
 
   window.ppWizard = function () {
     /* fetched reference data (filled before the wizard renders). */
-    var REF = { templates: [], rules: [], held: [], registered: [], quota: null };
+    var REF = { templates: [], rules: [], held: [], registered: [], src: null, quota: null };
     var tplOf = function (id) {
       return REF.templates.find(function (x) { return x.id === id; }) || null;
     };
@@ -79,9 +80,13 @@
     loads.then(function (res) {
       REF.templates = (Array.isArray(res[0]) ? res[0] : []).filter(function (x) { return !x.archived; });
       REF.rules = (res[1] && res[1].rules) || [];
-      REF.held = ((res[2] && res[2].holdings) || []).map(function (h) { return h.symbol; });
+      /* DEF-032: the universe is a set of SYMBOLS. Holdings are (帳戶, 標的) rows, so mapping
+         them straight to symbols listed AAPL twice (嘉信＋Moomoo) and counted 14 檔 for 13.
+         The one definition lives in pipeline.js and is shared with the 編輯標的 dialog. */
+      REF.src = window.ppUniverseSource(res[2], res[4]);
+      REF.held = REF.src.held;
       /* every registered instrument (held + watchlist) — drives the opt-in「含觀察標的」宇宙 */
-      REF.registered = ((res[4] && res[4].list) || []).map(function (i) { return i.symbol; });
+      REF.registered = REF.src.registered;
       REF.quota = res[3] && res[3].health ? res[3].health.quota_remaining : null;
       /* dismissed (ESC / ✕ / backdrop) while loading → nothing to fill. */
       if (!slot || !slot.isConnected) return;
@@ -101,9 +106,7 @@
       /* ---- 右側即時管線預覽 ---- */
       function symCount() {
         if (d.scope !== 'per_symbol') return 1;
-        if (d.universe.mode === 'all') return REF.held.length;
-        if (d.universe.mode === 'all_registered') return REF.registered.length;
-        return (d.universe.symbols || []).length;
+        return window.ppUniverseSymbols(d.universe, REF.src).length;
       }
       function renderRail() {
         rail.replaceChildren();
@@ -122,7 +125,7 @@
           : d.scope === 'on_alert' ? '事件標的'
           : (d.universe.mode === 'all' ? '全部持倉 ' + REF.held.length
             : d.universe.mode === 'all_registered' ? '持倉＋觀察 ' + REF.registered.length
-            : '自選 ' + (d.universe.symbols || []).length) + ' 檔・每檔 1 卡'));
+            : '自選 ' + symCount()) + ' 檔・每檔 1 卡'));
         stack.appendChild(layer('守則', '全域守則（共用）'));
         if (!d.templates.length) stack.appendChild(layer('模板', '－ 尚未選擇 －', 'l-off'));
         d.templates.forEach(function (tid, i) {
@@ -244,28 +247,17 @@
               grid4.style.gridTemplateColumns = 'repeat(3, 1fr)';
               grid4.appendChild(opt('全部持倉', REF.held.length + ' 檔・自動跟隨持倉變動', d.universe.mode === 'all', function () { d.universe = { mode: 'all' }; renderStage(); }));
               grid4.appendChild(opt('含觀察標的', REF.registered.length + ' 檔・持倉＋觀察清單（每檔皆計費）', d.universe.mode === 'all_registered', function () { d.universe = { mode: 'all_registered' }; renderStage(); }));
-              grid4.appendChild(opt('自選標的', '持倉勾選', d.universe.mode === 'custom', function () { d.universe = { mode: 'custom', symbols: d.universe.symbols || [] }; renderStage(); }));
+              grid4.appendChild(opt('自選標的', '勾選持倉或觀察標的', d.universe.mode === 'custom', function () { d.universe = { mode: 'custom', symbols: d.universe.symbols || [] }; renderStage(); }));
               stage.appendChild(grid4);
               if (d.universe.mode === 'custom') {
-                var grid5 = el('div', 'pv-symgrid');
-                grid5.style.marginTop = '8px';
-                if (!REF.held.length) grid5.appendChild(el('div', 'wz-note', '目前無持倉標的可選。'));
-                REF.held.forEach(function (sym) {
-                  var lb = el('label', 'pv-check');
-                  var cb = el('input');
-                  cb.type = 'checkbox';
-                  cb.value = sym;
-                  cb.checked = (d.universe.symbols || []).indexOf(sym) >= 0;
-                  cb.addEventListener('change', function () {
-                    d.universe.symbols = Array.prototype.slice.call(grid5.querySelectorAll('input:checked')).map(function (x) { return x.value; });
-                    renderRail();
-                  });
-                  lb.appendChild(cb);
-                  lb.appendChild(el('span', null, sym));
-                  lb.appendChild(el('span', 'pv-symtag', '持倉'));
-                  grid5.appendChild(lb);
+                /* one checkbox per SYMBOL with its account chips — the same picker the 編輯標的
+                   dialog uses (pipeline.js::ppUniversePicker). */
+                var picker = window.ppUniversePicker(REF.src, d.universe.symbols || [], function (syms) {
+                  d.universe.symbols = syms;
+                  renderRail();
                 });
-                stage.appendChild(grid5);
+                picker.style.marginTop = '8px';
+                stage.appendChild(picker);
               }
             }
           }
@@ -298,7 +290,7 @@
             stage.appendChild(row);
           });
           var lib = el('a', 'btn btn-sm', '＋ 需要新模板？前往模板庫');
-          lib.href = 'settings.html#prompts';
+          lib.href = 'settings.html#prompts/templates';   /* DEF-038: land ON the 策略提示詞 panel */
           stage.appendChild(lib);
         }
 

@@ -285,7 +285,7 @@
         </div>
         <div style="padding:14px var(--pad);">
           <h3 class="panel-title" style="margin:0 0 8px;font-size:12px;">加值歷史</h3>
-          <table class="data"><thead><tr><th>時間</th><th>金額</th><th class="col-text">備註</th></tr></thead><tbody id="topup-body"></tbody></table>
+          <div class="table-wrap"><table class="data"><thead><tr><th>時間</th><th>金額</th><th class="col-text">備註</th></tr></thead><tbody id="topup-body"></tbody></table></div>
         </div>
       </div>
     </section>
@@ -362,7 +362,7 @@
         <button class="btn btn-primary" id="news-save" type="button">儲存</button>
       </div>
     </section>
-    <section class="panel">
+    <section class="panel" data-anchor="templates">
       <div class="panel-head">
         <h2 class="panel-title">策略提示詞</h2>
         <span class="panel-sub">啟用中的策略會在洞察批次依序執行，各產生一張洞察卡片</span>
@@ -716,13 +716,47 @@
   document.querySelectorAll('.set-tab').forEach(function (b) {
     b.addEventListener('click', function () { window.showSettingsTab(b.dataset.tab); });
   });
-  /* activate from hash or default */
-  var hash = location.hash.slice(1);
+  /* activate from hash or default.
+     DEF-038: `#<tab>/<anchor>` deep-links to a block INSIDE a tab — the element in that tab
+     carrying `data-anchor="<anchor>"` (a closed <details> is opened). A tab alone could only
+     land at the top of the tab, so 洞察管線's 「進化設定」 card linked to bare settings.html
+     and landed on 帳戶與費率. Several targets are built asynchronously (settings-prompts.js
+     mounts 自我進化設定 after its fetches), so the lookup waits for the node (bounded) and
+     re-asserts the scroll briefly while content above it is still arriving. */
   var valid = ['llm','prompts','scheduler','accounts','datasources','alerts','notify','exports'];
-  showSettingsTab(valid.includes(hash) ? hash : 'accounts', true);
+  function parseHash(raw) {
+    var parts = String(raw || '').split('/');
+    return { tab: parts[0], anchor: (parts[1] || '').replace(/[^\w-]/g, '') };
+  }
+  function goAnchor(tab, anchor) {
+    var view = document.getElementById('view-' + tab);
+    if (!view || !anchor) return;
+    var sel = '[data-anchor="' + anchor + '"]';
+    var land = function () {
+      var target = view.querySelector(sel);
+      if (!target) return false;
+      if (target.tagName === 'DETAILS') target.open = true;
+      target.scrollIntoView({ block: 'start', behavior: 'auto' });
+      return true;
+    };
+    var settle = function () {
+      [400, 1200].forEach(function (ms) { setTimeout(land, ms); });
+    };
+    if (land()) { settle(); return; }
+    var mo = new MutationObserver(function () {
+      if (land()) { mo.disconnect(); settle(); }
+    });
+    mo.observe(view, { childList: true, subtree: true });
+    setTimeout(function () { mo.disconnect(); }, 10000);
+  }
+  var start = parseHash(location.hash.slice(1));
+  showSettingsTab(valid.includes(start.tab) ? start.tab : 'accounts', true);
+  if (valid.includes(start.tab)) goAnchor(start.tab, start.anchor);
   window.addEventListener('hashchange', function () {
-    var h = location.hash.slice(1);
-    if (valid.includes(h)) showSettingsTab(h);
+    var h = parseHash(location.hash.slice(1));
+    if (!valid.includes(h.tab)) return;
+    showSettingsTab(h.tab, !!h.anchor);
+    goAnchor(h.tab, h.anchor);
   });
   /* 版本發佈資訊 (一般 tab): lazy-ensure whatsnew.js through shell's version-stamped loader,
      then open the full version-history browser. Guest mode fine (GET only). */

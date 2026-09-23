@@ -24,10 +24,18 @@ def list_inbox(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    refreshed: str | None = None
-    if refresh:
-        refreshed = inbox.refresh_events_for_acquired(conn, now=now)
+    # DEF-015: the refresh travels as DATA — which symbols failed and why — plus the one
+    # sentence the scheduled scan also writes (``inbox.scan_sentence``). It was a bare
+    # 「14 檔事件已更新，1 檔失敗」 string that named nothing.
+    outcome = inbox.refresh_events_for_acquired(conn, now=now) if refresh else None
     rows = inbox.detect(conn, now=now)
+    refreshed: dict[str, Any] | None = None
+    if outcome is not None:
+        refreshed = {
+            "updated": outcome.updated,
+            "failed": outcome.failed,
+            "text": inbox.scan_sentence(outcome, len(rows)),
+        }
     return {
         "rows": [to_wire(r.model_dump()) for r in rows],
         "total_count": len(rows),

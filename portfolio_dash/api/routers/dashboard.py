@@ -15,16 +15,18 @@ from portfolio_dash.api import alert_inputs, insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.routers.scheduler import scheduler_running_dep
 from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.api.wire import alerts_wire
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight import composer_store, insights_store
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.shared.corporate_actions import kind_label
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy.alerts import account_display_names, compute_alerts_from
+from portfolio_dash.strategy.alerts import compute_alerts_from
 from portfolio_dash.strategy.rules_config import get_alert_rules
 
 router = APIRouter()
@@ -65,6 +67,11 @@ def dashboard(
     # ``ai_active`` (P3 batch 3 · 3B): the smallest honest surface for the quota chip — when
     # false the chip shows a neutral 「AI 未啟用」 instead of 「AI 額度 $0」+warning, matching
     # the quota_low alert now being gated off while no model is configured.
+    # I-11 / I-14: the ledger's word for each refused action's kind, so the 未套用 banner prints
+    # the server's vocabulary (分割／換股／分拆) rather than a table of its own. ADDITIVE.
+    for u in payload.get("unapplied_actions") or []:
+        u["kind_label"] = kind_label(str(u.get("kind", "")))
+
     ai_on = ai_active(conn)
     payload["llm_quota"] = {
         "remaining_usd": decimal_str(budget_remaining(conn)),
@@ -104,13 +111,12 @@ def dashboard(
         quota_threshold=get_alert_threshold(conn),
         ai_active=ai_on,
         calib_gap=calib,
-        account_names=account_display_names(conn),  # FH2: same display names as GET /api/alerts
         symbol_metrics=fed.symbol_metrics,
         target_weights=fed.target_weights,
         consensus_deltas=fed.consensus_deltas,
         target_levels=fed.target_levels,  # FU-D28: keep the embed identical to GET /api/alerts
     )
-    payload["alerts"] = to_wire([a.model_dump() for a in alerts])
+    payload["alerts"] = alerts_wire(alerts)   # I-16: + scope / subject
 
     # insights: the latest N real non-shadow cards (spec 08/04 I3). Router-fed (the pure
     # build_dashboard returns insights=[] — it does not read the insights table), overwriting

@@ -110,6 +110,9 @@
 .ca-modal .ca-fix-note { font-size: 10px; color: var(--text-3); line-height: 1.5; }
 /* D44's restate opt-in: an ACTION inside a warning, so it outweighs the notes under it. */
 .ca-modal .ca-restate { font-weight: 600; }
+/* DEF-005: the ratio box that holds a non-integer, and the sentence under it. */
+.ca-modal .input.ca-int-bad { border-color: var(--up); }
+.ca-modal .ca-int-error { font-size: 11px; color: var(--up); }
 @media (max-width: 640px) {
   .ca-modal .ca-grid { grid-template-columns: 1fr; }
 }`;
@@ -144,6 +147,12 @@
     return w;
   }
 
+  /* A ratio term is a POSITIVE INTEGER, judged on the text the owner typed. Leading zeros
+     are tolerated ("03" is 3); a decimal point, a sign or a letter is not. */
+  const INT_TERM = /^0*[1-9][0-9]*$/;
+  const isIntTerm = (v) => INT_TERM.test(String(v).trim());
+  const RATIO_ERROR = '比例只收整數（不要填算好的小數）';
+
   function intBox(value) {
     const n = el('input', 'input ca-int');
     n.type = 'number';
@@ -152,12 +161,14 @@
     n.inputMode = 'numeric';
     n.value = value === undefined ? '' : String(value);
     /* Integers only — the two terms map straight onto ratio_from / ratio_to with no
-       mental arithmetic and nothing to convert (§6.7). A pasted decimal is stripped
-       here as a courtesy; the REAL rejection is E6/E6a's, server-side. */
-    n.addEventListener('input', () => {
-      const cleaned = n.value.replace(/[^0-9]/g, '');
-      if (cleaned !== n.value) n.value = cleaned;
-    });
+       mental arithmetic and nothing to convert (§6.7). NEVER REWRITTEN (DEF-005,
+       2026-09-23): this box used to strip every non-digit from the value as a "courtesy",
+       which turned a typed 1.5 into 15 in silence — the owner saw 15:3 (a 5-for-1 reverse
+       split) where they meant 1.5:3, the preview computed it, and the save button stayed
+       enabled. The server's E6/E6a rejection never saw the decimal, because the browser
+       had already made it a legal integer. The value now stays EXACTLY as typed; the box
+       is flagged, the error is stated inline (`RATIO_ERROR`), and `ready()` refuses to
+       preview or save until the owner fixes it. */
     return n;
   }
 
@@ -260,9 +271,12 @@
       const parts = [];
       if (m.target_low !== null) parts.push('下限 ' + f().exact(m.target_low));
       if (m.target_high !== null) parts.push('上限 ' + f().exact(m.target_high));
+      /* DEF-021: the move is CONDITIONALLY reversible — said here, where the move is
+         promised, so the owner learns the undo rule before they need it. */
       host.appendChild(el('div', 'ca-unblock',
         '✓ ' + m.from_symbol + ' 的目標價（' + parts.join('、') + '）會一併移到 '
-        + m.to_symbol + '，數值不變'));
+        + m.to_symbol + '，數值不變；刪除此行動時若 ' + m.to_symbol
+        + ' 的目標價未再改動會自動移回 ' + m.from_symbol));
     }
 
     (data.issues || []).forEach((i) => {
@@ -418,19 +432,21 @@
   }
 
   /* §3.3 / D12: the reorganisation fee is a WITHDRAW cash movement, and the caveat is
-     shown inline rather than filed in a manual nobody reads at entry time. */
-  async function bookReorgFee(body, amount, ccy) {
-    if (!amount) return;
-    try {
-      await api().post('/api/cash/movements', {
-        account_id: body.account_id, date: body.date, kind: 'WITHDRAW',
-        ccy: ccy, amount: amount,
-        note: '重組費用 ' + body.from_symbol + ' ' + body.date
-      });
-      if (window.toast) window.toast('已登錄重組費用', 'ok', '記為現金支出，不計入成本基礎');
-    } catch (e) {
-      if (window.toast) window.toast('重組費用登錄失敗', 'fail', e && e.message);
-    }
+     shown inline rather than filed in a manual nobody reads at entry time.
+
+     DEF-020 (2026-09-23): it rides IN THE SAME REQUEST as the action (`reorg_fee` +
+     `reorg_fee_ccy` on POST /api/ledgers/corporate-actions) and the server writes both
+     rows under one commit, linked by `cash_movements.corporate_action_id`. This used to be
+     a second POST to /api/cash/movements after the action had committed — so a 502 on the
+     second request left an action with no fee, and deleting the action left the fee
+     standing on the cash page (the TWD pool stayed 50 short with nothing to explain it).
+     A fee the cash guard refuses now refuses the whole action, and the toast says so. */
+  function feeToast(resp) {
+    const fee = resp && resp.reorg_fee;
+    if (!fee || !window.toast) return;
+    window.toast('已一併登錄重組費用', 'ok',
+      f().money(fee.amount, fee.ccy) + ' ' + fee.ccy
+      + '，記為現金支出（不計入成本基礎）；刪除此公司行動時會一併刪除');
   }
 
   /* ---------------------------------------------------------------------- the form */
@@ -516,6 +532,19 @@
     ratioLine.appendChild(fToSym);
     bodyEl.appendChild(field('比例', ratioLine,
       '請照對帳單上的兩個整數填寫（例如 3 換 1、1 換 20、2 換 7），不要填算好的小數'));
+    /* DEF-005: the inline refusal. Shown the moment either term is not a positive
+       integer; the typed value is left untouched so the owner can see what they typed. */
+    const ratioErr = el('div', 'ca-int-error', RATIO_ERROR);
+    ratioErr.hidden = true;
+    bodyEl.appendChild(ratioErr);
+    function ratioTermsValid() {
+      const okFrom = fFrom.value.trim() === '' || isIntTerm(fFrom.value);
+      const okTo = fTo.value.trim() === '' || isIntTerm(fTo.value);
+      fFrom.classList.toggle('ca-int-bad', !okFrom);
+      fTo.classList.toggle('ca-int-bad', !okTo);
+      ratioErr.hidden = okFrom && okTo;
+      return okFrom && okTo;
+    }
 
     const fCarry = el('input', 'input');
     fCarry.type = 'number';
@@ -552,8 +581,8 @@
     fFee.min = '0';
     fFee.style.width = '140px';
     bodyEl.appendChild(field('重組費用（選填）', fFee,
-      '若對帳單有收取重組／換股手續費，會記成一筆現金支出（WITHDRAW）。'
-      + '⚠ 它不會併入成本基礎，也不會進入 XIRR 的現金流序列'));
+      '若對帳單有收取重組／換股手續費，會與這筆行動同時記成一筆現金支出（WITHDRAW），'
+      + '刪除行動時一併刪除。⚠ 它不會併入成本基礎，也不會進入 XIRR 的現金流序列'));
 
     /* --- the preview: ALWAYS ON, and the most important element on this form --- */
     const previewHost = el('div', 'ca-preview');
@@ -617,11 +646,18 @@
         cost_carry: state.kind === 'SPINOFF' ? fCarry.value : null,
         to_symbol_price:
           state.kind === 'SPINOFF' ? (fChildPrice.value.trim() || null) : null,
-        note: fNote.value.trim() || null
+        note: fNote.value.trim() || null,
+        /* DEF-020: the fee rides with the action; the currency is the instrument's quote
+           currency as the last preview reported it (the server defaults to the same). */
+        reorg_fee: fFee.value.trim() || null,
+        reorg_fee_ccy: (state.preview && state.preview.ccy) || null
       };
     }
 
     function ready() {
+      /* DEF-005: a non-integer term is never previewed and never saved — and never
+         rewritten. The inline error under the ratio line says why. */
+      if (!ratioTermsValid()) return false;
       const b = requestBody();
       if (!b.account_id || !b.from_symbol || !b.date) return false;
       if (!b.ratio_to || !b.ratio_from) return false;
@@ -675,6 +711,10 @@
       if (!ready()) {
         state.preview = null;
         renderPreview(previewHost, null, state);
+        if (!ratioErr.hidden) {
+          previewHost.replaceChildren(el('div', 'ca-issue ca-issue-error',
+            '✕ ' + RATIO_ERROR + '，請改成對帳單上的兩個整數後再試算'));
+        }
         syncSave();
         return;
       }
@@ -707,11 +747,10 @@
         dismiss();
         if (window.toast) {
           window.toast('公司行動已登錄', 'ok',
-            '寫入 ' + resp.written + ' 筆（' + (resp.accounts || []).join('、') + '）'
+            '寫入 ' + resp.written + ' 筆（' + (resp.accounts || []).map(acctZh).join('、') + '）'
             + (resp.prices_restated ? '；已重算 ' + resp.prices_restated + ' 筆價格' : ''));
         }
-        await bookReorgFee(body, fFee.value.trim(),
-          (state.preview && state.preview.ccy) || '');
+        feeToast(resp);
         await applyBandRestate(restatePreview);
         if (window.pdLedgerRefresh) { try { await window.pdLedgerRefresh(); } catch (e) { /* noop */ } }
         if (prefill.onSaved) prefill.onSaved(resp);
@@ -739,7 +778,12 @@
         fAcct.appendChild(o);
       });
       if (prefill.account_id && !list.some((a) => a.account_id === prefill.account_id)) {
-        const o = el('option', null, prefill.account_id);
+        /* I-9: a prefilled account the list does not carry still gets its display name
+           (pdNames resolves from its own registry, with the id as ITS fallback) — it printed
+           the bare id here, the one option on the page that did. */
+        const o = el('option', null, window.pdNames
+          ? window.pdNames.accountOption({ id: prefill.account_id })
+          : prefill.account_id);
         o.value = prefill.account_id;
         o.selected = true;
         fAcct.appendChild(o);

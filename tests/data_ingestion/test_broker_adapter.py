@@ -563,3 +563,87 @@ def test_the_corpus_proves_rule_7_is_live() -> None:
     with pytest.raises(UnmappedRow) as excinfo:
         _corpus("schwab_unmapped.csv")
     assert excinfo.value.source_file == "schwab_unmapped.csv"
+
+
+# ============================================================ file order → event order
+# DEF-027's companion (2026-09-23): the replay now books same-day trades by WRITE id, and
+# Schwab prints its history NEWEST FIRST, so the row printed lower happened earlier. A
+# converter that sorted by ``(trade_date, line_no)`` wrote a same-day buy-then-sell as
+# sell-then-buy: an oversell on a position the same file had just opened, and a fabricated
+# 「held before the window」 opening for it.
+
+_ROUND_TRIP_NEWEST_FIRST = (
+    '03/10/2026,Sell,AAA,AAA CORP,10,$12.00,$0.01,$119.99',   # line 2: printed FIRST, happened LAST
+    '03/10/2026,Buy,AAA,AAA CORP,10,$10.00,$0.00,-$100.00',   # line 3
+    '03/09/2026,Wire Received,,WIRE INCOMING,,,,$1000.00',    # line 4: the earliest row
+)
+
+
+def test_a_newest_first_export_ranks_the_lower_row_as_the_earlier_event() -> None:
+    events = _parse(*_ROUND_TRIP_NEWEST_FIRST)
+    assert [e.line_no for e in events] == [2, 3, 4]
+    assert [e.seq for e in events] == [2, 1, 0], "seq is the CHRONOLOGICAL rank, 0 = earliest"
+
+
+def test_an_oldest_first_export_keeps_its_line_order_as_the_event_order() -> None:
+    """A file a human re-sorted in a spreadsheet (and the synthetic corpus, generated
+    oldest-first) is still a Schwab file; the direction is read off the posted dates."""
+    events = _parse(*reversed(_ROUND_TRIP_NEWEST_FIRST))
+    assert [e.seq for e in events] == [0, 1, 2]
+
+
+@pytest.mark.parametrize(("dates", "want"), [
+    ([], True),                                          # nothing to read → the broker's convention
+    ([date(2026, 3, 10)], True),
+    ([date(2026, 3, 10), date(2026, 3, 10)], True),      # one day, no direction → convention
+    ([date(2026, 3, 10), date(2026, 3, 9)], True),
+    ([date(2026, 3, 9), date(2026, 3, 10)], False),
+    ([date(2026, 3, 9), date(2026, 3, 10), date(2026, 3, 8)], True),  # mixed → convention
+])
+def test_the_direction_detector(dates: list[date], want: bool) -> None:
+    assert schwab.newest_first(dates) is want
+
+
+def test_a_same_day_round_trip_converts_BUY_before_SELL_and_fabricates_no_opening() -> None:
+    """★ The defect itself, end to end through the converter.
+
+    Sell printed above buy (newest first, same day). The transactions CSV must carry the
+    buy first — that is the order the page commits and the replay books — and the
+    pre-history detector, walking the same chronological order, must NOT report AAA as a
+    position held before the window: the file explains every share it sells.
+    """
+    from portfolio_dash.data_ingestion.broker.convert import convert
+
+    events = _parse(*_ROUND_TRIP_NEWEST_FIRST)
+    conv, _grouped, report = convert(events, "schwab", "USD")
+    assert [r[2] for r in conv.rows["transactions"]] == ["BUY", "SELL"]
+    assert grouping.prehistory_shares(events) == {}
+    assert [i for i in report.advisory if i.code == "prehistory_position"] == []
+    assert conv.openings == {}
+
+
+def test_prehistory_walks_hand_built_events_in_construction_order_when_seq_is_unset() -> None:
+    """Events built without ``seq`` (every fixture above) keep their line order as the
+    tiebreak, so the existing detector tests keep their meaning."""
+    events = [
+        _ev(EventKind.SELL, symbol="AAA", qty="10", day="2026-01-05", line=2),
+        _ev(EventKind.BUY, symbol="AAA", qty="10", day="2026-01-05", line=3),
+    ]
+    assert grouping.prehistory_shares(events) == {"AAA": Decimal("10")}
+    # …and an explicit seq outranks the line number, whatever the construction order.
+    ranked = [events[0].model_copy(update={"seq": 1}), events[1].model_copy(update={"seq": 0})]
+    assert grouping.prehistory_shares(ranked) == {}
+
+
+def test_the_corpus_keeps_its_numbers_under_the_chronological_sort() -> None:
+    """The regression corpus has no same-day trades, so the sort change must leave its
+    conversion byte-identical in every row that matters: same trades, same order."""
+    from portfolio_dash.data_ingestion.broker.convert import convert
+
+    conv, _grouped, _report = convert(
+        _corpus("schwab_2024.csv", "schwab_2025.csv"), "schwab", "USD")
+    assert [(r[3], r[1], r[2]) for r in conv.rows["transactions"]][:3] == [
+        ("2024-01-08", "ALFA", "BUY"), ("2024-02-12", "ALFA", "BUY"),
+        ("2024-05-06", "ALFA", "SELL"),
+    ]
+    assert len(conv.rows["transactions"]) == 11

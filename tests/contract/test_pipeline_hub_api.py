@@ -620,12 +620,13 @@ def test_alert_advice_preset_reaches_the_runner_on_a_fired_alert(
     api_client.post("/api/insight-tasks/official-pack")
     alerts_bridge.ensure_tables(golden_db)
     now = datetime.now()
-    alerts_bridge.record_event(golden_db, rule_id="target_cross", symbol="2330", now=now)
+    alerts_bridge.record_event(golden_db, rule_id="target_cross", symbol="2330", now=now,
+                               scope="symbol")
 
     ran: list[tuple[int, str, str | None]] = []
 
     def runner(c: sqlite3.Connection, it_id: int, *, now: datetime,
-               fired_rule: str, fired_symbol: str | None) -> None:
+               fired_rule: str, fired_symbol: str | None, trigger: object) -> None:
         ran.append((it_id, fired_rule, fired_symbol))
 
     n = alerts_bridge.dispatch_alert_events(golden_db, runner, now=now)

@@ -69,7 +69,11 @@
   /* Fills a <select> in place and selects the preferred year. Returns the same promise so a
      caller can await the menu being ready (the e2e does). */
   function fillTaxYearSelect(sel) {
+    /* I-12: the year the owner picked while /api/db-stats was in flight survives the refill
+       (when the new menu still offers it); only an untouched menu takes the preferred year. */
+    var before = sel.value;
     return taxYears().then(function (r) {
+      var picked = sel.value;
       sel.textContent = '';
       r.years.forEach(function (y) {
         var o = document.createElement('option');
@@ -77,7 +81,9 @@
         o.textContent = y + ' 年度';
         sel.appendChild(o);
       });
-      sel.value = String(r.preferred);
+      var mine = picked !== '' && picked !== before && r.years.map(String).indexOf(picked) >= 0;
+      var rebuilt = sel.value;   // the refilled menu's own default — the page's value
+      window.pdField.writeIfUntouched(sel, rebuilt, mine ? picked : String(r.preferred));
       return r;
     });
   }

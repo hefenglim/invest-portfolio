@@ -27,10 +27,9 @@ import csv
 import io
 import sqlite3
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
-from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +50,7 @@ from portfolio_dash.data_ingestion.validate import CashPoolFn, Issue, TxnInput
 from portfolio_dash.llm_insight.official_templates import AI_INPUT_PROMPT_BODY
 from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm import LLMError, complete_structured
 from portfolio_dash.shared.models.enums import Side
@@ -61,8 +61,6 @@ from portfolio_dash.shared.symbol_format import matches_market_format
 #: ``effective_date`` return — resolves to the FIELD and mypy rejects it. Aliasing is the
 #: least surprising fix: renaming the field would change the ledger's wire contract.
 Date = date
-
-_TAIPEI = ZoneInfo("Asia/Taipei")
 
 # Market VALUE -> that market's quote ccy (inverse of markets.CCY_MARKET). Used to render a
 # MERGED account's per-market catalog line (id=name (USD:US＋MYR:MY)) for the AI parse prompt.
@@ -95,6 +93,13 @@ class TxnDraft(BaseModel):
     # quick-add dialog's market default in the preview and steers the per-row format check; the
     # real provider lookup at registration stays the authority. Blank on single-market accounts.
     market: str = ""
+    #: DEF-036 (2026-09-23): the statement's OWN total for this line (成交金額／應付金額／
+    #: 淨收付), copied verbatim when the text states one — never computed by the model. It is
+    #: EVIDENCE, not ledger data: it never reaches the commit CSV (``_TXN_CSV_COLUMNS``); the
+    #: door compares it against ``shares × price`` (:func:`_append_amount_check`) and flags a
+    #: contradiction instead of choosing between the two. Before it existed, 「100股 成交價 46
+    #: 成交金額 50,000 元」 parsed clean with the 50,000 parked in ``note``, where nothing reads.
+    stated_amount: Decimal | None = None
 
 
 class DivDraft(BaseModel):
@@ -204,6 +209,10 @@ class AiInputResult(BaseModel):
 
     previews: dict[str, ImportPreview] = Field(default_factory=dict)
     csv_texts: dict[str, str] = Field(default_factory=dict)
+    #: The drafts themselves, per kind and ROW-ALIGNED with ``previews[kind].rows`` (DEF-035).
+    #: They are what the draft table edits and sends back to :func:`revalidate_ai_drafts` —
+    #: the browser edits typed fields, never a CSV line, and never re-parses one.
+    drafts: dict[str, list[AnyDraft]] = Field(default_factory=dict)
     unparsed: list[UnparsedRow] = Field(default_factory=list)
     meta: AiMeta = Field(default_factory=AiMeta)
     error: Issue | None = None
@@ -303,6 +312,66 @@ def _cash_csv(drafts: list[CashDraft]) -> str:
         ]
         for d in drafts
     ])
+
+
+def cash_kind_vocabulary() -> list[dict[str, str]]:
+    """Every cash kind as ``{kind, label, sign}`` — the AI draft table's 類型 options (DEF-035).
+
+    Server-owned for the same reason ``kind_label`` / ``sign`` are (AI-D21): the frontend
+    renders this vocabulary rather than keeping another copy of ``CASH_KIND_ZH``, so a kind
+    added to ``shared/cash_kinds.py`` reaches the editable select without a web change.
+    """
+    return [{"kind": kind, "label": zh, "sign": str(movement_sign(kind))}
+            for kind, zh in CASH_KIND_ZH.items()]
+
+
+#: DEF-036: how far a statement's own total may sit from ``shares × price`` (or from that
+#: gross ± the engine's fee and tax) before the draft is flagged — a fraction of the gross.
+#: 1% is wide enough for what legitimately separates the two on a real statement (an average
+#: fill price printed to fewer decimals than the total was computed with, a broker whose fee
+#: differs from the engine's by a few units) and narrow enough to catch every mis-read the
+#: check exists for: a dropped or extra digit is a factor of 10, a lot/share confusion 1,000.
+STATED_AMOUNT_TOLERANCE = Decimal("0.01")
+
+
+def _append_amount_check(row: PreviewRow, draft: TxnDraft) -> None:
+    """Flag a draft whose transcribed total contradicts its own ``shares × price`` (DEF-036).
+
+    The model copies ``stated_amount`` and computes nothing; this door does the arithmetic,
+    in Decimal, against three readings a statement's total can have — the gross (成交金額),
+    the gross plus the engine's fee and tax (a buy's 應付金額) and the gross minus them (a
+    sell's 淨收付). Any one within :data:`STATED_AMOUNT_TOLERANCE` of the gross is consistent.
+    Otherwise the row gets a NEEDS-CONFIRM ``amount_mismatch`` naming both figures: the door
+    never picks a winner and never fills one field from the other (functional manual F-05:
+    「矛盾數字…系統應拒絕或標示，不得自行補齊」). A row whose share count or price is not
+    positive is left alone — those findings belong to the validator, and a tolerance of a
+    non-positive gross would be meaningless.
+
+    The flag is PREVIEW-ONLY on purpose: ``stated_amount`` is not a ledger column, so the
+    commit door re-derives the row without it. The draft table therefore never pre-ticks a
+    flagged row and asks again before writing one (``web/input.js``) — the acknowledgement
+    lives where the evidence is shown.
+    """
+    if draft.stated_amount is None:
+        return
+    row.payload["stated_amount"] = str(draft.stated_amount)
+    gross = draft.shares * draft.price
+    if draft.shares <= 0 or draft.price <= 0:
+        return
+    stated = abs(draft.stated_amount)
+    costs = (row.fee or Decimal(0)) + (row.tax or Decimal(0))
+    band = gross * STATED_AMOUNT_TOLERANCE
+    if any(abs(c - stated) <= band for c in (gross, gross + costs, gross - costs)):
+        return
+    pct = f"{(STATED_AMOUNT_TOLERANCE * 100).normalize():f}"
+    row.payload["amount_mismatch"] = "1"
+    row.issues.append(Issue(
+        kind="amount_mismatch",
+        needs_confirm=True,
+        message=(f"金額矛盾：文字寫成交金額 {stated:,}，但 {draft.shares:,} 股 × "
+                 f"{draft.price:,} = {gross:,}，差距超過 {pct}%；"
+                 "請確認股數、價格與金額後再勾選寫入"),
+    ))
 
 
 def _label_cash_rows(preview: ImportPreview) -> None:
@@ -462,7 +531,7 @@ def ai_agents_input(
         degradation issue.
     """
     completer = completer or complete_structured
-    anchor = today if today is not None else datetime.now(_TAIPEI).date()
+    anchor = today if today is not None else app_now().date()
     rendered = _PROMPT.format(
         text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
     )
@@ -500,6 +569,46 @@ def ai_agents_input(
             error_reason=f"{len(result.unparsed)} row(s) could not be classified",
         )
 
+    built = _build_result(conn, text, result, pool=pool)
+    built.meta = _latest_meta(conn)
+    return built
+
+
+def revalidate_ai_drafts(
+    conn: sqlite3.Connection,
+    drafts: AiDraftList,
+    *,
+    pool: CashPoolFn,
+    text: str = "",
+) -> AiInputResult:
+    """Re-validate EDITED drafts through the same post-parse pipeline — no model call (DEF-035).
+
+    The draft table's per-row edits come back here: the same per-row preview, FU-D41 format
+    check, DEF-036 amount check and AI-D21 cash labels that :func:`ai_agents_input` applies
+    to the model's output, and a commit CSV regenerated from the edited drafts. One pipeline,
+    two entry points — so an edited preview is still exactly what ``/api/import/commit`` will
+    re-derive (AI-D18), and the browser never assembles a CSV line of its own. It takes no
+    completer at all, so an edit cannot spend tokens; ``meta`` stays empty for the same reason.
+    ``unparsed`` is echoed back untouched (a confession is not editable into a row here).
+
+    Args:
+        conn:   Active SQLite connection.
+        drafts: The edited drafts (``rows`` in draft order; the kinds are regrouped
+                order-preservingly, so row *n* of a kind is still draft *n* of that kind).
+        pool:   The cash-pool probe — REQUIRED, exactly as at :func:`ai_agents_input`.
+        text:   The original pasted text, for the per-row ``raw`` provenance only.
+    """
+    return _build_result(conn, text, drafts, pool=pool)
+
+
+def _build_result(
+    conn: sqlite3.Connection,
+    text: str,
+    result: AiDraftList,
+    *,
+    pool: CashPoolFn,
+) -> AiInputResult:
+    """The post-parse pipeline shared by a model parse and an edit re-validation."""
     txns = [r for r in result.rows if isinstance(r, TxnDraft)]
     divs = [r for r in result.rows if isinstance(r, DivDraft)]
     cashs = [r for r in result.rows if isinstance(r, CashDraft)]
@@ -535,6 +644,7 @@ def ai_agents_input(
                 # committed CSV is unchanged, so the C7 row<->line mapping is preserved.
                 row.payload["market"] = d.market
             _append_format_warning(conn, row, d)  # FU-D41 soft check — warns, never rewrites
+            _append_amount_check(row, d)  # DEF-036 — a contradicted total is flagged, not fixed
             rows.append(row)
         previews["transactions"] = ImportPreview(rows=rows)
         csv_texts["transactions"] = _txn_csv(txns)
@@ -549,9 +659,13 @@ def ai_agents_input(
         _label_cash_rows(cash_preview)
         previews["cash"] = cash_preview
 
+    drafts: dict[str, list[AnyDraft]] = {}
+    for kind, group in (("transactions", txns), ("dividends", divs), ("cash", cashs)):
+        if group:
+            drafts[kind] = list(group)
     return AiInputResult(
         previews=previews,
         csv_texts=csv_texts,
+        drafts=drafts,
         unparsed=result.unparsed,
-        meta=_latest_meta(conn),
     )

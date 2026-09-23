@@ -95,9 +95,42 @@ def _open_broker_mode(page: Page, base: str) -> None:
     # web/names.js. The account picker read 「TW Broker（tw_broker）」 — the API's English
     # name + the raw id — on the page whose trade form reads 「台灣券商（TWD）」.
     expect(page.locator("#bk-broker option[value='schwab']")).to_have_text("嘉信 Schwab")
-    expect(page.locator("#bk-account option[value='tw_broker']")).to_have_text("台灣券商（TWD）")
+    expect(page.locator("#bk-account option[value='schwab']")).to_have_text("嘉信 Schwab（USD）")
     labels = page.locator("#bk-account option").all_inner_texts()
     assert not [t for t in labels if "Broker" in t or "Charles" in t or "_" in t], labels
+    # DEF-029 (2026-09-23): the account picker lists ONLY the accounts of the chosen broker.
+    # A Schwab statement could be aimed at 「Moomoo MY（USD／MYR）」 and wrote a real buy under
+    # the wrong broker with every check green; at 「台灣券商（TWD）」 it read 「對帳通過」 and
+    # was refused only at commit. Neither is offered any more (the server refuses them too).
+    assert page.locator("#bk-account option").all_inner_texts() == ["嘉信 Schwab（USD）"]
+    assert page.locator("#bk-account option[value='tw_broker']").count() == 0
+    assert page.locator("#bk-account option[value='moomoo_my']").count() == 0
+
+
+def _acknowledge_dialog(page: Page, *expect_texts: str) -> dict[str, Any]:
+    """Resolve the NEXT 匯入警告確認 dialog by ticking every warning row and confirming;
+    returns the acknowledged commit's request body. The blanket ack used to swallow these
+    unseen — the corpus raises two: the PREH 賣超 (交易) and NEWX's missing price after
+    the EXCHANGE (公司行動)."""
+    dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
+    expect(dialog).to_be_visible(timeout=15000)
+    for text in expect_texts:
+        expect(dialog).to_contain_text(text)
+    for cb in dialog.locator("input.bk-warn-tick").all():
+        assert not cb.is_checked(), "a warning row must never start ticked"
+        cb.check()
+    with page.expect_response("**/api/import/commit") as acked:
+        dialog.locator("button", has_text="寫入勾選的警告列").click()
+    assert acked.value.status == 200, acked.value.text()
+    return _sent_body(acked.value.request.post_data_json)
+
+
+def _sent_body(data: Any) -> dict[str, Any]:
+    """The JSON a commit request carried (Playwright types it ``Any | None``)."""
+    assert isinstance(data, dict), data
+    body: dict[str, Any] = data
+    assert body["ack_warnings"] is True
+    return body
 
 
 def _drop_exports(page: Page) -> dict[str, Any]:
@@ -143,16 +176,68 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
     # run must still work, and the row must simply not be written.
     assert body["actions_needing_input"], "the corpus carries a one-leg split"
 
+    # --- DEF-028: every row is on the screen, with a checkbox, before anything is written --
+    report = page.locator("#bk-report")
+    for kind, n in (("transactions", 11), ("dividends", 1), ("cash", 7), ("corporate_actions", 3)):
+        expect(report.locator(f"details.bk-kind[data-kind='{kind}'] tbody tr")).to_have_count(n)
+        expect(report.locator(f"details.bk-kind[data-kind='{kind}'] input.bk-row-tick:checked")
+               ).to_have_count(n)
+    # The source line rides every row; the type column is zh; the figures are the CSV's.
+    expect(report.locator("details.bk-kind[data-kind='transactions'] tbody tr").first
+           ).to_contain_text("schwab_2024.csv:4")
+    expect(report.locator("details.bk-kind[data-kind='transactions'] tbody tr").first
+           ).to_contain_text("買入")
+    # …and the rows that went elsewhere are named with their destination: the DRIP's three
+    # legs became dividend row 1, the journal pairs were dropped.
+    expect(report.locator("details.bk-dropped")).to_contain_text("已合併為一筆股利")
+    expect(report.locator("details.bk-dropped")).to_contain_text("股利 第 1 列")
+    expect(report.locator("details.bk-dropped")).to_contain_text("schwab_2024.csv:6")
+    expect(report.locator("details.bk-dropped")).to_contain_text("互相抵銷")
+    # DEF-027: the pre-history hint is measured against the ledger (empty here: 0 held).
+    expect(report).to_contain_text("帳本在 2024-01-02 已有 0 股，仍缺 80 股")
+
     page.wait_for_function(
         "() => { const b = document.querySelector('#bk-commit'); return b && !b.disabled; }")
+    expect(page.locator("#bk-commit")).to_have_text("寫入勾選列（22）")
     with page.expect_response("**/api/import/commit") as first:
         page.click("#bk-commit")
-    assert first.value.status == 200
+    # ★ DEF-027: the first commit (transactions) is sent UNACKNOWLEDGED and the server refuses
+    # it — the corpus sells 80 PREH the ledger never held — so the page must now ASK, row by
+    # row, instead of acknowledging on the owner's behalf (which wrote the sell with no
+    # dialog, discarded the basis and read 「✓ 全部寫入完成」).
+    assert first.value.status == 422
+    assert first.value.json()["error"]["code"] == "warnings_unacknowledged"
+    dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("交易")
+    expect(dialog).to_contain_text("PREH")
+    expect(dialog).to_contain_text("2025-11-20")
+    expect(dialog).to_contain_text("賣出 80 股，超過持有的 0 股")
+    expect(dialog).to_contain_text("永久捨棄")
+    expect(dialog).to_contain_text("之後再買回也不會還原")
+    ticks = dialog.locator("input.bk-warn-tick")
+    expect(ticks).to_have_count(1)
+    assert not ticks.first.is_checked(), "a warning row must never start ticked"
+    confirm = dialog.locator("button", has_text="寫入勾選的警告列")
+    assert confirm.is_disabled(), "nothing ticked → nothing to acknowledge"
+    ticks.first.check()
+    assert not confirm.is_disabled()
+    with page.expect_response("**/api/import/commit") as acked:
+        confirm.click()
+    assert acked.value.status == 200
+    sent = _sent_body(acked.value.request.post_data_json)
+    assert sent["kind"] == "transactions"
+    assert sorted(sent["select"]) == list(range(11)), "the ticked row travels as select"
+    # The SECOND warning the blanket ack used to swallow: NEWX (the EXCHANGE's new symbol)
+    # has no price row, so the corporate-actions commit asks too — one dialog per kind.
+    sent = _acknowledge_dialog(page, "公司行動", "NEWX", "2025-05-22", "沒有任何價格紀錄")
+    assert sent["kind"] == "corporate_actions" and sorted(sent["select"]) == [0, 1, 2]
     # The button drives several commits in SEQUENCE, so the run is over only when the
     # summary appears. Matched on the full phrase: 「寫入」 alone also occurs in the report
     # the page was already showing, so a substring test would pass before anything ran.
-    expect(page.locator("#bk-report")).to_contain_text("全部寫入完成", timeout=15000)
+    expect(page.locator("#bk-report")).to_contain_text("寫入完成", timeout=15000)
     expect(page.locator("#bk-report")).not_to_contain_text("寫入中止")
+    expect(page.locator(".modal-backdrop")).to_have_count(0)
 
     # --- the ledger the CLI route also produces ------------------------------------------
     held = _shares(base)
@@ -188,12 +273,65 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
     assert _get_json(base, "/api/import/batches")["batches"] == []
     assert _shares(base) == {}, "復原 must return the ledger to where it started"
 
-    assert _unexpected(console_errors) == []
+    # Chromium logs each unacknowledged 422 (two here: 交易, 公司行動) as a console error —
+    # that refusal is the feature; nothing else is allowed.
+    assert _unexpected(console_errors, "status of 422") == []
     assert page_errors == []
 
 
 def _unexpected(console_errors: list[str], *allowed: str) -> list[str]:
     return [e for e in console_errors if not any(a in e for a in allowed)]
+
+
+@pytest.mark.e2e
+def test_an_unticked_row_is_not_written_and_a_skipped_warning_row_is_not_written(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """DEF-028 + DEF-027, the other branch: the table's checkbox decides what is sent, and
+    the dialog's 「略過所有警告列」 writes the clean rows without the acknowledgement.
+
+    Breaks if: the ticks are decorative (F-03's exact defect on the standard pane — a
+    button labelled 勾選列 that wrote the whole paste); the skip path sends the ack for the
+    warning row anyway; or the acknowledgement rides a literal again.
+    """
+    base = flow_server(_seed)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    _open_broker_mode(page, base)
+    body = _drop_exports(page)
+    assert body["ok"] is True
+
+    # Untick the last ALFA buy (2025-12-15, row index 10) in the table.
+    page.locator("#bk-row-transactions-10").uncheck()
+    expect(page.locator("#bk-commit")).to_have_text("寫入勾選列（21）")
+    with page.expect_response("**/api/import/commit") as first:
+        page.click("#bk-commit")
+    assert first.value.status == 422
+    dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
+    expect(dialog).to_contain_text("PREH")
+    with page.expect_response("**/api/import/commit") as skipped:
+        dialog.locator("button", has_text="略過所有警告列").click()
+    assert skipped.value.status == 200
+    sent = _sent_body(skipped.value.request.post_data_json)
+    # The warning row (index 9) and the unticked row (index 10) are both out of `select`;
+    # the acknowledgement only releases the server's whole-file gate for rows not sent.
+    assert sorted(sent["select"]) == list(range(9))
+    # The corporate-actions kind asks about NEWX's missing price next; acknowledged here so
+    # the split/exchange still land (the numbers below depend on the 3-for-1 and the 1:1).
+    _acknowledge_dialog(page, "公司行動", "NEWX")
+    expect(page.locator("#bk-report")).to_contain_text("寫入完成", timeout=15000)
+    expect(page.locator("#bk-report")).to_contain_text("交易 寫入 9 筆")
+
+    held = _shares(base)
+    assert "PREH" not in held, "the skipped 賣超 row must not reach the ledger"
+    assert held["ALFA"] == Decimal("91.81366934")   # 101.81366934 without the unticked buy
+    batches = _get_json(base, "/api/import/batches")["batches"]
+    assert {b["kind"]: b["row_count"] for b in batches}["transactions"] == 9
+
+    # Chromium logs the 422 as a console error; nothing else is allowed.
+    assert _unexpected(console_errors, "status of 422") == []
+    assert page_errors == []
 
 
 @pytest.mark.e2e

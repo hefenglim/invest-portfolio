@@ -38,11 +38,12 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.defaults import default_registry
-from portfolio_dash.pricing.refresh import refresh_dividends
+from portfolio_dash.pricing.refresh import describe_refresh, refresh_dividends, refresh_failures
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import DividendEvent
 from portfolio_dash.pricing.store import get_dividend_events, get_price_history
 from portfolio_dash.scheduler.jobs import DEFAULT_BOARD, earliest_acquisitions
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -75,6 +76,8 @@ class PendingDividend(BaseModel):
     kind: str  # cash | drip | net | stock — the booking model on confirm
     source: str
     account_id: str
+    #: DEF-008: an ACCOUNT TOKEN (``{account:<id>}``, ``shared/account_ref.py``), not the
+    #: English ``accounts.name`` — the fetch layer resolves it to the ``pdNames`` spelling.
     account_name: str
     symbol: str
     name: str
@@ -189,11 +192,24 @@ def list_skipped(conn: sqlite3.Connection, *, now: datetime) -> list[SkippedDivi
     return out
 
 
-def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> str:
+class RefreshOutcome(BaseModel):
+    """What one dividend-event refresh did — as data AND as the one sentence (DEF-015).
+
+    ``failed`` is ``[{symbol, reason}]`` so a page can list them; ``text`` is
+    ``pricing.refresh.describe_refresh`` — the formatter ``dividends_daily`` uses too.
+    """
+
+    updated: int
+    failed: list[dict[str, str]]
+    text: str
+
+
+def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> RefreshOutcome:
     """Targeted event fetch for every symbol (any market) with an acquisition history.
 
     TW routes to FinMind (fetches since 2015); US/MY route to yfinance (full
-    dividend series). Returns a short human summary for the panel toast.
+    dividend series). It used to return 「14 檔事件已更新，1 檔失敗」 and nothing else —
+    which symbol, and why, was dropped here (DEF-015); both now travel.
     """
     acq = earliest_acquisitions(conn)
     refs = [
@@ -203,9 +219,17 @@ def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> s
         if i.symbol in acq
     ]
     if not refs:
-        return "無持倉可偵測"
+        return RefreshOutcome(updated=0, failed=[], text="無持倉可偵測")
     summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
-    return f"{len(summary.ok)} 檔事件已更新，{len(summary.failed)} 檔失敗"
+    return RefreshOutcome(updated=len(summary.ok), failed=refresh_failures(summary),
+                          text=describe_refresh(summary))
+
+
+def scan_sentence(outcome: RefreshOutcome, pending: int) -> str:
+    """「<refresh sentence>・待確認 N 筆」 — the ONE line the 重新偵測 toast and the scheduled
+    ``dividend_inbox_scan`` run both show, so the two can never tell the owner different
+    things about the same scan (DEF-015)."""
+    return f"{outcome.text}・待確認 {pending} 筆"
 
 
 def _price_on_or_before(
@@ -267,7 +291,7 @@ def detect(
         for ev in get_dividend_events(conn, symbol):
             if ev.ex_date < first_date or ev.ex_date > today:
                 continue
-            for account_id, account in accounts.items():
+            for account_id in accounts:
                 held = shares_on(conn, account_id, symbol, before=ev.ex_date)
                 if held <= _ZERO:
                     continue
@@ -283,7 +307,7 @@ def detect(
                     *, est_reinvest_price: Decimal | None = None,
                     est_reinvest_shares: Decimal | None = None,
                     confirmable: bool = True, note: str | None = None,
-                    _acct: str = account_id, _acct_name: str = account.name,
+                    _acct: str = account_id, _acct_name: str = account_ref(account_id),
                     _sym: str = symbol, _held: Decimal = held,
                     _ev: DividendEvent = ev, _inst: Instrument = inst,
                 ) -> PendingDividend:
@@ -407,6 +431,5 @@ def scan_job(conn: sqlite3.Connection, *, now: datetime) -> str:
     never imports api), so the inbox grows by itself and the run history shows
     how many items await the user.
     """
-    refreshed = refresh_events_for_acquired(conn, now=now)
-    pending = len(detect(conn, now=now))
-    return f"{refreshed} · 待確認 {pending} 筆"
+    outcome = refresh_events_for_acquired(conn, now=now)
+    return scan_sentence(outcome, len(detect(conn, now=now)))

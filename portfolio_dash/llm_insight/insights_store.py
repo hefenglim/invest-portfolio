@@ -30,6 +30,35 @@ logger = logging.getLogger(__name__)
 
 HorizonBasis = Literal["trading_days", "calendar_days"]
 
+# DEF-037 (2026-09-23): what produced a card. ``alert`` = an on_alert dispatch of one fired
+# alert event; ``schedule`` = a cron fire of the task's binding; ``manual`` = 立即執行 from the
+# task door or the 排程中心. Every generation door states it (scheduler/jobs.py::
+# _execute_insight + llm_insight/alerts_bridge.py::dispatch_alert_events_ex).
+TriggerSource = Literal["alert", "schedule", "manual"]
+
+
+class InsightTrigger(BaseModel):
+    """The provenance of one card (DEF-037) — stored as ``insights.trigger_json``.
+
+    Measured on the demo: an alert card for 2884 was titled 「RSI過熱警示」 while the alert that
+    fired was ``target_cross``, and nothing on the card or in the API said which alert it was.
+    For an ``alert`` trigger every field below is the rule engine's own record of the event —
+    ``alert_id`` is the ``alert_events`` row, ``title`` / ``detail`` are the computed text the
+    bell showed — so a card can always be traced back to the event that produced it. ``scope``
+    is what the alert is about (``symbol`` / ``portfolio`` reach a card; ``account`` /
+    ``sector`` / ``currency`` never do) and ``subject`` is its key (the symbol, for a
+    symbol alert). The non-alert sources carry ``source`` only.
+    """
+
+    source: TriggerSource
+    rule: str | None = None
+    alert_id: int | None = None
+    fired_at: str | None = None
+    scope: str | None = None
+    subject: str | None = None
+    title: str | None = None
+    detail: str | None = None
+
 
 class InsightRecord(BaseModel):
     """A stored insight row: the card payload plus its persistence metadata."""
@@ -70,6 +99,10 @@ class InsightRecord(BaseModel):
     # purpose: ``input_snapshot`` feeds the cache fingerprint and the Loop-2 master prompt,
     # and was found to hold only the ``"<date>|<target>"`` fallback tag on 149/149 demo rows.
     prompt_figures: str = ""
+    # DEF-037 (2026-09-23): what produced this card — an alert (with the event's rule, id and
+    # text), the task's schedule, or a manual run. None on every card written before the
+    # column existed: a legacy card claims no trigger rather than a guessed one.
+    trigger: InsightTrigger | None = None
     # M7-08 (owner ruling, option C, 2026-09-06): True when the stored ``prediction`` blob
     # could not be read back through the card schema (a required field the schema grew
     # later, a narrowed Literal, a corrupt blob, a NULLed confidence). The card is then
@@ -137,6 +170,9 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     # check compares against. DEFAULT '' so every existing row reads "no population
     # recorded" (the check's "none" state), never as an empty-but-checked population.
     _add_column_if_missing(conn, "insights", "prompt_figures", "TEXT NOT NULL DEFAULT ''")
+    # DEF-037 (2026-09-23): additive migration — the card's trigger (InsightTrigger JSON).
+    # NULLABLE: every existing row reads "trigger not recorded", never a guessed source.
+    _add_column_if_missing(conn, "insights", "trigger_json", "TEXT")
     conn.commit()
 
 
@@ -224,6 +260,7 @@ def add_card(
     tokens_in: int = 0,
     tokens_out: int = 0,
     prompt_figures: str = "",
+    trigger: InsightTrigger | None = None,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
 
@@ -242,6 +279,7 @@ def add_card(
     card. It is RECORDED, never enforced — ``card.confidence`` is stored exactly as the
     model stated it even when it exceeds the ceiling (AI-D33/AI-D38: a validator that
     rewrote the model's own stated confidence would be the defect, not the fix).
+    ``trigger`` (DEF-037) is what produced the card; ``None`` stores NULL (tests, legacy).
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -250,8 +288,9 @@ def add_card(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
-        "price_at_create, ceiling_at_create, tokens_in, tokens_out, prompt_figures) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "price_at_create, ceiling_at_create, tokens_in, tokens_out, prompt_figures, "
+        "trigger_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -275,6 +314,7 @@ def add_card(
             tokens_in,
             tokens_out,
             prompt_figures,
+            None if trigger is None else trigger.model_dump_json(exclude_none=True),
         ),
     )
     conn.commit()
@@ -323,6 +363,23 @@ def _card_from_row(row: sqlite3.Row) -> tuple[InsightCard, bool]:
         return InsightCard(**narrative, prediction=None), True
 
 
+def _trigger_from_row(row: sqlite3.Row) -> InsightTrigger | None:
+    """The stored trigger, or None for a legacy / unreadable value (never raises).
+
+    A malformed blob degrades to "not recorded" and is logged, the same tolerance
+    :func:`_card_from_row` gives the prediction blob: one bad row must not take a list read
+    (or the dashboard) down with it.
+    """
+    raw = row["trigger_json"] if "trigger_json" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        return InsightTrigger.model_validate_json(raw)
+    except ValidationError:
+        logger.warning("insight %s: stored trigger_json is unreadable; served as None", row["id"])
+        return None
+
+
 def _record_from_row(row: sqlite3.Row) -> InsightRecord:
     card, unreadable = _card_from_row(row)
     return InsightRecord(
@@ -353,6 +410,7 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         prompt_figures=(
             (row["prompt_figures"] or "") if "prompt_figures" in row.keys() else ""
         ),
+        trigger=_trigger_from_row(row),
     )
 
 

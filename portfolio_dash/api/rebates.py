@@ -37,6 +37,7 @@ from portfolio_dash.data_ingestion.store import (
     list_instruments,
     list_transactions,
 )
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.assets import Account
 from portfolio_dash.shared.models.enums import Side
 
@@ -147,6 +148,8 @@ class PendingRebate(BaseModel):
     """
 
     account_id: str
+    #: DEF-008: an ACCOUNT TOKEN (``{account:<id>}``, ``shared/account_ref.py``), not the
+    #: English ``accounts.name`` — the fetch layer resolves it to the ``pdNames`` spelling.
     account_name: str
     month: str  # "YYYY-MM"
     trade_count: int
@@ -271,7 +274,7 @@ def _aggregate(conn: sqlite3.Connection) -> list[PendingRebate]:
     for (account_id, month), (fee_total, expected) in agg.items():
         account = accts[account_id][0]
         out.append(PendingRebate(
-            account_id=account_id, account_name=account.name, month=month,
+            account_id=account_id, account_name=account_ref(account_id), month=month,
             trade_count=counts[(account_id, month)], fee_total=fee_total,
             expected=expected, ccy=account.settlement_ccy.value,
             trades=trades[(account_id, month)],
@@ -390,14 +393,13 @@ def list_skipped(conn: sqlite3.Connection, *, now: datetime) -> list[SkippedReba
     if not rows:
         return []
     by_key = {(p.account_id, p.month): p for p in detect(conn, now=now, include_skipped=True)}
-    accts = _rebate_accounts(conn)
     out: list[SkippedRebate] = []
     for r in rows:
         key = (r["account_id"], r["month"])
         detail = by_key.get(key)
-        name = accts[r["account_id"]][0].name if r["account_id"] in accts else r["account_id"]
         out.append(SkippedRebate(
-            account_id=r["account_id"], account_name=name, month=r["month"],
+            account_id=r["account_id"], account_name=account_ref(r["account_id"]),
+            month=r["month"],
             skipped_at=r["skipped_at"], detail=detail,
         ))
     return out

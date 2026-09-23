@@ -168,7 +168,9 @@ def test_ai_partial_success_keeps_only_skipped_rows(
 
     # partial -> banner reports both counts; ONLY the skipped row remains; the text is NOT cleared.
     expect(page.locator("#ai-result")).to_contain_text("已寫入 1 筆")
-    expect(page.locator("#ai-result")).to_contain_text("略過 1 筆")
+    # DEF-024: the AI door commits only ticked rows, so an unwritten row is 「未寫入」,
+    # never the ambiguous 「略過」 that also read as "you did not tick it".
+    expect(page.locator("#ai-result")).to_contain_text("未寫入 1 筆")
     expect(page.locator("#ai-body-transactions tr")).to_have_count(1)
     expect(page.locator("#ai-text")).not_to_have_value("")
 

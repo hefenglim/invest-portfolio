@@ -13,16 +13,20 @@ so the guards hold no matter which path a row arrives on. For transactions:
   cannot raise ``InvalidOperation`` into a 500.
 * future trade date (audit M5 — soft): flagged only when a clock is supplied.
 * duplicate trade (audit M7 — soft): an identical row already exists.
+* trade dated before the position's opening-inventory build date (DEF-014 — soft): the
+  opening already contains that day's position, so the row is probably a duplicate.
+* trade dated before the account's earliest ledger record (DEF-014 — ADVISORY): shown,
+  never gating.
 """
 
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from portfolio_dash.data_ingestion.holdings import (
     MAX_ACTION_DEPTH,
@@ -43,6 +47,7 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import (
     CASH_KIND_VALUES,
     CASH_KIND_ZH,
@@ -114,11 +119,34 @@ class TxnInput(BaseModel):
 
 
 class Issue(BaseModel):
-    """A validation finding returned by :func:`validate_transaction`."""
+    """A validation finding returned by :func:`validate_transaction`.
+
+    Three tiers, two flags:
+
+    * **hard** — ``needs_confirm=False``: the row cannot be written.
+    * **soft** — ``needs_confirm=True``: written only after the owner acknowledges it.
+    * **advisory** — ``info=True`` (DEF-014, 2026-09-23): shown beside the row, never
+      gating and never asking for a tick. ``needs_confirm`` is forced ``True`` on an
+      advisory so every existing "is this row hard?" test (``any(not i.needs_confirm)``)
+      keeps its answer; the doors that COUNT confirmations skip it by ``info``. Build one
+      with :func:`advisory_issue` rather than by hand.
+    """
 
     kind: str
     message: str
     needs_confirm: bool = False
+    info: bool = False
+
+    @model_validator(mode="after")
+    def _advisory_is_never_hard(self) -> "Issue":
+        if self.info:
+            self.needs_confirm = True
+        return self
+
+
+def advisory_issue(kind: str, message: str) -> Issue:
+    """An ADVISORY finding: rendered, never blocking, never acknowledged (see :class:`Issue`)."""
+    return Issue(kind=kind, message=message, needs_confirm=True, info=True)
 
 
 def exceeds_magnitude(value: Decimal) -> bool:
@@ -148,6 +176,54 @@ def dip_phrase(on: date | None) -> str:
     return f"於 {on.isoformat()} 降至" if on is not None else "於某時點降至"
 
 
+#: U+2212 — the minus sign ``web/format.js`` and ``export/cash_statement.py`` print, so an
+#: overdraft sentence reads the same negative the 帳戶現金 line beside it does.
+_MINUS = "−"
+
+
+def cash_amount_text(value: Decimal, ccy: Currency) -> str:
+    """A cash figure as the owner reads it: the currency's minor unit, thousands, U+2212.
+
+    DEF-008 (2026-09-23): the overdraft sentences printed ``decimal_str`` — the WIRE form,
+    full stored precision — so a TWD pool read 「3033798.0000」 and a dip 「-253820.0000」 in a
+    sentence whose every neighbour on screen says 「3,033,798」. Display only: the minor unit
+    is the ``data-and-pricing.md`` settlement precision (TWD 0 dp, USD/MYR 2 dp), quantized
+    ROUND_HALF_UP exactly as every display seam does. A negative that rounds to zero keeps
+    its real digits (``−0.4`` TWD, not 「−0」), because 「降至 −0」 would name a dip that the
+    sentence then denies.
+    """
+    q = quantize_amount(value, ccy)
+    if q == _ZERO and value < _ZERO:
+        body = format(abs(value).normalize(), "f")
+    else:
+        body = f"{abs(q):,}"
+    return f"{_MINUS}{body}" if value < _ZERO else body
+
+
+def cash_dip_sentence(
+    *, what: str, account_id: str, ccy: Currency, on: date | None, low: Decimal,
+    cause: str | None,
+) -> str:
+    """「此筆<what>會使 {account:…} 的 <CCY> 現金於 <day> 降至 <low>（<cause>）」 — ONE sentence.
+
+    DEF-008: the pool guards told the same fact five ways. The withdraw and 換匯 doors each
+    had two branches — the covering-balance check (「出金金額 X 超過 TW Broker 的 TWD 帳戶現金
+    Y」, no day at all) and the running-minimum check (「此筆出金會使 TW Broker 的 … 於 D 降至
+    Z」) — and the edit/delete door a fifth (「此筆會使 tw_broker 的 …」, the bare id). Two
+    spellings of the account, a sentence that named the day next to one that did not, and
+    four-decimal wire figures in all of them. Every branch now states the same three facts —
+    which pool, on which day, down to what — and differs only in its ``cause``: 「出金當日」
+    when the withdrawal's own day is short, 「出金日早於資金到位」 when a later day is.
+
+    The account is a TOKEN (``shared/account_ref.py``): the backend owns no zh name, and the
+    fetch layer resolves it to the one ``pdNames`` spelling. The caller appends its own tail
+    (the remedy differs per door), which is why this returns the clause, not the whole line.
+    """
+    tail = f"（{cause}）" if cause else ""
+    return (f"此筆{what}會使 {account_ref(account_id)} 的 {ccy.value} 現金"
+            f"{dip_phrase(on)} {cash_amount_text(low, ccy)}{tail}")
+
+
 def _same_ratio(a_to: Decimal, a_from: Decimal, b_to: Decimal, b_from: Decimal) -> bool:
     """True iff two ratios are the SAME ratio — 「3 比 1」 and 「30 比 10」 are one event.
 
@@ -168,8 +244,10 @@ def _depth_cap_issue(index: ActionIndex, symbols: set[str]) -> Issue | None:
     D31's whole design: no ``Decimal | None``, no sixth vocabulary for "not trustworthy",
     just the two mechanisms the codebase already has.
     """
-    hit = sorted(f"{sym}（{acct}）" for acct, sym in index.depth_capped_symbols()
-                 if sym in symbols)
+    # I-10: the account as a token (``account_ref``) — the fetch layer resolves it to the
+    # display name; the bare id used to reach the confirm dialog.
+    hit = sorted(f"{sym}（{account_ref(acct)}）"
+                 for acct, sym in index.depth_capped_symbols() if sym in symbols)
     if not hit:
         return None
     return Issue(
@@ -304,14 +382,87 @@ def validate_opening_cost(original_cost_total: Decimal) -> Issue | None:
     )
 
 
+#: Resolves a symbol to its registered instrument, or ``None`` — what
+#: :func:`pending_share_flows` needs to apply the whole-share rule to a SIBLING row.
+InstrumentOf = Callable[[str], Instrument | None]
+
+
+def whole_share_issue(inp: TxnInput, inst: Instrument | None) -> Issue | None:
+    """The TW / MY whole-share rule for one row (HARD; demo audit 2026-09-16, L12).
+
+    零股 trade in units of ONE share and a Bursa odd lot in units of ONE unit
+    (rules/markets-and-fees.md), yet a TW sell of 0.5 股 previewed cleanly — min fee 20,
+    tax floored, every number "right" — for a position no broker can hold. US is
+    deliberately NOT checked: fractional US shares are deferred, not forbidden, and DRIP
+    already books fractions there. Needs the instrument (its market); an unregistered
+    symbol is caught by the registration path, not here.
+
+    ONE owner, two callers (DEF-024, 2026-09-23): the row's own verdict in
+    :func:`validate_transaction`, and sibling-batch membership in
+    :func:`pending_share_flows` — a row this rejects can never be written, so it must never
+    cover a sibling either. Cheap on the common path: the quantity is tested before the
+    instrument is even looked at, so a whole-share row never costs a registry read.
+    """
+    if inp.quantity == inp.quantity.to_integral_value():
+        return None
+    if inst is None or inst.market.value not in ("TW", "MY"):
+        return None
+    return Issue(
+        kind="shares_not_integer",
+        message=(
+            f"{MARKET_ZH.get(inst.market, inst.market.value)}股數必須是整數"
+            f"（零股以 1 股為單位），目前是 {inp.quantity}"
+        ),
+    )
+
+
+def row_cannot_be_written(inp: TxnInput, instrument_of: InstrumentOf | None) -> bool:
+    """True when *inp* carries a ROW-LEVEL hard finding — one decidable from the row itself
+    plus the instrument registry — and therefore can never reach the ledger.
+
+    This is the membership predicate of :func:`pending_share_flows`, stated once. Two
+    families of hard finding exist and only one belongs here:
+
+    * **row-level** — the structural prefix (:func:`transaction_structural_issues`) and the
+      whole-share rule (:func:`whole_share_issue`). Either can be true of ONE row of an
+      ``(account, symbol)`` key while its siblings are fine, so a row in this family CAN
+      fund a false cover and must be excluded: a buy of 1.5 股 (hard) covered a sell of
+      101 (functional test 2026-09-22, I-06) because only the structural prefix decided
+      membership, and 1.5 is structurally a perfectly good positive Decimal.
+    * **key-level** — ``unknown_account``, ``market_mismatch``, ``symbol_unresolved``. Each
+      hits EVERY row of the same key identically (the only key a pending flow can cover),
+      so the "covered" sell is exactly as un-writable as the buy that covered it and no
+      false cover is possible. They stay in the batch because deciding them per sibling
+      would be a second validation pass for a case that cannot occur. ``fee_overflow`` is
+      downstream of the M4 bound the structural prefix enforces, so a row past the prefix
+      cannot raise it.
+
+    *instrument_of* may be ``None`` for a caller with no registry access; the whole-share
+    rule is then not applied (the structural prefix alone — the pre-DEF-024 behaviour).
+    """
+    if transaction_structural_issues(inp):
+        return True
+    if instrument_of is None:
+        return False
+    return whole_share_issue(inp, instrument_of(inp.symbol)) is not None
+
+
 def pending_share_flows(
-    batch: Sequence[TxnInput], *, exclude: TxnInput | None = None
+    batch: Sequence[TxnInput],
+    *,
+    exclude: TxnInput | None = None,
+    instrument_of: InstrumentOf | None = None,
 ) -> PendingFlows:
     """Turn a batch of not-yet-written transactions into :data:`PendingFlows`.
 
     The convention matches ``validate_cash_movement``: *batch* is every row committed
     together **including** the one being validated, and the caller names that one as
     *exclude* so it is not counted against itself.
+
+    **A row that can never be written never covers** — every row-level hard finding
+    excludes its row here (:func:`row_cannot_be_written`), not only the structural prefix
+    the CSV builder filters on before it hands the batch over (DEF-024, 2026-09-23). The
+    builder's filter is now redundant and harmless; this function is the owner.
 
     A DECLARED short sale contributes its flow like any other sell. Its own row is exempt
     from the guard, but the shares still leave the position and a LATER sibling sell has to
@@ -321,13 +472,56 @@ def pending_share_flows(
     for other in batch:
         if other is exclude:
             continue
+        if row_cannot_be_written(other, instrument_of):
+            continue
         is_buy = other.side is Side.BUY
         flows.setdefault((other.account_id, other.symbol), []).append((
             other.trade_date,
-            int(EventPriority.BUY if is_buy else EventPriority.SELL),
+            int(EventPriority.TRADE),
             other.quantity if is_buy else -other.quantity,
         ))
     return flows
+
+
+def siblings_booked_before(batch: Sequence[TxnInput], inp: TxnInput) -> list[TxnInput]:
+    """The rows of *batch* the replay books BEFORE *inp* (DEF-012, 2026-09-23).
+
+    Trades of one day book in ledger-id order (``shared/ledger_events.py``), and a file's
+    rows take ids in file order when they are written — so a same-day sibling that sits
+    AFTER *inp* in the file will be booked after it and cannot cover it. Rows dated on other
+    days are ordered by their date regardless of position. *inp* itself is kept (the caller
+    excludes it), and a batch that does not contain *inp* at all is returned unchanged.
+
+    This is what makes the CSV preview agree with the replay that follows the write: a
+    file listing a sell ABOVE its same-day buy used to preview clean and then replay as an
+    undeclared oversell — basis discarded, no realized row, and the one 賣超 confirmation
+    that exists to prevent exactly that was never shown.
+    """
+    pos = next((i for i, row in enumerate(batch) if row is inp), None)
+    if pos is None:
+        return list(batch)
+    return [
+        row for i, row in enumerate(batch)
+        if i <= pos or row.trade_date != inp.trade_date
+    ]
+
+
+def _ledger_start(conn: sqlite3.Connection, account_id: str) -> date | None:
+    """The earliest date on any of the five ledgers for *account_id*, or ``None`` when the
+    account has no record at all (DEF-014). ISO dates sort as text, so ``MIN`` is the
+    chronological minimum; ``MIN`` also ignores the ``NULL`` an empty ledger contributes."""
+    row = conn.execute(
+        "SELECT MIN(d) FROM ("
+        "  SELECT MIN(trade_date) AS d FROM transactions WHERE account_id=?"
+        "  UNION ALL SELECT MIN(date) FROM dividends WHERE account_id=?"
+        "  UNION ALL SELECT MIN(build_date) FROM opening_inventory WHERE account_id=?"
+        "  UNION ALL SELECT MIN(date) FROM fx_conversions WHERE account_id=?"
+        "  UNION ALL SELECT MIN(date) FROM cash_movements WHERE account_id=?"
+        ")",
+        (account_id,) * 5,
+    ).fetchone()
+    earliest = row[0] if row is not None else None
+    return date.fromisoformat(earliest) if isinstance(earliest, str) else None
 
 
 def transaction_structural_issues(inp: TxnInput) -> list[Issue]:
@@ -349,16 +543,11 @@ def transaction_structural_issues(inp: TxnInput) -> list[Issue]:
     for transactions until this function).
 
     Deliberately ONLY the ledger-independent checks — decidable from the ``TxnInput``
-    alone, so membership needs no connection and no second validation pass. The remaining
-    HARD kinds stay in the batch because none of them can fund a FALSE cover:
-    ``unknown_account`` and ``market_mismatch`` hit every row of the same
-    ``(account, symbol)`` key equally (the only key a pending flow can cover), so the
-    "covered" sell is just as un-writable; ``symbol_unresolved`` likewise — pending flows
-    are keyed on the RAW symbol, and the same raw spelling resolves (or fails) the same
-    way for both rows; ``fee_overflow`` sits downstream of the M4 bound enforced HERE,
-    whose whole purpose is that a row passing it cannot overflow the fee quantize — and it
-    is computed per row after batch assembly, so admitting it into membership would take a
-    circular second pass to exclude a case the bound already excludes.
+    alone. ⚠ It is NOT the whole membership predicate any more (DEF-024, 2026-09-23): the
+    whole-share rule is a row-level HARD finding that needs the instrument's market, and
+    "structural prefix only" let a 1.5-股 buy cover a sell. :func:`row_cannot_be_written`
+    is the predicate — this prefix plus :func:`whole_share_issue` — and it also states which
+    hard kinds are KEY-level and may stay in the batch.
     """
     issues: list[Issue] = []
     if inp.quantity <= 0:
@@ -442,23 +631,9 @@ def validate_transaction(
             )
 
     # --- whole shares only on TW / MY (HARD; demo audit 2026-09-16, L12) ---
-    # 零股 trade in units of ONE share and a Bursa odd lot in units of ONE unit
-    # (rules/markets-and-fees.md), yet a TW sell of 0.5 股 previewed cleanly — min fee 20,
-    # tax floored, every number "right" — for a position no broker can hold. US is
-    # deliberately NOT checked: fractional US shares are deferred, not forbidden, and DRIP
-    # already books fractions there. Needs the instrument (its market); an unregistered
-    # symbol is caught by the registration path, not here.
-    if inst is not None and inst.market.value in ("TW", "MY") \
-            and inp.quantity != inp.quantity.to_integral_value():
-        issues.append(
-            Issue(
-                kind="shares_not_integer",
-                message=(
-                    f"{MARKET_ZH.get(inst.market, inst.market.value)}股數必須是整數"
-                    f"（零股以 1 股為單位），目前是 {inp.quantity}"
-                ),
-            )
-        )
+    # One owner (:func:`whole_share_issue`), shared with sibling-batch membership below.
+    if (whole := whole_share_issue(inp, inst)) is not None:
+        issues.append(whole)
 
     # --- sell must not exceed holdings (soft) ---
     # A DECLARED short sale (spec 2026-07-31 option C) is exempt: exceeding the position is
@@ -475,7 +650,20 @@ def validate_transaction(
         # That is the one guard whose confirmation permanently discards a cost basis, so a
         # bulk import that raises it spuriously trains the owner to click exactly the button
         # that must stay frightening. Measured on a synthetic broker export: 7 of 47 rows.
-        pending = pending_share_flows(batch, exclude=inp)
+        #
+        # Membership applies the whole-share rule to each sibling through ONE memoised
+        # registry read per symbol (DEF-024): a 1.5-股 buy is a hard error on its own line
+        # and must not lend the 1.5 shares it will never book. The memo is seeded with this
+        # row's own instrument, so the common file (one symbol per key, whole shares) makes
+        # no extra read at all.
+        inst_memo: dict[str, Instrument | None] = {inp.symbol: inst}
+
+        def instrument_of(symbol: str) -> Instrument | None:
+            if symbol not in inst_memo:
+                inst_memo[symbol] = get_instrument(conn, symbol)
+            return inst_memo[symbol]
+
+        pending = pending_share_flows(batch, exclude=inp, instrument_of=instrument_of)
         held = current_shares(
             conn, inp.account_id, inp.symbol, index=walk_index, pending=pending)
         # DATE-AWARE (2026-07-31): the position that must cover the sell is the one that
@@ -483,9 +671,18 @@ def validate_transaction(
         # back-dated sell covered only by a LATER buy passed silently — and the replay then
         # discarded the symbol's cost basis for good. The cash ledger has had the equivalent
         # running-balance check since audit C3; this closes the same hole on the share side.
+        #
+        # ORDER-AWARE within the day (DEF-012, 2026-09-23): the replay books one day's
+        # trades in ledger-id order, and a file's rows take ids in file order, so a same-day
+        # sibling BELOW this sell in the file is booked after it and cannot cover it. The
+        # stored ledger's rows all precede a pending one (lower ids), so the manual door —
+        # whose batch is empty — is unchanged: every stored same-day buy still counts.
+        before_me = siblings_booked_before(batch, inp)
+        pending_then = pending_share_flows(
+            before_me, exclude=inp, instrument_of=instrument_of)
         held_then = shares_through(
             conn, inp.account_id, inp.symbol,
-            on=inp.trade_date, index=walk_index, pending=pending,
+            on=inp.trade_date, index=walk_index, pending=pending_then,
         )
         if (capped := _depth_cap_issue(walk_index, {inp.symbol})) is not None:
             issues.append(capped)
@@ -497,7 +694,19 @@ def validate_transaction(
             # `sell 150 > held 100` made one sentence read half in each language, on the one
             # dialog whose whole job is to make sure the owner understood before acking.
             # The NUMBERS are the message; they survive the translation unchanged.
-            if inp.quantity > held_then and inp.quantity <= held:
+            later_same_day = any(
+                row is not inp and row not in before_me
+                and (row.account_id, row.symbol) == (inp.account_id, inp.symbol)
+                for row in batch
+            )
+            if inp.quantity > held_then and inp.quantity <= held and later_same_day:
+                # The cover exists — it is simply LISTED BELOW this sell on the same day,
+                # so the ledger will book it afterwards. Say so, or the owner reads
+                # 「那一天只有 N 股」 while looking at the buy right under it.
+                msg = (f"賣出 {inp.quantity} 股，超過賣出當下持有的 {held_then} 股"
+                       f"（同日較後面的列會在這筆之後才入帳，不能先拿來抵；"
+                       f"目前淨額 {held} 股）— 請把買進列移到賣出列之前")
+            elif inp.quantity > held_then and inp.quantity <= held:
                 msg = (f"賣出 {inp.quantity} 股，超過 {inp.trade_date.isoformat()} 當日"
                        f"持有的 {held_then} 股（目前淨額 {held} 股，"
                        f"但那一天只有 {held_then} 股）")
@@ -520,6 +729,40 @@ def validate_transaction(
                 message=f"交易日期 {inp.trade_date.isoformat()} 晚於今日，確認無誤？",
             )
         )
+
+    # --- trade dated BEFORE the position's opening inventory (DEF-014, soft) ---
+    # An opening row says "on build_date this account already held N shares at this
+    # cost", so a trade of the same position dated earlier is either a duplicate of what
+    # the opening already contains (the common case — the statement and the opening both
+    # describe it) or an opening whose build date is wrong. Either way the owner has to
+    # look; the same ``needs_confirm`` mechanism as the future-date check, so all three
+    # doors (manual / CSV / broker) gate it the same way. The account is a token the fetch
+    # layer resolves to its display name (DEF-023).
+    opening = get_opening(conn, inp.account_id, inp.symbol)
+    if opening is not None and inp.trade_date < opening.build_date:
+        issues.append(
+            Issue(
+                kind="trade_before_opening",
+                needs_confirm=True,
+                message=(
+                    f"交易日 {inp.trade_date.isoformat()} 早於 {inp.symbol} 在 "
+                    f"{account_ref(inp.account_id)} 的期初庫存建檔日 "
+                    f"{opening.build_date.isoformat()}，期初庫存已包含該日的部位，"
+                    "請確認不是重複登錄"
+                ),
+            )
+        )
+    else:
+        # --- trade dated before the account's earliest record (DEF-014, ADVISORY) ---
+        # Not a duplicate signal — the first-ever row of a back-filled history is dated
+        # before everything by definition — so it informs and never gates. Suppressed when
+        # the opening finding above already fired: one sentence per cause.
+        earliest = _ledger_start(conn, inp.account_id)
+        if earliest is not None and inp.trade_date < earliest:
+            issues.append(advisory_issue(
+                "trade_before_ledger_start",
+                f"早於此帳戶最早紀錄（{earliest.isoformat()}），請確認日期",
+            ))
 
     # --- duplicate trade (M7, soft): an identical row already exists ---
     if _duplicate_exists(conn, inp):
@@ -864,7 +1107,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         conn, inp.account_id, inp.from_symbol, on=inp.date, index=walk_index
     ) == 0:
         add(Issue(kind="no_position_on_action_date",
-                  message=(f"{inp.account_id} 在 {inp.date.isoformat()} 沒有 "
+                  message=(f"{account_ref(inp.account_id)} 在 {inp.date.isoformat()} 沒有 "
                            f"{inp.from_symbol} 的持倉，無法套用公司行動。"
                            "請先補登該日之前的買進或期初庫存")))
 
@@ -878,7 +1121,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     opening = get_opening(conn, inp.account_id, inp.from_symbol)
     if opening is not None and opening.build_date == inp.date:
         add(Issue(kind="opening_on_action_date", needs_confirm=True,
-                  message=(f"{inp.account_id} 在 {inp.date.isoformat()} 有一筆 "
+                  message=(f"{account_ref(inp.account_id)} 在 {inp.date.isoformat()} 有一筆 "
                            f"{inp.from_symbol} 的期初庫存，與這筆公司行動同一天。"
                            "同一天的期初庫存會被視為行動之前就已持有，"
                            f"所以這筆行動會套用到它（{opening.shares} 股會依比例換算）。"
@@ -1326,7 +1569,7 @@ def validate_corporate_action_change(
             issues.append(Issue(
                 kind="conflicting_ratio",
                 message=(f"{row.from_symbol} 在 {row.date.isoformat()} 於 "
-                         f"{sibling.account_id} 的比例是 {sibling.ratio_to} 比 "
+                         f"{account_ref(sibling.account_id)} 的比例是 {sibling.ratio_to} 比 "
                          f"{sibling.ratio_from}，與本次改成的 {replacement.ratio_to} 比 "
                          f"{replacement.ratio_from} 不一致。"
                          "同一個事件只會有一個比例，請整組一起改"),
@@ -1593,21 +1836,24 @@ def _withdraw_issues(
     siblings = [_pool_row(b) for b in batch if b is not inp]
     before = pool(inp.account_id, inp.ccy, include=siblings, exclude_id=exclude_id,
                   as_of=inp.date)
+    # DEF-008: both branches state the same three facts in ONE sentence — which pool, on
+    # which day, down to what — and differ only in the cause (see cash_dip_sentence).
     if inp.amount > before.balance:
         return [Issue(
             kind="withdraw_insufficient_balance",
-            message=(f"出金金額 {decimal_str(inp.amount)} {inp.ccy.value} 超過 "
-                     f"{account.name} 的 {inp.ccy.value} 帳戶現金 "
-                     f"{decimal_str(before.balance)} — 出金不可透支"
-                     "（請先補登入金或換匯）"))]
+            message=cash_dip_sentence(
+                what="出金", account_id=account.account_id, ccy=inp.ccy, on=inp.date,
+                low=before.balance - inp.amount, cause="出金當日",
+            ) + "— 出金不可透支，請先補登入金或換匯")]
     after = pool(inp.account_id, inp.ccy,
                  include=[*siblings, _pool_row(inp)], exclude_id=exclude_id)
     if after.low < min(before.low, _ZERO):
         return [Issue(
             kind="withdraw_insufficient_balance",
-            message=(f"此筆出金會使 {account.name} 的 {inp.ccy.value} 現金"
-                     f"{dip_phrase(after.low_date)} {decimal_str(after.low)}"
-                     "（出金日早於資金到位）— 出金不可透支，請先補登入金或換匯"))]
+            message=cash_dip_sentence(
+                what="出金", account_id=account.account_id, ccy=inp.ccy,
+                on=after.low_date, low=after.low, cause="出金日早於資金到位",
+            ) + "— 出金不可透支，請先補登入金或換匯")]
     return []
 
 

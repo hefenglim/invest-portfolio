@@ -105,6 +105,26 @@
     return pa.neg ? -m : m;
   }
 
+  /* ---- DEF-007 (functional test 2026-09-22, A-02): THE ONE WAY A VALUE THAT ARRIVES AFTER
+     AN AWAIT MAY LAND IN AN EDITABLE FIELD. ----------------------------------------------
+     The 取得成本 prefill checked only its own sequence token, so a reference rate that came
+     back after the owner had typed 31.5 overwrote it with 31.698999 (and flipped the mode
+     back to 匯率), and 確認 then booked 31,699 TWD for a conversion dealt at 31,500. Measured
+     API latency on the live site is 5–30 s, so the window is not theoretical.
+
+     The rule: a late write may only replace what the PAGE knows is in the field — nothing
+     (an empty field destroys nothing when filled), or the value the page itself put there.
+     Anything else was typed during the round trip and is the owner's. `expected` is that
+     known value: the page's own last auto-fill for an estimate/prefill (autoFill below), or
+     the value just submitted for a post-commit clear. Every `.value =` that runs after an
+     `await` in this file goes through here — tests/contract/test_def007_async_field_writes.py
+     scans for any that does not. */
+  /* The guard itself lives in format.js (window.pdField, I-12) — every page with an editable
+     field shares ONE definition; these are this file's names for it. */
+  const writeIfUntouched = window.pdField.writeIfUntouched;
+  const autoFill = window.pdField.autoFill;
+  const resetField = window.pdField.resetField;
+
   let D = { balances: [], movements: [], negative_pools: [] };
   let accounts = [];  // from /api/input/context (id, name, ccy, settlement_ccy, funding_ccy)
   let cmKind = 'deposit';
@@ -846,6 +866,9 @@
     const syncMovementCcy = () => {
       fillCcySelect($('#cm-ccy'), $('#cm-account').value);
       updCmBalance();  // FU-D43a: refresh the 帳戶現金 ceiling for the new account/ccy
+      // DEF-007: a 取得成本 typed for the old pool is not one for the new pool — the reset is
+      // synchronous with the switch, so the prefill below fills an EMPTY field.
+      resetField($('#cm-acq'));
       // fillCcySelect writes the <select> programmatically, which fires NO change event —
       // without this call the 取得成本 field would stay hidden on load and after an account
       // switch, i.e. exactly when a foreign default is selected for the user.
@@ -864,8 +887,8 @@
     const syncFxCcy = () => {
       const accId = $('#cfx-account').value;
       const a = accounts.find((x) => x.id === accId);
-      $('#cfx-from-amt').value = '';
-      $('#cfx-to-amt').value = '';
+      resetField($('#cfx-from-amt'));
+      resetField($('#cfx-to-amt'));
       fillCcySelect($('#cfx-from-ccy'), accId, a && a.funding_ccy);
       fillCcySelect($('#cfx-to-ccy'), accId, a && settlementCcy(a));
       enforceFxCcyDistinct('from');  // guards a mis-seeded funding==settlement pair too
@@ -914,7 +937,7 @@
       const show = isForeignMovement();
       field.hidden = !show;
       if (!show) {
-        $('#cm-acq').value = '';
+        resetField($('#cm-acq'));
         acqPrefillMsg = '';
         acqPrefillFilled = false;
         $('#cm-acq-hint').className = 'cfx-balance';
@@ -935,13 +958,22 @@
         const r = await api.get('/api/cash/acq-rate', { account_id: account, ccy: ccy, on: on });
         if (seq !== acqPrefillSeq) return;  // a later change already superseded this one
         if (r.available) {
-          $('#cm-acq-mode').value = 'rate';
-          $('#cm-acq').value = r.rate;
-          acqPrefillFilled = true;
-          acqPrefillMsg = '參考值：' + on + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
-            + ' ' + r.home_ccy + '（市場中價，你的實際取得價可能不同，可直接修改）';
+          /* DEF-007: never switch the mode (家幣金額 is the owner's choice, and a RATE written
+             into an AMOUNT field is a different number), and never overwrite a value typed
+             while the lookup was in flight — the reference then stays in the hint only. */
+          acqPrefillFilled = $('#cm-acq-mode').value === 'rate'
+            && autoFill($('#cm-acq'), r.rate);
+          /* The date is the RATE's (as_of), not the one typed: a lookup on a day with no
+             close resolves to the latest earlier one, and the hint must say which. */
+          const asOf = r.as_of || on;
+          acqPrefillMsg = '參考值：' + asOf + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
+            + ' ' + r.home_ccy
+            + (asOf !== on ? '（' + on + ' 尚無收盤匯率，採最近一個交易日）' : '')
+            + (acqPrefillFilled
+              ? '（市場中價，你的實際取得價可能不同，可直接修改）'
+              : '（市場中價，僅供參考；未覆寫你輸入的值）');
         } else {
-          $('#cm-acq').value = '';
+          autoFill($('#cm-acq'), '');   // retract only a value the page itself put there
           acqPrefillFilled = false;
           acqPrefillMsg = r.reason + '（留白也可送出：金額照樣計入餘額，'
             + '但不列入匯損益計算並會被標示）';
@@ -1000,7 +1032,13 @@
       hint.textContent = parts.join('　·　');
     }
     $('#cm-acq').addEventListener('input', renderAcqHint);
-    $('#cm-acq-mode').addEventListener('change', renderAcqHint);
+    $('#cm-acq-mode').addEventListener('change', () => {
+      /* DEF-007: the page's prefill is a RATE. Switched to 家幣金額 it would be booked as an
+         amount (31.698999 TWD for 1,000 USD) — so the page retracts its OWN value; a value
+         the owner typed is left alone. */
+      if (autoFill($('#cm-acq'), '')) acqPrefillFilled = false;
+      renderAcqHint();
+    });
     $('#cm-amount').addEventListener('input', renderAcqHint);
     // The account select is covered by syncMovementCcy above; binding it here too would
     // fire a second, redundant prefill request for every account switch.
@@ -1035,6 +1073,10 @@
       const amount = $('#cm-amount').value.trim();
       if (!amount) { if (window.toast) window.toast('請輸入金額', 'fail'); return; }
       const restore = window.pdBusy ? window.pdBusy($('#cm-confirm'), '寫入中…') : () => {};
+      /* DEF-007: what was SENT, so the post-commit clear below removes only that — a value
+         typed into the form during the round trip (5–30 s live) is the next entry. */
+      const sent = { amount: $('#cm-amount').value, note: $('#cm-note').value,
+        acq: $('#cm-acq').value };
       try {
         const payload = {
           account_id: $('#cm-account').value, date: $('#cm-date').value, kind: cmKind,
@@ -1051,7 +1093,9 @@
         await api.post('/api/cash/movements', payload);
         restore();
         if (window.toast) window.toast('寫入成功', 'ok', (KIND_LABEL[cmKind] || '') + ' ' + amount);
-        $('#cm-amount').value = ''; $('#cm-note').value = ''; $('#cm-acq').value = '';
+        writeIfUntouched($('#cm-amount'), sent.amount, '');
+        writeIfUntouched($('#cm-note'), sent.note, '');
+        writeIfUntouched($('#cm-acq'), sent.acq, '');
         // M5-03: the hint must describe the field's CURRENT content — clearing the box and
         // leaving 「參考值：…」 standing is the same stale sentence by another route.
         renderAcqHint();
@@ -1145,7 +1189,7 @@
     function clearAutoEstimate(caption) {
       if (!estPristine) return;
       const to = $('#cfx-to-amt');
-      if (to && to.value !== '') { to.value = ''; updImplied(); }
+      if (to && to.value !== '' && autoFill(to, '')) updImplied();
       const cap = $('#cfx-estimate');
       if (cap) { cap.hidden = !caption; cap.textContent = caption || ''; }
     }
@@ -1183,7 +1227,8 @@
         return;
       }
       const cap = $('#cfx-estimate');
-      $('#cfx-to-amt').value = resp.estimate;  // server Decimal string, placed verbatim
+      // server Decimal string, placed verbatim — through the DEF-007 guard like every late write
+      if (!autoFill($('#cfx-to-amt'), resp.estimate)) { markBuyEdited(); return; }
       if (cap) {
         cap.hidden = false;
         cap.textContent = '以 ' + f.date(resp.rate_as_of) + ' 匯率 ' + f.rate(resp.rate) +
@@ -1232,6 +1277,10 @@
 
     $('#cfx-reestimate').addEventListener('click', () => {
       estPristine = true;  // explicit user request: the estimate may overwrite again
+      // …and that request hands the field's CURRENT value to the page (DEF-007): the guard
+      // lets a late write replace only what the page owns, and here the owner just gave it.
+      const buy = $('#cfx-to-amt');
+      if (buy && buy.value !== '') buy.dataset.pdAuto = buy.value;
       setReestimateVisible(false);
       runEstimate();
     });
@@ -1279,6 +1328,7 @@
          already disables 確認 when the amount exceeds 可用餘額; the backend re-validates as
          the authority and a 422 fx_insufficient_balance renders inline under the amount. */
       const restore = window.pdBusy ? window.pdBusy($('#cfx-confirm'), '寫入中…') : () => {};
+      const sentFx = { from: $('#cfx-from-amt').value, to: $('#cfx-to-amt').value };  // DEF-007
       try {
         await api.post('/api/cash/fx', {
           account_id: $('#cfx-account').value, date: $('#cfx-date').value,
@@ -1287,7 +1337,9 @@
         });
         restore();
         if (window.toast) window.toast('換匯已寫入', 'ok', fromA + ' ' + $('#cfx-from-ccy').value + ' → ' + toA + ' ' + $('#cfx-to-ccy').value);
-        $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; updImplied();
+        writeIfUntouched($('#cfx-from-amt'), sentFx.from, '');
+        writeIfUntouched($('#cfx-to-amt'), sentFx.to, '');
+        updImplied();
         resetEstimate();  // FU-D43c: cleared form -> pristine again, drop in-flight estimates
         await boot();  // refresh balances → the 可用餘額 ceiling updates (+ FU-D40 ledger)
       } catch (err) {

@@ -358,7 +358,7 @@ def test_a_builder_that_drops_a_row_is_caught_and_nothing_is_written(
     real = conv_mod._transaction_rows
     monkeypatch.setattr(
         conv_mod, "_transaction_rows",
-        lambda grouped, account, suspect: real(grouped, account, suspect)[:-1],
+        lambda grouped, account, currency, suspect: real(grouped, account, currency, suspect)[:-1],
     )
     out = tmp_path / "out"
     code, stdout, stderr = _run(

@@ -80,6 +80,7 @@ from portfolio_dash.pricing.store import (
     get_latest_price,
     get_price_history,
 )
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
@@ -303,8 +304,10 @@ def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
     20-row ledger problem would push the dashboard sideways (the same overflow class as the
     136-digit XIRR, 2026-08-05). The remainder is counted, never dropped silently.
     """
+    # The account is a TOKEN the fetch layer resolves to the zh display name (DEF-023):
+    # this string used to carry the bare id, so the badge read 「2884（tw_broker・…）」.
     named = "、".join(
-        f"{a.from_symbol}（{a.account_id}・{a.date.isoformat()}）"
+        f"{a.from_symbol}（{account_ref(a.account_id)}・{a.date.isoformat()}）"
         for a in unapplied[:_UNAPPLIED_ACTIONS_NAMED]
     )
     rest = len(unapplied) - _UNAPPLIED_ACTIONS_NAMED
@@ -769,7 +772,10 @@ def build_dashboard(
             unrealized_pct = h.unrealized_pnl / abs(h.original_cost_total)
         data = h.model_dump()
         data.update(
-            account_name=acct.name, name=inst.name, market=inst.market,
+            # I-10: the account as a TOKEN, like every backend sentence — ``accounts.name`` is
+            # the English label (「TW Broker」) the owner never chose. pdApi resolves it for
+            # every page, pdApi.download for the print reports that render this field.
+            account_name=account_ref(acct.account_id), name=inst.name, market=inst.market,
             sector=inst.sector, board=inst.board,
             price_as_of=pr.as_of if pr is not None else None,
             price_stale=pr.stale if pr is not None else True,

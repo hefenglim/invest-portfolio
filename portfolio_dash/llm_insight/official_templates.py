@@ -24,8 +24,11 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
 # v22: the W8 weekly lens in the checkup card, and the daytrade negative one-shot the
-# W4 live baseline measured into existence.
-LIBRARY_VERSION = "official-v24 (2026-08-28)"
+# W4 live baseline measured into existence. v25: the AI-input prompt v8 (DEF-036
+# stated_amount — a transcribed total the door checks against shares × price). v26: the
+# on-alert addendum v2 (DEF-037 — ``ON_ALERT_CONTEXT`` names WHICH alert fired); the content
+# changed under v25 and the library tag did not follow (I-17).
+LIBRARY_VERSION = "official-v26 (2026-09-23)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -67,7 +70,15 @@ LIBRARY_VERSION = "official-v24 (2026-08-28)"
 # so the prompt can never drift from the door's allowed set.
 _CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
 
-AI_INPUT_PROMPT_VERSION = "v7.4"  # R6 ex_date; +daytrade negative one-shot (W4 baseline)
+# v8 (DEF-036, 2026-09-23): the txn row gains ``stated_amount`` — the statement's OWN total
+# for the line (成交金額／應付金額／淨收付), COPIED, never computed, and never "reconciled" by
+# bending shares or price toward it. Measured before: 「100股 成交價 46 成交金額 50,000 元」
+# came back as 100 × 46 with the 50,000 parked in ``note``, where nothing reads it, and the
+# draft said 「✓ 解析完整」. ``agents.py::_append_amount_check`` now compares the two in
+# Decimal and flags a contradiction. The one-shot is a CONTRASTIVE PAIR (the 2026-08-28
+# technique): one total that agrees and one that does not, both copied verbatim — a lone
+# consistent example would teach "make them agree". Neither instance is in the corpus.
+AI_INPUT_PROMPT_VERSION = "v8"  # DEF-036 stated_amount (transcribed total, contrastive pair)
 AI_INPUT_PROMPT_BODY = (
     "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
     "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
@@ -77,7 +88,7 @@ AI_INPUT_PROMPT_BODY = (
     "<row_shapes>\n"
     'txn 買賣交易: {{"kind":"txn","account_id","symbol","side":"BUY|SELL",\n'
     '"date":"YYYY-MM-DD","shares","price","daytrade":false,"short_sale":false,\n'
-    '"is_etf":false,"note","market"}}\n'
+    '"is_etf":false,"note","market","stated_amount"}}\n'
     'div 股利: {{"kind":"div","account_id","symbol","date",\n'
     '"type":"CASH|STOCK|DRIP|NET","gross","withholding","net","reinvest_shares",\n'
     '"reinvest_price","ex_date"}}\n'
@@ -91,6 +102,17 @@ AI_INPUT_PROMPT_BODY = (
     '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2330",\n'
     '"side":"BUY","date":"2026-06-01","shares":"10","price":"600"}}],"unparsed":[]}}\n'
     "</example_output>\n"
+    # DEF-036 (v8): a CONTRASTIVE PAIR for stated_amount. The first total agrees with
+    # shares × price, the second does not (1000 × 52 is 52,000, the text says 5,180) — and
+    # BOTH are copied exactly, with shares and price left as written. The system, not the
+    # model, compares them; an example of only the agreeing case would teach "make it fit".
+    "<example_input>8/20 買 2317 200 股 @105，成交金額 21,000 元；"
+    "8/21 賣出 2303 1000 股 成交價 52，淨收付 5,180 元</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2317",\n'
+    '"side":"BUY","date":"2026-08-20","shares":"200","price":"105",\n'
+    '"stated_amount":"21000"}},{{"kind":"txn","account_id":"tw_broker","symbol":"2303",\n'
+    '"side":"SELL","date":"2026-08-21","shares":"1000","price":"52",\n'
+    '"stated_amount":"5180"}}],"unparsed":[]}}</example_output>\n'
     # A NEGATIVE one-shot for `daytrade` (2026-08-28). The live corpus measured the PROSE rule
     # failing on exactly the case it names: a same-day round trip the user never called 當沖
     # came back with daytrade=1 in BOTH baseline runs. That flag halves the TW sell tax
@@ -161,7 +183,12 @@ AI_INPUT_PROMPT_BODY = (
     "user explicitly says 當沖 (a same-day round trip they declare); never infer it from\n"
     "two same-day opposite drafts. short_sale: set true ONLY when the user explicitly\n"
     "says 放空／融券／short sell — never infer it from a sell larger than the position;\n"
-    "when in doubt, false.\n"
+    "when in doubt, false. stated_amount: when the text states the line's OWN total\n"
+    "(成交金額／應付金額／淨收付／amount), copy that number EXACTLY — digits only, no\n"
+    "thousands separators, unsigned — into stated_amount; when it states none, omit the\n"
+    "field. NEVER compute it from shares × price, and NEVER change shares or price to make\n"
+    "them agree with it: the system compares the two and asks the user when they differ.\n"
+    "Do not put the total in note.\n"
     "<dividend_rules>\n"
     "- CASH: 現金股利入帳.\n"
     "- STOCK: 配股（股票股利，加股數）.\n"
@@ -326,10 +353,23 @@ AI_INSTRUMENT_RESOLVE_PROMPT = (
 
 # On-alert insight addendum (llm_insight/generate.py): appended to an assembled insight
 # prompt when a card is risk-alert-triggered, forcing the ≤3-trading-day window (spec 4.10).
-ON_ALERT_NOTE_VERSION = "v1"
+# v2 (DEF-037, 2026-09-23): the addendum now also carries WHICH alert fired —
+# ``ON_ALERT_CONTEXT`` below, rendered from the ``alert_events`` row by generate.py. Until
+# then the prompt said only that an alert had fired, while the 提點 template asked the model
+# to state "what fired (rule and value)": measured on the demo, a ``target_cross`` card for
+# 2884 came back titled 「RSI過熱警示」 and an account-level card invented a broker outage.
+# The values are the rule engine's own computed text, never an LLM number (llm-insight.md).
+ON_ALERT_NOTE_VERSION = "v2"
 ON_ALERT_NOTE = (
     "\n\n[預警解讀守則] 本卡由風險預警觸發，請給出極短期（≤3 個交易日）的觀察與預測，"
     "聚焦此事件的即時影響。"
+)
+# Part of the ``insight_on_alert_note`` prompt (same registry entry, same version tag):
+# ``str.format`` slots, filled by ``generate._alert_note`` from the event's own record.
+ON_ALERT_CONTEXT = (
+    "\n[觸發預警] 規則代碼：{rule}；預警標題：{title}；預警內容：{detail}；觸發日：{fired_on}。"
+    "以上是系統計算的預警事實：說明「觸發了什麼」時只能依此描述，"
+    "不得改寫成其他警示，也不得推測未列出的事件。"
 )
 
 # Master-role system prompts (llm_insight/master.py): the scoring rubric, the calibration
@@ -911,7 +951,9 @@ PROMPT_REGISTRY: list[PromptRegistryEntry] = [
     },
     {
         "key": "insight_on_alert_note",
-        "feature": "洞察卡預警附加守則（generate 對 on_alert 卡附加，強制 ≤3 交易日）",
+        "feature": (
+            "洞察卡預警附加守則（generate 對 on_alert 卡附加，強制 ≤3 交易日，附觸發預警事實）"
+        ),
         "tier": "code-owned",
         "version": ON_ALERT_NOTE_VERSION,
         "agent": "insight_generate",

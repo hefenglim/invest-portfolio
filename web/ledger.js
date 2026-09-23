@@ -229,10 +229,26 @@
     return td;
   }
 
-  /* The success toast fires AFTER the tables are rebuilt — it used to fire before `boot()`,
-     so 「刪除完成」 stood on screen beside the row it claimed was gone. */
+  /* I-7 (DEF-019's last stranded writer): an edit or delete here changes the ledger every
+     holdings figure on the page is read from, so it settles through the page's ONE refresh —
+     window.pdLedgerRefresh, which input.js adopts (structural context, the per-account
+     holdings cache the pickers and sell hints read, then these tables). It used to call
+     boot(), which rebuilt only these tables: after an edit here the 交易輸入 picker kept
+     annotating the pre-edit share count until the next commit made in the input pane. On a
+     page without input.js the global is still this file's own table refresh, and boot() is
+     the fallback when neither is present. The ledger KIND is the visible tab's. */
+  function refreshAfterMutation() {
+    if (typeof window.pdLedgerRefresh === 'function') {
+      const kind = Object.keys(KIND_TAB).find((k) => KIND_TAB[k] === activeTab);
+      return window.pdLedgerRefresh(kind);
+    }
+    return boot();
+  }
+
+  /* The success toast fires AFTER the tables are rebuilt — it used to fire before the
+     refresh, so 「刪除完成」 stood on screen beside the row it claimed was gone. */
   async function mutationOk(kind, prog) {
-    await boot();
+    await refreshAfterMutation();
     const sub = '帳本已更新，統計將由帳本重建';
     if (prog) prog.done(kind + '完成', sub);
     else if (window.toast) window.toast(kind + '完成', 'ok', sub);
@@ -293,16 +309,40 @@
       err, '寫入', (param) => runMutation(kind, () => send(param)), ui.dismiss));
   }
 
-  /* DELETE with confirm + the ack retry loop (the ack rides as a query param). */
-  function delWithConfirm(path, label) {
+  /* DELETE with confirm + the ack retry loop (the ack rides as a query param). `extra` is
+     appended to the confirm body — a consequence the owner must read BEFORE confirming. */
+  function delWithConfirm(path, label, extra) {
     const send = (param) => window.pdApi.del(
       param ? path + (path.indexOf('?') === -1 ? '?' : '&') + param + '=true' : path);
     window.confirmDialog({
-      title: '刪除' + label, body: '確定刪除這筆' + label + '？統計將由其餘帳本紀錄重建。',
+      title: '刪除' + label,
+      body: '確定刪除這筆' + label + '？統計將由其餘帳本紀錄重建。' + (extra || ''),
       confirmLabel: '刪除', danger: true,
       onConfirm: () => runMutation('刪除', () => send(null), (err, prog) => ackConfirm(
         err, '刪除', (param) => runMutation('刪除', () => send(param)), prog.drop)),
     });
+  }
+
+  /* DEF-023 (2026-09-23): deleting a trade can pull the holding out from under a LATER
+     corporate action on the same account + symbol — the replay then refuses the action
+     (「沒有持倉，無法套用」), XIRR goes 「— 資料不足」 portfolio-wide, and nothing in this
+     dialog said so. The actions dated on/after the trade are read from the ledger API
+     (`from` = the trade's own date, the row's `symbol` is its source symbol) and named
+     here, one line each, BEFORE the confirm opens. A lookup failure degrades to the plain
+     confirm: the warning is advice, the server's replay guard is the authority. */
+  async function delTxWithWarning(t) {
+    let extra = '';
+    try {
+      const resp = await window.pdApi.get('/api/ledgers/corporate-actions', {
+        account_id: t.account_id, symbol: t.symbol, from: t.date, limit: 500 });
+      const later = ((resp && resp.rows) || []).filter(
+        (a) => a.symbol === t.symbol && a.date >= t.date);
+      later.forEach((a) => {
+        extra += '　⚠ 刪除後 ' + f.date(a.date) + ' 的 ' + a.symbol + ' ' + a.kind_label
+          + ' 可能失去持倉依據而無法套用（待釐清）。';
+      });
+    } catch (e) { /* degrade to the plain confirm */ }
+    delWithConfirm('/api/ledgers/transactions/' + t.id, '交易', extra);
   }
 
   /* generic edit modal: rows = [[label, inputNode]], onSave({ok, dismiss}) async — the 儲存
@@ -606,7 +646,7 @@
       tr.appendChild(tdTotal);
       tr.appendChild(actionsCell(
         () => editTx(t),
-        () => delWithConfirm('/api/ledgers/transactions/' + t.id, '交易')));
+        () => { delTxWithWarning(t); }));
 
       const detail = el('tr', 'detail-row');
       const td = el('td');
@@ -743,14 +783,22 @@
     const fRatioTo = inp(a.ratio_to, 'number', '1');
     const fCarry = inp(a.cost_carry === null ? '' : a.cost_carry, 'number', 'any');
     const fNote = inp(a.note || '');
+    /* DEF-020: the linked reorganisation fee is edited HERE, with the action it belongs
+       to. The value is the server's Decimal string, shown verbatim; blank removes the fee;
+       the server re-dates and re-accounts it with the action under one commit. */
+    const fee = a.reorg_fee || null;
+    const fFee = inp(fee ? fee.amount : '', 'number', 'any');
+    const feeLabel = '重組費用（' + (fee ? fee.ccy + '，留空即刪除該筆出金' : '選填，記為出金')
+      + '）';
     const warn = el('div', 'hint',
       '⚠ 修改公司行動會重算歷史：股數、均價、報酬率與價格基準都會依新內容重建（原值已存入稽核軌跡）。'
-      + '若這筆行動同時登錄在多個帳戶，代號／日期／類型／比例必須整組一致，否則會被擋下。');
+      + '若這筆行動同時登錄在多個帳戶，代號／日期／類型／比例必須整組一致，否則會被擋下。'
+      + '重組費用會隨行動的日期與帳戶一併更新。');
     editModal('編輯公司行動 #' + a.id + ' — ' + a.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['類型', fKind],
       ['來源代號', fFrom], ['目的代號', fTo],
       ['每持有（股）', fRatioFrom], ['變成／換得（股）', fRatioTo],
-      ['成本分攤比例（分拆用）', fCarry], ['備註', fNote],
+      ['成本分攤比例（分拆用）', fCarry], [feeLabel, fFee], ['備註', fNote],
       ['', warn],
     ], async (ui) => {
       const body = {
@@ -759,6 +807,10 @@
         ratio_to: fRatioTo.value, ratio_from: fRatioFrom.value,
         cost_carry: fCarry.value.trim() || null,
         note: fNote.value.trim() || null, ack_warnings: false,
+        /* Always a string on this door: '' = remove the linked fee, a value = sync it.
+           (Omitting the key would mean "leave it alone", which an edit form cannot mean.) */
+        reorg_fee: fFee.value.trim(),
+        reorg_fee_ccy: fee ? fee.ccy : (a.ccy || null),
       };
       const put = () => window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
       /* `warnings_unacknowledged` is this door's own ack code (not in ACK_CODES: the ack
@@ -782,16 +834,85 @@
      share correction is per account — and the drawer would print ✓ 對帳一致 over the
      mismatch. The refusal is turned into a guided action here rather than a dead end:
      the owner who really does want the action gone is offered the WHOLE SET. */
+  /* What the delete response says happened to the band (DEF-021): a toast when the band
+     did NOT come back, with the server's reason — the owner then knows to visit 觀察清單. */
+  function afterActionDelete(resp) {
+    if (!resp || !window.toast) return;
+    const br = resp.band_restore;
+    if (br) {
+      const band = br.band || {};
+      if (br.restored) {
+        window.toast('目標價已移回 ' + band.from_symbol, 'ok',
+          '換股已刪除，' + band.to_symbol + ' 上的目標價（登錄換股時搬過去的）已原值移回');
+      } else {
+        window.toast('目標價未移回', 'warn', br.reason || '');
+      }
+    }
+    /* I-6 (F-3): the target weight's outcome, reported the same way — the delete response
+       has carried it since F-3; nothing on the page read it. */
+    const wr = resp.weight_restore;
+    if (wr) {
+      if (wr.restored) {
+        window.toast('目標權重已移回 ' + wr.from_symbol, 'ok',
+          '換股已刪除，' + wr.to_symbol + ' 上的目標權重（' + f.pct(wr.weight)
+          + '，登錄換股時搬過去的）已原值移回');
+      } else {
+        window.toast('目標權重未移回', 'warn', wr.reason || '');
+      }
+    }
+  }
+
+  /* The sentence(s) the delete confirm adds for a corporate action: which fee leaves with
+     it (DEF-020) and whether its band comes back (DEF-021) — both read off the row the
+     server sent, through the SAME predicate the delete will run. */
+  function actionDeleteConsequences(a) {
+    let s = '';
+    if (a.reorg_fee) {
+      const fee = a.reorg_fee;
+      s += '　會一併刪除這筆行動的重組費用出金：' + f.date(fee.date) + ' '
+        + fee.kind_label + ' ' + f.money(fee.amount, fee.ccy) + ' ' + fee.ccy
+        + '（' + acctZh(fee.account_id) + '）。';
+    }
+    if (a.band_move) {
+      const m = a.band_move;
+      const br = a.band_restore || {};
+      const parts = [];
+      if (m.target_low !== null && m.target_low !== undefined) parts.push('下限 ' + m.target_low);
+      if (m.target_high !== null && m.target_high !== undefined) parts.push('上限 ' + m.target_high);
+      if (br.restorable) {
+        s += '　登錄時移到 ' + m.to_symbol + ' 的目標價（' + parts.join('、')
+          + '）未再改動，會自動移回 ' + m.from_symbol + '。';
+      } else {
+        s += '　目標價不會移回：' + (br.reason || '登錄時搬移的目標價已不在原狀') + '。';
+      }
+    }
+    /* I-6 (F-3): the target weight, through the same predicate the delete runs
+       (`weight_restore` on the list row) — the confirm used to be silent about it. */
+    if (a.weight_move) {
+      const w = a.weight_move;
+      const wr = a.weight_restore || {};
+      if (wr.restorable) {
+        s += '　登錄時移到 ' + w.to_symbol + ' 的目標權重（' + f.pct(w.weight)
+          + '）未再改動，會自動移回 ' + w.from_symbol + '。';
+      } else {
+        s += '　目標權重不會移回：' + (wr.reason || '登錄時搬移的目標權重已不在原狀') + '。';
+      }
+    }
+    return s;
+  }
+
   function delAction(a) {
-    const delOne = () => window.pdApi.del('/api/ledgers/corporate-actions/' + a.id);
-    const delSet = () => window.pdApi.del('/api/ledgers/corporate-actions/set'
-      + '?from_symbol=' + encodeURIComponent(a.symbol)
-      + '&date=' + encodeURIComponent(a.date)
-      + '&kind=' + encodeURIComponent(a.kind));
+    const delOne = async () => afterActionDelete(
+      await window.pdApi.del('/api/ledgers/corporate-actions/' + a.id));
+    const delSet = async () => afterActionDelete(
+      await window.pdApi.del('/api/ledgers/corporate-actions/set'
+        + '?from_symbol=' + encodeURIComponent(a.symbol)
+        + '&date=' + encodeURIComponent(a.date)
+        + '&kind=' + encodeURIComponent(a.kind)));
     window.confirmDialog({
       title: '刪除公司行動',
       body: '確定刪除 ' + a.symbol + ' 在 ' + a.date + ' 的' + a.kind_label
-        + '？股數、成本與價格基準都會由帳本重建。',
+        + '？股數、成本與價格基準都會由帳本重建。' + actionDeleteConsequences(a),
       confirmLabel: '刪除', danger: true,
       onConfirm: () => runMutation('刪除', delOne, (err, prog) => {
         if (!(err && err.status === 422 && err.code === 'partial_action_set_change')) return false;
@@ -813,9 +934,22 @@
     tbody.replaceChildren();
     byKeyword(D.actions).forEach((a) => {
       const tr = el('tr');
+      /* DEF-023: addressable from the dashboard banner and the drawer (deep link). */
+      tr.dataset.actionId = a.id;
       tr.appendChild(el('td', 'num', f.date(a.date)));
       tr.appendChild(el('td', 'col-text', acctZh(a.account_id)));
-      tr.appendChild(el('td', 'col-text', a.kind_label));
+      const tdKind = el('td', 'col-text', a.kind_label);
+      if (a.unapplied) {
+        /* DEF-023: the replay refused THIS row — marked on the row itself, not only in
+           the XIRR tooltip and the drawer. The reason is the server's sentence. */
+        tr.classList.add('row-stale');
+        const ub = el('span', 'badge badge-missing ledger-unapplied', '未套用');
+        ub.title = a.unapplied.reason || '';
+        tdKind.appendChild(document.createTextNode(' '));
+        tdKind.appendChild(ub);
+        tr.title = '公司行動未套用（待釐清）：' + (a.unapplied.reason || '');
+      }
+      tr.appendChild(tdKind);
       tr.appendChild(symCell(a.symbol, a.name));
       const tdTo = el('td', 'col-text');
       if (a.to_symbol && a.to_symbol !== a.symbol) {
@@ -1022,6 +1156,39 @@
     }
   }
 
+  /* DEF-023: `trades.html?ledger=action&action_id=N` (from the dashboard's 未套用 banner
+     and the drawer) opens the 公司行動 tab and flashes that row. Falls back to matching
+     the (account_id, symbol, date, kind) tuple when no id was given, and to the tab alone
+     when the row is not on the current page (a toast says so). Runs ONCE after boot. */
+  async function openDeepLink() {
+    let q;
+    try { q = new URLSearchParams(window.location.search); } catch (e) { return; }
+    const tab = q.get('ledger');
+    if (!tab || !LOADERS[tab]) return;
+    /* Not dirty BEFORE the click: the click handler's ensureTab would otherwise start a
+       second, un-awaited fetch of the same pane beside the one awaited here. */
+    dirty[tab] = false;
+    const btn = document.getElementById('tab-' + TAB_IDS[tab]);
+    if (btn) btn.click();
+    activeTab = tab;
+    await LOADERS[tab]();
+    if (tab !== 'action') return;
+    const id = q.get('action_id');
+    const want = { account_id: q.get('account_id'), symbol: q.get('symbol'),
+                   date: q.get('date'), kind: q.get('kind') };
+    const hit = (D.actions || []).find((a) => id
+      ? String(a.id) === id
+      : (a.account_id === want.account_id && a.symbol === want.symbol
+         && a.date === want.date && (!want.kind || a.kind === want.kind)));
+    const row = hit && document.querySelector('#action-body tr[data-action-id="' + hit.id + '"]');
+    if (!row) {
+      if (window.toast) window.toast('找不到該筆公司行動列', 'warn', '可能不在目前頁面，請翻頁或調整篩選');
+      return;
+    }
+    row.classList.add('ledger-added-row');
+    if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+  }
+
   async function boot() {
     await loadAccounts();
     initFilters();
@@ -1030,5 +1197,5 @@
 
   initFilters();        // account chip bar (DOM only, no data) — safe before boot
   if (ownsTabs) showTab('tx');
-  boot();
+  boot().then(openDeepLink);
 })();

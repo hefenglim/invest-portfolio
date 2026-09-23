@@ -21,7 +21,12 @@ from portfolio_dash.api import news_service
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.news import store as news_store
-from portfolio_dash.scheduler.jobs import finish_job_run, latest_run_unfinished, start_job_run
+from portfolio_dash.scheduler.jobs import (
+    failure_detail,
+    finish_job_run,
+    latest_run_unfinished,
+    start_job_run,
+)
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.wire import decimal_str
 
@@ -131,7 +136,10 @@ def _news_run_worker(
                 )
                 status = "ok"
             except Exception as exc:  # noqa: BLE001 — swallow + log via the run row
-                detail, status = str(exc), "error"
+                # I-16: the scheduler's one sentence for a failed run (DEF-030) — the bare
+                # ``str(exc)`` (a KeyError's repr, an English provider message) reached the
+                # 排程中心 status chip from this worker only.
+                detail, status = failure_detail(exc), "error"
             finish_job_run(conn, int(row["id"]), status=status, detail=detail, now=now)
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return

@@ -2452,3 +2452,32 @@ button[disabled], .btn[disabled] {
 .digest-cfg-hhmm { width: 120px; }
 .digest-cfg-custom { font-size: 11px; color: var(--text-3); }
 .digest-cfg-hint { font-size: 11px; color: var(--text-3); flex: 1 1 220px; }
+/* DEF-023 (2026-09-23): the dashboard's 未套用公司行動 block — a visible entry, not a tooltip.
+   Reuses the unreg-banner frame; stacked so each refused action is its own line with its
+   own link. */
+.unapplied-banner { flex-direction: column; align-items: stretch; gap: 6px;
+  border-color: rgba(214, 69, 69, .45); }
+.unapplied-banner .unapplied-head { display: flex; align-items: center; gap: 10px; }
+.unapplied-banner .unreg-ico { color: var(--up); }
+.unapplied-list { list-style: none; margin: 0; padding: 0 0 0 24px;
+  display: flex; flex-direction: column; gap: 4px; }
+.unapplied-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  font-size: 12px; color: var(--text-2); }
+.unapplied-item .unapplied-meta { font-weight: 600; color: var(--text); white-space: nowrap; }
+.unapplied-item .unapplied-reason { flex: 1 1 320px; min-width: 0; }
+/* DEF-023: the 未套用 mark on a 公司行動 ledger row, and the drawer's link into that row. */
+.ledger-unapplied { margin-left: 4px; vertical-align: middle; }
+.sd-tx-issue-link { color: var(--accent); font-weight: 600; white-space: nowrap; }
+/* DEF-035 (2026-09-23): the AI draft table's per-row editors — table-height, compact, and a
+   flagged box (a typed value that does not parse) keeps its text and turns red (DEF-005). */
+.ai-edit { box-sizing: border-box; width: 100%; min-width: 64px; max-width: 150px; height: 26px;
+  padding: 2px 6px; font-size: 12px; font-family: inherit; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.ai-edit.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ai-edit.invalid { border-color: var(--up); box-shadow: 0 0 0 1px var(--up) inset; }
+.ai-edit-date { min-width: 128px; }
+.ai-edit-sym { min-width: 72px; max-width: 96px; }
+select.ai-edit { padding-right: 2px; }
+/* DEF-024 (2026-09-23): a preview row's ADVISORY (`info`) — a grey note that asks for nothing,
+   never painted as a warning. */
+.row-info { color: var(--text-3); font-size: 11px; line-height: 1.5; white-space: normal; }

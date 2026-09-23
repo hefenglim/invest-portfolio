@@ -44,7 +44,7 @@ from portfolio_dash.api.instrument_service import reconcile_price_basis
 # Sibling router, same layer, no cycle (``cash`` imports nothing from here) — the same shape
 # ``rebates.py`` already uses for ``movement_guard``. The alternative is a second spelling of
 # the 換匯 guard on the correction door, which is exactly the drift QA-10 found.
-from portfolio_dash.api.routers.cash import fx_change_guard, fx_delete_guard
+from portfolio_dash.api.routers.cash import cash_pool_fn, fx_change_guard, fx_delete_guard
 from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import check_amounts
@@ -58,11 +58,15 @@ from portfolio_dash.data_ingestion.register import (
 )
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
+    BandRestoreVerdict,
     MovedBand,
+    MovedWeight,
+    StoredCashMovement,
     StoredCorporateAction,
     StoredDividend,
     StoredOpening,
     StoredTransaction,
+    delete_cash_movement,
     delete_corporate_action,
     delete_dividend,
     delete_fx_conversion,
@@ -74,7 +78,9 @@ from portfolio_dash.data_ingestion.store import (
     get_instrument,
     get_opening,
     get_transaction,
+    insert_cash_movement,
     insert_corporate_action,
+    linked_cash_movements,
     list_accounts,
     list_cash_movements,
     list_corporate_actions,
@@ -86,6 +92,9 @@ from portfolio_dash.data_ingestion.store import (
     load_ledger_bundle,
     move_target_band,
     pending_band_move,
+    pending_band_restore,
+    restore_target_band,
+    update_cash_movement,
     update_corporate_action,
     update_dividend,
     update_fx_conversion,
@@ -95,10 +104,13 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.data_ingestion.validate import (
     IDENTIFIER_CHANGE_SUSPECTED,
     TARGET_BAND_PREDATES_SPLIT,
+    CashMovementInput,
     CorporateActionInput,
     Issue,
     identifier_change_repair,
     restated_band,
+    unknown_account_message,
+    validate_cash_movement,
     validate_corporate_action,
     validate_corporate_action_change,
     validate_opening_cost,
@@ -107,7 +119,8 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
-from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
+from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, CashKind, movement_sign
 from portfolio_dash.shared.corporate_actions import (
     KIND_ZH,
     ActionIndex,
@@ -119,7 +132,13 @@ from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_history, signal_states
-from portfolio_dash.strategy.target_weights import move_target_weight
+from portfolio_dash.strategy.target_weights import (
+    WeightRestoreVerdict,
+    move_target_weight,
+    pending_weight_move,
+    pending_weight_restore,
+    restore_target_weight,
+)
 
 router = APIRouter()
 
@@ -483,7 +502,7 @@ def _mutation_guard(
     always unconditional."""
     if not _account_exists(conn, account_id):
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {account_id} 不存在", field="account_id"))
+            "validation_error", unknown_account_message(account_id), field="account_id"))
     if symbol is not None:
         inst = get_instrument(conn, symbol)
         if inst is None:
@@ -862,7 +881,7 @@ def edit_opening(
     existing = get_opening(conn, account_id, symbol)
     if existing is None:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"期初 {account_id}/{symbol} 不存在"))
+            "not_found", f"期初 {account_ref(account_id)}／{symbol} 不存在"))
     # Resolve the authoritative total: prefer the explicit 原始總成本; fall back to the legacy
     # avg (total = avg * shares). A rounded average is NEVER stored as the authority.
     if body.total is not None:
@@ -909,7 +928,7 @@ def remove_opening(
 ) -> Any:
     if get_opening(conn, account_id, symbol) is None:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"期初 {account_id}/{symbol} 不存在"))
+            "not_found", f"期初 {account_ref(account_id)}／{symbol} 不存在"))
     would_be = [o for o in list_opening(conn)
                 if not (o.account_id == account_id and o.symbol == symbol)]
     blocked = _replay_guard(conn, ack_oversell=ack_oversell, opening=would_be)
@@ -988,6 +1007,16 @@ class ActionBody(BaseModel):
     #: reason the ratio terms are: a malformed one gets this module's zh rejection, not
     #: pydantic's English one. Optional; blank means "wait for the next quote refresh".
     to_symbol_price: str | None = None
+    #: DEF-020 — the reorganisation fee (§3.3 / D12), booked as a WITHDRAW cash movement on
+    #: the submitting account IN THE SAME TRANSACTION as the action rows and linked to them
+    #: (``cash_movements.corporate_action_id``). The form used to post it as a second
+    #: request after the action had committed, which is the two-writer shape that left an
+    #: action with no fee on a 502 and a fee with no action on a delete. A string for the
+    #: same reason the ratio terms are. ``None`` / blank / ``"0"`` = no fee. On a PUT,
+    #: ``None`` means "leave the linked fee as it is" and a value (or blank) SYNCS it.
+    reorg_fee: str | None = None
+    #: The fee's currency; defaults to the source instrument's quote currency.
+    reorg_fee_ccy: str | None = None
 
 
 def _num(raw: str | None, label: str) -> Decimal | None | JSONResponse:
@@ -1096,6 +1125,120 @@ def _build_batch(
         not_affected=_later_holders(
             conn, symbol, body.date, covered=set(accounts), index=index, today=today),
     )
+
+
+def _reorg_fee_input(
+    conn: sqlite3.Connection, body: ActionBody, *, inp: CorporateActionInput,
+    default_ccy: Currency | None = None,
+) -> CashMovementInput | None | JSONResponse:
+    """DEF-020: the reorganisation fee as the shared cash validator's input, or ``None``
+    when the body carries no fee (absent, blank or zero), or a zh 400.
+
+    The fee is a WITHDRAW on the SUBMITTING account, dated the action day, in the source
+    instrument's quote currency unless the body names one — the same row the form used to
+    post to ``POST /api/cash/movements`` on its own, now built here so the action route can
+    run the SAME guard that door runs (``validate_cash_movement``: kind, currency coherence,
+    the date-aware overdraft block) before either row is written.
+    """
+    text = (body.reorg_fee or "").strip()
+    if not text:
+        return None
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"重組費用必須是數字（目前是「{text}」）",
+            field="reorg_fee"))
+    if amount == _ZERO:
+        return None
+    if amount < _ZERO:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"重組費用不可為負數（目前是 {text}）", field="reorg_fee"))
+    ccy_text = (body.reorg_fee_ccy or "").strip().upper()
+    if ccy_text:
+        try:
+            ccy = Currency(ccy_text)
+        except ValueError:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"重組費用的幣別無法辨識：{ccy_text}",
+                field="reorg_fee_ccy"))
+    elif default_ccy is not None:
+        ccy = default_ccy
+    else:
+        inst = get_instrument(conn, inp.from_symbol)
+        if inst is None:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error",
+                f"無法決定重組費用的幣別：{inp.from_symbol} 未註冊，請指定幣別",
+                field="reorg_fee_ccy"))
+        ccy = inst.quote_ccy
+    return CashMovementInput(
+        account_id=inp.account_id, date=inp.date, kind=CashKind.WITHDRAW.value,
+        ccy=ccy, amount=amount, note=f"重組費用 {inp.from_symbol} {inp.date.isoformat()}")
+
+
+def _reorg_fee_refusal(
+    conn: sqlite3.Connection, fee: CashMovementInput, *, exclude_id: int | None = None
+) -> JSONResponse | None:
+    """Run the shared cash-movement guard on the fee; the first HARD issue as a refusal
+    that names BOTH consequences — no fee, and no action either — because the two are one
+    write now. Same status mapping as ``cash.py::_movement_error`` (422 for the overdraft
+    guard, which the frontend must not offer an ack for; 400 otherwise)."""
+    issues = validate_cash_movement(
+        conn, fee, pool=cash_pool_fn(conn), exclude_id=exclude_id,
+        accounts={a.account_id: a for a in list_accounts(conn)})
+    hard = next((i for i in issues if not i.needs_confirm), None)
+    if hard is None:
+        return None
+    status = 422 if hard.kind == "withdraw_insufficient_balance" else 400
+    code = hard.kind if status == 422 else "validation_error"
+    return JSONResponse(status_code=status, content=error_body(
+        code, f"重組費用無法登錄，公司行動也未寫入：{hard.message}", field="reorg_fee"))
+
+
+def _fee_wire(m: StoredCashMovement) -> dict[str, Any]:
+    """One linked reorganisation-fee movement on the wire — money as a Decimal STRING."""
+    return {
+        "movement_id": m.id, "account_id": m.account_id, "date": m.date.isoformat(),
+        "kind": m.kind, "kind_label": CASH_KIND_ZH.get(m.kind, m.kind),
+        "ccy": m.ccy.value, "amount": decimal_str(m.amount), "note": m.note,
+    }
+
+
+def _band_restore_wire(verdict: BandRestoreVerdict | None) -> dict[str, Any] | None:
+    """DEF-021's outcome (or promise) on the wire: ``restorable`` is the predicate the
+    delete confirm quotes, ``restored`` is what the delete actually did."""
+    if verdict is None:
+        return None
+    return {
+        "restorable": verdict.restorable,
+        "restored": verdict.restored,
+        "reason": verdict.reason,
+        "band": _band_moved_wire(verdict.band),
+    }
+
+
+def _unapplied_index(conn: sqlite3.Connection) -> dict[tuple[str, str, str, str, str], str]:
+    """DEF-023: the corporate-action rows the REPLAY refuses, keyed the way the ledger
+    stores them, so the ledger page can mark 「未套用」 on the row itself.
+
+    Read off ``Book.unapplied_actions`` — the same channel the dashboard's XIRR gate and
+    the drawer footer read — through the dashboard path (``allow_oversell=True``), so the
+    ledger tab marks exactly the rows those two surfaces complain about. Keyed by the
+    tuple rather than an id because :class:`UnappliedAction` carries no row id (the replay
+    reads converted rows); a hand-duplicated row therefore marks both copies, which is the
+    honest answer. Degrades to "no marks" when the ledger cannot be replayed at all: this
+    is a list page, and a replay failure must not blank the tab that exists to fix it.
+    """
+    try:
+        book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    except (ValueError, KeyError):
+        return {}
+    return {
+        (u.account_id, u.date.isoformat(), str(u.kind).strip().upper(),
+         u.from_symbol, u.to_symbol): u.reason
+        for u in book.unapplied_actions
+    }
 
 
 def _stored_from(inp: CorporateActionInput, row_id: int) -> StoredCorporateAction:
@@ -1514,10 +1657,20 @@ def corporate_actions(
     if bad is not None:
         return bad
     accts, names, ccys = _names(conn)
+    # DEF-020 / DEF-021 / DEF-023: what leaves with the row, whether its band comes back,
+    # and whether the replay applies it — read ONCE per page, not per row.
+    fees_by_action: dict[int, StoredCashMovement] = {}
+    for m in list_cash_movements(conn):
+        if m.corporate_action_id is not None:
+            fees_by_action.setdefault(m.corporate_action_id, m)
+    unapplied = _unapplied_index(conn)
     out: list[dict[str, Any]] = []
     for a in list_corporate_actions(conn, account_id=account_id, symbol=symbol):
         if not _in_range(a.date, frm, to):
             continue
+        fee = fees_by_action.get(a.id)
+        reason = unapplied.get((a.account_id, a.date.isoformat(),
+                                a.kind.strip().upper(), a.from_symbol, a.to_symbol))
         out.append({
             "id": a.id, "date": a.date.isoformat(), "account_id": a.account_id,
             "account": accts.get(a.account_id, a.account_id),
@@ -1535,6 +1688,21 @@ def corporate_actions(
             "cost_carry": (decimal_str(a.cost_carry)
                            if a.cost_carry is not None else None),
             "note": a.note, "ccy": ccys.get(a.from_symbol, ""),
+            # DEF-020: the linked reorganisation fee, so the delete confirm can say what
+            # goes with the row (amount + currency) BEFORE the owner confirms.
+            "reorg_fee": _fee_wire(fee) if fee is not None else None,
+            # DEF-021: what this EXCHANGE moved, and whether deleting it moves it back —
+            # the same predicate the delete runs, quoted beforehand.
+            "band_move": _band_moved_wire(a.band_move),
+            "band_restore": _band_restore_wire(pending_band_restore(conn, a.band_move)),
+            # I-6 (F-3's list half): the same record and promise for the target WEIGHT, so
+            # the delete confirm can say beforehand what the delete will do to both settings
+            # — until now the weight's verdict appeared only in the delete RESPONSE.
+            "weight_move": _weight_moved_wire(a.weight_move),
+            "weight_restore": _weight_restore_wire(
+                pending_weight_restore(conn, a.weight_move)),
+            # DEF-023: the replay's refusal, on the row that caused it.
+            "unapplied": {"reason": reason} if reason is not None else None,
         })
     return _page(out, limit, offset)
 
@@ -1591,9 +1759,38 @@ def add_corporate_action(
     if issues and not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
+    # DEF-020: the reorganisation fee is validated BEFORE anything is written, through the
+    # same guard the cash door runs, so a refused fee refuses the whole request — no action
+    # without its fee, no fee without its action.
+    submitting = next((r for r in batch.rows if r.account_id == body.account_id),
+                      batch.rows[0])
+    fee = _reorg_fee_input(conn, body, inp=submitting)
+    if isinstance(fee, JSONResponse):
+        return fee
+    if fee is not None and (refused := _reorg_fee_refusal(conn, fee)) is not None:
+        return refused
+    is_exchange = batch.rows[0].kind.strip().upper() == CorporateActionKind.EXCHANGE.value
+    # DEF-021: what the band move WILL do, read through the same predicate the move uses,
+    # recorded on every row of the set so the delete can offer the conditional reversal.
+    pending = (
+        pending_band_move(conn, from_symbol=batch.rows[0].from_symbol,
+                          to_symbol=batch.rows[0].to_symbol)
+        if is_exchange
+        else None
+    )
+    # F-3: the same record for the target WEIGHT, through the move's own predicate.
+    pending_weight = (
+        pending_weight_move(conn, from_symbol=batch.rows[0].from_symbol,
+                            to_symbol=batch.rows[0].to_symbol)
+        if is_exchange
+        else None
+    )
     # ALL-OR-NOTHING. The N rows are one event (D13), so a batch that half-lands is the
     # partial state E13 exists to forbid, created by the writer instead of by the owner.
-    # Every insert defers its commit and one rollback covers the lot.
+    # Every insert defers its commit and one rollback covers the lot — the fee movement and
+    # the band move included (DEF-020 / DEF-021): a band moved onto a symbol whose action
+    # then failed to commit would be an alert on a security this ledger does not hold.
+    fee_row: StoredCashMovement | None = None
     try:
         # D48a: created BEFORE the rows that reference it, so nothing between here and the
         # reconcile reads an action pointing at a symbol the registry does not have — and
@@ -1609,41 +1806,52 @@ def add_corporate_action(
                 kind=CorporateActionKind(inp.kind), from_symbol=inp.from_symbol,
                 to_symbol=inp.to_symbol, ratio_to=inp.ratio_to,
                 ratio_from=inp.ratio_from, cost_carry=inp.cost_carry, note=inp.note,
-                commit=False)
+                band_move=pending, weight_move=pending_weight, commit=False)
             for inp in batch.rows
         ]
+        # D47: an EXCHANGE re-keys the position, so the owner's alert band follows the
+        # ticker — inside the transaction now, so it lands with the rows or not at all.
+        moved = (
+            move_target_band(conn, from_symbol=batch.rows[0].from_symbol,
+                             to_symbol=batch.rows[0].to_symbol, commit=False)
+            if is_exchange
+            else None
+        )
+        # The owner's OTHER per-symbol setting follows the ticker too — and inside the SAME
+        # transaction since F-3 (DEF-020's class): it used to run after the commit below, so
+        # a failure here left an EXCHANGE standing with its weight still on the dead ticker.
+        # A target weight is config that nothing recomputes, so that state disagreed with
+        # nothing and surfaced only as a rebalance entry that could never be satisfied.
+        weight_moved = (
+            move_target_weight(conn, from_symbol=batch.rows[0].from_symbol,
+                               to_symbol=batch.rows[0].to_symbol, now=now, commit=False)
+            if is_exchange
+            else None
+        )
+        if fee is not None:
+            owner_id = written[batch.rows.index(submitting)]
+            fee_id = insert_cash_movement(
+                conn, account_id=fee.account_id, move_date=fee.date, kind=fee.kind,
+                ccy=fee.ccy, amount=fee.amount, note=fee.note,
+                corporate_action_id=owner_id, commit=False)
+            fee_row = StoredCashMovement(
+                id=fee_id, account_id=fee.account_id, date=fee.date, kind=fee.kind,
+                ccy=fee.ccy, amount=fee.amount, note=fee.note,
+                corporate_action_id=owner_id)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     restated = reconcile_split_prices(
         conn, {body.from_symbol.strip(), body.to_symbol.strip()})
-    # D47: an EXCHANGE re-keys the position, so the owner's alert band follows the ticker.
-    # After the rows land, never before — a band moved onto a symbol whose action then
-    # failed to commit would be an alert on a security this ledger does not hold.
-    is_exchange = batch.rows[0].kind.strip().upper() == CorporateActionKind.EXCHANGE.value
-    moved = (
-        move_target_band(conn, from_symbol=batch.rows[0].from_symbol,
-                         to_symbol=batch.rows[0].to_symbol)
-        if is_exchange
-        else None
-    )
-    # The owner's OTHER per-symbol setting. Same trigger, same timing, different store — and
-    # it was missed when the band was done, because a target weight is config that nothing
-    # recomputes, so a stranded one produces no disagreement anywhere, only a rebalance entry
-    # that can never be satisfied.
-    weight_moved = (
-        move_target_weight(conn, from_symbol=batch.rows[0].from_symbol,
-                           to_symbol=batch.rows[0].to_symbol, now=now)
-        if is_exchange
-        else None
-    )
     priced = _seed_child_price(conn, batch.rows[0], body.to_symbol_price, now=now)
     return {"ok": True, "written": len(written), "ids": written,
             "accounts": batch.accounts, "prices_restated": restated,
             "band_moved": _band_moved_wire(moved),
             "weight_moved": None if weight_moved is None else decimal_str(weight_moved),
             "child_priced": priced,
+            # DEF-020: the fee that landed WITH the rows (one request, one transaction).
+            "reorg_fee": _fee_wire(fee_row) if fee_row is not None else None,
             # D48b: a seeded price answers the very warning this field reports, so a symbol
             # that just got one is no longer unpriced. Leaving it listed would send the owner
             # to 更新報價 for a price they typed a second ago.
@@ -1835,18 +2043,65 @@ def edit_corporate_action(
     if issues and not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
-    update_corporate_action(
-        conn, action_id, account_id=replacement.account_id,
-        action_date=replacement.date, kind=CorporateActionKind(replacement.kind),
-        from_symbol=replacement.from_symbol, to_symbol=replacement.to_symbol,
-        ratio_to=replacement.ratio_to, ratio_from=replacement.ratio_from,
-        cost_carry=replacement.cost_carry, note=replacement.note)
+    # DEF-020: the linked fee follows the row. `reorg_fee` absent (None) = leave it alone;
+    # blank / "0" = remove it; a value = write it (date and account re-synced to the
+    # edited action), validated by the cash guard BEFORE the row is touched, with the
+    # existing fee excluded from its own overdraft check.
+    linked = linked_cash_movements(conn, action_id)
+    current = linked[0] if linked else None
+    fee: CashMovementInput | None = None
+    if body.reorg_fee is not None:
+        built = _reorg_fee_input(
+            conn, body, inp=replacement,
+            default_ccy=current.ccy if current is not None else None)
+        if isinstance(built, JSONResponse):
+            return built
+        fee = built
+        if fee is not None and (refused := _reorg_fee_refusal(
+                conn, fee, exclude_id=current.id if current is not None else None)
+        ) is not None:
+            return refused
+    fee_after: StoredCashMovement | None = current
+    try:
+        update_corporate_action(
+            conn, action_id, account_id=replacement.account_id,
+            action_date=replacement.date, kind=CorporateActionKind(replacement.kind),
+            from_symbol=replacement.from_symbol, to_symbol=replacement.to_symbol,
+            ratio_to=replacement.ratio_to, ratio_from=replacement.ratio_from,
+            cost_carry=replacement.cost_carry, note=replacement.note, commit=False)
+        if body.reorg_fee is not None:
+            if fee is None:
+                for m in linked:
+                    delete_cash_movement(conn, m.id, commit=False)
+                fee_after = None
+            elif current is not None:
+                update_cash_movement(
+                    conn, current.id, account_id=fee.account_id, move_date=fee.date,
+                    kind=fee.kind, ccy=fee.ccy, amount=fee.amount, note=fee.note,
+                    acq_home_amount=current.acq_home_amount, commit=False)
+                fee_after = current.model_copy(update={
+                    "account_id": fee.account_id, "date": fee.date, "kind": fee.kind,
+                    "ccy": fee.ccy, "amount": fee.amount, "note": fee.note})
+            else:
+                fee_id = insert_cash_movement(
+                    conn, account_id=fee.account_id, move_date=fee.date, kind=fee.kind,
+                    ccy=fee.ccy, amount=fee.amount, note=fee.note,
+                    corporate_action_id=action_id, commit=False)
+                fee_after = StoredCashMovement(
+                    id=fee_id, account_id=fee.account_id, date=fee.date, kind=fee.kind,
+                    ccy=fee.ccy, amount=fee.amount, note=fee.note,
+                    corporate_action_id=action_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     # BOTH ends of BOTH shapes — the row may have moved symbol, and the ABANDONED one is
     # the half a symbol-blind reconcile leaves behind holding a basis nothing references.
     restated = reconcile_split_prices(conn, {
         existing.from_symbol, existing.to_symbol,
         replacement.from_symbol, replacement.to_symbol})
-    return {"ok": True, "id": action_id, "prices_restated": restated}
+    return {"ok": True, "id": action_id, "prices_restated": restated,
+            "reorg_fee": _fee_wire(fee_after) if fee_after is not None else None}
 
 
 @router.delete("/ledgers/corporate-actions/set")
@@ -1855,6 +2110,7 @@ def remove_corporate_action_set(
     on: str = Query(..., alias="date"),
     kind: str = Query(...),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Delete a whole ``(from_symbol, date, kind)`` set — the ONLY way to leave one.
 
@@ -1878,15 +2134,87 @@ def remove_corporate_action_set(
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"找不到 {from_symbol} 在 {on} 的{KIND_ZH.get(wanted, wanted)}"))
     symbols = {a.from_symbol for a in rows} | {a.to_symbol for a in rows}
-    for a in rows:
-        delete_corporate_action(conn, a.id)
+    outcome = _delete_actions(conn, rows, now=now)
     restated = reconcile_split_prices(conn, symbols)
-    return {"ok": True, "deleted": len(rows), "prices_restated": restated}
+    return {"ok": True, "deleted": len(rows), "prices_restated": restated, **outcome}
+
+
+def _delete_actions(
+    conn: sqlite3.Connection, rows: Sequence[StoredCorporateAction], *, now: datetime,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Delete the rows, their linked fees (DEF-020) and — when the recorded band move is
+    still intact at both ends — move the band back (DEF-021), under ONE commit.
+
+    **The one delete path for a corporate-action set** — both ledger delete routes AND the
+    import-batch undo (I-3: ``input_center.import_batch_delete`` binds this as
+    ``provenance.delete_batch``'s ``delete_actions``) go through here, so an imported EXCHANGE
+    undone by batch gives back its band, its weight and its linked fee exactly as the ledger
+    tab's 刪除 does. ``commit=False`` hands the transaction to that caller (the batch's other
+    tables are deleted in the same one).
+
+    Returns the wire fields both delete routes report: ``fee_deleted`` (every linked
+    movement that left with the rows), ``band_restored`` (``True`` / ``False`` / ``None``
+    when nothing was recorded) and ``band_restore`` (the full verdict, reason included).
+    The set is one event, so its band is restored ONCE, from the first row that recorded
+    the move — every row of an API-written set carries the same record, and an imported set
+    carries it on the row that performed the move.
+
+    F-3: the target WEIGHT the EXCHANGE re-keyed comes back the same way, under the same
+    commit (``weight_restored`` / ``weight_restore``) — once per set, from the first row that
+    recorded a weight move.
+    """
+    fees = [m for a in rows for m in linked_cash_movements(conn, a.id)]
+    recorded = next((a.band_move for a in rows if a.band_move is not None), None)
+    recorded_weight = next((a.weight_move for a in rows if a.weight_move is not None), None)
+    try:
+        for a in rows:
+            delete_corporate_action(conn, a.id, commit=False)
+        verdict = restore_target_band(conn, recorded, commit=False)
+        weight_verdict = restore_target_weight(conn, recorded_weight, now=now, commit=False)
+        if commit:
+            conn.commit()
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
+    return {
+        "fee_deleted": [_fee_wire(m) for m in fees],
+        "band_restored": None if verdict is None else verdict.restored,
+        "band_restore": _band_restore_wire(verdict),
+        "weight_restored": None if weight_verdict is None else weight_verdict.restored,
+        "weight_restore": _weight_restore_wire(weight_verdict),
+    }
+
+
+def _weight_moved_wire(moved: MovedWeight | None) -> dict[str, Any] | None:
+    """F-3's record on the wire (I-6) — the weight as a Decimal STRING, like ``band_move``'s
+    levels; ``None`` on every row that recorded no weight move."""
+    if moved is None:
+        return None
+    return {"from_symbol": moved.from_symbol, "to_symbol": moved.to_symbol,
+            "weight": decimal_str(moved.weight)}
+
+
+def _weight_restore_wire(verdict: WeightRestoreVerdict | None) -> dict[str, Any] | None:
+    """F-3's outcome on the wire — the weight as a Decimal STRING (``decimal_str``), like
+    ``weight_moved`` on the save; ``None`` when the deleted rows recorded no weight move."""
+    if verdict is None:
+        return None
+    return {
+        "from_symbol": verdict.weight.from_symbol,
+        "to_symbol": verdict.weight.to_symbol,
+        "weight": decimal_str(verdict.weight.weight),
+        "restorable": verdict.restorable,
+        "restored": verdict.restored,
+        "reason": verdict.reason,
+    }
 
 
 @router.delete("/ledgers/corporate-actions/{action_id}")
 def remove_corporate_action(
-    action_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    action_id: int, conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Delete one row — refused when it belongs to a multi-account set (F-32)."""
     existing = get_corporate_action(conn, action_id)
@@ -1896,6 +2224,6 @@ def remove_corporate_action(
     blocked = _change_block(validate_corporate_action_change(conn, action_id))
     if blocked is not None:
         return blocked
-    delete_corporate_action(conn, action_id)
+    outcome = _delete_actions(conn, [existing], now=now)
     restated = reconcile_split_prices(conn, {existing.from_symbol, existing.to_symbol})
-    return {"ok": True, "id": action_id, "prices_restated": restated}
+    return {"ok": True, "id": action_id, "prices_restated": restated, **outcome}

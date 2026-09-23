@@ -33,7 +33,11 @@ from portfolio_dash.data_ingestion.provenance import (
     source_sha256,
 )
 from portfolio_dash.data_ingestion.schema import create_tables
-from portfolio_dash.data_ingestion.store import insert_cash_movement, list_cash_movements
+from portfolio_dash.data_ingestion.store import (
+    StoredCorporateAction,
+    insert_cash_movement,
+    list_cash_movements,
+)
 from portfolio_dash.data_ingestion.validate import CashPool
 from portfolio_dash.shared.enums import Currency
 
@@ -176,6 +180,11 @@ def test_the_batch_records_what_it_wrote(conn: sqlite3.Connection) -> None:
 # ------------------------------------------------------------------ reversibility
 
 
+def _NO_ACTIONS(rows: list[StoredCorporateAction]) -> None:  # noqa: N802 - a constant seam
+    """These batches are cash-only: a corporate-action event reaching the seam is a bug."""
+    raise AssertionError(f"unexpected corporate-action rows: {rows}")
+
+
 def test_deleting_a_batch_removes_exactly_its_rows(conn: sqlite3.Connection) -> None:
     """The half that makes an import safe to ATTEMPT on real data: a bad batch is undone
     exactly, instead of by restoring a backup and losing everything entered since."""
@@ -186,7 +195,7 @@ def test_deleting_a_batch_removes_exactly_its_rows(conn: sqlite3.Connection) -> 
     batch_id, written, _ = _commit(conn, _HEADER + _DEPOSIT + _DEPOSIT)
     assert len(list_cash_movements(conn)) == 3
 
-    removed = delete_batch(conn, batch_id)
+    removed = delete_batch(conn, batch_id, delete_actions=_NO_ACTIONS)
     assert removed == len(written)
     remaining = list_cash_movements(conn)
     assert len(remaining) == 1
@@ -200,6 +209,6 @@ def test_deleting_a_batch_lets_the_same_file_import_again(
     """Undo must be complete, not merely visible: if the hashes survived the delete, the
     re-import would report every row as a duplicate and the ledger would stay empty."""
     batch_id, _, _ = _commit(conn, _HEADER + _DEPOSIT)
-    delete_batch(conn, batch_id)
+    delete_batch(conn, batch_id, delete_actions=_NO_ACTIONS)
     _, written, dupes = _commit(conn, _HEADER + _DEPOSIT)
     assert len(written) == 1 and dupes == []

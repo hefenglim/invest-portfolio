@@ -35,7 +35,7 @@ from portfolio_dash.data_ingestion.broker.grouping import (
     pair_actions,
     prehistory_shares,
 )
-from portfolio_dash.data_ingestion.broker.ir import EventKind, RawEvent
+from portfolio_dash.data_ingestion.broker.ir import EventKind, RawEvent, chrono_key
 from portfolio_dash.data_ingestion.broker.reconcile import ReconcileReport, reconcile
 from portfolio_dash.data_ingestion.import_templates import template_columns
 
@@ -71,6 +71,50 @@ UNCONVERTIBLE: dict[EventKind, str] = {
 _BUY_SIDE = {EventKind.BUY, EventKind.BUY_COVER}
 
 
+@dataclass(frozen=True)
+class RowDetail:
+    """One converted row as the page shows it beside its checkbox (DEF-028).
+
+    The figures are the ones the owner checks against the statement — source rows, date,
+    type, symbol, shares, price, amount — as STRINGS, exactly as they are written into the
+    CSV. ``cells`` is the very list :func:`render_kind` writes, so a page that re-renders a
+    ticked subset through the template header produces byte-identical rows, and never has
+    to parse CSV text back into fields (the F-03 lesson: the frontend must not re-parse
+    what the server already parsed).
+    """
+
+    refs: tuple[str, ...]
+    date: str
+    type: str
+    symbol: str
+    shares: str
+    price: str
+    amount: str
+    currency: str
+    note: str
+    cells: list[str]
+
+
+@dataclass(frozen=True)
+class DroppedRow:
+    """A source row that becomes NO row of its own, and where it went (DEF-028).
+
+    Fifteen rows in, nine rows out, and the six that went elsewhere used to be a number the
+    owner had to reconcile by hand: a journal pair dropped, a cancel taking its buy with it,
+    three dividend legs folded into one — each is named here with its destination. ``into``
+    is ``"<kind>:<row index>"`` when the row's money lives on inside another row, and empty
+    when it left the conversion for good.
+    """
+
+    refs: tuple[str, ...]
+    why: str
+    date: str
+    symbol: str
+    kinds: tuple[str, ...]
+    into: str
+    detail: str
+
+
 @dataclass
 class Conversion:
     """The converted rows, keyed by import kind, plus what could not be converted."""
@@ -84,6 +128,11 @@ class Conversion:
     #: Every source row this conversion accounted for — written into a CSV or named as
     #: unconvertible. Checked against the routed events by :func:`account_for_output`.
     written_refs: set[str]
+    #: The four importable kinds, row by row, with the figures a page shows. ``rows[k]``
+    #: is exactly ``[d.cells for d in details[k]]`` — one list, two views.
+    details: dict[str, list[RowDetail]]
+    #: Every source row that produced no row of its own, with its destination.
+    dropped: list[DroppedRow]
 
 
 # --------------------------------------------------------------------------- formatting
@@ -108,55 +157,77 @@ def _shares(value: Decimal) -> str:
 _DUPLICATE_MARK = "可能重複（兩份匯出的日期區間重疊）"
 
 
-def _transaction_rows(grouped: GroupedImport, account: str, suspect: set[str]) -> list[
-    list[str]
-]:
+def _transaction_rows(
+    grouped: GroupedImport, account: str, currency: str, suspect: set[str]
+) -> list[RowDetail]:
     """Trades. Fees are the BROKER's own numbers, never recomputed.
 
     ``csv_import`` only auto-fills a fee or tax it was not given, so writing both columns keeps
     the ledger reconcilable against the statement to the cent. Recomputing them from the
     account's fee rules would produce a defensible number that does not match the money that
     actually left the account, which is the wrong kind of correct.
+
+    ⚠ In the order the trades HAPPENED (:func:`chrono_key`), which is also the order the
+    page commits them and the order the replay books them (write id ascending since
+    2026-09-23). A Schwab export prints newest first, so the old ``(trade_date, line_no)``
+    sort wrote a same-day buy-then-sell as sell-then-buy — an oversell on a position the
+    same file had just opened.
     """
-    out: list[list[str]] = []
-    for e in sorted(grouped.trades, key=lambda x: (x.trade_date, x.line_no)):
+    out: list[RowDetail] = []
+    for e in sorted(grouped.trades, key=chrono_key):
         side = "BUY" if e.kind in _BUY_SIDE else "SELL"
-        out.append([
-            account, e.symbol, side, e.trade_date.isoformat(),
-            _shares(abs(e.quantity)), _money(e.price),
-            _money(abs(e.fees)), "0",
-            "0", "1" if e.kind is EventKind.SELL_SHORT else "0",
-            f"{_DUPLICATE_MARK} {e.ref}" if e.ref in suspect else e.ref,
-        ])
+        duplicate = e.ref in suspect
+        out.append(RowDetail(
+            refs=(e.ref,), date=e.trade_date.isoformat(), type=side, symbol=e.symbol,
+            shares=_shares(abs(e.quantity)), price=_money(e.price),
+            amount=_money(abs(e.amount)), currency=currency,
+            note=_DUPLICATE_MARK if duplicate else "",
+            cells=[
+                account, e.symbol, side, e.trade_date.isoformat(),
+                _shares(abs(e.quantity)), _money(e.price),
+                _money(abs(e.fees)), "0",
+                "0", "1" if e.kind is EventKind.SELL_SHORT else "0",
+                f"{_DUPLICATE_MARK} {e.ref}" if duplicate else e.ref,
+            ],
+        ))
     return out
 
 
-def _dividend_rows(dividends: list[DividendEvent], account: str) -> list[list[str]]:
+def _dividend_rows(
+    dividends: list[DividendEvent], account: str, currency: str
+) -> list[RowDetail]:
     """One row per folded distribution. ``DRIP`` when it reinvested, ``CASH`` when it paid out.
 
     ``CASH`` on a ``drip_us`` account is ordinary, not exceptional (P1b): the same US position
     pays cash in some quarters and reinvests in others, and the model accepts both.
     """
-    out: list[list[str]] = []
+    out: list[RowDetail] = []
     for d in sorted(dividends, key=lambda x: (x.trade_date, x.symbol)):
         reinvested = d.reinvest_shares is not None and d.reinvest_price is not None
-        out.append([
-            account, d.symbol, d.trade_date.isoformat(),
-            "DRIP" if reinvested else "CASH",
-            _money(d.gross), _money(d.withholding), _money(d.net),
-            _shares(d.reinvest_shares) if d.reinvest_shares is not None else "",
-            _money(d.reinvest_price) if d.reinvest_price is not None else "",
-            # R6 ``ex_date``: a broker statement's distribution line carries the payment
-            # date, not the ex-date, so this stays blank — the same 「supplied verbatim, never
-            # recomputed」 discipline this converter is built on. Blank replays exactly as it
-            # did before the column existed.
-            "",
-        ])
+        shares = _shares(d.reinvest_shares) if d.reinvest_shares is not None else ""
+        price = _money(d.reinvest_price) if d.reinvest_price is not None else ""
+        out.append(RowDetail(
+            refs=d.refs, date=d.trade_date.isoformat(),
+            type="DRIP" if reinvested else "CASH", symbol=d.symbol,
+            shares=shares, price=price, amount=_money(d.net), currency=currency,
+            note=f"總額 {_money(d.gross)}，預扣 {_money(d.withholding)}",
+            cells=[
+                account, d.symbol, d.trade_date.isoformat(),
+                "DRIP" if reinvested else "CASH",
+                _money(d.gross), _money(d.withholding), _money(d.net),
+                shares, price,
+                # R6 ``ex_date``: a broker statement's distribution line carries the payment
+                # date, not the ex-date, so this stays blank — the same 「supplied verbatim,
+                # never recomputed」 discipline this converter is built on. Blank replays
+                # exactly as it did before the column existed.
+                "",
+            ],
+        ))
     # The header comes from ``template_columns``, so a row SHORTER than the column list
     # misaligns every field after the gap instead of failing. Adding ex_date to
     # DIVIDEND_COLUMNS without the blank above would have done exactly that, silently.
     width = len(template_columns("dividends"))
-    assert all(len(r) == width for r in out), (
+    assert all(len(r.cells) == width for r in out), (
         f"dividend row width must match the {width} template columns"
     )
     return out
@@ -164,7 +235,7 @@ def _dividend_rows(dividends: list[DividendEvent], account: str) -> list[list[st
 
 def _cash_rows(
     grouped: GroupedImport, account: str, currency: str, suspect: set[str]
-) -> tuple[list[list[str]], list[tuple[RawEvent, str]]]:
+) -> tuple[list[RowDetail], list[tuple[RawEvent, str]]]:
     """Cash movements. The ledger takes a MAGNITUDE plus a kind; the kind carries the sign.
 
     A row that appeared identically in two source files is written, and its note says so. It
@@ -173,24 +244,33 @@ def _cash_rows(
     once, whereas the ``note`` column is in front of whoever opens the CSV, which is where the
     decision actually gets made. (``import_batches`` catches a repeat of the whole FILE; it
     cannot see two copies of one row inside a single import.)
+
+    Chronological (:func:`chrono_key`) for the same reason as the trades: the cash ledger's
+    withdraw guard walks the day's movements in write order.
     """
-    out: list[list[str]] = []
+    out: list[RowDetail] = []
     unconvertible: list[tuple[RawEvent, str]] = []
-    for e in sorted(grouped.cash, key=lambda x: (x.trade_date, x.line_no)):
+    for e in sorted(grouped.cash, key=chrono_key):
         kind = CASH_KIND.get(e.kind)
         if kind is None:
             unconvertible.append((e, UNCONVERTIBLE.get(e.kind, "no mapping to a ledger row")))
             continue
-        note = f"{_DUPLICATE_MARK} {e.ref}" if e.ref in suspect else e.ref
-        out.append([
-            account, e.trade_date.isoformat(), kind, currency,
-            _money(abs(e.amount)), "", note,
-        ])
+        duplicate = e.ref in suspect
+        out.append(RowDetail(
+            refs=(e.ref,), date=e.trade_date.isoformat(), type=kind, symbol="",
+            shares="", price="", amount=_money(abs(e.amount)), currency=currency,
+            note=_DUPLICATE_MARK if duplicate else "",
+            cells=[
+                account, e.trade_date.isoformat(), kind, currency,
+                _money(abs(e.amount)), "",
+                f"{_DUPLICATE_MARK} {e.ref}" if duplicate else e.ref,
+            ],
+        ))
     return out, unconvertible
 
 
 def _action_rows(pairs: list[ActionPair], account: str) -> tuple[
-    list[list[str]], list[list[str]], list[ActionPair]
+    list[RowDetail], list[list[str]], list[ActionPair]
 ]:
     """Split the paired actions into importable rows and a worksheet.
 
@@ -200,7 +280,7 @@ def _action_rows(pairs: list[ActionPair], account: str) -> tuple[
     rounded one replays into the 賣超 cascade this feature exists to prevent, and a ratio
     invented by the converter is the same defect with a friendlier face.
     """
-    ready: list[list[str]] = []
+    ready: list[RowDetail] = []
     worksheet: list[list[str]] = []
     pending: list[ActionPair] = []
     for p in sorted(pairs, key=lambda x: (x.trade_date, x.to_symbol)):
@@ -216,8 +296,80 @@ def _action_rows(pairs: list[ActionPair], account: str) -> tuple[
             worksheet.append(row)
             pending.append(p)
         else:
-            ready.append(row)
+            rename = f"{p.from_symbol} → {p.to_symbol}，" if p.from_symbol != p.to_symbol else ""
+            ready.append(RowDetail(
+                refs=tuple(p.refs), date=p.trade_date.isoformat(), type=p.kind.value,
+                symbol=p.to_symbol, shares="", price="", amount="", currency="",
+                note=f"{rename}每 {p.ratio_from} 股 → {p.ratio_to} 股",
+                cells=row,
+            ))
     return ready, worksheet, pending
+
+
+def _dropped_rows(
+    grouped: GroupedImport,
+    details: dict[str, list[RowDetail]],
+    unconvertible: list[tuple[RawEvent, str]],
+    pending: list[ActionPair],
+) -> list[DroppedRow]:
+    """Every source row that reaches no row of its own, with where it went (DEF-028).
+
+    Built from the SOURCE objects — the suppressed groups, the folded legs, the dividend
+    refs — never by subtracting the written refs from the input, because a set difference
+    can only say a row is missing, not what happened to it. Every row of the input must
+    appear either in ``details`` or here; :func:`account_for_output`'s ref check and the
+    endpoint's conservation test hold the two together.
+    """
+    out: list[DroppedRow] = []
+    for g in grouped.suppressed:
+        out.append(DroppedRow(
+            refs=g.refs, why="suppressed", date=g.key[0].isoformat(), symbol=g.key[1],
+            kinds=tuple(k.value for k in g.kinds), into="",
+            detail=f"互相抵銷的群組（金額合計 {g.amount_sum}，股數合計 {g.quantity_sum}）",
+        ))
+    for i, d in enumerate(details["dividends"]):
+        if len(d.refs) > 1:
+            out.append(DroppedRow(
+                refs=d.refs, why="merged_dividend", date=d.date, symbol=d.symbol,
+                kinds=(), into=f"dividends:{i}",
+                detail=f"{len(d.refs)} 列配息分錄合併為一筆股利",
+            ))
+    # An absorbed interest-withholding row lives on inside the day's one interest credit.
+    credit_rows = {
+        (c.date, c.type): i for i, c in enumerate(details["cash"]) if c.type == "INTEREST"
+    }
+    for e in grouped.folded:
+        target = credit_rows.get((e.trade_date.isoformat(), "INTEREST"))
+        out.append(DroppedRow(
+            refs=(e.ref,), why="folded_interest_tax", date=e.trade_date.isoformat(),
+            symbol="", kinds=(e.kind.value,),
+            into=f"cash:{target}" if target is not None else "",
+            detail="利息預扣稅已併入同日的利息收入（記淨額）",
+        ))
+    for e in grouped.options:
+        out.append(DroppedRow(
+            refs=(e.ref,), why="option_row_unsupported", date=e.trade_date.isoformat(),
+            symbol=e.option_symbol, kinds=(e.kind.value,), into="",
+            detail="選擇權腿：本系統認得但不支援，不匯入",
+        ))
+    for e in grouped.unrouted:
+        out.append(DroppedRow(
+            refs=(e.ref,), why="unrouted_row", date=e.trade_date.isoformat(),
+            symbol=e.symbol or e.option_symbol, kinds=(e.kind.value,), into="",
+            detail="已分類但不屬於任何帳本，不匯入",
+        ))
+    for e, why in unconvertible:
+        out.append(DroppedRow(
+            refs=(e.ref,), why="unconvertible", date=e.trade_date.isoformat(),
+            symbol=e.symbol, kinds=(e.kind.value,), into="", detail=why,
+        ))
+    for idx, p in enumerate(pending):
+        out.append(DroppedRow(
+            refs=tuple(p.refs), why="action_needs_input", date=p.trade_date.isoformat(),
+            symbol=p.to_symbol, kinds=(p.kind.value,), into=f"actions_needing_input:{idx}",
+            detail="公司行動的比例檔案未載明，列在「需要你補的資料」",
+        ))
+    return out
 
 
 def _opening_rows(
@@ -302,13 +454,16 @@ def convert(events: list[RawEvent], account: str, currency: str) -> tuple[
     # replay's same-date ordering decide whether the opening covers a sell or arrives after it.
     build = (earliest - timedelta(days=1)).isoformat() if earliest is not None else ""
 
+    details: dict[str, list[RowDetail]] = {
+        "transactions": _transaction_rows(grouped, account, currency, suspect),
+        "dividends": _dividend_rows(grouped.dividends, account, currency),
+        "cash": cash,
+        "fx": [],
+        "corporate_actions": ready,
+    }
     conv = Conversion(
         rows={
-            "transactions": _transaction_rows(grouped, account, suspect),
-            "dividends": _dividend_rows(grouped.dividends, account),
-            "cash": cash,
-            "fx": [],
-            "corporate_actions": ready,
+            **{kind: [d.cells for d in rows] for kind, rows in details.items()},
             "_actions_worksheet": worksheet,
             "_openings_worksheet": _opening_rows(openings, account, build),
         },
@@ -327,6 +482,8 @@ def convert(events: list[RawEvent], account: str, currency: str) -> tuple[
             *(r for p in pairs for r in p.refs),
             *(e.ref for e, _ in unconvertible),
         },
+        details=details,
+        dropped=_dropped_rows(grouped, details, unconvertible, pending),
     )
     return conv, grouped, report
 

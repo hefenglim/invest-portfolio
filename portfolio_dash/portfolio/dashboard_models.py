@@ -24,6 +24,8 @@ class HoldingRow(BaseModel):
     """Flattened holding row: all ``Holding`` fields + instrument/account enrichment."""
 
     account_id: str
+    #: The account as a ``{account:<id>}`` token (``shared/account_ref.py``, I-10) — resolved
+    #: to the display name by the fetch layer (``web/api.js``), never an English name here.
     account_name: str
     symbol: str
     name: str

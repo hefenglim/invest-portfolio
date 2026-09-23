@@ -9,6 +9,22 @@ from portfolio_dash.shared.enums import Market
 _OrderKey = tuple[DataType, Market | None]
 
 
+def _failure_phrase(provider: str, exc: Exception | None) -> str:
+    """「<provider> 逾時／連線失敗／回應錯誤／無配息資料」 — why ONE provider gave nothing.
+
+    Classified by type, never by printing the exception: its text is English and written for
+    a developer, and this phrase is read by the owner (DEF-015).
+    """
+    if exc is None:
+        return f"{provider} 無配息資料"
+    kind = type(exc).__name__.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in kind:
+        return f"{provider} 逾時"
+    if isinstance(exc, ConnectionError) or "connection" in kind:
+        return f"{provider} 連線失敗"
+    return f"{provider} 回應錯誤"
+
+
 class Registry:
     """Config-ordered, capability-aware fallback chain over providers.
 
@@ -90,24 +106,44 @@ class Registry:
     def fetch_dividends(
         self, instruments: list[InstrumentRef],
     ) -> tuple[list[DividendEvent], dict[str, str], list[str]]:
+        events, sources, failed, _reasons = self.fetch_dividends_explained(instruments)
+        return events, sources, failed
+
+    def fetch_dividends_explained(
+        self, instruments: list[InstrumentRef],
+    ) -> tuple[list[DividendEvent], dict[str, str], list[str], dict[str, str]]:
+        """:meth:`fetch_dividends` plus a zh REASON per failed symbol (DEF-015, 2026-09-23).
+
+        The fall-through used to swallow every provider exception and every empty answer
+        into one bare list, so 「1 檔失敗」 was all anyone could ever say — not which symbol,
+        and not whether the source timed out or simply had no dividend history (a symbol
+        that never paid one is the common case, and it is not an error). Each provider tried
+        now leaves one phrase — 「yfinance 逾時」「stooq 回應錯誤」「yfinance 無配息資料」 —
+        joined in chain order; a market with no dividend provider at all says so.
+        """
         events: list[DividendEvent] = []
         sources: dict[str, str] = {}
         failed: list[str] = []
+        reasons: dict[str, str] = {}
         for ref in instruments:
             filled = False
+            tried: list[str] = []
             for provider in self._chain(DataType.DIVIDEND, ref.market):
                 try:
                     got = provider.fetch_dividends([ref])
-                except Exception:  # noqa: BLE001 - any provider failure -> fall back
+                except Exception as exc:  # noqa: BLE001 - any provider failure -> fall back
+                    tried.append(_failure_phrase(provider.name, exc))
                     continue
                 if got:
                     events.extend(got)
                     sources[ref.symbol] = provider.name
                     filled = True
                     break
+                tried.append(_failure_phrase(provider.name, None))
             if not filled:
                 failed.append(ref.symbol)
-        return events, sources, failed
+                reasons[ref.symbol] = "、".join(tried) if tried else "無可用的配息資料來源"
+        return events, sources, failed, reasons
 
     def fetch_fx(
         self, pairs: list[FxPair],

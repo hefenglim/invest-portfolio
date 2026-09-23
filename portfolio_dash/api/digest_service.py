@@ -237,7 +237,7 @@ def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any
     """
     extra = "" if ai_active(conn) else " AND rule_id != 'quota_low'"
     rows = conn.execute(
-        "SELECT rule_id, symbol FROM alert_events "
+        "SELECT * FROM alert_events "
         "WHERE substr(fired_at,1,10) = ? AND rule_id NOT LIKE 'signal_%'"
         + extra + " ORDER BY id",
         (_today(now),),
@@ -251,7 +251,11 @@ def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any
             {"rule_id": rid, "label": label, "severity": sev, "count": 0, "symbols": []},
         )
         g["count"] = int(g["count"]) + 1
-        if r["symbol"]:
+        # I-16: only a SYMBOL subject is a symbol. The column holds whatever the alert is
+        # about (an account for fx_drift, a sector, a currency — DEF-037's ``scope``); a row
+        # recorded before the column existed reads as a symbol, as it always did.
+        scope = r["scope"] if "scope" in r.keys() else None
+        if r["symbol"] and scope in (None, "symbol"):
             g["symbols"].append(str(r["symbol"]))
     return list(grouped.values())
 
@@ -508,13 +512,11 @@ def run_digest_daily(
 
 
 def _drift_symbols(alerts: list[Alert]) -> list[str]:
-    """Extract the per-target symbol from ``rule:symbol`` alert ids (skip global ids)."""
-    out: list[str] = []
-    for a in alerts:
-        prefix = f"{a.rule}:"
-        if a.id.startswith(prefix):
-            out.append(a.id[len(prefix):])
-    return out
+    """The symbol subjects of the drift alerts (a portfolio-wide one has none).
+
+    I-16: read off the alert's STRUCTURE (``scope`` + ``subject``, DEF-037), never off the
+    id's ``rule:`` suffix — which is a ticker only by the rule's convention."""
+    return [a.subject for a in alerts if a.scope == "symbol" and a.subject]
 
 
 def _alert_review_week(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, Any]]:

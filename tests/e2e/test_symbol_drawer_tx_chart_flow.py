@@ -503,7 +503,9 @@ def test_symbol_drawer_corporate_action_footer_term(
     expect(rows).to_have_count(2)  # the buy + the action
     act = rows.nth(1)
     expect(act.locator(".dir-chip")).to_have_text("公司行動")
-    expect(act.locator(".sd-act-label")).to_contain_text("拆併股 3：1")
+    # I-14: the ledger's own word (server `kind_label`) — the drawer said 「拆併股」 until it
+    # printed the server's vocabulary instead of a private table.
+    expect(act.locator(".sd-act-label")).to_contain_text("分割 3：1")
     expect(act.locator("td").nth(3)).to_have_text("—")  # 股數 column
 
     assert not console_errors and not page_errors, (

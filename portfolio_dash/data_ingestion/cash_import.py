@@ -55,6 +55,7 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import ValidationError
 
+from portfolio_dash.data_ingestion.csv_import import unread_columns_issues
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.store import (
     StoredCashMovement,
@@ -433,6 +434,10 @@ def build_cash_movement_preview(
     its own verdict, it simply stops funding its siblings.
     """
     reader = csv.DictReader(io.StringIO(csv_text.lstrip("﻿")))  # tolerate a BOM
+    # I-4 (DEF-026's seam, every kind): the columns this door will not read are NAMED on
+    # each row as an advisory (「已忽略欄位：…」), never dropped in silence.
+    ignored = unread_columns_issues(
+        [(h or "").strip() for h in (reader.fieldnames or [])], CASH_MOVEMENT_COLUMNS)
     parsed: list[tuple[int, dict[str, str], CashMovementInput | None, list[Issue]]] = []
     for idx, raw0 in enumerate(reader):
         raw: dict[str, str] = {k.strip(): (v or "").strip()
@@ -474,6 +479,8 @@ def build_cash_movement_preview(
         rows.append(PreviewRow(
             index=idx, raw=raw,
             payload=_payload(inp, accounts.get(inp.account_id)), issues=all_issues))
+    for row in rows:
+        row.issues.extend(ignored)
     return ImportPreview(rows=rows)
 
 

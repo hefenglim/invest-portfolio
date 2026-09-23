@@ -202,6 +202,11 @@ class UnappliedAction(BaseModel):
     from_symbol: str
     to_symbol: str
     reason: str
+    #: The ``corporate_actions.id`` of the refused row, when the replay read it from the
+    #: store (DEF-023, 2026-09-23). ``None`` for an action that was only being validated.
+    #: The dashboard's 待釐清 entry point links the owner to the row by this id — a sentence
+    #: that names the account, symbol and date is an explanation, not a way in.
+    action_id: int | None = None
 
 
 class Book(BaseModel):

@@ -20,7 +20,7 @@
   "holdings": [
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "2330",
       "name": "TSMC",
       "market": "TW",
@@ -56,7 +56,7 @@
     },
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "0056",
       "name": "元大高股息",
       "market": "TW",
@@ -92,7 +92,7 @@
     },
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "2603",
       "name": "長榮",
       "market": "TW",
@@ -128,7 +128,7 @@
     },
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "00919",
       "name": "群益台灣精選高息",
       "market": "TW",
@@ -162,7 +162,7 @@
     },
     {
       "account_id": "schwab",
-      "account_name": "Charles Schwab",
+      "account_name": "{account:schwab}",
       "symbol": "AAPL",
       "name": "Apple",
       "market": "US",
@@ -198,7 +198,7 @@
     },
     {
       "account_id": "schwab",
-      "account_name": "Charles Schwab",
+      "account_name": "{account:schwab}",
       "symbol": "MSFT",
       "name": "Microsoft",
       "market": "US",
@@ -234,7 +234,7 @@
     },
     {
       "account_id": "moomoo_my",
-      "account_name": "Moomoo MY",
+      "account_name": "{account:moomoo_my}",
       "symbol": "1155.KL",
       "name": "Maybank",
       "market": "MY",
@@ -270,7 +270,7 @@
     },
     {
       "account_id": "moomoo_my",
-      "account_name": "Moomoo MY",
+      "account_name": "{account:moomoo_my}",
       "symbol": "NVDA",
       "name": "NVIDIA",
       "market": "US",
@@ -1752,7 +1752,9 @@
       "rule": "single_weight",
       "title": "2330 單一持股權重偏高",
       "detail": "單一持股權重 40.8%＞門檻 30.0%",
-      "href": "/symbol/2330"
+      "href": "/symbol/2330",
+      "scope": "symbol",
+      "subject": "2330"
     },
     {
       "id": "single_weight:AAPL",
@@ -1760,7 +1762,9 @@
       "rule": "single_weight",
       "title": "AAPL 單一持股權重偏高",
       "detail": "單一持股權重 32.8%＞門檻 30.0%",
-      "href": "/symbol/AAPL"
+      "href": "/symbol/AAPL",
+      "scope": "symbol",
+      "subject": "AAPL"
     },
     {
       "id": "sector_weight:Information Technology",
@@ -1768,7 +1772,9 @@
       "rule": "sector_weight",
       "title": "Information Technology 產業權重偏高",
       "detail": "產業權重 83.2%＞門檻 60.0%",
-      "href": "index.html#sector-chart"
+      "href": "index.html#sector-chart",
+      "scope": "sector",
+      "subject": "Information Technology"
     },
     {
       "id": "stale_price:00919",
@@ -1776,7 +1782,9 @@
       "rule": "stale_price",
       "title": "00919 報價過期",
       "detail": "庫存報價已過期，尚未更新",
-      "href": "/symbol/00919"
+      "href": "/symbol/00919",
+      "scope": "symbol",
+      "subject": "00919"
     },
     {
       "id": "stale_price:MSFT",
@@ -1784,7 +1792,9 @@
       "rule": "stale_price",
       "title": "MSFT 報價過期",
       "detail": "庫存報價已過期，尚未更新",
-      "href": "/symbol/MSFT"
+      "href": "/symbol/MSFT",
+      "scope": "symbol",
+      "subject": "MSFT"
     },
     {
       "id": "missing_price:00919",
@@ -1792,15 +1802,19 @@
       "rule": "missing_price",
       "title": "00919 無報價",
       "detail": "無庫存報價，無法評價",
-      "href": "/symbol/00919"
+      "href": "/symbol/00919",
+      "scope": "symbol",
+      "subject": "00919"
     },
     {
       "id": "fx_drift:schwab",
       "sev": "info",
       "rule": "fx_drift",
-      "title": "Charles Schwab 匯率偏離成本",
+      "title": "{account:schwab} 匯率偏離成本",
       "detail": "即期匯率偏離成本匯率 3.2%＞門檻 3.0%",
-      "href": "cash.html#fx"
+      "href": "cash.html#fx",
+      "scope": "account",
+      "subject": "schwab"
     }
   ]
 }
