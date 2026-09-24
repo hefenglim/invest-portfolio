@@ -145,11 +145,22 @@ def held_symbols_for_alerts(
     return held_in_book(build_dashboard(conn, now=now, reporting=reporting))
 
 
-def _all_registered_symbols(conn: sqlite3.Connection) -> list[str]:
-    """Every registered instrument symbol (held + watchlist) — the opt-in ``all_registered``
-    universe (P2 batch 3). Watch symbols are entry candidates, so a checkup task MAY analyse
-    them — but only when the user explicitly opts in (each is LLM cost; default stays holds)."""
-    return sorted({i.symbol for i in list_instruments(conn)})
+def _all_registered_symbols(conn: sqlite3.Connection, held: set[str]) -> list[str]:
+    """The opt-in ``all_registered`` universe (P2 batch 3): holdings + the ACTIVE watchlist.
+
+    Watch symbols are entry candidates, so a checkup task MAY analyse them — but only when the
+    user explicitly opts in (each is LLM cost; default stays holds).
+
+    DEF-059 (owner ruling 2026-09-24): an ARCHIVED instrument is out. Archiving is the owner's
+    「停止追蹤」 (FU-D13) — the quote, signal and news scopes already drop it — yet this read
+    returned every row of ``list_instruments`` (whose docstring leaves the archived filter to
+    the caller), so a task paid for a card on a symbol nobody tracks any more. A HELD symbol
+    always stays (``held => not archived`` is enforced at booking, and ``all_registered`` must
+    never be narrower than ``all``). This is the only definition: the status card's 「N 檔標
+    的」, the dry-run preflight, the draft preflight and the actual run all resolve through
+    :func:`_resolve_universe_raw`, and the page's estimate mirrors it (``web/pipeline.js``).
+    """
+    return sorted(held | {i.symbol for i in list_instruments(conn) if not i.archived})
 
 
 def _custom_symbols(syms: object) -> list[str]:
@@ -170,19 +181,15 @@ def _custom_symbols(syms: object) -> list[str]:
 def _resolve_universe(
     conn: sqlite3.Connection, it: cs.InsightType, data: DashboardData
 ) -> list[str]:
-    """The per_symbol universe: custom list, all current holdings (``mode:all``, the
-    default), or holdings + watchlist (``mode:all_registered`` — explicit opt-in)."""
-    held = sorted(held_in_book(data))
-    universe = it.universe
-    if isinstance(universe, dict):
-        mode = universe.get("mode")
-        if mode == "custom":
-            return _custom_symbols(universe.get("symbols"))
-        if mode == "all_registered":
-            return _all_registered_symbols(conn)
-        if mode == "all":
-            return held
-    return held  # default: follow holdings
+    """The per_symbol universe of a SAVED task: custom list, all current holdings
+    (``mode:all``, the default), or holdings + the active watchlist (``mode:all_registered``
+    — explicit opt-in).
+
+    DEF-059: delegates to :func:`_resolve_universe_raw` — the draft preflight's resolver used
+    to be a second copy of these branches, and one universe rule written twice is two rules
+    the day one of them is edited.
+    """
+    return _resolve_universe_raw(conn, it.universe, data)
 
 
 
@@ -1163,26 +1170,42 @@ def _gather_facts(
 
 
 def _last_batch(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    """The most recent FINISHED non-shadow insight batch: ``{at, cards, cost_usd}`` or None.
+    """The most recent FINISHED non-shadow insight batch: ``{at, cards, cost_usd, runs}``.
 
-    ``cards`` counts the non-shadow insight rows created in that batch (their ``created_at``
-    equals the run's ``started_at`` — both stamped from the same injected ``now``).
+    DEF-058 (2026-09-25): a BATCH is defined ONCE — the finished non-shadow insight runs that
+    share one ``started_at`` (one injected ``now``: an alert dispatch runs one task per event,
+    a scheduler tick several tasks, all stamped with the same clock) — and BOTH figures are
+    taken over that one set. ``cards`` counts the non-shadow cards created at that instant
+    (a card's ``created_at`` is its run's ``now``); ``cost_usd`` is the Decimal sum of the
+    set's run costs, as a string. Before, the cards were counted over the set while the cost
+    was read off ``ORDER BY id DESC LIMIT 1`` — one run of seven — so the page printed
+    「7 卡 本批成本 $0.001」 for a batch that cost $0.0050487. ``at`` is the latest finish of
+    the set; ``runs`` (additive) is its size. None when no insight run has finished.
     """
-    row = conn.execute(
-        "SELECT started_at, finished_at, cost_usd FROM job_runs "
+    anchor = conn.execute(
+        "SELECT started_at FROM job_runs "
         "WHERE job_id LIKE 'insight:%' AND is_shadow = 0 AND finished_at IS NOT NULL "
         "ORDER BY id DESC LIMIT 1",
     ).fetchone()
-    if row is None:
+    if anchor is None:
         return None
+    started_at = anchor["started_at"]
+    runs = conn.execute(
+        "SELECT finished_at, cost_usd FROM job_runs "
+        "WHERE job_id LIKE 'insight:%' AND is_shadow = 0 AND finished_at IS NOT NULL "
+        "AND started_at = ?",
+        (started_at,),
+    ).fetchall()
+    cost = sum((Decimal(r["cost_usd"]) for r in runs if r["cost_usd"]), Decimal("0"))
     cards_row = conn.execute(
         "SELECT COUNT(*) AS c FROM insights WHERE is_shadow = 0 AND created_at = ?",
-        (row["started_at"],),
+        (started_at,),
     ).fetchone()
     return {
-        "at": row["finished_at"],
+        "at": max(str(r["finished_at"]) for r in runs),
         "cards": int(cards_row["c"]) if cards_row is not None else 0,
-        "cost_usd": row["cost_usd"] if row["cost_usd"] is not None else "0",
+        "cost_usd": decimal_str(cost),
+        "runs": len(runs),
     }
 
 
@@ -1269,19 +1292,21 @@ def _resolve_universe_raw(
     universe: dict[str, Any] | list[Any] | str | None,
     data: DashboardData,
 ) -> list[str]:
-    """Resolve a per_symbol universe value (mode:all → holdings, mode:custom → listed,
-    mode:all_registered → holdings + watchlist). The draft-preflight twin of
-    ``_resolve_universe`` (spec 07 §7.2 dry run)."""
-    held = sorted(held_in_book(data))
+    """Resolve a per_symbol universe value — THE one resolver (DEF-059): mode:all →
+    holdings, mode:custom → the listed symbols, mode:all_registered → holdings + the active
+    (non-archived) watchlist; anything else follows holdings. A saved task
+    (:func:`_resolve_universe`) and an unsaved draft (spec 07 §7.2 dry run) both land here."""
+    held_set = held_in_book(data)
+    held = sorted(held_set)
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":
             return _custom_symbols(universe.get("symbols"))
         if mode == "all_registered":
-            return _all_registered_symbols(conn)
+            return _all_registered_symbols(conn, held_set)
         if mode == "all":
             return held
-    return held
+    return held  # default: follow holdings
 
 
 def _missing_prices_for(

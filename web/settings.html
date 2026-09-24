@@ -328,11 +328,13 @@
   <!-- ===== AI 提示詞 (WPF: canonical — mirrors the retired standalone page incl.
        sys-reset / tpl-from-lib / the FM8 in-panel save bar) ===== -->
   <div class="set-view" id="view-prompts" data-screen-label="AI 提示詞">
-    <section class="panel">
+    <section class="panel" data-anchor="system-prompt">
       <div class="panel-head">
         <h2 class="panel-title">系統提示詞</h2>
         <span class="panel-sub" id="sys-prompt-meta"></span>
         <span class="spacer"></span>
+        <!-- DEF-057: every save / reset / restore keeps a version (settings-prompts.js) -->
+        <button class="btn" id="sys-versions" type="button" title="檢視每次儲存留下的版本、對照差異，或回復任一版">版本記錄</button>
         <button class="btn" id="sys-reset" type="button" title="以官方模板庫最新版覆蓋目前內容">重置回官方版</button>
       </div>
       <div class="sys-prompt-card"><textarea class="input" id="sys-prompt" spellcheck="false"></textarea><span class="hint">定義角色、語言與全域規則；所有 AI 呼叫（輸入解析、洞察批次）皆先套用此提示詞。</span></div>
@@ -345,11 +347,12 @@
     <!-- ===== 新聞整理提示詞 (spec docs/spec/2026-09-10-news-prompt-settings.html, owner D3(a)):
          the news pipeline's organizer system prompt — one global text, same grammar as the
          system-prompt panel above. Badge text/state come from the backend (is_official). ===== -->
-    <section class="panel" id="news-prompt-panel">
+    <section class="panel" id="news-prompt-panel" data-anchor="news-prompt">
       <div class="panel-head">
         <h2 class="panel-title">新聞整理提示詞 <span class="badge prompt-badge" id="news-prompt-badge"></span></h2>
         <span class="panel-sub" id="news-prompt-meta"></span>
         <span class="spacer"></span>
+        <button class="btn" id="news-versions" type="button" title="檢視每次儲存留下的版本、對照差異，或回復任一版">版本記錄</button>
         <button class="btn" id="news-reset" type="button" title="以官方模板庫最新版覆蓋目前內容">重置回官方版</button>
       </div>
       <div class="sys-prompt-card">

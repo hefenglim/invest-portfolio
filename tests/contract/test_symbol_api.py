@@ -474,26 +474,27 @@ def test_a_deliberately_wrong_corporate_delta_makes_the_footer_red(
     """§7.3's DETECTION-POWER half — and it is the half that matters.
 
     The mutation is applied to the REAL code path the router sources the delta from
-    (`current_shares`, the action-aware term of §6.3's definition), not to a local variable in
-    the test: audit F-11 found the sibling test in `test_corporate_actions.py` ending in a
-    tautology on a local, which is a test that cannot fail. Everything downstream — the
-    subtraction, the identity, the tolerance, the HTTP response — runs unmodified, so a green
-    footer here would mean the footer genuinely cannot detect a wrong corporate term.
+    (`shares_through` at the valuation day — the action-aware term of §6.3's definition, taken
+    at the close of `as_of` since DEF-056), not to a local variable in the test: audit F-11
+    found the sibling test in `test_corporate_actions.py` ending in a tautology on a local,
+    which is a test that cannot fail. Everything downstream — the subtraction, the identity,
+    the tolerance, the HTTP response — runs unmodified, so a green footer here would mean the
+    footer genuinely cannot detect a wrong corporate term.
     """
-    from portfolio_dash.data_ingestion.holdings import current_shares as real_current_shares
+    from portfolio_dash.data_ingestion.holdings import shares_through as real_shares_through
 
     _seed_split(golden_db)
     ok = api_client.get("/api/symbol/2330/detail").json()["activity_reconcile"]["total"]
     assert ok["balances"] is True, "precondition: the unmutated path reconciles"
 
     def wrong(conn: sqlite3.Connection, account_id: str, symbol: str,
-              *, index: ActionIndex | None = None) -> Decimal:
-        return real_current_shares(conn, account_id, symbol, index=index) + Decimal("1")
+              *, on: date, index: ActionIndex | None = None) -> Decimal:
+        return real_shares_through(conn, account_id, symbol, on=on, index=index) + Decimal("1")
 
     # Patched by DOTTED PATH, which names the exact binding the production code path reads —
     # `symbol.py` imported the function, so rebinding the router's own name is what a wrong
     # `corporate_delta` would actually look like at run time.
-    monkeypatch.setattr("portfolio_dash.api.routers.symbol.current_shares", wrong)
+    monkeypatch.setattr("portfolio_dash.api.routers.symbol.shares_through", wrong)
     bad = api_client.get("/api/symbol/2330/detail").json()["activity_reconcile"]["total"]
     assert bad["balances"] is False
     assert Decimal(bad["diff_shares"]) == Decimal("1")

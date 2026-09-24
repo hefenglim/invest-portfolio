@@ -49,6 +49,7 @@ from portfolio_dash.export.report_html import (
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.corporate_actions import KIND_ZH
+from portfolio_dash.shared.models.ledger import dividend_effective_date, pending_from
 
 _ZERO = Decimal("0")
 _DIV_TYPE_ZH = {"CASH": "現金", "STOCK": "配股", "DRIP": "DRIP", "NET": "淨額"}
@@ -138,6 +139,22 @@ def _fmt_rate(value: Decimal) -> str:
     return f"{value.quantize(_RATE_Q, rounding=ROUND_HALF_UP):,.4f}"
 
 
+def _date_cell(shown: date, today: date, counts_on: date | None = None) -> str:
+    """A row's date cell, plus DEF-056's 「未來日期：YYYY-MM-DD 起計入」 when the row does not
+    count yet on the report's valuation day (the server's ``now``).
+
+    The predicate is the valuation cut's own — ``shared.models.ledger.pending_from``, the one
+    the ledger lists' ``counts_from`` and every valuation read — so a printed row and the
+    figures it explains can never disagree about whether it counts. *counts_on* differs from
+    *shown* only for a dividend, which counts from its EFFECTIVE date (a 配股's ex-date).
+    """
+    pending = pending_from(counts_on if counts_on is not None else shown, today)
+    mark = ("" if pending is None
+            else '<br><span class="chip future">'
+                 f"未來日期：{_esc(pending.isoformat())} 起計入</span>")
+    return f'<td class="num">{_esc(shown.isoformat())}{mark}</td>'
+
+
 def _empty_section(title: str) -> str:
     return f'<section><h2>{_esc(title)}</h2><p class="note">本區間無紀錄</p></section>'
 
@@ -161,6 +178,7 @@ def _transactions_section(
     ccys: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     net_totals: dict[str, Decimal] = {}
@@ -176,7 +194,7 @@ def _transactions_section(
         side = _side_chip(t.side.value, daytrade=t.daytrade, short_sale=t.short_sale)
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(t.trade_date.isoformat())}</td>'
+            f"{_date_cell(t.trade_date, today)}"
             f'<td class="l">{_acct_label(t.account_id)}</td>'
             f"{_sym_cell(t.symbol, names.get(t.symbol, ''))}"
             f'<td class="l">{side}</td>'
@@ -205,6 +223,7 @@ def _dividends_section(
     ccys: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     net_totals: dict[str, Decimal] = {}
@@ -221,7 +240,7 @@ def _dividends_section(
             reinvest = _NULL
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(d.date.isoformat())}</td>'
+            f"{_date_cell(d.date, today, dividend_effective_date(d.type, d.date, d.ex_date))}"
             f'<td class="l">{_acct_label(d.account_id)}</td>'
             f"{_sym_cell(d.symbol, names.get(d.symbol, ''))}"
             f'<td class="l">{_esc(_DIV_TYPE_ZH.get(d.type.upper(), d.type))}</td>'
@@ -247,6 +266,7 @@ def _fx_section(
     convs: list[StoredFxConversion],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     out_totals: dict[str, Decimal] = {}
@@ -271,7 +291,7 @@ def _fx_section(
             f"{_fmt_rate(quote[2])} {_esc(quote[1].value)}")
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(c.date.isoformat())}</td>'
+            f"{_date_cell(c.date, today)}"
             f'<td class="l">{_acct_label(c.account_id)}</td>'
             f'<td class="num">{_amount_ccy(c.from_amount, c.from_ccy.value)}</td>'
             f'<td class="num">{_amount_ccy(c.to_amount, c.to_ccy.value)}</td>'
@@ -296,6 +316,7 @@ def _openings_section(
     ccys: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     cost_totals: dict[str, Decimal] = {}
@@ -313,7 +334,7 @@ def _openings_section(
             f'<td class="num">{_fmt_shares(o.shares)}</td>'
             f'<td class="num">{_fmt_amount(o.original_avg, ccy)}</td>'
             f'<td class="num">{_amount_ccy(o.original_cost_total, ccy)}</td>'
-            f'<td class="num">{_esc(o.build_date.isoformat())}</td>'
+            f"{_date_cell(o.build_date, today)}"
             "</tr>"
         )
     if not rows:
@@ -332,6 +353,8 @@ def _actions_section(
     names: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
+    fees: dict[int, StoredCashMovement] | None = None,
 ) -> str:
     """公司行動 — the one section with NO money column, and that is the point.
 
@@ -345,7 +368,13 @@ def _actions_section(
     called them 「四帳本＋期初庫存」 — five names for four sections, with the one ledger that
     explains a changed share count missing. A printed ledger that cannot explain why 100
     shares became 700 is a ledger that does not reconcile.
+
+    DEF-052 (2026-09-25): the linked reorganisation fee (*fees*, keyed by action id) is
+    printed ON the action's row — it was visible only in the web delete/edit dialogs. The
+    fee is still a cash movement (listed, and totalled, in 資金收支), so this column names the
+    link and is deliberately not totalled here: a second total would count the fee twice.
     """
+    fees = fees or {}
     rows: list[str] = []
     count = 0
     for a in sorted(actions, key=lambda x: (x.date, x.id)):
@@ -361,14 +390,18 @@ def _actions_section(
             f"{_fmt_amount(a.cost_carry * Decimal(100), '')}%"
             if a.cost_carry is not None else _NULL
         )
+        fee = fees.get(a.id)
+        fee_cell = (_amount_ccy(fee.amount, fee.ccy.value) if fee is not None
+                    else _esc(_NULL))
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(a.date.isoformat())}</td>'
+            f"{_date_cell(a.date, today)}"
             f'<td class="l">{_acct_label(a.account_id)}</td>'
             f'<td class="l">{_esc(KIND_ZH.get(a.kind.upper(), a.kind))}</td>'
             f"{moves}"
             f'<td class="num">{_fmt_shares(a.ratio_from)} → {_fmt_shares(a.ratio_to)}</td>'
             f'<td class="num">{_esc(carry)}</td>'
+            f'<td class="num">{fee_cell}</td>'
             f'<td class="l">{_esc(a.note or "")}</td>'
             "</tr>"
         )
@@ -377,18 +410,30 @@ def _actions_section(
     head = (
         '<tr><th>日期</th><th class="l">帳戶</th><th class="l">類型</th>'
         '<th class="l">代號 / 名稱</th><th>比例（原 → 新）</th>'
-        "<th>成本分攤</th><th class=\"l\">備註</th></tr>"
+        "<th>成本分攤</th><th>重組費用</th><th class=\"l\">備註</th></tr>"
     )
     return _section(
         "公司行動", count, head, "".join(rows),
-        ["公司行動不移動現金，故本節無金額合計。"],
+        ["公司行動本身不移動現金，故本節無金額合計；連帶的重組費用已記在「資金收支」（出金），"
+         "此欄僅標示連結、不另計合計。"],
     )
+
+
+def _linked_fees(moves: list[StoredCashMovement]) -> dict[int, StoredCashMovement]:
+    """Action id → the cash movement written FOR it (DEF-020's link, DEF-052's column) —
+    the first per action, the same rule the ledger API's ``reorg_fee`` reads."""
+    out: dict[int, StoredCashMovement] = {}
+    for m in moves:
+        if m.corporate_action_id is not None:
+            out.setdefault(m.corporate_action_id, m)
+    return out
 
 
 def _cash_section(
     moves: list[StoredCashMovement],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     """資金收支 — the sixth and last ledger, printable since 2026-08-16.
 
@@ -416,7 +461,7 @@ def _cash_section(
                else _NULL)
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(m.date.isoformat())}</td>'
+            f"{_date_cell(m.date, today)}"
             f'<td class="l">{_acct_label(m.account_id)}</td>'
             f'<td class="l">{_esc(CASH_KIND_ZH.get(m.kind.upper(), m.kind))}</td>'
             f'<td class="num">{_amount_ccy(signed, ccy)}</td>'
@@ -453,16 +498,20 @@ def build_ledgers_report_html(
     insts = list_instruments(conn)
     names = {i.symbol: i.name for i in insts}
     ccys = {i.symbol: i.quote_ccy.value for i in insts}
+    moves = list_cash_movements(conn)
+    # DEF-056: the report's valuation day — the SERVER clock, as the ledger lists' counts_from.
+    today = now.date()
 
     body = "\n".join(
         [
             _header_html(now, frm, to),
-            _transactions_section(list_transactions(conn), names, ccys, frm, to),
-            _dividends_section(list_dividends(conn), names, ccys, frm, to),
-            _fx_section(list_fx_conversions(conn), frm, to),
-            _openings_section(list_opening(conn), names, ccys, frm, to),
-            _actions_section(list_corporate_actions(conn), names, frm, to),
-            _cash_section(list_cash_movements(conn), frm, to),
+            _transactions_section(list_transactions(conn), names, ccys, frm, to, today),
+            _dividends_section(list_dividends(conn), names, ccys, frm, to, today),
+            _fx_section(list_fx_conversions(conn), frm, to, today),
+            _openings_section(list_opening(conn), names, ccys, frm, to, today),
+            _actions_section(list_corporate_actions(conn), names, frm, to, today,
+                             fees=_linked_fees(moves)),
+            _cash_section(moves, frm, to, today),
             _page_footer("帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。"),
         ]
     )

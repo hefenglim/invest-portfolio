@@ -116,7 +116,9 @@ def test_the_batch_list_honours_undoable_and_names_both_counts() -> None:
 
 
 def test_the_undo_says_what_it_did_and_the_confirm_says_what_it_touches() -> None:
-    body = _fn(_BROKER, "undoBatch")
+    # DEF-049 split the flow: undoBatch confirms, runUndo sends (and resends with the replay
+    # guard's acknowledgements) and reports — the undo is the two together.
+    body = _fn(_BROKER, "undoBatch") + _fn(_BROKER, "runUndo")
     assert "手動輸入的紀錄與其他批次不受影響" not in body
     assert "「手動輸入」" in body and "只刪除這一批寫入的列" in body
     assert "r.deleted === 0" in body and "r.message" in body

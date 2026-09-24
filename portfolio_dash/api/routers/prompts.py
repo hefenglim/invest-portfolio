@@ -16,6 +16,7 @@ Two paths share one validation core (``validate_tokens``):
 
 import math
 import sqlite3
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -30,7 +31,8 @@ from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_dividends
-from portfolio_dash.llm_insight import official_templates
+from portfolio_dash.llm_insight import official_templates, prompt_diff
+from portfolio_dash.llm_insight import system_prompt as system_prompt_store
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.evaluations_store import (
     calibration_bins,
@@ -56,6 +58,7 @@ from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
+from portfolio_dash.shared import prompt_versions as pv
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining
@@ -167,7 +170,7 @@ def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, 
 
 
 @router.get("/system-prompt")
-def read_system_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, str]:
+def read_system_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     return get_system_prompt(conn)
 
 
@@ -199,9 +202,12 @@ def read_prompt_templates() -> dict[str, Any]:
 def reset_system_prompt(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
-    """Restore the global system prompt to the official library version."""
-    return set_system_prompt(conn, official_templates.SYSTEM_PROMPT_BODY, now=now)
+) -> dict[str, Any]:
+    """Restore the global system prompt to the official library version.
+
+    DEF-057: 還原官方 is itself a version (source ``reset_official``) when it changes the body.
+    """
+    return system_prompt_store.reset_system_prompt(conn, now=now)
 
 
 # --- news-organizer prompt (batch ④; user-viewable + editable, with reset) -----
@@ -236,8 +242,163 @@ def reset_news_prompt(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    """Restore the news-organizer prompt to the official library version."""
+    """Restore the news-organizer prompt to the official library version (a version too)."""
     return dict(news_organizer_prompt.reset_news_prompt(conn, now=now))
+
+
+# --- version history of the two global prompts (DEF-057) -----------------------
+# Owner ruling 2026-09-24: the system prompt and the news-organizer prompt keep versions
+# exactly as the strategy prompts do (DEF-033) — list, read one, server-side line diff
+# against the previous / the current version, and restore (a NEW version; history is never
+# rewritten). ONE set of handlers, registered once per prompt by ``_version_routes``: the
+# kind is part of the PATH (``/system-prompt/versions``, ``/news-prompt/versions``), so the
+# action log labels each prompt's restore on its own (``api/action_log.py``) and a version
+# id of the other prompt is a 404 here, never a cross-prompt restore.
+
+_RestoreFn = Callable[
+    [sqlite3.Connection, int, datetime], "tuple[Mapping[str, Any], bool, int] | None"
+]
+_ReadFn = Callable[[sqlite3.Connection], Mapping[str, Any]]
+
+
+def _pv_meta(v: pv.PromptVersion, current: int | None) -> dict[str, Any]:
+    """The list/detail view of one version (no body) — DEF-033's shape, ``kind`` for its
+    ``strategy_id``. ``source_label`` is zh and server-owned."""
+    return {
+        "id": v.id,
+        "kind": v.kind,
+        "version": v.version,
+        "source": v.source,
+        "source_label": pv.SOURCE_LABELS.get(v.source, v.source),
+        "restored_from": v.restored_from,
+        "saved_at": v.saved_at,
+        "chars": len(v.body),
+        "lines": len(v.body.splitlines()),
+        "is_current": current is not None and v.version == current,
+    }
+
+
+def _version_routes(kind: pv.Kind, base: str, read: _ReadFn, restore: _RestoreFn) -> None:
+    """Register list / get / diff / restore for one global prompt under ``{base}/versions``."""
+    label = pv.KIND_LABELS[kind]
+
+    def _unknown(version_id: int) -> JSONResponse:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"未知{label}版本：{version_id}"))
+
+    def _own(conn: sqlite3.Connection, version_id: int) -> pv.PromptVersion | None:
+        read(conn)  # seeds + back-fills, so a fresh install lists its v1
+        v = pv.get_version(conn, version_id)
+        return v if v is not None and v.kind == kind else None
+
+    def list_versions(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """The prompt's whole version history, newest first (DEF-057)."""
+        read(conn)
+        current = pv.current_version_no(conn, kind)
+        return {
+            "kind": kind,
+            "name": label,
+            "current_version": current,
+            "versions": [_pv_meta(v, current) for v in pv.list_versions(conn, kind)],
+        }
+
+    def get_version(version_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+        """One version, with its full body (DEF-057)."""
+        v = _own(conn, version_id)
+        if v is None:
+            return _unknown(version_id)
+        return {**_pv_meta(v, pv.current_version_no(conn, kind)), "body": v.body}
+
+    def diff_version(
+        version_id: int,
+        against: str = "current",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> Any:
+        """Line diff between this version and another of the SAME prompt (DEF-057).
+
+        ``against`` = ``current`` (default), ``previous`` or another version's id — DEF-033's
+        grammar. Always read CHRONOLOGICALLY: ``from`` is the lower version number.
+        """
+        v = _own(conn, version_id)
+        if v is None:
+            return _unknown(version_id)
+        current = pv.current_version_no(conn, kind)
+        other: pv.PromptVersion | None
+        if against == "current":
+            other = pv.latest(conn, kind)
+        elif against == "previous":
+            other = pv.get_by_number(conn, kind, v.version - 1)
+        else:
+            try:
+                other_id = int(against)
+            except ValueError:
+                return JSONResponse(status_code=400, content=error_body(
+                    "validation_error", f"against 非有效值：{against}", field="against"))
+            other = pv.get_version(conn, other_id)
+            if other is None:
+                return _unknown(other_id)
+            if other.kind != kind:
+                return JSONResponse(status_code=400, content=error_body(
+                    "validation_error", f"只能比對同一則{label}的版本", field="against"))
+        if other is None:  # "previous" of version 1
+            older, newer = None, v
+        elif other.version <= v.version:
+            older, newer = other, v
+        else:
+            older, newer = v, other
+        diff = prompt_diff.line_diff(older.body if older is not None else "", newer.body)
+        return {
+            "from": _pv_meta(older, current) if older is not None else None,
+            "to": _pv_meta(newer, current),
+            "identical": older is not None and diff.identical,
+            "added": diff.added,
+            "removed": diff.removed,
+            "lines": [ln.model_dump() for ln in diff.lines],
+        }
+
+    def restore_version(
+        version_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+        now: datetime = Depends(get_now),
+    ) -> Any:
+        """Make an old version's body current again — as a NEW version (DEF-057).
+
+        ``changed`` is False when the chosen body already is the current one (nothing
+        written, no version added).
+        """
+        outcome = restore(conn, version_id, now)
+        if outcome is None:
+            return _unknown(version_id)
+        wire, changed, restored_from = outcome
+        return {
+            "prompt": dict(wire),
+            "changed": changed,
+            "restored_from": restored_from,
+            "current_version": pv.current_version_no(conn, kind),
+        }
+
+    router.add_api_route(f"{base}/versions", list_versions, methods=["GET"])
+    router.add_api_route(f"{base}/versions/{{version_id}}", get_version, methods=["GET"])
+    router.add_api_route(f"{base}/versions/{{version_id}}/diff", diff_version, methods=["GET"])
+    router.add_api_route(
+        f"{base}/versions/{{version_id}}/restore", restore_version, methods=["POST"]
+    )
+
+
+def _restore_system(
+    conn: sqlite3.Connection, version_id: int, now: datetime
+) -> tuple[Mapping[str, Any], bool, int] | None:
+    return system_prompt_store.restore_system_prompt_version(conn, version_id, now=now)
+
+
+def _restore_news(
+    conn: sqlite3.Connection, version_id: int, now: datetime
+) -> tuple[Mapping[str, Any], bool, int] | None:
+    return news_organizer_prompt.restore_news_prompt_version(conn, version_id, now=now)
+
+
+_version_routes("system", "/system-prompt", get_system_prompt, _restore_system)
+_version_routes("news", "/news-prompt", news_organizer_prompt.get_news_prompt, _restore_news)
 
 
 # --- shared assembly ----------------------------------------------------------

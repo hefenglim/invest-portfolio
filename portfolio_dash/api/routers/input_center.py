@@ -10,13 +10,15 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from portfolio_dash.api.action_log import DETAIL_ATTR
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body, llm_refusal_message
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
+from portfolio_dash.api.replay_guard import BatchUndoVerdict, batch_undo_guard
 from portfolio_dash.api.routers.cash import cash_pool_fn
 from portfolio_dash.api.routers.ledgers import (
     _delete_actions,
@@ -58,9 +60,17 @@ from portfolio_dash.data_ingestion.dividend_import import (
     build_dividend_preview,
     write_dividend_row,
 )
-from portfolio_dash.data_ingestion.fees import forecast_tw_rebate, rebate_applies
+from portfolio_dash.data_ingestion.fees import (
+    booked_discount,
+    forecast_tw_rebate,
+    rebate_applies,
+)
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
-from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
+from portfolio_dash.data_ingestion.holdings import (
+    current_shares,
+    load_action_index,
+    shares_through,
+)
 from portfolio_dash.data_ingestion.import_templates import (
     DATE_COLUMN_BY_KIND,
     TEMPLATE_KINDS,
@@ -81,6 +91,7 @@ from portfolio_dash.data_ingestion.preview import (
     commit_preview,
 )
 from portfolio_dash.data_ingestion.provenance import (
+    BatchRows,
     delete_batch,
     existing_hashes,
     is_undoable,
@@ -228,16 +239,16 @@ def _book_of(bundle: LedgerBundle) -> Book | None:
 def _book_or_none(conn: sqlite3.Connection, *, as_of: date) -> Book | None:
     """The cost-basis replay over the current ledger, or ``None`` when it cannot be booked.
 
-    ``as_of`` is the valuation day (required, no default): a dividend counts from its pay
-    date (DEF-016), so the ledger is cut exactly as ``build_dashboard`` cuts it and the sell
-    hint's 均價 is the dashboard row's own figure.
+    ``as_of`` is the valuation day (required, no default): every row counts from its own
+    date (DEF-016 / DEF-056), so the ledger is cut exactly as ``build_dashboard`` cuts it and
+    the sell hint's 均價 is the dashboard row's own figure.
 
     Never-500 (lesson: degrade at EVERY ``build_book`` call site). Split out of
     :func:`_holdings_or_none` so :func:`_position_preview` can tell a WITHHELD position from
     an absent one off the SAME replay — ``Book.holdings`` is the only source that answers
     both, and asking a second share path instead is how two answers to one question appear.
     """
-    return _book_of(_to_models(conn).received_by(as_of))
+    return _book_of(_to_models(conn).valued_as_of(as_of))
 
 
 def _holdings_or_none(
@@ -300,41 +311,53 @@ def input_holdings(
                  position can still pay a dividend after its ex-date (owner 假設 2).
                  Closed entries stay ``{symbol, name}`` — the extension is held-only.
 
-    Share counts reuse the pure ``current_shares`` helper (opening + buys − sells +
-    zero-cost reinvest shares — the same replay rule as ``build_book``); adjusted_avg
-    comes from the verified cost-basis replay itself (``_adjusted_avg_by_position`` →
-    ``build_book``). NO cost-basis math is duplicated here. Classification is strictly
-    per (account, symbol): the SAME symbol may be ``held`` in one account and ``closed``
-    in another. Names come from the instruments registry (fallback: the raw symbol).
-    Unknown account -> 404.
+    Share counts reuse the pure share walker (opening + buys − sells + zero-cost reinvest
+    shares — the same replay rule as ``build_book``); adjusted_avg comes from the verified
+    cost-basis replay itself (``_adjusted_avg_by_position`` → ``build_book``). NO cost-basis
+    math is duplicated here. Classification is strictly per (account, symbol): the SAME
+    symbol may be ``held`` in one account and ``closed`` in another. Names come from the
+    instruments registry (fallback: the raw symbol). Unknown account -> 404.
+
+    Both figures are TODAY's position (DEF-056, owner ruling 2026-09-24): a row dated after
+    the valuation day does not count yet, so ``shares`` is ``shares_through(on=today)`` —
+    not ``current_shares``, which nets every date and put a future buy's shares into 可賣股數
+    beside an average that (correctly) left it out — and a symbol whose only rows are still
+    ahead is neither held nor closed.
     """
     accounts = {a.account_id for a in list_accounts(conn)}
     if account not in accounts:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", unknown_account_message(account), field="account"))
-    # Every symbol this account has ever touched, across the three share-bearing ledgers.
+    today = now.date()
+    day = today.isoformat()
+    # Every symbol this account has touched BY TODAY, across the three share-bearing ledgers
+    # (the date columns the valuation cut reads; a dividend by its payment date — a 配股
+    # can only exist on a symbol the account already held, so its ex-date adds no symbol).
     symbols: set[str] = set()
     for row in conn.execute(
-        "SELECT DISTINCT symbol FROM transactions WHERE account_id=?", (account,)
+        "SELECT DISTINCT symbol FROM transactions WHERE account_id=? AND trade_date<=?",
+        (account, day),
     ):
         symbols.add(row["symbol"])
     for row in conn.execute(
-        "SELECT DISTINCT symbol FROM opening_inventory WHERE account_id=?", (account,)
+        "SELECT DISTINCT symbol FROM opening_inventory WHERE account_id=? AND build_date<=?",
+        (account, day),
     ):
         symbols.add(row["symbol"])
     for row in conn.execute(
-        "SELECT DISTINCT symbol FROM dividends WHERE account_id=?", (account,)
+        "SELECT DISTINCT symbol FROM dividends WHERE account_id=? AND date<=?", (account, day)
     ):
         symbols.add(row["symbol"])
     names = {i.symbol: i.name for i in list_instruments(conn)}
     avg_map: dict[tuple[str, str], Decimal] | None = None  # built once, on first held row
     held: list[dict[str, Any]] = []
     closed: list[dict[str, str]] = []
+    index = load_action_index(conn)   # ONE per request (trap #21)
     for sym in sorted(symbols):
-        shares = current_shares(conn, account, sym)
+        shares = shares_through(conn, account, sym, on=today, index=index)
         if shares > _ZERO:
             if avg_map is None:
-                avg_map = _adjusted_avg_by_position(conn, as_of=now.date())
+                avg_map = _adjusted_avg_by_position(conn, as_of=today)
             avg = avg_map.get((account, sym))
             held.append({
                 "symbol": sym, "name": names.get(sym) or sym,
@@ -913,6 +936,32 @@ def _account_cash(
     return wire, amount
 
 
+def _charged_discount(
+    rule: FeeRuleSet, replacing: StoredTransaction | None, body: ManualBody
+) -> Decimal:
+    """The settlement discount the previewed fee was CHARGED under (DEF-010 / DEF-055).
+
+    The regime belongs to the FEE, not to the account or to today's rule set:
+
+    * a NEW draft's fee — computed by the engine, or supplied (whose snapshot then records
+      no discount) — is charged under the rule set in force: ``rule.discount``, the same
+      fallback ``api/rebates.py`` reads once the row is stored;
+    * an EDIT that carries the stored fee (``fee_override`` — the 更正 modal sends the row's
+      own fee until a core field moves) previews the REPLACED row's money, charged under the
+      regime its snapshot records. The PUT keeps that snapshot (``_recompute_edit_fees``
+      only rewrites it when it recomputes the fee), so ``booked_discount`` of it is exactly
+      what ``/api/rebates`` will read after the save. Measured before DEF-055: #29 (booked
+      at ``discount 0.23``, fee 285) previewed ``rebate_estimate "219"`` (285 × 0.77) — the
+      double benefit DEF-010 removed everywhere else. That holds when the edit also MOVES the
+      row to another account: the fee is still the discounted money that left.
+    * an edit whose fee the engine RECOMPUTES (a core field moved, no override) is charged
+      under today's rule, and the PUT stores today's snapshot — ``rule.discount`` again.
+    """
+    if replacing is not None and body.fee_override is not None:
+        return booked_discount(replacing.fee_rule_snapshot, fallback=rule.discount)
+    return rule.discount
+
+
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody,
@@ -951,13 +1000,14 @@ def manual_preview(
     # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
     # month's refund = floor(resolved fee × rebate_rate). Null when the account never rebates
     # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies —
-    # and (DEF-010) null when the rule set ALSO discounts at settlement: the draft's fee was
-    # computed with that discount, so a refund on top of it would count the benefit twice.
-    rebate_estimate = (
-        decimal_str(forecast_tw_rebate(draft.fee, rule.rebate_rate, discount=rule.discount))
-        if rule is not None and rule.rebate_rate > _ZERO and rebate_applies(rule.discount)
-        else None
-    )
+    # and (DEF-010) null when the fee was ALREADY discounted at settlement: a refund on top of
+    # it would count the benefit twice.
+    rebate_estimate: str | None = None
+    if rule is not None and rule.rebate_rate > _ZERO:
+        discount = _charged_discount(rule, replacing, body)
+        if rebate_applies(discount):
+            rebate_estimate = decimal_str(
+                forecast_tw_rebate(draft.fee, rule.rebate_rate, discount=discount))
     # R6-E (additive): the drawer-parity position what-if + the display-only account-cash line,
     # both SERVER-computed as Decimal strings (the frontend renders only). null on any
     # degradation / unregistered symbol / incomplete inputs — the base preview never fails.
@@ -1672,9 +1722,19 @@ def import_batches(
     return {"batches": list_batches(conn, limit=max(1, min(limit, 500)))}
 
 
+#: DEF-049: what the action log says an undo was refused for (the error code, in words).
+_UNDO_REFUSED_ZH = {
+    "oversell": "賣超待確認",
+    "orphan_correction": "股利會失去對應持倉",
+    "negative_cash": "現金將為負數待確認",
+}
+
+
 @router.delete("/import/batches/{batch_id}")
 def import_batch_delete(
-    batch_id: int, conn: sqlite3.Connection = Depends(get_conn),
+    batch_id: int, request: Request,
+    ack_oversell: bool = False, ack_negative: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Undo one import: delete exactly the ledger rows that batch wrote, and the batch.
@@ -1692,6 +1752,15 @@ def import_batch_delete(
     the same conditions and with the same verdicts as 刪除 on the 公司行動 tab; and a SPLIT
     that leaves re-expresses its symbol's stored prices (the reconcile the ledger delete has
     always run — the bare batch DELETE left the closes in post-split terms).
+
+    DEF-049: the undo runs the SAME replay guard as every ledger-tab delete, over the ledger
+    WITHOUT the whole batch (``replay_guard.batch_undo_guard``, bound as ``delete_batch``'s
+    required ``guard`` seam): a stranded dividend → 422 ``orphan_correction`` (no ack); a new
+    or worsened 賣超 → 422 ``oversell`` naming each affected sell, until ``ack_oversell``; a
+    pool the batch's cash / FX rows funded going negative → 422 ``negative_cash``, until
+    ``ack_negative``. Every row it deletes leaves its before-image in ``ledger_audit``
+    (source 「批次復原 #id」), and the action log records the batch, the rows and any
+    acknowledgement used.
     """
     found = conn.execute(
         "SELECT kind FROM import_batches WHERE id=?", (batch_id,)
@@ -1715,8 +1784,32 @@ def import_batch_delete(
         symbols.update({a.from_symbol for a in rows} | {a.to_symbol for a in rows})
         outcomes.append(_delete_actions(conn, rows, now=now, commit=False))
 
-    removed = delete_batch(conn, batch_id, delete_actions=_delete_event)
+    verdicts: list[BatchUndoVerdict] = []
+
+    def _guard(rows: BatchRows) -> bool:
+        verdict = batch_undo_guard(
+            conn, rows, ack_oversell=ack_oversell, ack_negative=ack_negative)
+        verdicts.append(verdict)
+        return verdict.refusal is None
+
+    removed = delete_batch(conn, batch_id, delete_actions=_delete_event, guard=_guard)
+    verdict = verdicts[0]
+    if removed is None:
+        code = verdict.code or ""
+        setattr(request.state, DETAIL_ATTR,
+                f"批次 #{batch_id}・未刪除：{_UNDO_REFUSED_ZH.get(code, code)}")
+        return verdict.refusal
+    acked = (["已確認賣超"] if verdict.acked_oversell else []) + (
+        ["已確認現金為負"] if verdict.acked_negative else [])
+    setattr(request.state, DETAIL_ATTR,
+            "・".join([f"批次 #{batch_id}", f"刪除 {removed} 筆", *acked]))
     out: dict[str, Any] = {"deleted": removed, "import_batch_id": batch_id}
+    if verdict.acked_oversell:
+        # ADDITIVE and only when true (the ``duplicates`` convention): the undo the owner
+        # confirmed past the 賣超確認 dialog says so, so the page can name the consequence.
+        out["oversell_acknowledged"] = True
+    if verdict.acked_negative:
+        out["negative_cash_acknowledged"] = True
     if outcomes:
         # ADDITIVE, and only when the batch held corporate actions — the other kinds keep a
         # byte-identical payload. The same wire fields the ledger delete returns, one entry

@@ -376,7 +376,9 @@ def test_records_and_references_are_dropped_by_rule_and_the_rest_comes_back(
         assert dst.post("/api/import/commit",
                         json={**body, "ack_warnings": True}).status_code == 200
 
-    dropped = {"corporate_action_id", "band_move_json", "weight_move_json"}
+    # DEF-040 R4: ``child_seed_json`` is the same kind of record (what a SPINOFF's save wrote
+    # into the SOURCE database's prices) and is declared export-only the same way.
+    dropped = {"corporate_action_id", "band_move_json", "weight_move_json", "child_seed_json"}
 
     def rows(c: sqlite3.Connection, table: str) -> list[dict[str, object]]:
         return [{k: r[k] for k in r.keys() if k not in _REGENERATED | dropped}

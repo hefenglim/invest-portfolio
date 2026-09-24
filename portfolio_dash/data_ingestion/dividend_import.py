@@ -7,38 +7,21 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from portfolio_dash.data_ingestion.csv_import import unread_columns_issues
-from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model, check_amounts
+from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
-from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
-from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import insert_dividend
 from portfolio_dash.data_ingestion.validate import (
+    DividendInput,
     Issue,
     alias_import_account,
-    unknown_account_issue,
+    validate_dividend,
 )
 from portfolio_dash.shared.models.enums import DividendType
 
-# Batch B (F01): the CSV `type` values each STORED (account, market) dividend model accepts.
-# A merged dual-market account would otherwise mis-book one market's dividends (MY cash as
-# DRIP with a fabricated 30% withholding, or a US dividend missing withholding) — corrupt
-# money of record. Dormant for a single-market account whose only model matches its rows.
-_MODEL_ALLOWED_TYPES: dict[str, set[str]] = {
-    "cash_cost_reduction": {"CASH", "STOCK"},  # TW: cash cost-reduction (+ optional 配股)
-    # US Schwab/Moomoo. DRIP is the account's default mechanism, but a US payout that
-    # arrives as PLAIN CASH is ordinary, not exceptional — the owner's real broker export
-    # carries more dividend rows than reinvest rows, and the difference is exactly these.
-    # Admitting CASH here (P1b, 2026-08-13) removes the per-row `dividend_type_mismatch`
-    # confirmation that used to stand between a statement and the ledger.
-    #
-    # It needs NO accounting change: a CASH row falls into ``CASH_DIVIDEND_TYPES``
-    # (``shared/models/enums.py``), so it reduces ``adjusted_total`` exactly as a TW/MY cash
-    # dividend does — owner ruling D35, 2026-08-10. Booking it as income instead would fork
-    # ``CASH_DIVIDEND_TYPES`` by market, and 回本進度 / 股利回收率 would then mean different
-    # things per market ON THE SAME SCREEN.
-    "drip_us": {"DRIP", "CASH"},
-    "cash": {"NET"},                            # MY single-tier: net received
-}
+# The (account, market) model -> accepted types table (Batch B F01, P1b's US CASH) now lives
+# in ``dividend_model.MODEL_ALLOWED_TYPES``, read by the ONE dividend validator
+# (``validate.validate_dividend``, DEF-061) that this door and the ledger correction door
+# both run.
 
 # Canonical CSV column order for the dividends import — SINGLE SOURCE for the downloadable
 # template header (see data_ingestion.import_templates). Required: account, symbol, date, type,
@@ -264,84 +247,18 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
         if alias_issue is not None:
             issues.append(alias_issue)
 
-        # --- validate account exists (hard issue) ---
-        account_known = (
-            conn.execute(
-                "SELECT 1 FROM accounts WHERE account_id=?", (account_id,)
-            ).fetchone()
-            is not None
-        )
-        if not account_known:
-            # L-1: the shared sentence. A BLANK ``account`` cell rendered 「帳戶  不存在」
-            # here — two spaces, no name — while the cash door already said 「帳戶不可空白」.
-            issues.append(unknown_account_issue(account_id))
-
-        # --- resolve the symbol once: soft unresolved warning + type/market coherence ---
-        res = resolve(conn, symbol)
-        if res.status is ResolutionStatus.NEEDS_AI:
-            # Unregistered symbol -> soft warning (existing handling); no coherence check
-            # (its market is unknown until it is registered).
-            issues.append(
-                Issue(
-                    kind="symbol_unresolved",
-                    needs_confirm=True,
-                    message=f"未註冊標的 {symbol} — 請先至「標的管理」註冊",
-                )
-            )
-        elif res.instrument is not None and account_known:
-            # Batch B (F01): the row's `type` must match the dividend model bound to
-            # (account, the RESOLVED instrument's market). Mismatch -> soft needs_confirm
-            # (importable only after explicit confirm). Only reachable for a KNOWN account +
-            # REGISTERED symbol; a single-market account's coherent rows never trip it.
-            model = dividend_model_for(conn, account_id, res.instrument.market)
-            allowed = _MODEL_ALLOWED_TYPES.get(model)
-            if allowed is not None and div_type not in allowed:
-                issues.append(
-                    Issue(
-                        kind="dividend_type_mismatch",
-                        needs_confirm=True,
-                        message="股利類型與該市場模型不符，請確認",
-                    )
-                )
-            elif (
-                model == "drip_us"
-                and div_type == "CASH"
-                and withholding_override is None
-            ):
-                # P1b's edge. ``apply_dividend_model`` keys on the dividend TYPE, not on the
-                # account's model, so a blank withholding on a CASH row books 0 — right for
-                # a TW/MY payout, wrong for a US one under W-8BEN. The consequence is not
-                # cosmetic: net would equal gross, over-reducing ``adjusted_total`` and
-                # under-reporting the position's unrealized gain for the rest of its life.
-                #
-                # Soft, not hard: a withholding-free US distribution genuinely exists (a
-                # return of capital), so this asks rather than refuses. The manual form
-                # always sends the number, and the broker converter reads it off the
-                # statement, so it fires only on a hand-written row that omitted it.
-                issues.append(
-                    Issue(
-                        kind="us_cash_dividend_no_withholding",
-                        needs_confirm=True,
-                        message="美股現金股利未填預扣稅，將以 0 記錄（淨額=總額），請確認",
-                    )
-                )
-
-        # --- NET (§6.3): single-tier has no withholding — a stated one is refused ---
-        # ``apply_dividend_model`` itself would ACCEPT it (its cash/NET branch computes
-        # ``net = gross − withholding``, the TW shape), which is precisely why the refusal
-        # sits at this door rather than being half-implemented as a different derivation:
-        # the model stays the ONE amounts engine, and a row that contradicts the single-tier
-        # definition never reaches it. Hard, not needs_confirm — under §6.3 gross ≡ net, so
-        # a non-zero withholding means the row is mis-typed (a taxed payout belongs under
-        # CASH with its real gross), and acknowledging cannot make the numbers coherent.
-        # An explicit ``0`` is not refused: it states exactly what the model would derive.
-        if div_type == "NET" and withholding_override is not None and withholding_override != 0:
-            issues.append(Issue(
-                kind="net_dividend_withholding",
-                message=(f"NET（單層制）股利不會有預扣稅，預扣稅額（withholding）"
-                         f"目前是 {withholding_override}。單層制以實收淨額入帳，總額即淨額；"
-                         "若這筆股利確實被預扣稅款，請改用 CASH 類型並填寫總額與預扣稅額"),
-            ))
+        # --- every dividend check: the ONE validator (DEF-061) ---
+        # Account exists (L-1's shared sentence), symbol registered, type vs the (account,
+        # market) model (Batch B F01), P1b's US CASH without withholding, NET with a
+        # withholding (§6.3), conservation (M5) and the DRIP/STOCK share count the replay
+        # requires — the SAME function the ledger correction door runs, so the two doors
+        # cannot disagree about one row. The overrides go in as stated (``None`` = blank
+        # cell), because a blank and a stated ``0`` are different findings.
+        issues.extend(validate_dividend(conn, DividendInput(
+            account_id=account_id, symbol=symbol, div_date=div_date, type=div_type,
+            gross=gross, withholding=withholding_override, net=net_override,
+            reinvest_shares=reinvest_shares_override,
+            reinvest_price=reinvest_price_override, ex_date=ex_date)))
 
         # --- apply dividend model to compute withholding / net / reinvest_shares ---
         amounts = apply_dividend_model(
@@ -352,32 +269,6 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             reinvest_shares=reinvest_shares_override,
             reinvest_price=reinvest_price_override,
         )
-
-        # Conservation gate (audit M5): a payout can never deliver more than it declared.
-        # Hard issue — the same check the ledger edit endpoint enforces, so both write paths
-        # agree instead of one silently accepting what the other rejects.
-        amount_issue = check_amounts(amounts.gross, amounts.withholding, amounts.net)
-        if amount_issue is not None:
-            issues.append(Issue(kind="dividend_amounts", message=amount_issue))
-
-        # A share-adding dividend with no share count is refused HERE, because the replay
-        # already refuses it: `cost_basis.py` raises "DRIP/STOCK dividend ... requires
-        # reinvest_shares" rather than coercing to zero. Until this guard existed the door
-        # accepted such a row with NO issue at all — `apply_dividend_model` passes the field
-        # through for STOCK and only derives it for DRIP when a reinvest_price is present,
-        # and the conservation gate above passes for any non-negative gross. The row landed
-        # clean and then broke every later rebuild of the whole book (the class
-        # `test_cost_basis.py` records as having once "crashed every rebuild that held a MY
-        # dividend"). The condition is written to MIRROR the replay's own test, not to
-        # restate it in different words, so the two cannot drift apart.
-        if div_type in ("DRIP", "STOCK") and amounts.reinvest_shares is None:
-            issues.append(Issue(
-                kind="reinvest_shares_required",
-                message=(
-                    f"{div_type} 股利必須有股數（reinvest_shares）"
-                    "——配股／再投資是以股數入帳，缺這個欄位重算會失敗"
-                ),
-            ))
 
         payload: dict[str, str] = {
             "account_id": account_id,

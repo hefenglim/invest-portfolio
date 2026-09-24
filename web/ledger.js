@@ -182,6 +182,9 @@
     });
     return true;
   }
+  /* DEF-049: shared with 最近匯入 › 復原 (broker-import.js), whose undo answers the same
+     ack-able 422s — one dialog, one ack table, for every door that removes ledger rows. */
+  window.pdAckConfirm = ackConfirm;
 
   /* ===== M3-04 (2026-09-06): one ledger mutation at a time, and it is visible =====
      Every correction door on this page used to close its dialog FIRST and await the request
@@ -669,20 +672,62 @@
     const fNet = inp(d.net, 'number', 'any');
     const fReSh = inp(d.reinvest_shares, 'number', 'any');
     const fRePx = inp(d.reinvest_price, 'number', 'any');
-    editModal('編輯股利 #' + d.id + ' — ' + d.symbol, [
+    /* DEF-061: the correction runs the entry doors' ONE validator (validate_dividend), so the
+       dialog shows its findings live and — the ⑪a contract, as the trade dialog does — holds
+       儲存 until every warning is ticked; hard findings are refused by the PUT itself.
+       A blank 預扣 / 淨額 is sent as null ("not stated", like a blank CSV cell), so the
+       dividend model derives it exactly as the entry door would. */
+    const blankNull = (n) => (n.value.trim() === '' ? null : n.value);
+    const bodyOf = (ack) => ({
+      account_id: fAcc.value, symbol: fSym.value.trim(), date: fDate.value,
+      type: fType.value, gross: fGross.value || '0',
+      withhold: blankNull(fWh), net: blankNull(fNet),
+      reinvest_shares: blankNull(fReSh), reinvest_price: blankNull(fRePx),
+      ack_oversell: ack,
+    });
+    const issueBox = el('div', 'issues div-edit-issues');
+    const panel = { list: [], acks: {}, pending: false };
+    let ui0 = null;
+    function gate() {
+      const allAcked = renderEditIssues(issueBox, panel.list, panel.acks, gate);
+      if (ui0 && !ui0.ok.classList.contains('is-busy')) {
+        ui0.ok.disabled = panel.pending || !allAcked;
+      }
+    }
+    let previewSeq = 0;
+    async function recompute() {
+      if (!window.pdApi) return;
+      const seq = ++previewSeq;
+      const body = bodyOf(false);
+      delete body.ack_oversell;
+      body.replaces_div_id = d.id;
+      panel.pending = true;
+      gate();
+      try {
+        const resp = await window.pdApi.post('/api/ledgers/dividends/preview', body);
+        if (seq !== previewSeq) return;
+        panel.list = (resp && resp.issues) || [];
+      } catch (e) {
+        /* best-effort; the PUT's validation is the authority. A failed preview clears the
+           panel so an earlier value's warning never outlives the request that replaced it. */
+        if (seq !== previewSeq) return;
+        panel.list = [];
+      }
+      panel.pending = false;
+      gate();
+    }
+    [fGross, fWh, fNet, fReSh, fRePx, fSym].forEach((n) => n.addEventListener('input', recompute));
+    [fAcc, fType, fDate].forEach((n) => n.addEventListener('change', recompute));
+    ui0 = editModal('編輯股利 #' + d.id + ' — ' + d.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['類型', fType],
       ['總額', fGross], ['預扣', fWh], ['淨額', fNet],
-      ['再投資股數（DRIP）', fReSh], ['再投資價格（DRIP）', fRePx],
+      ['再投資股數（DRIP／配股）', fReSh], ['再投資價格（DRIP）', fRePx],
+      ['', issueBox],
     ], async (ui) => {
-      await putWithAckGuard('/api/ledgers/dividends/' + d.id, (ack) => ({
-        account_id: fAcc.value, symbol: fSym.value.trim(), date: fDate.value,
-        type: fType.value, gross: fGross.value || '0', withhold: fWh.value || '0',
-        net: fNet.value || '0',
-        reinvest_shares: fReSh.value === '' ? null : fReSh.value,
-        reinvest_price: fRePx.value === '' ? null : fRePx.value,
-        ack_oversell: ack,
-      }), '編輯', ui);
+      await putWithAckGuard('/api/ledgers/dividends/' + d.id, bodyOf, '編輯', ui);
     });
+    /* The row's findings AS IT STANDS, on open (DEF-042's rule for the trade dialog). */
+    recompute();
   }
 
   const CCY_OPTS = [['TWD', 'TWD'], ['USD', 'USD'], ['MYR', 'MYR']];
@@ -733,6 +778,28 @@
     return td;
   }
 
+  /* DEF-056 (owner ruling 2026-09-24): a row dated after TODAY does not count yet — not in
+     the holdings, 總報酬, XIRR or the cash pools — until its own date. The server decides
+     (`counts_from`, set only while the row is still ahead, cut on the SERVER's clock — never
+     this browser's), and the row says so, so a ledger row that the dashboard does not reflect
+     explains itself. The date shown is the day it starts to count: for a dividend that is its
+     effective date (the payment date; a 配股's ex-date). Rendered UNDER the date so the date
+     column stays one token wide. The same badge text is in web/cash.js (its own IIFE). */
+  function futureBadge(countsFrom) {
+    const b = el('span', 'badge badge-stale-mini ledger-future', '未來日期：' + countsFrom + ' 起計入');
+    b.title = '日期晚於今天：到 ' + countsFrom + ' 才計入持股、成本、總報酬、XIRR 與資金餘額';
+    return b;
+  }
+  function dateCell(dateIso, countsFrom) {
+    const td = el('td', 'num', f.date(dateIso));
+    if (countsFrom) {
+      const line = el('div', 'ledger-future-line');
+      line.appendChild(futureBadge(countsFrom));
+      td.appendChild(line);
+    }
+    return td;
+  }
+
   /* ===== 交易 (with row expander: fee-rule snapshot) ===== */
   function renderTx() {
     const tbody = $('#tx-body');
@@ -741,7 +808,7 @@
       const tr = el('tr', 'expandable');
       const tdCaret = el('td', 'num caret-cell', '▸');
       tr.appendChild(tdCaret);
-      tr.appendChild(el('td', 'num', f.date(t.date)));
+      tr.appendChild(dateCell(t.date, t.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(t.account_id)));
       tr.appendChild(symCell(t.symbol, t.name));
       const tdSide = el('td', 'col-text');
@@ -813,7 +880,7 @@
     tbody.replaceChildren();
     byKeyword(D.dividends).forEach((d) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(d.date)));
+      tr.appendChild(dateCell(d.date, d.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(d.account_id)));
       tr.appendChild(symCell(d.symbol));
       const meta = DIV_TYPE[d.type] || { label: d.type, cls: '' };
@@ -846,7 +913,7 @@
     tbody.replaceChildren();
     byKeyword(D.fx).forEach((x) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(x.date)));
+      tr.appendChild(dateCell(x.date, x.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(x.account_id)));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
@@ -877,7 +944,7 @@
       tr.appendChild(el('td', 'num', f.shares(o.shares)));
       tr.appendChild(el('td', 'num', f.price(o.avg, o.ccy)));
       tr.appendChild(el('td', 'num', f.money(o.total, o.ccy) + ' ' + o.ccy));
-      tr.appendChild(el('td', 'num', f.date(o.date)));
+      tr.appendChild(dateCell(o.date, o.counts_from));
       const openPath = '/api/ledgers/openings/' + encodeURIComponent(o.account_id) +
         '/' + encodeURIComponent(o.symbol);
       tr.appendChild(actionsCell(
@@ -913,15 +980,22 @@
     const fFee = inp(fee ? fee.amount : '', 'number', 'any');
     const feeLabel = '重組費用（' + (fee ? fee.ccy + '，留空即刪除該筆出金' : '選填，記為出金')
       + '）';
+    /* DEF-060: the SPINOFF child's seed price. Blank = leave it as it is (it still MOVES
+       with a new date / child); a value re-types it — written only where the child has no
+       price that day, and the server's sentence says what happened (afterActionEdit). */
+    const fSeed = inp('', 'number', 'any');
     const warn = el('div', 'hint',
       '⚠ 修改公司行動會重算歷史：股數、均價、報酬率與價格基準都會依新內容重建（原值已存入稽核軌跡）。'
       + '若這筆行動同時登錄在多個帳戶，代號／日期／類型／比例必須整組一致，否則會被擋下。'
-      + '重組費用會隨行動的日期與帳戶一併更新。');
+      + '重組費用會隨行動的日期與帳戶一併更新；分拆登錄時寫入的子公司起始價也會隨日期／子公司代號搬移'
+      + '（新日期已有正式報價時不寫入）。');
     editModal('編輯公司行動 #' + a.id + ' — ' + a.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['類型', fKind],
       ['來源代號', fFrom], ['目的代號', fTo],
       ['每持有（股）', fRatioFrom], ['變成／換得（股）', fRatioTo],
-      ['成本分攤比例（分拆用）', fCarry], [feeLabel, fFee], ['備註', fNote],
+      ['成本分攤比例（分拆用）', fCarry],
+      ['子公司起始價（分拆用，選填；留空＝不變更）', fSeed],
+      [feeLabel, fFee], ['備註', fNote],
       ['', warn],
     ], async (ui) => {
       const body = {
@@ -934,22 +1008,53 @@
            (Omitting the key would mean "leave it alone", which an edit form cannot mean.) */
         reorg_fee: fFee.value.trim(),
         reorg_fee_ccy: fee ? fee.ccy : (a.ccy || null),
+        /* DEF-060: only a SPINOFF takes one (the server refuses it on another kind). */
+        to_symbol_price: fKind.value === 'SPINOFF' ? (fSeed.value.trim() || null) : null,
       };
-      const put = () => window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
+      const put = async () => {
+        const resp = await window.pdApi.put('/api/ledgers/corporate-actions/' + a.id, body);
+        afterActionEdit(resp);
+        return resp;
+      };
       /* `warnings_unacknowledged` is this door's own ack code (not in ACK_CODES: the ack
          rides as a body flag, not a param), so it opens its dialog here — the modal closed
          first, same order as ackConfirm. */
+      /* DEF-049: the edit is REPLAYED server-side like every other correction — a 422
+         `oversell` (a later sell the old ratio/date covered) opens the shared ackConfirm;
+         確認 sets the ack in the BODY (like ack_warnings) and re-sends. */
+      const replayAck = (err, prog) => ackConfirm(err, '儲存', (param) => {
+        body[param] = true;
+        runMutation('編輯', put, replayAck);
+      }, prog ? prog.drop : ui.dismiss);
       await saveFromModal(ui, '編輯', put, (err) => {
+        if (replayAck(err)) return true;
         if (!(err && err.status === 422 && err.code === 'warnings_unacknowledged')) return false;
         ui.dismiss();
         window.confirmDialog({
           title: '公司行動警告確認', body: err.message,
           confirmLabel: '我了解，仍要儲存', danger: true,
-          onConfirm: () => { body.ack_warnings = true; runMutation('編輯', put); },
+          onConfirm: () => { body.ack_warnings = true; runMutation('編輯', put, replayAck); },
         });
         return true;
       });
     });
+  }
+
+  /* DEF-060: what the edit did to the SPINOFF child's seed price — the server's sentences,
+     verbatim: moved / re-typed (ok), or not written / not moved and why (warn). */
+  function afterActionEdit(resp) {
+    if (!resp || !window.toast) return;
+    const mv = resp.child_price_move;
+    if (mv) {
+      window.toast(mv.moved ? '子公司起始價已更新' : '子公司起始價未搬移',
+        mv.moved ? 'ok' : 'warn', mv.message || '');
+    } else if (resp.child_priced) {
+      window.toast('已寫入子公司起始價', 'ok', resp.child_priced);
+    }
+    const skip = resp.child_price_skipped;
+    if (skip && !(mv && mv.message && mv.message.indexOf(skip.reason) !== -1)) {
+      window.toast('子公司起始價未寫入', 'warn', skip.reason);
+    }
   }
 
   /* F-32: deleting ONE row of a multi-account set is refused server-side, because the
@@ -1050,26 +1155,41 @@
   }
 
   function delAction(a) {
-    const delOne = async () => afterActionDelete(
-      await window.pdApi.del('/api/ledgers/corporate-actions/' + a.id));
-    const delSet = async () => afterActionDelete(
+    /* DEF-049: both deletes are REPLAYED server-side like every other ledger delete — a
+       split whose shares a later sell used answers 422 `oversell`, naming each sell. That
+       opens the same ackConfirm dialog the other rows use; 確認 re-sends carrying every ack
+       given so far (`acks`), 取消 sends nothing. */
+    const ackQs = (acks) => Object.keys(acks).map((k) => k + '=true');
+    const delOne = (acks) => async () => {
+      const q = ackQs(acks);
+      afterActionDelete(await window.pdApi.del('/api/ledgers/corporate-actions/' + a.id
+        + (q.length ? '?' + q.join('&') : '')));
+    };
+    const delSet = (acks) => async () => afterActionDelete(
       await window.pdApi.del('/api/ledgers/corporate-actions/set'
         + '?from_symbol=' + encodeURIComponent(a.symbol)
         + '&date=' + encodeURIComponent(a.date)
-        + '&kind=' + encodeURIComponent(a.kind)));
+        + '&kind=' + encodeURIComponent(a.kind)
+        + ackQs(acks).map((p) => '&' + p).join('')));
+    const acked = (send, acks) => (err, prog) => ackConfirm(err, '刪除', (param) => {
+      const next = Object.assign({}, acks, { [param]: true });
+      runMutation('刪除', send(next), acked(send, next));
+    }, prog.drop);
     window.confirmDialog({
       title: '刪除公司行動',
       body: '確定刪除 ' + a.symbol + ' 在 ' + a.date + ' 的' + a.kind_label
         + '？股數、成本與價格基準都會由帳本重建。' + actionDeleteConsequences(a),
       confirmLabel: '刪除', danger: true,
-      onConfirm: () => runMutation('刪除', delOne, (err, prog) => {
-        if (!(err && err.status === 422 && err.code === 'partial_action_set_change')) return false;
+      onConfirm: () => runMutation('刪除', delOne({}), (err, prog) => {
+        if (!(err && err.status === 422 && err.code === 'partial_action_set_change')) {
+          return acked(delOne, {})(err, prog);
+        }
         prog.drop();
         window.confirmDialog({
           title: '這筆行動屬於多帳戶整組紀錄',
           body: err.message + '　要整組一起刪除嗎？',
           confirmLabel: '整組刪除', danger: true,
-          onConfirm: () => runMutation('刪除', delSet),
+          onConfirm: () => runMutation('刪除', delSet({}), acked(delSet, {})),
         });
         return true;
       }),
@@ -1084,7 +1204,9 @@
       const tr = el('tr');
       /* DEF-023: addressable from the dashboard banner and the drawer (deep link). */
       tr.dataset.actionId = a.id;
-      tr.appendChild(el('td', 'num', f.date(a.date)));
+      /* DEF-056: the SERVER's counts_from (cut on the app clock), rendered like every other
+         ledger's 「未來日期：YYYY-MM-DD 起計入」 — never decided here. */
+      tr.appendChild(dateCell(a.date, a.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(a.account_id)));
       const tdKind = el('td', 'col-text', a.kind_label);
       if (a.unapplied) {
@@ -1116,7 +1238,19 @@
         tdCarry.textContent = a.cost_carry;   /* a server string; never re-scaled here */
       }
       tr.appendChild(tdCarry);
-      tr.appendChild(el('td', 'col-text', a.note || ''));
+      /* DEF-052: the linked reorganisation fee is part of THIS event, so the row shows it —
+         until now only the delete and edit dialogs read `reorg_fee`. The amount is the
+         server's Decimal string through the display formatter (never computed here), the
+         same 「50 TWD」 the save toast and the delete confirm print. */
+      const tdNote = el('td', 'col-text');
+      if (a.reorg_fee) {
+        const fee = a.reorg_fee;
+        tdNote.appendChild(el('span', 'badge ledger-reorg-fee',
+          '重組費用 ' + f.money(fee.amount, fee.ccy) + ' ' + fee.ccy));
+        if (a.note) tdNote.appendChild(document.createTextNode(' '));
+      }
+      if (a.note) tdNote.appendChild(document.createTextNode(a.note));
+      tr.appendChild(tdNote);
       tr.appendChild(actionsCell(() => editAction(a), () => delAction(a)));
       tbody.appendChild(tr);
     });
@@ -1128,7 +1262,7 @@
     tbody.replaceChildren();
     byKeyword(D.cash).forEach((m) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(m.date)));
+      tr.appendChild(dateCell(m.date, m.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(m.account_id)));
       tr.appendChild(el('td', 'col-text', m.kind_label));
       tr.appendChild(el('td', 'col-text', m.ccy));

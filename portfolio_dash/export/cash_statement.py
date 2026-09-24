@@ -43,6 +43,7 @@ from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.models.ledger import counts_by
 from portfolio_dash.shared.wire import decimal_str
 
 _ZERO = Decimal("0")
@@ -196,7 +197,7 @@ def _as_of_balance(stmt: list[tuple[CashLine, Decimal]], as_of: date) -> Decimal
     end-of-day balance (M5-06); 0 for a pool with no such line. The statement is
     chronological, so this equals ``cash_balances(..., as_of=as_of)`` for the same pool by
     construction — the figure ``GET /api/cash`` and ``GET /api/cash/statement`` serve."""
-    return next((bal for ln, bal in reversed(stmt) if ln.date <= as_of), _ZERO)
+    return next((bal for ln, bal in reversed(stmt) if counts_by(ln.date, as_of)), _ZERO)
 
 
 def _pool_section(
@@ -220,7 +221,7 @@ def _pool_section(
     """
     ccy = pool_ccy.value
     bal = _as_of_balance(stmt, as_of)
-    future = sum(1 for ln, _ in stmt if ln.date > as_of)
+    future = sum(1 for ln, _ in stmt if not counts_by(ln.date, as_of))
     head = (
         '<tr><th>日期</th><th class="l">類型</th><th class="l">說明</th>'
         "<th>金額</th><th>餘額</th></tr>"
@@ -235,7 +236,7 @@ def _pool_section(
     else:
         rows: list[str] = []
         for ln, b in stmt:
-            is_future = ln.date > as_of
+            is_future = not counts_by(ln.date, as_of)
             if is_future and len(rows) == len(stmt) - future:
                 rows.append(cut)  # once, before the first future row (rows are chronological)
             kind = _esc(_KIND_ZH.get(ln.kind, ln.kind)) + ("（未來）" if is_future else "")

@@ -51,6 +51,9 @@ def _item_wire(n: news_store.OrganizedNews) -> dict[str, Any]:
         "tokens_in": n.tokens_in,
         "tokens_out": n.tokens_out,
         "model": n.model,
+        # DEF-057: the news-organizer prompt version the summary was produced with (null =
+        # headline-only, or organized before versions were recorded).
+        "prompt_version": n.prompt_version,
         "headline_only": not n.body_summary.strip(),
     }
 

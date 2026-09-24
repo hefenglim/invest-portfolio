@@ -417,7 +417,11 @@
      generated with, as the server recorded them at generation (`prompt_versions`, one entry
      per strategy layer). null = the card predates the record → 「生成時版本未記錄」, never a
      version guessed from today's history; [] = no prompt was assembled (the zero-LLM 資料異常
-     card) → nothing to name. Links to 設定 › AI 提示詞, where each strategy's 版本記錄 lives. */
+     card) → nothing to name. Links to 設定 › AI 提示詞, where each strategy's 版本記錄 lives.
+     DEF-057: the SYSTEM-prompt layer rides the same chip (`system_prompt_version`): null =
+     not recorded (the card predates DEF-057 — the strategy half reads exactly as before),
+     {used:false} = no system layer was assembled (nothing to name), {used:true, version} =
+     「系統 vN」 ahead of the strategy versions. */
   function promptVersionChip(card) {
     var pv = card.prompt_versions;
     if (pv === undefined) return null;
@@ -426,15 +430,24 @@
       none.title = '此卡片產生於提示詞版本記錄啟用之前，無法得知當時使用的策略提示詞版本';
       return none;
     }
-    if (!pv.length) return null;
-    var a = el('a', 'insight-time insight-pver',
-      '提示詞 ' + pv.map(function (r) {
-        return r.version == null ? '版本不明' : 'v' + r.version;
-      }).join('・'));
+    var sys = card.system_prompt_version;
+    var sysUsed = !!(sys && sys.used);
+    if (!pv.length && !sysUsed) return null;
+    var parts = [];
+    var tips = [];
+    if (sysUsed) {
+      parts.push('系統 ' + (sys.version == null ? '版本不明' : 'v' + sys.version));
+      tips.push('系統提示詞' + (sys.version == null ? ' 版本不明' : ' v' + sys.version));
+    }
+    pv.forEach(function (r) {
+      parts.push(r.version == null ? '版本不明' : 'v' + r.version);
+      tips.push('策略「' + r.name + '」' + (r.version == null ? ' 版本不明' : ' v' + r.version));
+    });
+    if (sys === null || sys === undefined) tips.push('系統提示詞 生成時版本未記錄');
+    else if (!sysUsed) tips.push('未套用系統提示詞');
+    var a = el('a', 'insight-time insight-pver', '提示詞 ' + parts.join('・'));
     a.href = 'settings.html#prompts';
-    a.title = pv.map(function (r) {
-      return '策略「' + r.name + '」' + (r.version == null ? ' 版本不明' : ' v' + r.version);
-    }).join('\n') + '\n點擊前往 AI 提示詞，於策略卡「版本記錄」檢視該版內文';
+    a.title = tips.join('\n') + '\n點擊前往 AI 提示詞，於系統提示詞或策略卡的「版本記錄」檢視該版內文';
     return a;
   }
 

@@ -15,6 +15,25 @@ class DividendAmounts(BaseModel):
     reinvest_price: Decimal | None = None
 
 
+#: Batch B (F01): the dividend ``type`` values each STORED (account, market) dividend model
+#: accepts. A merged dual-market account would otherwise mis-book one market's dividends (MY
+#: cash as DRIP with a fabricated 30% withholding, or a US dividend missing withholding) —
+#: corrupt money of record. Dormant for a single-market account whose only model matches.
+#:
+#: US Schwab/Moomoo: DRIP is the account's default mechanism, but a US payout that arrives as
+#: PLAIN CASH is ordinary, not exceptional (P1b, 2026-08-13) — and it needs NO accounting
+#: change: a CASH row falls into ``CASH_DIVIDEND_TYPES`` (``shared/models/enums.py``), so it
+#: reduces ``adjusted_total`` exactly as a TW/MY cash dividend does (owner ruling D35,
+#: 2026-08-10).
+#:
+#: Moved here from ``dividend_import`` (DEF-061, 2026-09-25) so the ONE dividend validator
+#: (``validate.validate_dividend``) and the CSV door read the same table.
+MODEL_ALLOWED_TYPES: dict[str, frozenset[str]] = {
+    "cash_cost_reduction": frozenset({"CASH", "STOCK"}),  # TW: cash cost-reduction (+ 配股)
+    "drip_us": frozenset({"DRIP", "CASH"}),
+    "cash": frozenset({"NET"}),                            # MY single-tier: net received
+}
+
 _US_WITHHOLDING = Decimal("0.30")
 _ZERO = Decimal("0")
 # The M4 bound, restated: ``validate._MAX_MAGNITUDE`` is the owner of the number; this module

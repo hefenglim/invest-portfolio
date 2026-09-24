@@ -36,6 +36,22 @@
     const p = (n) => String(n).padStart(2, '0');
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   })();
+  /* DEF-056 (owner ruling 2026-09-24): a movement / conversion dated after today does not
+     count yet — the balances above already leave it out (M5-06). The SERVER decides
+     (`counts_from`, set only while the row is still ahead, cut on the server's clock — NOT
+     the browser's TODAY above, which only pre-fills the date inputs), and the row says so.
+     Same badge text as web/ledger.js::futureBadge (a separate IIFE). */
+  function dateCell(dateIso, countsFrom) {
+    const td = el('td', 'num', f.date(dateIso));
+    if (countsFrom) {
+      const b = el('span', 'badge badge-stale-mini ledger-future', '未來日期：' + countsFrom + ' 起計入');
+      b.title = '日期晚於今天：到 ' + countsFrom + ' 才計入資金餘額、持股與報酬';
+      const line = el('div', 'ledger-future-line');
+      line.appendChild(b);
+      td.appendChild(line);
+    }
+    return td;
+  }
 
   const KIND_LABEL = {
     deposit: '入金', withdraw: '出金', opening: '期初資金', rebate: '折讓款',
@@ -205,7 +221,7 @@
     tbody.replaceChildren();
     cfxLed.rows.forEach((x) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(x.date)));
+      tr.appendChild(dateCell(x.date, x.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(x.account_id)));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
@@ -478,7 +494,7 @@
     tbody.replaceChildren();
     D.movements.forEach((m) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(m.date)));
+      tr.appendChild(dateCell(m.date, m.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(m.account_id)));
       const tdKind = el('td', 'col-text');
       const chipCls = DEBIT_KINDS.indexOf(m.kind) >= 0 ? 'dir-sell' : 'dir-buy';

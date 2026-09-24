@@ -168,6 +168,10 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # NULL replays byte-identically to before the column existed. `date` is pinned to
     # mean the PAYMENT date.
     _add_column_if_missing(conn, "dividends", "ex_date", "TEXT")
+    # DEF-049 (2026-09-25): which BULK door removed an audited row (「批次復原 #15」 for an
+    # import-batch undo). Nullable, no default: every existing row — and every single-row
+    # correction written from now on — stays NULL, i.e. "its own ledger tab", as before.
+    _add_column_if_missing(conn, "ledger_audit", "source", "TEXT")
     _add_column_if_missing(conn, "instruments", "board", "TEXT")  # migrate legacy DBs
     _add_column_if_missing(conn, "instruments", "target_low", "TEXT")
     _add_column_if_missing(conn, "instruments", "board_status", "TEXT NOT NULL DEFAULT 'resolved'")
@@ -267,6 +271,13 @@ def create_tables(conn: sqlite3.Connection) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_{_ledger}_batch "
             f"ON {_ledger}(import_batch_id)"
         )
+    # child_seed_json (DEF-040 R4, 2026-09-25): what a SPINOFF's save wrote into `prices` for
+    # its child — the slot and the typed close, or "nothing" — so the delete takes back
+    # exactly that and never a row that was there before the save (a provider's quote, or an
+    # orphan seed carrying the same signature). Additive and nullable, and added AFTER the
+    # provenance columns so every database — fresh or migrated — lists it last. NULL on every
+    # pre-existing row, where the delete keeps R3's signature-only rule.
+    _add_column_if_missing(conn, "corporate_actions", "child_seed_json", "TEXT")
     # original_avg_cost drop (A6, 2026-07-21): the stored rounded average is retired — cost
     # basis / XIRR key off original_cost_total only, and the average is computed on read. A
     # legacy DB carried a NOT NULL original_avg_cost column that upsert_opening no longer fills,

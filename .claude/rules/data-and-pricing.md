@@ -172,6 +172,21 @@ Rules:
 - A failed/stale fetch degrades gracefully: serve last-known price with a clear
   staleness indicator; never crash the dashboard, never silently fabricate.
 - Source is recorded per row, so data provenance is always auditable.
+- **Exactly one price row is typed by a human: the SPINOFF child's seed** (D48b; DEF-040,
+  owner ruling 2026-09-24, R4 2026-09-25). A spinoff creates a holding no provider has quoted
+  yet, so the corporate-action form takes the child's opening price off the statement.
+  `pricing/seed.py` is its only writer and remover (`pricing/` still owns every write to
+  `prices`; the `api` layer only binds it). Three rules: **(1) a seed is written ONLY into an
+  EMPTY `(instrument, as_of_date)` slot** — never over a provider quote or another seed; a
+  refused write is reported (`child_price_skipped`), never silent. R3 wrote through
+  `upsert_prices`' `ON CONFLICT` and so replaced a provider quote with no copy kept, and the
+  delete then removed the replacement: the quote was gone while the API answered `restored`.
+  **(2)** `source = "manual"` is RESERVED for seeds (no provider may use it) and the stamp is
+  `fetched_at` = the action day 00:00; **(3)** each save records what it wrote
+  (`corporate_actions.child_seed_json`), and deleting / re-dating the action takes back exactly
+  that row and only while it is intact — a row a real quote has since replaced is the market's
+  number and stays, with the reason in the confirm dialog and the toast. The provenance rule
+  above is what makes (3) decidable from the row.
 
 ### Snapshot provenance — fundamentals are a UNION, not a fallback chain (AI-D4 / AI-D14)
 

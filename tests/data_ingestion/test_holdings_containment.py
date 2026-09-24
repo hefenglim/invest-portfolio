@@ -70,12 +70,21 @@ ACCTS = ("schwab", "moomoo_my")
 EXPECTED_CALL_SITES = {
     ("portfolio_dash/api/dividend_inbox.py", "shares_on"),
     ("portfolio_dash/api/routers/input_center.py", "current_shares"),
+    # DEF-056 (owner ruling 2026-09-24): the sell hints' 可賣股數 is TODAY's position — a row
+    # dated after the valuation day does not count yet — so `/input/holdings` asks for the
+    # shares at the close of today instead of the net over every date. Containment is the
+    # same structural short-circuit as `current_shares`: an action-free symbol takes
+    # `_shares_until` with a date bound, which on a ledger with no future rows is the same
+    # number.
+    ("portfolio_dash/api/routers/input_center.py", "shares_through"),
     # W5 (spec §6.3): the symbol drawer's `corporate_delta` — `shares_action_aware −
     # shares_naive`, this being the action-aware half. Containment holds for it the same
     # structural way as for the other eight: an action-free symbol short-circuits inside
     # `_shares_at`, the walk does not run, and the delta is an exact `Decimal("0")`, so the
     # reconciliation footer of every un-actioned symbol is byte-identical to pre-feature.
-    ("portfolio_dash/api/routers/symbol.py", "current_shares"),
+    # DEF-056: taken at the CLOSE of the valuation day (`shares_through`), because the book
+    # the footer reconciles against is cut there — an action dated next week is not a term.
+    ("portfolio_dash/api/routers/symbol.py", "shares_through"),
     ("portfolio_dash/api/routers/instruments.py", "current_shares"),
     ("portfolio_dash/api/routers/strategy.py", "current_shares"),
     ("portfolio_dash/api/signals_service.py", "current_shares"),

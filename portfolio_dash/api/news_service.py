@@ -21,6 +21,7 @@ from portfolio_dash.news.organizer_prompt import get_news_prompt
 from portfolio_dash.news.store import OrganizedNews
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing import finmind_datasets
+from portfolio_dash.shared import prompt_versions
 from portfolio_dash.shared.enums import Currency
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,8 @@ def run_news_for(
     """
     holdings = sorted(set(symbols_with_market))
     prompt = get_news_prompt(conn)["body"]
+    # DEF-057: the version of the exact body handed to the organizer, looked up BY BODY.
+    prompt_version = prompt_versions.version_of_body(conn, "news", prompt)
     finmind = _finmind_client(conn, now)
     yfc = _yf_client()
     start = (now.date() - timedelta(days=_NEWS_LOOKBACK_DAYS)).isoformat()
@@ -107,7 +110,9 @@ def run_news_for(
     def do_organize(link: news_sources.NewsLink, text: str) -> OrganizedNews:
         if progress is not None:
             progress(f"AI 整理：{link.title[:24]}")
-        return organizer.organize(link, text, prompt, conn=conn, now=now)
+        return organizer.organize(
+            link, text, prompt, prompt_version=prompt_version, conn=conn, now=now
+        )
 
     with news_store.news_session() as nconn:
         result = pipeline.run_news_pipeline(

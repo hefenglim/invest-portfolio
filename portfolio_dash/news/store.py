@@ -91,6 +91,11 @@ CREATE INDEX IF NOT EXISTS ix_organized_news_date ON organized_news(news_date);
 #   fetch_status   — last fetch outcome for this link (see news.fetcher.FetchOutcome.status);
 #                    '' until first recorded. Makes an empty body_summary auditable, not silent.
 #   fetch_attempts — how many times the pipeline has fetched this link; caps the retry queue.
+#   prompt_version — DEF-057 (2026-09-25): the news-organizer prompt version the AI summary
+#                    was produced with (``shared/prompt_versions.py`` kind ``news``, which lives
+#                    in the MAIN db — this is its number, not a foreign key). NULL for a
+#                    headline-only degrade (no prompt was used) and for every row organized
+#                    before the column existed.
 _ADDED_COLUMNS = (
     ("cost_usd", "TEXT NOT NULL DEFAULT '0'"),
     ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
@@ -98,6 +103,7 @@ _ADDED_COLUMNS = (
     ("model", "TEXT"),
     ("fetch_status", "TEXT DEFAULT ''"),
     ("fetch_attempts", "INTEGER DEFAULT 0"),
+    ("prompt_version", "INTEGER"),
 )
 
 
@@ -150,6 +156,8 @@ class OrganizedNews(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     model: str | None = None  # model alias that organized this item (AI attribution)
+    # DEF-057: the news-organizer prompt version used (None = no prompt used / not recorded)
+    prompt_version: int | None = None
     fetched_at: str
     organized_at: str
 
@@ -198,18 +206,19 @@ def upsert_news(
     cur = conn.execute(
         "INSERT INTO organized_news "
         "(link, title, news_date, body_summary, related_stocks, source, lang, "
-        " cost_usd, tokens_in, tokens_out, model, fetched_at, organized_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        " cost_usd, tokens_in, tokens_out, model, prompt_version, fetched_at, organized_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(link) DO UPDATE SET title=excluded.title, news_date=excluded.news_date, "
         "body_summary=excluded.body_summary, related_stocks=excluded.related_stocks, "
         "source=excluded.source, lang=excluded.lang, cost_usd=excluded.cost_usd, "
         "tokens_in=excluded.tokens_in, tokens_out=excluded.tokens_out, "
-        "model=excluded.model, organized_at=excluded.organized_at",
+        "model=excluded.model, prompt_version=excluded.prompt_version, "
+        "organized_at=excluded.organized_at",
         (
             item.link, item.title, item.news_date, item.body_summary,
             json.dumps(item.related_stocks, ensure_ascii=False), item.source, item.lang,
             str(item.cost_usd), item.tokens_in, item.tokens_out, item.model,
-            item.fetched_at, item.organized_at,
+            item.prompt_version, item.fetched_at, item.organized_at,
         ),
     )
     row = conn.execute(
@@ -322,6 +331,7 @@ def _from_row(r: sqlite3.Row) -> OrganizedNews:
         tokens_in=r["tokens_in"] if "tokens_in" in keys and r["tokens_in"] else 0,
         tokens_out=r["tokens_out"] if "tokens_out" in keys and r["tokens_out"] else 0,
         model=r["model"] if "model" in keys else None,
+        prompt_version=r["prompt_version"] if "prompt_version" in keys else None,
         fetched_at=r["fetched_at"], organized_at=r["organized_at"],
     )
 

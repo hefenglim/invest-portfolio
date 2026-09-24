@@ -43,6 +43,7 @@ _EXCLUDED_PREFIXES = (
     "/api/prompts/preview",
     "/api/rebalance/preview",
     "/api/ledgers/corporate-actions/preview",
+    "/api/ledgers/dividends/preview",   # DEF-061: the dividend edit dialog's live findings
     "/api/whatif",
     "/api/auth/session",
 )
@@ -132,6 +133,10 @@ _LABELS: list[tuple[str, str, str]] = [
     ("PUT", "/api/news-prompt", "新聞提示詞變更"),
     ("POST", "/api/news-prompt/reset", "新聞提示詞重設"),
     ("POST", "/api/system-prompt/reset", "系統提示詞重設"),
+    # DEF-057: each global prompt's version history has one write (a restore is a NEW
+    # version); the kind is in the path, so each reads as its own action.
+    ("POST", "/api/news-prompt/versions", "新聞提示詞回復版本"),
+    ("POST", "/api/system-prompt/versions", "系統提示詞回復版本"),
     ("POST", "/api/prompts/test", "提示詞測試"),
     ("PUT", "/api/digest/config", "摘要設定變更"),
     ("POST", "/api/digest/run", "摘要手動產生"),
@@ -160,6 +165,18 @@ def label_for(method: str, path: str) -> str:
     return f"{method} {path}"
 
 
+#: DEF-049 (2026-09-25): the ``request.state`` attribute a route sets when its row needs more
+#: than the label — what the request DID, in words (the batch undo: which batch, how many rows,
+#: whether a 賣超 / negative pool was acknowledged). Bodies are still never stored: the route
+#: writes the sentence itself, so only what it chose to say reaches the log.
+DETAIL_ATTR = "action_detail"
+
+
+def with_detail(label: str, detail: str | None) -> str:
+    """The logged action: the label, and the route's detail in 全形 parentheses when set."""
+    return f"{label}（{detail}）" if detail else label
+
+
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     conn.commit()
@@ -174,14 +191,18 @@ def record(
     path: str,
     status: int,
     duration_ms: int,
+    detail: str | None = None,
 ) -> None:
-    """Insert one action row and prune the table to the newest ``_KEEP`` rows."""
+    """Insert one action row and prune the table to the newest ``_KEEP`` rows.
+
+    ``detail`` (DEF-049) is the route's own account of what the request did — see
+    :data:`DETAIL_ATTR`; ``None`` logs the bare label, exactly as before."""
     ensure_table(conn)
     conn.execute(
         "INSERT INTO action_log (ts, username, method, path, action, status, duration_ms) "
         "VALUES (?,?,?,?,?,?,?)",
-        (ts.isoformat(), username, method, path, label_for(method, path), status,
-         duration_ms),
+        (ts.isoformat(), username, method, path,
+         with_detail(label_for(method, path), detail), status, duration_ms),
     )
     conn.execute(
         "DELETE FROM action_log WHERE id NOT IN "

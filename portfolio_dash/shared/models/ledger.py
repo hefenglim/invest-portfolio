@@ -1,8 +1,10 @@
 """Source-of-truth ledger models: transactions, dividends, FX, opening inventory."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
+from typing import Protocol
 
 from pydantic import BaseModel
 
@@ -97,6 +99,48 @@ def dividend_effective_date(
     return pay_date
 
 
+def counts_by(counts_on: Date, day: Date) -> bool:
+    """THE valuation cut (DEF-016, widened by DEF-056 — owner rulings 2026-09-24): a ledger
+    row counts in a VALUATION as at *day* iff the date it counts from is on or before *day*.
+
+    *counts_on* is the row's own date — ``trade_date``, ``build_date``, an FX conversion's or
+    a cash movement's ``date``, a corporate action's ``date`` — and, for a dividend,
+    :attr:`Dividend.effective_date` (the payment date; a 配股's ex-date). Inclusive: the
+    ledger carries dates, not timestamps, so a row dated today has happened today.
+
+    Every valuation cut reads this ONE predicate — :meth:`LedgerBundle.valued_as_of`, the
+    two ledgers the bundle does not carry (:func:`valued_rows_as_of`) and the ledger rows'
+    「未來日期」 flag (:func:`pending_from`) — so the dashboard, the tax package, 試算 and
+    the badge on a row can never disagree about whether that row counts yet.
+    """
+    return counts_on <= day
+
+
+def pending_from(counts_on: Date, today: Date) -> Date | None:
+    """The day a row that does NOT count yet starts to count, or ``None`` when it already
+    does — the ledger lists' ``counts_from`` flag (「未來日期：YYYY-MM-DD 起計入」).
+
+    ``today`` is the SERVER's valuation day (the injected app clock), never the browser's,
+    so the badge and the figures it explains are cut on the same day.
+    """
+    return None if counts_by(counts_on, today) else counts_on
+
+
+class _DatedRow(Protocol):
+    """Any ledger row that counts from its ``date`` — an FX conversion or a cash movement,
+    as a model or as a stored row."""
+
+    @property
+    def date(self) -> Date: ...
+
+
+def valued_rows_as_of[T: _DatedRow](rows: Iterable[T], day: Date) -> list[T]:
+    """The valuation cut for the two ledgers :class:`LedgerBundle` does not carry — FX
+    conversions and cash movements (DEF-056). Same predicate as
+    :meth:`LedgerBundle.valued_as_of`: a row dated after *day* has not happened yet."""
+    return [r for r in rows if counts_by(r.date, day)]
+
+
 class FXConversion(BaseModel):
     """An actual currency conversion (primarily consumed by sub-project ② forex)."""
 
@@ -157,47 +201,60 @@ class LedgerBundle:
     # try/except. See `UnreadableAction` for why raising and dropping were both rejected.
     unreadable_actions: list[UnreadableAction] = field(default_factory=list)
 
-    def through(self, day: date) -> "LedgerBundle":
-        """Everything dated on-or-before *day*, over the daily trend replay's date columns.
+    def valued_as_of(self, day: date) -> "LedgerBundle":
+        """The ledger a VALUATION as at *day* reads — every row counts from its OWN date
+        (DEF-016 for dividends, widened to every ledger by DEF-056; owner rulings 2026-09-24).
 
-        The per-day filter used to be open-coded at the one call site that needs it, which
-        is exactly where a new ledger gets forgotten — silently, because a book missing a
-        ledger still builds.
+        A row can be dated in the future: a confirmed dividend is stored on its payment date
+        (the inbox confirms a payout the day it is announced), and a trade, an opening, an
+        FX conversion or a corporate action may be entered ahead of its date (allowed with a
+        warning since DEF-014). Replayed at once, a future buy put shares into today's
+        holdings and 總報酬 and handed XIRR a flow dated AFTER its own terminal value, while
+        the cash pool (``cash_balances`` with ``as_of``, M5-06) and the trend (one cut per
+        day) already — correctly — ignored it. One ruling, one cut: nothing counts before its
+        own date, on any surface that values the portfolio "as at a day" (the dashboard and
+        everything built on it, 試算, the tax package, the sell hints, the oracle).
+
+        The date each ledger counts from is the one :meth:`through` has always used: a
+        trade's ``trade_date``, an opening's ``build_date``, a corporate action's ``date``
+        and a dividend's ``effective_date`` — never its ``date``: a 配股 with a known ex-date
+        is OWNED from the ex-date (R6) and the quoted price has already dropped by then, so
+        it must stay in; cash / DRIP / NET move on the payment date. The predicate is
+        :func:`counts_by`; FX conversions and cash movements, which this bundle does not
+        carry, are cut by :func:`valued_rows_as_of` on the same predicate.
+
+        Corporate actions are cut too, and must be: an action is an event in the same
+        date-ordered replay, and a date PREFIX of the ledger is a state that actually exists,
+        whereas cutting the trades but not the actions is not — a future 7-for-1 would
+        multiply today's shares while every stored price is still pre-split (the price basis
+        folds in only splits a fetch has seen, ``data-and-pricing.md``), inflating the
+        position sevenfold; and a future action on a future buy would find no source and
+        blank XIRR as 「無法套用」.
+
+        VALIDATION replays do NOT read this: 重算, the correction doors' replay guards,
+        corporate-action reachability and the date-aware sell guard check the WHOLE ledger —
+        what will be stored, not what has happened by today.
         """
         return replace(
             self,
-            transactions=[t for t in self.transactions if t.trade_date <= day],
-            # R6: `effective_date`, not `date` — a STOCK dividend with a known ex-date is
-            # booked from the ex-date, so it must be IN the bundle on those days at all.
-            dividends=[d for d in self.dividends if d.effective_date <= day],
-            opening=[o for o in self.opening if o.build_date <= day],
-            actions=[a for a in self.actions if a.date <= day],
-            unreadable_actions=[u for u in self.unreadable_actions if u.date <= day],
+            transactions=[t for t in self.transactions if counts_by(t.trade_date, day)],
+            dividends=[d for d in self.dividends if counts_by(d.effective_date, day)],
+            opening=[o for o in self.opening if counts_by(o.build_date, day)],
+            actions=[a for a in self.actions if counts_by(a.date, day)],
+            unreadable_actions=[u for u in self.unreadable_actions
+                                if counts_by(u.date, day)],
         )
 
-    def received_by(self, day: date) -> "LedgerBundle":
-        """The ledger a VALUATION as at *day* reads: every dividend not yet received by *day*
-        is left out; every other ledger is untouched (DEF-016, owner ruling 2026-09-24).
+    def through(self, day: date) -> "LedgerBundle":
+        """Everything dated on-or-before *day* — the daily trend replay's per-day cut.
 
-        A confirmed dividend is stored on its PAYMENT date (R6), and that date can lie in the
-        future — the inbox confirms a declared payout the day it is announced. The book used
-        to replay it at once: the adjusted cost fell, 總報酬 rose, and XIRR received a cash
-        inflow dated AFTER its own terminal value, while the cash pool (``cash_balances``
-        with ``as_of``, M5-06) and the trend (:meth:`through`, per day) both — correctly —
-        still ignored it. The ruling: a dividend counts from the day it is received, on
-        every surface, so the valuation reads it through this cut.
-
-        ``effective_date``, never ``date`` — the same rule :meth:`through` uses: a 配股 with a
-        known ex-date is OWNED from the ex-date (R6), and the quoted price has already dropped
-        by then, so it must stay in. Cash / DRIP / NET move on the payment date.
-
-        ⚠ Dividends ONLY, on purpose. A future-dated TRADE (allowed with a warning since
-        DEF-014) is the same class of question and is NOT cut here — that widening is an
-        open owner decision (R3 report K, DEF-016). :meth:`through` is the all-ledgers cut
-        if the owner rules for it.
+        It IS the valuation cut (:meth:`valued_as_of`) taken once per day: the trend values
+        the world as at the close of each day exactly as the dashboard values it as at
+        today. Delegating rather than restating it keeps the two from drifting — the per-day
+        filter used to be open-coded at its one call site, which is exactly where a new
+        ledger gets forgotten, silently, because a book missing a ledger still builds.
         """
-        return replace(
-            self, dividends=[d for d in self.dividends if d.effective_date <= day])
+        return self.valued_as_of(day)
 
     def before_action_on(self, day: date) -> "LedgerBundle":
         """Everything that replays BEFORE a corporate action dated *day* (2026-08-11).

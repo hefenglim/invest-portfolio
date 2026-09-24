@@ -85,7 +85,11 @@ from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import FXConversion, LedgerBundle
+from portfolio_dash.shared.models.ledger import (
+    FXConversion,
+    LedgerBundle,
+    valued_rows_as_of,
+)
 from portfolio_dash.shared.sectors import canonical_sector
 
 _ZERO = Decimal("0")
@@ -461,16 +465,21 @@ def build_dashboard(
     # 1. Ledgers and reference data. One bundle, one loader (Stored* -> ledger models).
     bundle = load_ledger_bundle(conn)
     instruments = bundle.instruments
+    # DEF-056 (owner ruling 2026-09-24): FX conversions and cash movements count from their
+    # own date like every other ledger — the SAME predicate as step 1c's bundle cut. The FX
+    # pool and the cash series already bounded themselves by `as_of`; XIRR's three cost
+    # kinds (AI-D42) and 交易與融資成本 (the B − A split) did not, so a future-dated fee or
+    # rebate was a flow dated after XIRR's own terminal value. Cut ONCE, here, at the load.
     convs = [
         FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                      from_amount=s.from_amount, to_ccy=s.to_ccy, to_amount=s.to_amount)
-        for s in list_fx_conversions(conn)
+        for s in valued_rows_as_of(list_fx_conversions(conn), as_of)
     ]
     accounts = {a.account_id: a for a in list_accounts(conn)}
     # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
     # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
     # Loaded once here so the two views can never read different rows.
-    cash_movements = list_cash_movements(conn)
+    cash_movements = valued_rows_as_of(list_cash_movements(conn), as_of)
 
     # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
     # Instrument row has no quote currency — it cannot be booked, valued, or priced.
@@ -482,14 +491,15 @@ def build_dashboard(
     unregistered = bundle.unregistered_symbols
     if unregistered:
         bundle = bundle.without_unregistered()
-    # 1c. A dividend counts from the day it is RECEIVED (DEF-016, owner ruling 2026-09-24).
-    # A confirmed payout is stored on its payment date, which can be in the future; replaying
-    # it now lowered the adjusted cost (總報酬 up) and handed XIRR an inflow dated after its
-    # own terminal value, while the cash pool and the trend already ignored it. ONE cut, here,
-    # so the book, XIRR, the received-dividend summary, the FX pool and the trend all read the
-    # same ledger — and every surface built on this function (drawer, exports, alerts,
-    # insights, snapshots) inherits it.
-    bundle = bundle.received_by(as_of)
+    # 1c. Every row counts from its OWN date (DEF-016 for dividends, widened to trades,
+    # openings, FX conversions and corporate actions by DEF-056 — owner rulings 2026-09-24).
+    # A confirmed payout is stored on its payment date and a trade may be entered ahead of
+    # its date; replaying either now moved the holdings, 總報酬 and the adjusted cost, and
+    # handed XIRR a flow dated after its own terminal value, while the cash pool and the
+    # trend already ignored it. ONE cut, here, so the book, XIRR, the received-dividend
+    # summary, the FX pool and the trend all read the same ledger — and every surface built
+    # on this function (drawer, exports, alerts, insights, snapshots, rebalance) inherits it.
+    bundle = bundle.valued_as_of(as_of)
     # Read-only local views of the (now filtered) bundle, for the steps below.
     txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
 

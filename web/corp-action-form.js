@@ -279,6 +279,15 @@
         + ' 的目標價未再改動會自動移回 ' + m.from_symbol));
     }
 
+    /* DEF-040 R4: the typed 子公司起始價 will NOT be written — the child already has a price
+       row on that day (a provider's quote, or an earlier seed), and a seed never overwrites
+       one. Said BEFORE saving, in the server's own sentence (the same predicate the save
+       runs); the existing price stays, so saving is still safe — nothing to acknowledge. */
+    if (data.child_price_skip) {
+      host.appendChild(el('div', 'ca-issue ca-issue-warn ca-seed-skip',
+        '⚠ ' + data.child_price_skip.reason + '。存檔後沿用這筆既有價格，刪除此行動時也不會動到它'));
+    }
+
     (data.issues || []).forEach((i) => {
       const box = el('div', 'ca-issue ca-issue-' + (i.sev === 'error' ? 'error' : 'warn'));
       box.appendChild(el('span', null, i.sev === 'error' ? '✕' : '⚠'));
@@ -447,6 +456,15 @@
     window.toast('已一併登錄重組費用', 'ok',
       f().money(fee.amount, fee.ccy) + ' ' + fee.ccy
       + '，記為現金支出（不計入成本基礎）；刪除此公司行動時會一併刪除');
+  }
+
+  /* DEF-040 R4: the typed child price was NOT written because the (child, day) slot already
+     held a price — the server's sentence, verbatim. Never silent: the owner typed a number
+     and must learn it did not arrive (D48b's rule), and why. */
+  function seedToast(resp) {
+    const skip = resp && resp.child_price_skipped;
+    if (!skip || !window.toast) return;
+    window.toast('子公司起始價未寫入', 'warn', skip.reason);
   }
 
   /* ---------------------------------------------------------------------- the form */
@@ -733,7 +751,9 @@
       syncSave();
     }
 
-    [fSym, fToSym, fTo, fFrom, fCarry].forEach((n) => n.addEventListener('input', schedule));
+    /* fChildPrice too (DEF-040 R4): the preview says whether the typed price can be written. */
+    [fSym, fToSym, fTo, fFrom, fCarry, fChildPrice].forEach(
+      (n) => n.addEventListener('input', schedule));
     [fAcct, fDate].forEach((n) => n.addEventListener('change', schedule));
 
     save.addEventListener('click', async () => {
@@ -751,6 +771,7 @@
             + (resp.prices_restated ? '；已重算 ' + resp.prices_restated + ' 筆價格' : ''));
         }
         feeToast(resp);
+        seedToast(resp);
         await applyBandRestate(restatePreview);
         if (window.pdLedgerRefresh) { try { await window.pdLedgerRefresh(); } catch (e) { /* noop */ } }
         if (prefill.onSaved) prefill.onSaved(resp);

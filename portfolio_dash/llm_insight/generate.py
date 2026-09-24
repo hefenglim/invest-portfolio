@@ -40,6 +40,7 @@ from portfolio_dash.llm_insight.gating import GateContext, GateResult, evaluate_
 from portfolio_dash.llm_insight.insights_store import HorizonBasis, InsightTrigger
 from portfolio_dash.llm_insight.official_templates import ON_ALERT_CONTEXT as _ON_ALERT_CONTEXT
 from portfolio_dash.llm_insight.official_templates import ON_ALERT_NOTE as _ON_ALERT_NOTE
+from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.account_ref import resolve_account_refs
 from portfolio_dash.shared.llm_config import LLMBudgetExceeded, LLMError
@@ -379,6 +380,8 @@ def run_insight_type(
                     # DEF-033: no prompt was assembled for this card — an empty list, which
                     # the page reads as "nothing to name", not as 「未記錄」.
                     strategy_versions=[],
+                    # DEF-057: likewise no system layer — recorded as not used, never NULL.
+                    system_prompt_ref=SystemPromptRef(used=False),
                 )
                 created += 1
             continue
@@ -474,6 +477,8 @@ def run_insight_type(
             # DEF-033 (owner ruling 2026-09-24): the strategy versions this prompt was
             # assembled from — the same Assembly object that produced ``prompt`` above.
             strategy_versions=assembled.strategy_versions,
+            # DEF-057: and the system-prompt layer of that same Assembly.
+            system_prompt_ref=assembled.system_prompt_ref,
         )
         created += 1
 

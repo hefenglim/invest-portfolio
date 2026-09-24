@@ -9,6 +9,77 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R3 → R4 — 1 re-verification failure + 13 new items, 2 M / 12 L (2026-09-25).**
+The verifier's R3 pass on `4655845` closed 18 of 19, bounced DEF-040 (a SPINOFF seed written over an
+existing provider quote was lost for good on delete, while the API answered `restored`), and opened
+DEF-049 … 061 with the owner's rulings of 2026-09-24 and a spec file
+(`docs/audit/2026-09-24-r3-dev-specs.md`). All 14 are fixed under the manual's §4 contract. The
+manual's B-17 expectation gains the DEF-056 rule at the verifier's request (manual v3.2).
+
+*The bounce*
+
+- **A SPINOFF seed is written only into an EMPTY price slot, and each save records what it wrote
+  (DEF-040, re-verification).** R3's `write_seed_price` went through `upsert_prices`' `ON CONFLICT`,
+  so a provider quote already on the action day was replaced with no copy kept, and the delete then
+  removed the replacement. `pricing/seed.py::occupied_slot` is now the one test (preview, save and
+  re-date share it); an occupied slot is refused and reported (`child_price_skipped`, announced in
+  the form before saving). The new nullable `corporate_actions.child_seed_json` records what each
+  save wrote, so a delete takes back exactly that row and never an orphan seed with the same stamp;
+  rows saved before it keep R3's signature rule. The rule is recorded in `data-and-pricing.md`.
+- **Re-dating a SPINOFF moves its seed (DEF-060).** The PUT also silently dropped `to_symbol_price`,
+  left the seed behind when the kind or the child symbol changed; all four are handled, and a
+  non-SPINOFF with a seed price is a 400.
+
+*Owner rulings and new items*
+
+- **Every door that deletes or corrects a ledger row runs the replay guard (DEF-049, M).** Undoing
+  an import batch ran a bare `DELETE … WHERE import_batch_id=?`: a later sell became a 賣超 with
+  no question and no audit row, while deleting the same buy on its tab asked first. The guard moved
+  to `api/replay_guard.py` (one decision, `_replay_block`) and is injected into
+  `provenance.delete_batch` as a required seam (recorded in `architecture.md`); the undo deletes row
+  by row through the store, so every row writes `ledger_audit` (new nullable `source`, 「批次復原
+  #id」) and the action log names the batch. The class scan walked the ROUTE TABLE, not the SQL, and
+  found three more doors with the same gap — the 公司行動 single delete, set delete and edit — now
+  guarded too: 14 of 14 delete/edit doors, with an architecture test that fails on a new unguarded
+  one. The confirm is the ledger tab's own 賣超確認 dialog.
+- **Every ledger row counts from its own date (DEF-056, ruling option A).** DEF-016 cut dividends
+  only; a future-dated buy doubled today's holding, a future split doubled a position at the unsplit
+  price. `LedgerBundle.valued_as_of` + one predicate `counts_by` now cut trades, openings,
+  dividends, corporate actions, FX conversions and cash movements for every valuation (dashboard,
+  試算, tax package, sell hints, drawer, stress-audit oracle); validation replays keep the whole
+  ledger. Ledger lists, the cash page and the printed ledger report flag such rows 「未來日期：
+  YYYY-MM-DD 起計入」 from the server's clock. Two DEF-016 leftovers went with it (the sell hint's
+  share count and the drawer's action delta read all dates).
+- **System and news-organizer prompts keep every version (DEF-057, M).** New
+  `shared/prompt_versions.py` (one table, `kind` system / news); each store's single `_write`
+  appends a version, 重置回官方版 and restore included; existing bodies are back-filled as v1; the
+  settings page reuses DEF-033's history dialog; cards record the system-prompt version
+  (`insights.system_prompt_ref`), organized news the organizer version. `strategy_prompt_versions`
+  is untouched. Cache fingerprint unchanged.
+- **The dividend correction runs the entry doors' validator (DEF-061).** `validate_dividend(…,
+  replacing=)` is shared by the four entry doors and the edit, which also stores the model-derived
+  amounts now and previews its findings in the dialog.
+- **Smaller fixes.** The editing preview forecasts no rebate for an already-discounted row
+  (DEF-055); the 公司行動 row and the printed report show the linked reorg fee (DEF-052);
+  「最近批次」 sums cards and cost over one set (DEF-058); `all_registered` tasks skip archived
+  symbols (DEF-059); panel subtitles wrap at ≤ 600 px (23 truncations on 16 pages → 0, DEF-050);
+  scheduler toasts name the job (DEF-051); scope identifiers never reach user text (DEF-053).
+- **Data (demo).** Insight card #97 deleted (DEF-054) and rebate snapshots #33 / #44 made coherent
+  (DEF-055, `--scope all`), after a backup, with audit rows.
+
+*Gates*
+
+- ruff (`portfolio_dash tests scripts`) clean; `mypy --strict` 915 files, 0 issues (fresh cache —
+  its first run caught a redefined name in an agent-edited e2e file, fixed).
+- pytest without e2e: 6,227 passed / 5 skipped / 0 failed, in four foreground parts. The first
+  run failed one pre-existing SOURCE-STRING guard (`test_i8_…::test_the_undo_says_what_it_did…`
+  searched `undoBatch` alone after DEF-049 split the undo into `undoBatch` + `runUndo`); the guard
+  now reads both and the half was re-run clean.
+- e2e: 80 files, 288 passed, in 14 foreground chunks.
+- stress-audit phase 1: ops=128, pass=6,025, fail=0 (same as R3).
+- Every defect's new tests fail on `4655845`, and each fix was mutation-tested (details per item in
+  the workbook's 來回記錄 R4 rows).
+
 **Functional-test manual R2 → R3 — 2 re-verification failures + 17 new items, 4 M / 15 L (2026-09-24).**
 The verifier's R2 pass on `e6fd9f4` closed 27 of 29 defects, bounced DEF-023 (複驗未過) and
 DEF-017 (partial), and wrote the owner's rulings of 2026-09-24 into the register: DEF-006 / 018 are

@@ -1944,6 +1944,33 @@ details.freshness > summary > span,
 .set-head .panel-sub {
   white-space: nowrap;
 }
+/* DEF-050 (2026-09-25): on a PHONE the one clipped line is an amputation, not a summary —
+   at 390px the 收件匣 › 待確認退款 subtitle (scrollWidth 849 in a 349px box) lost exactly the
+   sentence DEF-011 added (「不改變持倉成本與資產損益，但會計入 XIRR 與含匯兌總損益」), and 23 head
+   subtitles on 16 pages/tabs were cut the same way. At <=600px the subtitle takes a line of
+   its own under the title and wraps (CJK breaks anywhere; `overflow-wrap` covers a long
+   Latin token), so the whole text is visible; the desktop head keeps its single line.
+   ORDER MATTERS: this block must stay directly BELOW the nowrap rule above — same
+   specificity (0,2,0), and a media query adds none, so the later rule wins. (The KPI band
+   lost a breakpoint exactly that way: `.kpi-band.v2` out-specified its `@media` rule.)
+   `.input-toggle` (交易輸入's collapsible head) is a no-wrap flex row, so it gets
+   `flex-wrap` here too — without it the 100% basis is shrunk back to an 85px sliver. */
+@media (max-width: 600px) {
+  .panel-head .panel-sub,
+  .input-toggle .panel-sub,
+  .set-head .panel-sub {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    flex: 1 1 100%;
+    /* Chrome's default `text-spacing-trim` lets a line END in a full-width closing mark
+       whose blank half hangs past the box (measured: 費率明細's 「…未來交易）」 laid out at
+       335px in a 333px box — scrollWidth > clientWidth with nothing actually hidden).
+       `space-all` keeps the full advance, so the line breaks instead of hanging and the
+       box's own measurement is exact: what fits is what shows. */
+    text-spacing-trim: space-all;
+  }
+  .input-toggle { flex-wrap: wrap; }
+}
 .topbar .asof,
 .topbar .asof .label,
 details.freshness > summary > span:not(.sum-chips) {

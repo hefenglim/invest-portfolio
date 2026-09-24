@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from portfolio_dash.shared import config_store
+from portfolio_dash.shared import config_store, prompt_versions
 
 CATEGORY = "evolution"
 
@@ -96,14 +96,13 @@ VersionSource = Literal[
 ]
 
 # zh labels for the history list (the page renders the string, it holds no table of its own).
+# DEF-057: built ON the global prompts' vocabulary (``shared/prompt_versions.py``), so an
+# event both histories share (儲存 / 回復 / the back-fill) reads the same word on one page.
 VERSION_SOURCE_LABELS: dict[str, str] = {
+    **prompt_versions.SOURCE_LABELS,
     "create": "新增",
     "official_copy": "自官方模板加入",
-    "user_save": "儲存",
     "sync_official": "同步官方",
-    "restore": "回復",
-    "migration": "啟用版本記錄時的內容",
-    "backfill": "補記（內容在版本記錄外被改動）",
 }
 
 

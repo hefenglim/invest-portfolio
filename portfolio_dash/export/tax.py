@@ -23,7 +23,7 @@ from portfolio_dash.portfolio.results import RealizedRow
 from portfolio_dash.pricing.store import get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import DividendType
-from portfolio_dash.shared.models.ledger import FXConversion
+from portfolio_dash.shared.models.ledger import FXConversion, valued_rows_as_of
 from portfolio_dash.shared.wire import decimal_str
 
 _ONE = Decimal("1")
@@ -64,19 +64,23 @@ def build_tax_package_zip(
 ) -> ExportArtifact:
     """Build the annual tax package zip (realized gains + dividends + FX realized + summary).
 
-    The package content is year-cut. ``now`` also cuts one thing (DEF-016, owner ruling
-    2026-09-24): a dividend whose pay date is still ahead has not been RECEIVED, so it is
-    neither income on the dividends sheet nor a realized row in the reconciliation — the
-    same cut ``build_dashboard`` applies, which is what keeps the 「對帳用」 line equal to the
-    dashboard figure (DEF-001) for a package generated before a confirmed payout lands.
+    The package content is year-cut. ``now`` also cuts every ledger at the valuation day
+    (DEF-016 for dividends, DEF-056 for trades, openings, FX conversions and cash movements —
+    owner rulings 2026-09-24): a row dated after today has not happened, so a dividend whose
+    pay date is still ahead is not income on the dividends sheet, a sale dated next week is
+    not a realized gain and a reconversion dated next week is not realized FX — the same cut
+    ``build_dashboard`` applies, which is what keeps the 「對帳用」 line equal to the
+    dashboard figure (DEF-001) for a package generated before a future-dated row lands.
     """
-    bundle = load_ledger_bundle(conn).received_by(now.date())
+    today = now.date()
+    bundle = load_ledger_bundle(conn).valued_as_of(today)
     divs = bundle.dividends
     instruments = bundle.instruments
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                           from_amount=s.from_amount, to_ccy=s.to_ccy,
-                          to_amount=s.to_amount) for s in list_fx_conversions(conn)]
-    moves = list_cash_movements(conn)
+                          to_amount=s.to_amount)
+             for s in valued_rows_as_of(list_fx_conversions(conn), today)]
+    moves = valued_rows_as_of(list_cash_movements(conn), today)
     accounts = {a.account_id: a for a in list_accounts(conn)}
     book = build_book(bundle)
 

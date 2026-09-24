@@ -31,7 +31,7 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
@@ -41,13 +41,30 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import reconcile_price_basis
 
+# DEF-049 (2026-09-25): the replay guard moved to ``api/replay_guard.py`` so the import-batch
+# undo runs the SAME decision as the row doors below. Re-exported under the same names
+# (``input_center`` imports ``_to_models`` from here).
+from portfolio_dash.api.replay_guard import (
+    _oversell_response as _oversell_response,
+)
+from portfolio_dash.api.replay_guard import (
+    _replay_block as _replay_block,
+)
+from portfolio_dash.api.replay_guard import (
+    _replay_guard as _replay_guard,
+)
+from portfolio_dash.api.replay_guard import (
+    _to_models as _to_models,
+)
+from portfolio_dash.api.replay_guard import action_change_guard
+
 # Sibling router, same layer, no cycle (``cash`` imports nothing from here) — the same shape
 # ``rebates.py`` already uses for ``movement_guard``. The alternative is a second spelling of
 # the 換匯 guard on the correction door, which is exactly the drift QA-10 found.
 from portfolio_dash.api.routers.cash import cash_pool_fn, fx_change_guard, fx_delete_guard
 from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
-from portfolio_dash.data_ingestion.dividend_model import check_amounts
+from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import load_action_index, shares_through
@@ -59,12 +76,12 @@ from portfolio_dash.data_ingestion.register import (
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
     BandRestoreVerdict,
+    ChildSeedRecord,
     MovedBand,
     MovedWeight,
     StoredCashMovement,
     StoredCorporateAction,
     StoredDividend,
-    StoredOpening,
     StoredTransaction,
     delete_cash_movement,
     delete_corporate_action,
@@ -94,6 +111,7 @@ from portfolio_dash.data_ingestion.store import (
     pending_band_move,
     pending_band_restore,
     restore_target_band,
+    set_child_seed,
     update_cash_movement,
     update_corporate_action,
     update_dividend,
@@ -106,6 +124,7 @@ from portfolio_dash.data_ingestion.validate import (
     TARGET_BAND_PREDATES_SPLIT,
     CashMovementInput,
     CorporateActionInput,
+    DividendInput,
     Issue,
     TxnInput,
     identifier_change_repair,
@@ -114,6 +133,7 @@ from portfolio_dash.data_ingestion.validate import (
     validate_cash_movement,
     validate_corporate_action,
     validate_corporate_action_change,
+    validate_dividend,
     validate_opening_cost,
     validate_transaction,
 )
@@ -121,6 +141,8 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.pricing.seed import (
     SeedPriceVerdict,
+    SeedSkip,
+    occupied_slot,
     pending_seed_removal,
     remove_seed_price,
     write_seed_price,
@@ -134,8 +156,12 @@ from portfolio_dash.shared.corporate_actions import (
 )
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import LedgerBundle
+from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.models.ledger import (
+    LedgerBundle,
+    dividend_effective_date,
+    pending_from,
+)
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.target_weights import (
@@ -179,16 +205,28 @@ def _in_range(d: date, frm: str | None, to: str | None) -> bool:
     return True
 
 
+def _counts_from(counts_on: date, today: date) -> str | None:
+    """The row's ``counts_from`` flag (DEF-056, owner ruling 2026-09-24): the ISO day a row
+    dated after the SERVER's valuation day starts to count — rendered 「未來日期：YYYY-MM-DD
+    起計入」 — or ``None`` when it already counts. ``today`` is the injected app clock, never
+    the browser's, so the badge and the figures it explains are cut on the same day; the
+    predicate is the valuation cut's own (``shared.models.ledger.pending_from``)."""
+    pending = pending_from(counts_on, today)
+    return pending.isoformat() if pending is not None else None
+
+
 @router.get("/ledgers/transactions")
 def transactions(
     account_id: str | None = None, symbol: str | None = None,
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
     if bad is not None:
         return bad
+    today = now.date()
     accts, names, ccys = _names(conn)
     out: list[dict[str, Any]] = []
     for t in list_transactions(conn, account_id=account_id, symbol=symbol):
@@ -213,6 +251,8 @@ def transactions(
             # row's 「當沖」 badge reads the row itself — not the fee snapshot, which a
             # supplied fee/tax leaves without a rate — and the edit modal can preserve it.
             "daytrade": t.daytrade,
+            # DEF-056: set only while the trade date is still ahead — it does not count yet.
+            "counts_from": _counts_from(t.trade_date, today),
         })
     return _page(out, limit, offset)
 
@@ -223,10 +263,12 @@ def dividends(
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
     if bad is not None:
         return bad
+    today = now.date()
     accts, names, ccys = _names(conn)
     out: list[dict[str, Any]] = []
     for d in list_dividends(conn, account_id=account_id, symbol=symbol):
@@ -249,6 +291,10 @@ def dividends(
             # pre-R6 row — never guessed.
             "ex_date": d.ex_date.isoformat() if d.ex_date is not None else None,
             "ccy": ccys.get(d.symbol, ""),
+            # DEF-016 / DEF-056: a dividend counts from its EFFECTIVE date — the payment
+            # date, or a 配股's ex-date — the same date the valuation cut reads.
+            "counts_from": _counts_from(
+                dividend_effective_date(d.type, d.date, d.ex_date), today),
         })
     return _page(out, limit, offset)
 
@@ -259,10 +305,12 @@ def fx(
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
     if bad is not None:
         return bad
+    today = now.date()
     accts, _names_map, _ccys = _names(conn)
     out: list[dict[str, Any]] = []
     for c in list_fx_conversions(conn, account_id=account_id):
@@ -283,6 +331,7 @@ def fx(
             "implied_rate": (decimal_str(quote[2]) if quote is not None else None),
             "implied_unit_ccy": (quote[0].value if quote is not None else None),
             "implied_per_ccy": (quote[1].value if quote is not None else None),
+            "counts_from": _counts_from(c.date, today),   # DEF-056
         })
     return _page(out, limit, offset)
 
@@ -293,6 +342,7 @@ def cash_movements(
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """The 6th ledger's page view (2026-08-16).
 
@@ -310,6 +360,7 @@ def cash_movements(
     bad = _check_dates(frm, to)
     if bad is not None:
         return bad
+    today = now.date()
     accts, _names_map, _ccys = _names(conn)
     out: list[dict[str, Any]] = []
     for m in list_cash_movements(conn, account_id=account_id):
@@ -325,6 +376,9 @@ def cash_movements(
             "acq_home_amount": (None if m.acq_home_amount is None
                                 else decimal_str(m.acq_home_amount)),
             "note": m.note or "",
+            # DEF-056: the pool counts a movement from its own date (M5-06), so a movement
+            # dated ahead carries the same 「未來日期」 flag as the other five ledgers.
+            "counts_from": _counts_from(m.date, today),
         })
     return _page(out, limit, offset)
 
@@ -334,7 +388,9 @@ def openings(
     account_id: str | None = None, symbol: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
+    today = now.date()
     accts, names, ccys = _names(conn)
     out: list[dict[str, Any]] = []
     for o in list_opening(conn, account_id=account_id):
@@ -347,6 +403,7 @@ def openings(
             "avg": decimal_str(o.original_avg),  # computed on read (total / shares) — A6
             "total": decimal_str(o.original_cost_total),
             "ccy": ccys.get(o.symbol, ""),
+            "counts_from": _counts_from(o.build_date, today),   # DEF-056
         })
     paged = _page(out, limit, offset)
     for i, row in enumerate(paged["rows"], start=1):
@@ -359,130 +416,8 @@ def openings(
 # ---------------------------------------------------------------------------
 
 
-class _ReplayBlock(BaseModel):
-    """A reason a correction is refused: an ``oversell`` (ack-bypassable) or an
-    ``orphan`` (a dividend/opening record stranded by the mutation — hard)."""
-
-    code: str  # "oversell" | "orphan"
-    message: str
-
-
-def _to_models(
-    conn: sqlite3.Connection,
-    txs: list[StoredTransaction] | None = None,
-    divs: list[StoredDividend] | None = None,
-    opening: list[StoredOpening] | None = None,
-) -> LedgerBundle:
-    """The replay bundle for the mutated list(s); unspecified ledgers load from store.
-
-    Rows whose symbol is unregistered are excluded (same degradation as the dashboard)
-    so one legacy bad row cannot block corrections to healthy rows.
-    """
-    return load_ledger_bundle(
-        conn, transactions=txs, dividends=divs, opening=opening
-    ).without_unregistered()
-
-
-def _orphan_keys(bundle: LedgerBundle) -> set[tuple[str, str]]:
-    """(account, symbol) dividend keys with NO buy/sell/opening on-or-before the div date.
-
-    These are exactly the rows on which ``build_book`` raises ``ValueError`` ('dividend
-    for unknown position') — computing the set directly (rather than catching) lets the
-    caller scope the block to orphans the mutation INTRODUCES (audit H3)."""
-    orphans: set[tuple[str, str]] = set()
-    for dv in bundle.dividends:
-        covered = any(
-            o.account_id == dv.account_id and o.symbol == dv.symbol
-            and o.build_date <= dv.date for o in bundle.opening
-        ) or any(
-            t.account_id == dv.account_id and t.symbol == dv.symbol
-            and t.trade_date <= dv.date for t in bundle.transactions
-        )
-        if not covered:
-            orphans.add((dv.account_id, dv.symbol))
-    return orphans
-
-
-def _oversold_shares(bundle: LedgerBundle) -> dict[tuple[str, str], Holding] | None:
-    """Map of (account, symbol) → the oversold Holding.
-
-    The whole Holding, not just ``shares``: the guard is DATE-AWARE, so the position's final
-    net quantity is not evidence of the problem — it can even be positive, since a later buy
-    nets it back up without restoring the discarded basis (F-16). ``oversold_on`` /
-    ``oversold_sold`` / ``oversold_held`` carry the day that actually broke.
-
-    ``None`` when the ledger is un-bookable (e.g. a pre-existing orphan) — the caller
-    then declines to scope the oversell rather than block an unrelated correction."""
-    try:
-        book = build_book(bundle, allow_oversell=True)
-    except (ValueError, KeyError):
-        return None
-    return {(h.account_id, h.symbol): h for h in book.holdings if h.oversold}
-
-
-def _oversell_phrase(symbol: str, held: Holding) -> str:
-    """Name the DAY the ledger broke, not the position's final net quantity.
-
-    The date-aware guard exists because a back-dated sell can be uncovered on its own date
-    and covered by a later buy (domain-ledger.md, 2026-07-31). Reporting the end-state
-    therefore contradicts the finding it is reporting: 「部位將為 9.5 股」 is a positive number
-    offered as proof of a shortfall, and it names no day to go and look at.
-
-    Falls back to the old shape when the replay recorded no event — that arm is reachable for
-    a position flagged only by ``shares < 0``, and a message with a stale format is better
-    than one asserting a date that was never established.
-    """
-    if held.oversold_on is None or held.oversold_sold is None or held.oversold_held is None:
-        return f"{symbol} 部位將為 {decimal_str(held.shares)} 股"
-    return (f"{held.oversold_on.isoformat()} 的 {symbol} 賣出 "
-            f"{decimal_str(held.oversold_sold)} 股，超過當日持股 "
-            f"{decimal_str(held.oversold_held)} 股")
-
-
-def _replay_block(
-    conn: sqlite3.Connection,
-    *,
-    txs: list[StoredTransaction] | None = None,
-    divs: list[StoredDividend] | None = None,
-    opening: list[StoredOpening] | None = None,
-) -> _ReplayBlock | None:
-    """Compare the CURRENT ledger to the WOULD-BE ledger; block only what this mutation
-    introduces — a newly stranded dividend/opening (orphan, hard) or a new/worsened
-    oversell (soft). A pre-existing, unrelated oversell/orphan never poisons the
-    correction (audit H3 + H8)."""
-    pre = _to_models(conn)
-    post = _to_models(conn, txs, divs, opening)
-
-    introduced_orphans = _orphan_keys(post) - _orphan_keys(pre)
-    if introduced_orphans:
-        sym = sorted(introduced_orphans)[0][1]
-        return _ReplayBlock(
-            code="orphan",
-            message=(
-                f"此更正會使 {sym} 的股利/期初紀錄失去對應持倉，請先處理該紀錄"
-            ),
-        )
-
-    post_over = _oversold_shares(post)
-    pre_over_raw = _oversold_shares(pre)
-    if post_over is None:
-        # The would-be ledger cannot be replayed (beyond the orphan-dividend case above,
-        # e.g. a DRIP dividend stripped of its reinvest shares). Block hard when THIS
-        # mutation introduced it; a pre-existing un-bookable ledger must not poison an
-        # unrelated correction (mirrors the oversell scoping).
-        if pre_over_raw is not None:
-            return _ReplayBlock(
-                code="orphan",
-                message="此更正會使帳本無法重建，請檢查相關股利/期初紀錄")
-        return None
-    pre_over = pre_over_raw or {}
-    for key, held in post_over.items():
-        prev = pre_over.get(key)
-        # Compared on `shares` exactly as before — the SCOPE of the block is unchanged; only
-        # the sentence it produces is.
-        if prev is None or held.shares < prev.shares:  # newly oversold OR gone more negative
-            return _ReplayBlock(code="oversell", message=_oversell_phrase(key[1], held))
-    return None
+# The replay guard (``_replay_block`` / ``_replay_guard`` and their helpers) lives in
+# ``api/replay_guard.py`` since DEF-049 — imported at the top under the same names.
 
 
 def _account_exists(conn: sqlite3.Connection, account_id: str) -> bool:
@@ -532,33 +467,6 @@ def _mutation_guard(
                     f"{symbol} 屬 {inst.market.value} 市場，"
                     f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶",
                     field="symbol"))
-    return None
-
-
-def _oversell_response(msg: str) -> JSONResponse:
-    return JSONResponse(status_code=422, content=error_body(
-        "oversell",
-        f"此更正將造成賣超（{msg}）— 確認後可強制寫入（儀表板將標示賣超待釐清）"))
-
-
-def _replay_guard(
-    conn: sqlite3.Connection,
-    *,
-    ack_oversell: bool,
-    txs: list[StoredTransaction] | None = None,
-    divs: list[StoredDividend] | None = None,
-    opening: list[StoredOpening] | None = None,
-) -> JSONResponse | None:
-    """Replay the would-be ledger; 422 the caller when THIS mutation strands a record
-    (orphan — hard) or introduces/worsens an oversell (soft, ack-bypassable)."""
-    block = _replay_block(conn, txs=txs, divs=divs, opening=opening)
-    if block is None:
-        return None
-    if block.code == "orphan":
-        return JSONResponse(status_code=422, content=error_body(
-            "orphan_correction", block.message))
-    if not ack_oversell:
-        return _oversell_response(block.message)
     return None
 
 
@@ -758,17 +666,61 @@ def remove_transaction(
     return {"ok": True, "id": txn_id}
 
 
-_DIV_TYPES = {t.value for t in DividendType}
+class DivPreviewBody(BaseModel):
+    """The dividend edit dialog's live preview: the correction as it stands, and the row it
+    replaces (the transaction dialog's ``replaces_txn_id``, DEF-042)."""
 
-
-class DivEditBody(BaseModel):
+    replaces_div_id: int
     account_id: str
     symbol: str
     date: date
     type: str
     gross: Decimal
-    withhold: Decimal
-    net: Decimal
+    withhold: Decimal | None = None
+    net: Decimal | None = None
+    reinvest_shares: Decimal | None = None
+    reinvest_price: Decimal | None = None
+
+
+def _dividend_input(body: "DivEditBody | DivPreviewBody",
+                    existing: StoredDividend) -> DividendInput:
+    """A correction body as the ONE validator's input — blanks stay ``None`` (not stated)."""
+    return DividendInput(
+        account_id=body.account_id, symbol=body.symbol, div_date=body.date, type=body.type,
+        gross=body.gross, withholding=body.withhold, net=body.net,
+        reinvest_shares=body.reinvest_shares, reinvest_price=body.reinvest_price,
+        ex_date=existing.ex_date)
+
+
+@router.post("/ledgers/dividends/preview")
+def preview_dividend_edit(
+    body: DivPreviewBody, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """What saving this dividend correction WOULD report — the same ``validate_dividend``
+    (with ``replacing=``) the PUT runs, computed and never written (DEF-061). The edit dialog
+    shows it live and holds 儲存 until every soft finding is ticked: the ⑪a contract (the
+    server refuses hard findings, the screen gates soft ones), as the trade dialog does."""
+    existing = get_dividend(conn, body.replaces_div_id)
+    if existing is None:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"股利 #{body.replaces_div_id} 不存在"))
+    findings = validate_dividend(conn, _dividend_input(body, existing), replacing=existing)
+    return {"issues": [issue_wire(i) for i in findings]}
+
+
+class DivEditBody(BaseModel):
+    """A dividend correction. ``withhold`` / ``net`` / ``reinvest_shares`` may be ``None`` —
+    "not stated", exactly like a blank CSV cell at the entry door (DEF-061): the dividend
+    model then derives them, and ``validate_dividend`` raises the same findings the entry
+    door raises for the same blank (a US cash dividend with no withholding stated)."""
+
+    account_id: str
+    symbol: str
+    date: date
+    type: str
+    gross: Decimal
+    withhold: Decimal | None = None
+    net: Decimal | None = None
     reinvest_shares: Decimal | None = None
     reinvest_price: Decimal | None = None
     ack_oversell: bool = False
@@ -780,6 +732,25 @@ def edit_dividend(
     body: DivEditBody,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
+    """Correct one dividend row — through the SAME ``validate_dividend`` every entry door
+    runs (DEF-061, owner ruling 2026-09-24; the dividend twin of DEF-042).
+
+    Until DEF-061 this door checked the type string and amount conservation only, so a
+    correction could store what the entry door refuses (a NET row with a withholding, a
+    DRIP / STOCK row without its share count — which then broke every rebuild — or a type
+    the account's model does not book). Now, mirroring ``edit_transaction``:
+
+    * ``_mutation_guard`` first — this door's own structural rule (the row stays keyed to a
+      known account and a REGISTERED instrument; market coherence when it is re-keyed);
+    * a HARD finding the edit introduces → 400 with the full issue list (a legacy row's OWN
+      hard condition stays correctable — ``validate_dividend(replacing=)``);
+    * the replay guard (賣超 the edit would strand elsewhere);
+    * the amounts STORED are the dividend model's — the entry door's ``apply_dividend_model``
+      on the same input — so a blank withholding / net / share count is derived exactly as
+      the entry door derives it (a DRIP given only a reinvest price gets its share count);
+    * soft findings are returned in the 200 body and shown by the edit dialog (the ⑪a
+      contract: the server gates hard findings, the screen gates soft ones).
+    """
     existing = get_dividend(conn, div_id)
     if existing is None:
         return JSONResponse(status_code=404,
@@ -789,23 +760,21 @@ def edit_dividend(
         prev_account_id=existing.account_id, prev_symbol=existing.symbol)
     if guard is not None:
         return guard
+    findings = validate_dividend(conn, _dividend_input(body, existing), replacing=existing)
+    hard = [i for i in findings if not i.needs_confirm]
+    if hard:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", hard[0].message,
+            issues=[issue_wire(i) for i in findings]))
     div_type = body.type.strip().upper()
-    if div_type not in _DIV_TYPES:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"未知股利類型 {body.type}", field="type"))
-    # The SAME conservation gate the CSV/manual import path applies (audit M5): this endpoint
-    # used to check only "not negative" and then store gross/withhold/net verbatim, so an edit
-    # could leave a row where 預扣+淨額 exceeds 總額 — and since only `net` reaches the ledger,
-    # the discrepancy was invisible afterwards.
-    amount_issue = check_amounts(body.gross, body.withhold, body.net)
-    if amount_issue is not None:
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error", amount_issue, field="net"))
+    amounts = apply_dividend_model(
+        div_type, gross=body.gross, withholding=body.withhold, net=body.net,
+        reinvest_shares=body.reinvest_shares, reinvest_price=body.reinvest_price)
     edited = existing.model_copy(update={
         "account_id": body.account_id, "symbol": body.symbol, "date": body.date,
-        "type": div_type, "gross": body.gross, "withholding": body.withhold,
-        "net": body.net, "reinvest_shares": body.reinvest_shares,
-        "reinvest_price": body.reinvest_price,
+        "type": div_type, "gross": amounts.gross, "withholding": amounts.withholding,
+        "net": amounts.net, "reinvest_shares": amounts.reinvest_shares,
+        "reinvest_price": amounts.reinvest_price,
     })
     would_be = [edited if d.id == div_id else d for d in list_dividends(conn)]
     blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, divs=would_be)
@@ -813,11 +782,11 @@ def edit_dividend(
         return blocked
     update_dividend(
         conn, div_id, account_id=body.account_id, symbol=body.symbol,
-        div_date=body.date, div_type=div_type, gross=body.gross,
-        withholding=body.withhold, net=body.net,
-        reinvest_shares=body.reinvest_shares, reinvest_price=body.reinvest_price,
+        div_date=body.date, div_type=div_type, gross=amounts.gross,
+        withholding=amounts.withholding, net=amounts.net,
+        reinvest_shares=amounts.reinvest_shares, reinvest_price=amounts.reinvest_price,
     )
-    return {"ok": True, "id": div_id}
+    return {"ok": True, "id": div_id, "issues": [issue_wire(i) for i in findings]}
 
 
 @router.delete("/ledgers/dividends/{div_id}")
@@ -1059,6 +1028,9 @@ class ActionBody(BaseModel):
     cost_carry: str | None = None
     note: str | None = None
     ack_warnings: bool = False
+    #: DEF-049 — PUT only: the owner confirmed the 賣超 the edited ledger would create (the
+    #: replay guard's ack, the same flag the transaction edit carries). Ignored by the POST.
+    ack_oversell: bool = False
     #: D48b — the SPINOFF child's first price, on the action date. A string for the same
     #: reason the ratio terms are: a malformed one gets this module's zh rejection, not
     #: pydantic's English one. Optional; blank means "wait for the next quote refresh".
@@ -1699,6 +1671,11 @@ def _preview_payload(
         "unblocks": _unblocked_sells(
             conn, accounts=batch.accounts, symbol=body.from_symbol.strip(),
             before=index, after=ActionIndex.from_stored([*stored, *candidates])),
+        # DEF-040 R4: said BEFORE saving, like `band_move` — the typed child price will NOT
+        # be written, because the (child, day) slot already holds a row. The same plan the
+        # save records, so the notice cannot disagree with what saving does.
+        "child_price_skip": _seed_skip_wire(
+            _plan_child_seed(conn, batch.rows[0], body.to_symbol_price)[1]),
     }
 
 
@@ -1708,10 +1685,12 @@ def corporate_actions(
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
     if bad is not None:
         return bad
+    today = now.date()
     accts, names, ccys = _names(conn)
     # DEF-020 / DEF-021 / DEF-023: what leaves with the row, whether its band comes back,
     # and whether the replay applies it — read ONCE per page, not per row.
@@ -1770,6 +1749,9 @@ def corporate_actions(
                 conn, sets.get((a.from_symbol, a.date, a.kind), [a]))),
             # DEF-023: the replay's refusal, on the row that caused it.
             "unapplied": {"reason": reason} if reason is not None else None,
+            # DEF-056: a corporate action dated after the server's valuation day is cut
+            # from every valuation until then — said on the row, as on the other ledgers.
+            "counts_from": _counts_from(a.date, today),
         })
     return _page(out, limit, offset)
 
@@ -1814,6 +1796,10 @@ def add_corporate_action(
     # a price row nobody looks at until the XIRR stays dark.
     if (bad := _child_price_refusal(batch.rows[0].kind, body.to_symbol_price)) is not None:
         return bad
+    # DEF-040 R4: what the seed WILL be, decided BEFORE anything is written — through the
+    # same slot predicate the write re-checks — and recorded on every row of the set, so
+    # the delete takes back exactly this and never a row that was there before the save.
+    seed_plan, seed_skip = _plan_child_seed(conn, batch.rows[0], body.to_symbol_price)
     issues: list[Issue] = []
     for inp in batch.rows:
         issues.extend(validate_corporate_action(
@@ -1873,7 +1859,8 @@ def add_corporate_action(
                 kind=CorporateActionKind(inp.kind), from_symbol=inp.from_symbol,
                 to_symbol=inp.to_symbol, ratio_to=inp.ratio_to,
                 ratio_from=inp.ratio_from, cost_carry=inp.cost_carry, note=inp.note,
-                band_move=pending, weight_move=pending_weight, commit=False)
+                band_move=pending, weight_move=pending_weight, child_seed=seed_plan,
+                commit=False)
             for inp in batch.rows
         ]
         # D47: an EXCHANGE re-keys the position, so the owner's alert band follows the
@@ -1911,12 +1898,15 @@ def add_corporate_action(
         raise
     restated = reconcile_split_prices(
         conn, {body.from_symbol.strip(), body.to_symbol.strip()})
-    priced = _seed_child_price(conn, batch.rows[0], body.to_symbol_price, now=now)
+    priced, late_skip = _seed_child_price(conn, seed_plan, now=now)
     return {"ok": True, "written": len(written), "ids": written,
             "accounts": batch.accounts, "prices_restated": restated,
             "band_moved": _band_moved_wire(moved),
             "weight_moved": None if weight_moved is None else decimal_str(weight_moved),
             "child_priced": priced,
+            # DEF-040 R4: the typed price was NOT written because the (child, day) slot
+            # already held a row — said on the wire so the form's toast can say it too.
+            "child_price_skipped": _seed_skip_wire(seed_skip or late_skip),
             # DEF-020: the fee that landed WITH the rows (one request, one transaction).
             "reorg_fee": _fee_wire(fee_row) if fee_row is not None else None,
             # D48b: a seeded price answers the very warning this field reports, so a symbol
@@ -1957,11 +1947,59 @@ def _child_price_refusal(kind: str, raw: str | None) -> JSONResponse | None:
     return None
 
 
+def _typed_child_price(kind: str, raw: str | None) -> Decimal | None:
+    """The SPINOFF child price the owner typed, or ``None`` (blank, another kind, unusable —
+    :func:`_child_price_refusal` has already answered the unusable ones with a 400)."""
+    text = (raw or "").strip()
+    if not text or kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+        return None
+    try:
+        close = Decimal(text)
+    except InvalidOperation:
+        return None
+    return close if close.is_finite() and close > 0 else None
+
+
+def _plan_child_seed(
+    conn: sqlite3.Connection, inp: CorporateActionInput, raw: str | None
+) -> tuple[ChildSeedRecord | None, SeedSkip | None]:
+    """DEF-040 R4: what a SPINOFF's save will write into ``prices`` — decided BEFORE the
+    rows are inserted, so the record lands with them (``corporate_actions.child_seed_json``).
+
+    Returns ``(record, skip)``. ``record`` is ``None`` for every other kind (NULL column);
+    for a SPINOFF it is the slot + typed close when the slot is free, or "wrote nothing"
+    (``close=None``) when no price was typed or the slot is occupied — then ``skip`` says
+    why, through the same :func:`pricing.seed.occupied_slot` the write re-checks. A plan the
+    write later cannot honour (a quote landing in between) is harmless: the delete re-reads
+    the row, and a provider's row never matches the seed signature.
+    """
+    if inp.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+        return None, None
+    close = _typed_child_price(inp.kind, raw)
+    if close is None:
+        return ChildSeedRecord(), None
+    if (skip := occupied_slot(conn, symbol=inp.to_symbol, on=inp.date)) is not None:
+        return ChildSeedRecord(), skip
+    return ChildSeedRecord(close=close, symbol=inp.to_symbol, as_of=inp.date), None
+
+
+def _seed_skip_wire(skip: SeedSkip | None) -> dict[str, Any] | None:
+    """DEF-040 R4's refusal on the wire: ``{symbol, date, existing_close, source, reason}`` —
+    the existing close is the stored Decimal TEXT verbatim, never re-scaled."""
+    if skip is None:
+        return None
+    return {"symbol": skip.symbol, "date": skip.as_of.isoformat(),
+            "existing_close": skip.existing_close, "source": skip.source,
+            "reason": skip.reason}
+
+
 def _seed_child_price(
-    conn: sqlite3.Connection, inp: CorporateActionInput, raw: str | None, *, now: datetime
-) -> str | None:
-    """D48b: store the SPINOFF child's first price, dated the action day. Returns the symbol
-    priced, or ``None`` when there was nothing to write.
+    conn: sqlite3.Connection, plan: ChildSeedRecord | None, *, now: datetime
+) -> tuple[str | None, SeedSkip | None]:
+    """D48b: store the SPINOFF child's first price, dated the action day — the *plan*
+    :func:`_plan_child_seed` recorded on the rows. Returns ``(symbol priced, None)``, or
+    ``(None, skip)`` when the slot turned out to be occupied (DEF-040 R4: a seed never
+    overwrites a row), or ``(None, None)`` when there was nothing to write.
 
     **Why it is worth a field at all.** ``returns.py`` is all-or-nothing on the terminal
     value: ONE unpriced holding makes the WHOLE portfolio's XIRR ``None``, not just that
@@ -2003,26 +2041,22 @@ def _seed_child_price(
     the same condition ``validate._has_prices`` already absorbs. A corporate action must not
     become unrecordable because an optional convenience has nowhere to go.
     """
-    text = (raw or "").strip()
-    if not text or inp.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
-        return None
-    try:
-        close = Decimal(text)
-    except InvalidOperation:
-        return None
-    if close <= 0:
-        return None
-    inst = get_instrument(conn, inp.to_symbol)
+    if plan is None or plan.close is None or plan.symbol is None or plan.as_of is None:
+        return None, None
+    inst = get_instrument(conn, plan.symbol)
     if inst is None:
-        return None
+        return None, None
     try:
         # DEF-040: through pricing's ONE owner of the seed signature (source + action-day
         # stamp), so the delete can recognise — and conditionally remove — exactly this row.
-        write_seed_price(conn, symbol=inst.symbol, market=inst.market, on=inp.date,
-                         close=close, tz=now.tzinfo)
+        # R4: it writes ONLY into an empty slot and reports the refusal otherwise.
+        wrote = write_seed_price(conn, symbol=inst.symbol, market=inst.market,
+                                 on=plan.as_of, close=plan.close, tz=now.tzinfo)
     except sqlite3.OperationalError:
-        return None
-    return inst.symbol
+        return None, None
+    if not wrote.written:
+        return None, wrote.skipped
+    return inst.symbol, None
 
 
 def _band_moved_wire(moved: MovedBand | None) -> dict[str, Any] | None:
@@ -2053,7 +2087,8 @@ def _change_block(issues: list[Issue]) -> JSONResponse | None:
 
 @router.put("/ledgers/corporate-actions/{action_id}")
 def edit_corporate_action(
-    action_id: int, body: ActionBody, conn: sqlite3.Connection = Depends(get_conn)
+    action_id: int, body: ActionBody, conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Edit one row — re-validated on the way OUT (F-32) and IN, then both ends reconciled.
 
@@ -2061,6 +2096,10 @@ def edit_corporate_action(
     before-image goes to ``ledger_audit`` (the store does that), and the price basis of the
     OLD symbol has to be restated too — otherwise it keeps a basis from an action that no
     longer references it.
+
+    DEF-060 (owner ruling 2026-09-24): a SPINOFF's seed price follows the edit — to the new
+    day / child, under DEF-040's rules on both ends (:func:`_move_child_seed`) — and a typed
+    ``to_symbol_price`` is applied the same way instead of being dropped in silence.
     """
     existing = get_corporate_action(conn, action_id)
     if existing is None:
@@ -2069,6 +2108,10 @@ def edit_corporate_action(
     replacement = _action_input(body, body.account_id)
     if isinstance(replacement, JSONResponse):
         return replacement
+    # D48b's entry guard, on this door too: a child price typed for the wrong kind, or an
+    # unusable one, is refused LOUDLY rather than dropped (the PUT used to ignore the field).
+    if (bad := _child_price_refusal(replacement.kind, body.to_symbol_price)) is not None:
+        return bad
     blocked = _change_block(
         validate_corporate_action_change(conn, action_id, replacement=replacement))
     if blocked is not None:
@@ -2109,6 +2152,15 @@ def edit_corporate_action(
     if issues and not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
+    # DEF-049: the edited ledger is REPLAYED like every other correction door — a new date,
+    # ratio, symbol or kind can strand a later sell (a 10:1 split edited to 2:1 under a sell
+    # of 5,000) or a dividend. Same decision as the transaction edit; the ack rides the body.
+    replayed = action_change_guard(
+        conn, would_be=[_stored_from(replacement, action_id) if a.id == action_id else a
+                        for a in list_corporate_actions(conn)],
+        ack_oversell=body.ack_oversell, what="此更正", then="再修改這筆公司行動")
+    if replayed is not None:
+        return replayed
     # DEF-020: the linked fee follows the row. `reorg_fee` absent (None) = leave it alone;
     # blank / "0" = remove it; a value = write it (date and account re-synced to the
     # edited action), validated by the cash guard BEFORE the row is touched, with the
@@ -2166,8 +2218,118 @@ def edit_corporate_action(
     restated = reconcile_split_prices(conn, {
         existing.from_symbol, existing.to_symbol,
         replacement.from_symbol, replacement.to_symbol})
+    seed = _move_child_seed(conn, existing, replacement, body.to_symbol_price, now=now)
     return {"ok": True, "id": action_id, "prices_restated": restated,
-            "reorg_fee": _fee_wire(fee_after) if fee_after is not None else None}
+            "reorg_fee": _fee_wire(fee_after) if fee_after is not None else None,
+            **seed}
+
+
+def _move_child_seed(
+    conn: sqlite3.Connection, existing: StoredCorporateAction,
+    replacement: CorporateActionInput, raw_price: str | None, *, now: datetime,
+) -> dict[str, Any]:
+    """DEF-060: what an edit does to the SPINOFF child's seed price — the wire fields
+    ``child_priced`` / ``child_price_skipped`` / ``child_price_move``.
+
+    The seed belongs to the action's ``(child, day)`` slot. An edit that moves the slot (a
+    new date or child), types a new price (``to_symbol_price``), or turns the row into
+    another kind runs DEF-040's two halves in order:
+
+    1. **the old slot** — the seed the row OWNS (its record, or R3's signature rule for a
+       row saved before the record existed) is removed only while intact, exactly as a
+       delete would (:func:`pricing.seed.remove_seed_price`); a seed a quote has replaced,
+       or one another row still owns, stays and the reason is returned;
+    2. **the new slot** — the moved close (or the typed one) is written only into an EMPTY
+       slot (:func:`pricing.seed.write_seed_price`); a quote already there is left alone
+       and the refusal is returned, the same sentence the save gives.
+
+    The row's record is then rewritten to what it now owns (``set_child_seed``), so a later
+    delete takes back exactly that. An edit that changes none of the three leaves the seed
+    — and the record, legacy NULL included — untouched.
+    """
+    out: dict[str, Any] = {"child_priced": None, "child_price_skipped": None,
+                           "child_price_move": None}
+    spin = CorporateActionKind.SPINOFF.value
+    is_spin = replacement.kind.strip().upper() == spin
+    typed = _typed_child_price(replacement.kind, raw_price)
+    old = _owned_slot(existing)
+    old_slot = None if old is None else (old[0], old[1])
+    new_slot = (replacement.to_symbol, replacement.date) if is_spin else None
+    if old_slot == new_slot and typed is None:
+        return out
+    if old is None and new_slot is None:
+        return out
+    verdict: SeedPriceVerdict | None = None
+    if old is not None:
+        still_used = any(
+            a.id != existing.id and (other := _owned_slot(a)) is not None
+            and (other[0], other[1]) == old_slot
+            for a in list_corporate_actions(conn, symbol=old[0]))
+        verdict = remove_seed_price(conn, symbol=old[0], on=old[1], still_used=still_used,
+                                    expected_close=old[2])
+    carry = typed if typed is not None else (
+        verdict.close if verdict is not None and verdict.removed else None)
+    record = ChildSeedRecord()
+    skip: SeedSkip | None = None
+    unregistered = False
+    if new_slot is not None and carry is not None:
+        inst = get_instrument(conn, new_slot[0])
+        if inst is None:
+            unregistered = True
+        else:
+            try:
+                wrote = write_seed_price(conn, symbol=inst.symbol, market=inst.market,
+                                         on=new_slot[1], close=carry, tz=now.tzinfo)
+            except sqlite3.OperationalError:
+                wrote = None
+            if wrote is not None and wrote.written:
+                record = ChildSeedRecord(close=carry, symbol=inst.symbol, as_of=new_slot[1])
+                out["child_priced"] = inst.symbol
+            elif wrote is not None:
+                skip = wrote.skipped
+    out["child_price_skipped"] = _seed_skip_wire(skip)
+    set_child_seed(conn, [existing.id], record)
+    if old is not None and verdict is not None:
+        out["child_price_move"] = _seed_move_wire(
+            old_slot=(old[0], old[1]), new_slot=new_slot, verdict=verdict,
+            written=record.close, skip=skip, unregistered=unregistered)
+    return out
+
+
+def _seed_move_wire(
+    *, old_slot: tuple[str, date], new_slot: tuple[str, date] | None,
+    verdict: SeedPriceVerdict, written: Decimal | None, skip: SeedSkip | None,
+    unregistered: bool,
+) -> dict[str, Any]:
+    """DEF-060's outcome for the OLD seed, as one zh sentence the edit toast shows.
+    ``moved`` is True only when the seed now sits in the new slot."""
+    old_label = f"{old_slot[0]} 在 {old_slot[1].isoformat()}"
+    moved = verdict.removed and written is not None
+    if moved and new_slot is not None:
+        if new_slot == old_slot:
+            message = f"{old_label} 的子公司起始價已改為 {decimal_str(written or _ZERO)}"
+        else:
+            message = (f"子公司起始價 {decimal_str(written or _ZERO)} 已由 {old_label} "
+                       f"搬到 {new_slot[0]} 在 {new_slot[1].isoformat()}")
+    elif not verdict.removed:
+        message = f"子公司起始價未搬移：{verdict.reason or ''}"
+    elif new_slot is None:
+        message = f"已不是分拆，登錄時寫入的子公司起始價（{old_label}）已移除"
+    elif skip is not None:
+        message = f"{skip.reason}；原本 {old_label} 的起始價已移除"
+    elif unregistered:
+        message = (f"新子公司 {new_slot[0]} 尚未註冊，起始價未寫入；"
+                   f"原本 {old_label} 的起始價已移除")
+    else:
+        message = f"原本 {old_label} 的子公司起始價已移除"
+    return {
+        "from": {"symbol": old_slot[0], "date": old_slot[1].isoformat()},
+        "to": (None if new_slot is None
+               else {"symbol": new_slot[0], "date": new_slot[1].isoformat()}),
+        "moved": moved,
+        "removed": verdict.removed,
+        "message": message,
+    }
 
 
 @router.delete("/ledgers/corporate-actions/set")
@@ -2175,10 +2337,15 @@ def remove_corporate_action_set(
     from_symbol: str,
     on: str = Query(..., alias="date"),
     kind: str = Query(...),
+    ack_oversell: bool = False,
+    ack_negative: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Delete a whole ``(from_symbol, date, kind)`` set — the ONLY way to leave one.
+
+    DEF-049: replayed first, over the ledger without EVERY row of the set, like every other
+    ledger delete (``replay_guard.action_change_guard``).
 
     「Leaving the set requires taking the set」 (F-32). Offering this beside the per-row
     refusal is what keeps that refusal from being a dead end: an owner who really does want
@@ -2199,6 +2366,13 @@ def remove_corporate_action_set(
     if not rows:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"找不到 {from_symbol} 在 {on} 的{KIND_ZH.get(wanted, wanted)}"))
+    leaving = {a.id for a in rows}
+    replayed = action_change_guard(
+        conn, would_be=[a for a in list_corporate_actions(conn) if a.id not in leaving],
+        leaving=rows, ack_oversell=ack_oversell, ack_negative=ack_negative,
+        what="此刪除", then="再刪除這組公司行動")
+    if replayed is not None:
+        return replayed
     symbols = {a.from_symbol for a in rows} | {a.to_symbol for a in rows}
     outcome = _delete_actions(conn, rows, now=now)
     restated = reconcile_split_prices(conn, symbols)
@@ -2243,7 +2417,8 @@ def _delete_actions(
         # pricing's function, bound here, under the same commit — unless a real quote has
         # replaced it since (or another action still creates the same child that day).
         seed_verdict = (None if seed is None else remove_seed_price(
-            conn, symbol=seed[0], on=seed[1], still_used=seed[2], commit=False))
+            conn, symbol=seed.symbol, on=seed.on, still_used=seed.still_used,
+            expected_close=seed.expected_close, commit=False))
         if commit:
             conn.commit()
     except Exception:
@@ -2261,24 +2436,55 @@ def _delete_actions(
     }
 
 
+class _SeedTarget(NamedTuple):
+    """The seed a delete (or an edit's move) of a SPINOFF set may take back (DEF-040)."""
+
+    symbol: str
+    on: date
+    still_used: bool
+    #: The close the save RECORDED writing; ``None`` for a row saved before the record
+    #: existed (the signature alone then decides — R3's rule).
+    expected_close: Decimal | None
+
+
+def _owned_slot(a: StoredCorporateAction) -> tuple[str, date, Decimal | None] | None:
+    """The ``(child, day, expected close)`` seed slot SPINOFF row *a* owns, or ``None``.
+
+    DEF-040 R4: read off the row's own record (``child_seed_json``). A record that says the
+    save wrote NOTHING — no price typed, the slot was already occupied, or an import door
+    that takes no price — owns nothing, so neither its delete nor its batch undo can take a
+    row it never wrote. A row with no record at all (saved before the record existed) falls
+    back to R3's rule: its own ``(to_symbol, date)``, signature only.
+    """
+    if a.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+        return None
+    rec = a.child_seed
+    if rec is None:
+        return a.to_symbol, a.date, None
+    if rec.close is None:
+        return None
+    return rec.symbol or a.to_symbol, rec.as_of or a.date, rec.close
+
+
 def _seed_target(
     conn: sqlite3.Connection, rows: Sequence[StoredCorporateAction]
-) -> tuple[str, date, bool] | None:
-    """The ``(child, day, still_used)`` whose seed price a delete of *rows* may take with it
-    (DEF-040) — ``None`` when *rows* hold no SPINOFF. A set is one event, so it has one child
-    and one day; ``still_used`` is True when a SPINOFF that is NOT being deleted creates the
-    same child on the same day (the seed then still belongs to that one)."""
+) -> _SeedTarget | None:
+    """The seed a delete of *rows* may take with it (DEF-040) — ``None`` when *rows* hold no
+    SPINOFF, or when their SPINOFF owns no seed (R4: it recorded writing nothing). A set is
+    one event, so it has one child and one day; ``still_used`` is True when a SPINOFF that
+    is NOT being deleted owns the same slot (the seed then still belongs to that one)."""
     spin = next((a for a in rows
                  if a.kind.strip().upper() == CorporateActionKind.SPINOFF.value), None)
-    if spin is None:
+    if spin is None or (slot := _owned_slot(spin)) is None:
         return None
+    symbol, on, expected = slot
     leaving = {a.id for a in rows}
     still_used = any(
-        a.id not in leaving and a.kind.strip().upper() == CorporateActionKind.SPINOFF.value
-        and a.to_symbol == spin.to_symbol and a.date == spin.date
-        for a in list_corporate_actions(conn, symbol=spin.to_symbol)
+        a.id not in leaving and (other := _owned_slot(a)) is not None
+        and (other[0], other[1]) == (symbol, on)
+        for a in list_corporate_actions(conn, symbol=symbol)
     )
-    return spin.to_symbol, spin.date, still_used
+    return _SeedTarget(symbol, on, still_used, expected)
 
 
 def _pending_seed(
@@ -2289,7 +2495,9 @@ def _pending_seed(
     seed = _seed_target(conn, rows)
     if seed is None:
         return None
-    return pending_seed_removal(conn, symbol=seed[0], on=seed[1], still_used=seed[2])
+    return pending_seed_removal(conn, symbol=seed.symbol, on=seed.on,
+                                still_used=seed.still_used,
+                                expected_close=seed.expected_close)
 
 
 def _seed_wire(verdict: SeedPriceVerdict | None) -> dict[str, Any] | None:
@@ -2331,10 +2539,12 @@ def _weight_restore_wire(verdict: WeightRestoreVerdict | None) -> dict[str, Any]
 
 @router.delete("/ledgers/corporate-actions/{action_id}")
 def remove_corporate_action(
-    action_id: int, conn: sqlite3.Connection = Depends(get_conn),
+    action_id: int, ack_oversell: bool = False, ack_negative: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    """Delete one row — refused when it belongs to a multi-account set (F-32)."""
+    """Delete one row — refused when it belongs to a multi-account set (F-32), and replayed
+    first like every other ledger delete (DEF-049: ``replay_guard.action_change_guard``)."""
     existing = get_corporate_action(conn, action_id)
     if existing is None:
         return JSONResponse(status_code=404, content=error_body(
@@ -2342,6 +2552,12 @@ def remove_corporate_action(
     blocked = _change_block(validate_corporate_action_change(conn, action_id))
     if blocked is not None:
         return blocked
+    replayed = action_change_guard(
+        conn, would_be=[a for a in list_corporate_actions(conn) if a.id != action_id],
+        leaving=[existing], ack_oversell=ack_oversell, ack_negative=ack_negative,
+        what="此刪除", then="再刪除這筆公司行動")
+    if replayed is not None:
+        return replayed
     outcome = _delete_actions(conn, [existing], now=now)
     restated = reconcile_split_prices(conn, {existing.from_symbol, existing.to_symbol})
     return {"ok": True, "id": action_id, "prices_restated": restated, **outcome}

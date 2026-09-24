@@ -1,4 +1,6 @@
-"""The stress-audit oracle transcribes the pay-date rule of 2026-09-24 (DEF-016).
+"""The stress-audit oracle transcribes the valuation cut of 2026-09-24 (DEF-016, widened by
+DEF-056): every row — a dividend from its pay date, a trade / opening / conversion from its
+own date — counts from that day on.
 
 The oracle keeps its OWN transcription of every replay rule (the independence rule — an
 oracle that imports the implementation cannot detect an error in it), so the owner's ruling
@@ -22,7 +24,8 @@ from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from portfolio_dash.data_ingestion.store import insert_dividend
+from portfolio_dash.data_ingestion.store import insert_dividend, insert_transaction
+from portfolio_dash.shared.models.enums import Side
 from tests.conftest import DashboardClientFactory, _seed_golden
 
 _ORACLE = Path(__file__).resolve().parents[2] / "scripts" / "stress_audit" / "oracle.py"
@@ -74,15 +77,43 @@ def test_the_oracle_cuts_an_unpaid_dividend_exactly_where_the_app_does(
     facts = _facts(o)
     for now in (datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei")),
                 datetime(2026, 7, 1, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))):
-        res = o.replay(o.facts_received_by(facts, now.date()))
+        res = o.replay(o.facts_valued_as_of(facts, now.date()))
         oracle_adjusted = res.holdings[("tw_broker", "2330")].adjusted_total
         app = dashboard_client_factory(_with_unpaid, now=now)
         assert oracle_adjusted == _app_adjusted(app), now
 
 
-def test_the_cut_keeps_every_other_ledger_and_is_not_a_deletion() -> None:
+def test_the_cut_is_a_date_not_a_deletion() -> None:
     o = _oracle()
     facts = _facts(o)
-    before = o.facts_received_by(facts, date(2026, 6, 30))
+    before = o.facts_valued_as_of(facts, date(2026, 6, 30))
     assert [d.id for d in before.divs] == [1] and before.txs == facts.txs
-    assert [d.id for d in o.facts_received_by(facts, _PAY).divs] == [1, 2]
+    assert [d.id for d in o.facts_valued_as_of(facts, _PAY).divs] == [1, 2]
+
+
+def _with_future_buy(conn: sqlite3.Connection) -> None:
+    _seed_golden(conn)
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=D("1000"), price=D("600"), fees=D("855"), tax=D("0"),
+                       trade_date=_PAY)
+
+
+def test_the_oracle_cuts_a_future_trade_exactly_where_the_app_does(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """DEF-056: a BUY dated after the valuation day is not in the position yet — in the
+    oracle's own transcription as in the app — and is from its date on."""
+    o = _oracle()
+    facts = _facts(o)
+    future = o.TxFact(id=2, account_id="tw_broker", symbol="2330", side="BUY", qty=D("1000"),
+                      price=D("600"), fee=D("855"), tax=D("0"), trade_date=_PAY)
+    facts = o.Facts(txs=[*facts.txs, future], divs=facts.divs[:1],
+                    instruments=facts.instruments)
+    for now in (datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei")),
+                datetime(2026, 7, 1, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))):
+        held = o.replay(o.facts_valued_as_of(facts, now.date())).holdings[("tw_broker", "2330")]
+        dash = dashboard_client_factory(_with_future_buy, now=now).get("/api/dashboard").json()
+        app = next(x for x in dash["holdings"]
+                   if x["account_id"] == "tw_broker" and x["symbol"] == "2330")
+        assert (held.shares, held.original_total) == (D(app["shares"]),
+                                                      D(app["original_cost_total"])), now

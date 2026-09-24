@@ -61,12 +61,18 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   ledger-only database must read as "no rows", never as `OperationalError`.
 - **A cross-layer CALL into another module's CALCULATION is done by INJECTION, not by an import**
   (established by D17, generalised 2026-08-12). The table convention above covers reading *rows*;
-  this one covers reusing a *computation* that must keep exactly one owner. Two instances:
+  this one covers reusing a *computation* that must keep exactly one owner. Instances:
   `scheduler/jobs.py::split_factor_fn` hands `pricing/` the split ratio it may not fetch for itself
-  (D17), and `api/routers/cash.py::cash_pool_fn` hands `data_ingestion/validate.py::
+  (D17); `api/routers/cash.py::cash_pool_fn` hands `data_ingestion/validate.py::
   validate_cash_movement` the cash-pool balance + date-ordered running minimum that live in
   `portfolio/cash.py`, so the CSV import door and the manual form run the **same** withdraw guard
-  (audit C3). The binder is always the layer already above **both**, and it binds **ONCE** per
+  (audit C3); and `api/routers/input_center.py::import_batch_delete` binds BOTH required seams of
+  `data_ingestion/provenance.py::delete_batch` — `delete_actions` (`ActionSetDeleter`, I-3
+  2026-09-23: the 公司行動 tab's own delete with its linked fee / band / seed side effects) and
+  `guard` (`BatchUndoGuard`, DEF-049 2026-09-25: `api/replay_guard.py`'s orphan / oversell /
+  negative-cash decision), so undoing an import batch runs the same decision and writes the same
+  `ledger_audit` rows as deleting each row by hand (recorded here, 2026-09-25, when the second
+  seam was added — the first had been in the code since I-3 without an entry). The binder is always the layer already above **both**, and it binds **ONCE** per
   request/import, never per row. Three obligations: **(1)** the injected parameter has **no
   default** — D39 rejected injection from `api/app.py` because a *missed* registration degrades
   silently, and a **required** argument is exactly the difference: forgetting it is a mypy error

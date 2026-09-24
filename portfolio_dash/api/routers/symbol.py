@@ -40,7 +40,7 @@ a non-held / watchlist symbol.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -51,8 +51,8 @@ from portfolio_dash.data_ingestion.holdings import (
     _shares_until as shares_naive,  # §6.3's second term, by NAME — see _corporate_delta
 )
 from portfolio_dash.data_ingestion.holdings import (
-    current_shares,
     load_action_index,
+    shares_through,
 )
 from portfolio_dash.data_ingestion.store import (
     StoredCorporateAction,
@@ -77,6 +77,7 @@ from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import (
     OpeningInventory,
     Transaction,
+    counts_by,
     dividend_effective_date,
 )
 from portfolio_dash.shared.wire import decimal_str
@@ -240,7 +241,8 @@ def _aggregate_position(
 
 
 def _corporate_delta(
-    conn: sqlite3.Connection, index: ActionIndex, account_id: str, symbol: str
+    conn: sqlite3.Connection, index: ActionIndex, account_id: str, symbol: str,
+    *, as_of: date,
 ) -> Decimal:
     """§6.3's ``corporate_delta`` for one (account, symbol) — the DEFINITION, not arithmetic.
 
@@ -272,6 +274,14 @@ def _corporate_delta(
     rather than rebuilt for a second, load-bearing reason: it also carries D31's depth-cap
     sink and D33's negative-side-skip sink, which the walk MUTATES. A caller that builds its
     own throwaway index loses those records and the 待釐清 chip silently never appears.
+
+    *as_of* is the valuation day (DEF-056, owner ruling 2026-09-24): both terms count only
+    what has happened by then — the action-aware walk at the CLOSE of *as_of*
+    (``shares_through``) and the naive sum strictly before the next day — because the book
+    they reconcile against (``build_dashboard``) is cut at that day. Taken over the whole
+    ledger, an action dated next week would add its shares to the footer while the book,
+    correctly, does not hold them yet. Required, with no default, so a caller cannot fall
+    back to the whole ledger by omission.
     """
     # `shares_naive` is holdings.py's `_shares_until` under §6.3's own name for it. Imported
     # privately on purpose: the spec defines the second term AS that function ("shares_naive
@@ -280,8 +290,8 @@ def _corporate_delta(
     # would make the delta `aware − our_own_sum` instead of `aware − naive`. Those agree
     # today, and on the day they stop agreeing the second form ABSORBS the disagreement into
     # the corporate term and the footer stays green over it. This form reports it.
-    return current_shares(conn, account_id, symbol, index=index) - shares_naive(
-        conn, account_id, symbol, None
+    return shares_through(conn, account_id, symbol, on=as_of, index=index) - shares_naive(
+        conn, account_id, symbol, as_of + timedelta(days=1)
     )
 
 
@@ -528,6 +538,16 @@ def symbol_detail(
     # Matches EITHER end (store.list_corporate_actions): a symbol's history includes the
     # actions that CREATED it, not only those it was the source of.
     sym_actions = list_corporate_actions(conn, symbol=symbol)
+    # DEF-056 (owner ruling 2026-09-24): 交易明細 (`activity`) and its footer describe the
+    # position the book holds AS OF the valuation day, and the book counts every row from its
+    # own date (`LedgerBundle.valued_as_of`). A row dated later is not part of that position
+    # yet, so it is neither a line here nor a term of the footer — the same call DEF-016 made
+    # for a future DRIP. `trade_events` / `dividend_events` still carry every row (they are
+    # the ledger's markers, not the position); the ledger page lists the future row with its
+    # 「未來日期：YYYY-MM-DD 起計入」 badge.
+    act_txs = [t for t in sym_txs if counts_by(t.trade_date, as_of)]
+    act_opening = [o for o in sym_opening if counts_by(o.build_date, as_of)]
+    act_actions = [a for a in sym_actions if counts_by(a.date, as_of)]
 
     # price_history — STORED prices over [as_of - days, as_of] (read-only; no backfill).
     #
@@ -617,17 +637,17 @@ def symbol_detail(
     # day's trades, whose quantities are already quoted in post-action terms. Hand-numbering
     # around the new row is exactly how the list would drift from the replay it displays.
     aev: list[tuple[Any, int, dict[str, Any]]] = []
-    for o in sym_opening:
+    for o in act_opening:
         aev.append((o.build_date, int(EventPriority.OPENING), {
             "date": o.build_date.isoformat(),
             "account_id": o.account_id, "account": acct_names.get(o.account_id, o.account_id),
             "side": "open", "shares": decimal_str(o.shares),
             "price": decimal_str(o.original_avg), "fee": None, "tax": None,
             "total": decimal_str(-o.original_cost_total), "ccy": ccy}))
-    for a in sym_actions:
+    for a in act_actions:
         aev.append((a.date, int(EventPriority.CORPORATE_ACTION),
                     _action_wire(a, symbol, acct_names.get(a.account_id, a.account_id), ccy)))
-    for tx in sym_txs:
+    for tx in act_txs:
         if tx.side is Side.BUY:
             total = -(tx.quantity * tx.price + tx.fees + tx.tax)
             aev.append((tx.trade_date, int(EventPriority.BUY), {
@@ -652,7 +672,7 @@ def symbol_detail(
     # footer below — or the footer would add shares the position does not hold yet and print
     # ⚠ 對帳不一致 over a correct book. ``dividend_events`` above still lists every row.
     received_divs = [d for d in sym_divs
-                     if dividend_effective_date(d.type, d.date, d.ex_date) <= as_of]
+                     if counts_by(dividend_effective_date(d.type, d.date, d.ex_date), as_of)]
     for d in received_divs:
         dt = DividendType(d.type)
         if dt in _REINVEST_TYPES and d.reinvest_shares is not None:
@@ -684,15 +704,16 @@ def symbol_detail(
     # positions are keyed (account, symbol) and every action row binds to one account, so the
     # sum IS the aggregate — and computing it twice by two routes is how the drawer's
     # aggregate/detail pairs have drifted three times before.
-    deltas = {aid: _corporate_delta(conn, action_index, aid, symbol) for aid in acct_ids}
+    deltas = {aid: _corporate_delta(conn, action_index, aid, symbol, as_of=as_of)
+              for aid in acct_ids}
     activity_reconcile = {
-        "total": _reconcile(sym_holdings, sym_opening, sym_txs, received_divs,
+        "total": _reconcile(sym_holdings, act_opening, act_txs, received_divs,
                             _sum(list(deltas.values()))),
         "by_account": {
             aid: _reconcile(
                 [h for h in sym_holdings if h.account_id == aid],
-                [o for o in sym_opening if o.account_id == aid],
-                [t for t in sym_txs if t.account_id == aid],
+                [o for o in act_opening if o.account_id == aid],
+                [t for t in act_txs if t.account_id == aid],
                 [d for d in received_divs if d.account_id == aid],
                 deltas[aid],
             )

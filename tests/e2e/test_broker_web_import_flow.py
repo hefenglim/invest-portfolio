@@ -262,13 +262,31 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
     expect(page.locator("#bk-batches")).to_contain_text("schwab_2024.csv")
 
     # --- 復原, through the real control, until the ledger is empty again ------------------
+    # DEF-049: each undo now runs the ledger tab's replay guard over the ledger WITHOUT that
+    # batch, and the list is undone newest-first — so taking a batch off while an EARLIER one
+    # still holds rows that depended on it (a split the later sells were booked against, a
+    # deposit the trades spent) is answered with the ledger tab's own ack dialog. Each is
+    # answered 「我了解，仍要復原」 here, as the owner undoing the whole run would; the end
+    # state is still the empty ledger.
+    ack_titles: list[str] = []
     for _ in range(len(batches)):
         page.locator("#bk-batches tr").first.locator("button", has_text="復原").click()
         dialog = page.locator(".modal-backdrop .modal", has_text="復原這批匯入")
         expect(dialog).to_be_visible()
-        with page.expect_response("**/api/import/batches/**"):
+        with page.expect_response("**/api/import/batches/**") as undone:
             dialog.locator("button", has_text="復原").click()
+        while undone.value.status == 422:
+            ack = page.locator(".modal-backdrop .modal").filter(
+                has=page.locator("button", has_text="我了解，仍要復原"))
+            expect(ack).to_be_visible()
+            ack_titles.append(ack.locator(".modal-title").inner_text())
+            with page.expect_response("**/api/import/batches/**") as undone:
+                ack.locator("button", has_text="我了解，仍要復原").click()
+        assert undone.value.status == 200
         page.wait_for_timeout(150)
+    # Measured on this corpus: the cash batch goes first (newest) while the trades it funded
+    # are still booked, so its pool dips — the only acknowledgement the whole run needs.
+    assert ack_titles == ["現金將變為負數"], ack_titles
 
     assert _get_json(base, "/api/import/batches")["batches"] == []
     assert _shares(base) == {}, "復原 must return the ledger to where it started"

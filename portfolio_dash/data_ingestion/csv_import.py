@@ -115,6 +115,9 @@ EXPORT_ONLY_COLUMNS: dict[str, str] = {
     # what IT moved; replaying the old record would describe settings the file never set.
     "band_move_json": "換股時目標價的搬移紀錄，匯入換股時依目前設定重新處理，不沿用舊紀錄",
     "weight_move_json": "換股時目標權重的搬移紀錄，匯入換股時依目前設定重新處理，不沿用舊紀錄",
+    # DEF-040 R4: what a SPINOFF's save wrote into the destination's OWN price table. The
+    # import door takes no child price, so an imported SPINOFF records "wrote nothing".
+    "child_seed_json": "分拆登錄時子公司起始價的寫入紀錄，匯入的分拆不寫起始價，不沿用舊紀錄",
     # DEF-009: the trade month a CONFIRMED 折讓款 credit books. Only the rebate inbox's confirm
     # writes it; a re-imported row is a hand-entered credit and keeps the legacy keys (the
     # month before its date / its 「YYYY-MM 折讓款」 note), which name the same month.

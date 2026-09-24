@@ -632,11 +632,12 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     # family would compare an app that could not value a day against an oracle that could.
     _ensure_daily_prices(db_path, raw)
     dash = api.get("/api/dashboard").json()
-    # DEF-016: the valuation reads only the dividends RECEIVED by the app's own as_of (read
-    # back from the response, as the XIRR family does). The raw facts stay for the checks
-    # that compare stored ROWS (ledger APIs, the dated cash statement).
+    # DEF-016 / DEF-056: the valuation reads only the rows that count by the app's own as_of
+    # (read back from the response, as the XIRR family does) — every ledger from its own
+    # date. The raw facts stay for the checks that compare stored ROWS (ledger APIs, the
+    # dated cash statement).
     as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
-    facts = O.facts_received_by(raw, as_of)
+    facts = O.facts_valued_as_of(raw, as_of)
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)

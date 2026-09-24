@@ -165,3 +165,35 @@ def test_refuses_without_db_or_scope() -> None:
         script.main(["--scope", "all"])
     with pytest.raises(SystemExit):
         script.main(["--db", "x.db"])
+
+
+def test_scope_all_selects_the_verifiers_two_january_rows(tmp_path: Path) -> None:
+    """DEF-055 (owner ruling 2026-09-24: #33 and #44 are cleaned too, ``--scope all``). Their
+    exact shape on demo: two 2026-01-10 3008 buys, ``discount 0.23`` + ``rebate_rate 0.77``,
+    in a month ALREADY credited — here by a credit LINKED to it (``rebate_period``, DEF-009),
+    the form the confirm door writes. ``uncredited`` must leave both (that is why R3's cleanup
+    missed them); ``all`` must take both, and only them."""
+    path = tmp_path / "demo.db"
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    bootstrap_db(conn)
+    seed_accounts(conn)
+    jan = [insert_transaction(conn, account_id="tw_broker", symbol="3008", side=Side.BUY,
+                              quantity=Decimal(q), price=Decimal("2500"), fees=Decimal(fee),
+                              tax=Decimal("0"), trade_date=date(2026, 1, 10),
+                              fee_rule_snapshot=_DOUBLE)
+           for q, fee in (("100", "81"), ("200", "163"))]
+    coherent = _tx(conn, date(2026, 1, 12), "142", {**_DOUBLE, "discount": "1"})
+    insert_cash_movement(conn, account_id="tw_broker", move_date=date(2026, 2, 5),
+                         kind="REBATE", ccy=Currency.TWD, amount=Decimal("109"),
+                         note="折讓款入帳", rebate_period="2026-01")
+    conn.commit()
+    conn.close()
+
+    assert script.main(["--db", str(path), "--scope", "uncredited", "--apply"]) == 0
+    assert all(_snap(path, i)["rebate_rate"] == "0.77" for i in jan)
+    assert script.main(["--db", str(path), "--scope", "all", "--apply"]) == 0
+    assert all(_snap(path, i)["rebate_rate"] == "0" for i in jan)
+    assert all(_snap(path, i)["discount"] == "0.23" for i in jan)      # what happened stays
+    assert _snap(path, coherent)["rebate_rate"] == "0.77"               # never selected
+    assert sorted(int(a["row_id"]) for a in _audit(path)) == sorted(jan)

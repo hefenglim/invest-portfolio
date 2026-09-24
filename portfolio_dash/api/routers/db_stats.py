@@ -62,6 +62,7 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("strategy_prompts", "策略提示詞", "AI 記錄", None),
     # DEF-033: every saved body of every strategy (append-only; a restore is a new row).
     _TableSpec("strategy_prompt_versions", "策略提示詞版本", "AI 記錄", "saved_at"),
+    _TableSpec("prompt_versions", "系統／新聞整理提示詞版本", "AI 記錄", "saved_at"),
     # 系統記錄 — operational history
     _TableSpec("job_runs", "排程執行紀錄", "系統記錄", "started_at"),
     _TableSpec("action_log", "系統操作記錄", "系統記錄", "ts"),

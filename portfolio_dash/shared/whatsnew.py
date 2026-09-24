@@ -70,6 +70,19 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, system + news-organizer prompt version history (DEF-057, 2026-09-25) ----
+    Feature(
+        version="0.1.29",
+        id="global-prompt-versions",
+        title="系統提示詞與新聞整理提示詞也有版本記錄了",
+        desc="和策略提示詞一樣，這兩個提示詞每次儲存、「重置回官方版」或回復都會另存一版（內文沒變"
+        "就不加版），可以檢視任一版、和前一版或目前的內文逐行對照，並把任一版回復成新的一版。重置前"
+        "的內容不會再遺失。洞察卡頁尾的版本標示會多一段「系統 vN」，新聞彈窗會寫出整理時用的是"
+        "「整理提示詞 vN」；功能上線前的內容一律記為 v1",
+        href="settings.html#prompts",
+        area="系統設定 → AI 提示詞 → 系統提示詞／新聞整理提示詞 → 版本記錄",
+        target="#sys-versions",
+    ),
     # --- v0.1.29, strategy-prompt version history (functional-test DEF-033, 2026-09-24) ---
     Feature(
         version="0.1.29",

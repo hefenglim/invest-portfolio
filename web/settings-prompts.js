@@ -29,6 +29,7 @@
     /* system_prompt + system_updated_at are filled from GET /api/system-prompt on boot. */
     system_prompt: '',
     system_updated_at: '',
+    system_version: null,   // DEF-057: the newest version number (GET /api/system-prompt)
     strategies: [],
     library: [],  // official template rows (W7, AI-D37) — feeds the 同步官方 button
   };
@@ -80,6 +81,7 @@
     const sp = await api.get('/api/system-prompt');
     D.system_prompt = (sp && sp.body) || '';
     D.system_updated_at = (sp && sp.updated_at) || '';
+    D.system_version = sp && sp.current_version != null ? sp.current_version : null;
   } catch (err) {
     _toast('系統提示詞載入失敗', 'fail', (err && err.message) || undefined);
   }
@@ -97,8 +99,13 @@
     D.library = [];
   }
   window.pdField.writeIfUntouched($('#sys-prompt'), '', D.system_prompt);   // I-12
-  $('#sys-prompt-meta').textContent =
-    '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
+  /* DEF-057: the meta line leads with the version, as a strategy card's does (「v3・更新 …」). */
+  function sysMetaSet() {
+    $('#sys-prompt-meta').textContent =
+      (D.system_version != null ? 'v' + D.system_version + '・' : '') +
+      '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
+  }
+  sysMetaSet();
   /* save the global system prompt -> PUT /api/system-prompt (toast + restamp meta). */
   const sysSave = document.getElementById('prompts-save');
 
@@ -321,24 +328,34 @@
     });
   }
 
-  /* ================= 版本記錄 (DEF-033, owner ruling 2026-09-24) =================
+  /* ================= 版本記錄 (DEF-033 strategies · DEF-057 system / news) =================
      Every save keeps a version; the owner can read any version, see what changed, and
      restore ANY version. The history, the zh source labels and the line diff all come from
-     the server (GET /api/strategy-prompt-versions?strategy_id= · …/{id}/diff); this modal
-     renders them and computes nothing. 回復此版 = POST …/{id}/restore, which the server
-     records as a NEW version (history is never rewritten), so a restore can itself be
-     undone from the same list. */
+     the server; this modal renders them and computes nothing. 回復此版 = POST …/{id}/restore,
+     which the server records as a NEW version (history is never rewritten), so a restore can
+     itself be undone from the same list.
+
+     ONE modal for every versioned prompt (DEF-057 generalised DEF-033's): `o` is the
+     prompt's adapter —
+       title / applies   the modal title and the 「…下次執行即使用回復後的內文」 sentence
+       writeDoors        the prompt's other write doors, for the note (同步官方 / 重置回官方版)
+       dirtyWhere        where unsaved edits live (此卡片 / 此提示詞), for the confirm text
+       list() / one(id) / diff(id, against) / restore(id)
+                         the prompt's own version routes (GET history · GET one · GET diff ·
+                         POST restore) — each adapter spells its paths out in full, so the
+                         route-caller contract test can see every call it makes
+       liveText()        the text in the prompt's textarea NOW (I-12: a reply that lands
+                         after the owner kept typing never overwrites the typing)
+       storedText()      the body as last saved
+       applyRestore(resp, bodyAtConfirm) → { name, version } after a successful restore */
   const tplMetaText = (t) =>
     (t.current_version != null ? 'v' + t.current_version + '・' : '') +
     '更新 ' + f.date(t.updated_at);
 
-  /* `t._live` = { card, ta, meta } of the card instance currently in the list: a restore
-     re-renders the card, so the modal must never hold on to the textarea it opened from. */
-  function versionHistory(t) {
-    const liveTa = () => t._live.ta;
-    openModal('版本記錄 — ' + t.name, (body) => {
+  function openVersionHistory(o) {
+    openModal('版本記錄 — ' + o.title, (body) => {
       body.appendChild(el('div', 'pv-note',
-        '每次儲存、同步官方或回復都會留下一版。回復＝以選定版本的內文另存為新版本，舊版本不會被改寫，隨時可再回復。'));
+        '每次儲存、' + o.writeDoors + '或回復都會留下一版。回復＝以選定版本的內文另存為新版本，舊版本不會被改寫，隨時可再回復。'));
       const listBox = el('div', 'ver-list');
       /* The restore confirmation lives INSIDE this modal, not in confirmDialog: that dialog
          stacks at z 72 and this settings modal at 80 (styles.css overlay ladder), so a
@@ -351,11 +368,11 @@
       body.appendChild(confirmBox);
       body.appendChild(diffBox);
 
-      /* 檢視: one version's full text (GET /api/strategy-prompt-versions/{id}). */
+      /* 檢視: one version's full text (GET base + id). */
       const showBody = async (v) => {
         diffBox.replaceChildren(el('div', 'pv-testing', '⏳ 載入內文…'));
         try {
-          const full = await api.get('/api/strategy-prompt-versions/' + v.id);
+          const full = await o.one(v.id);
           diffBox.replaceChildren();
           diffBox.appendChild(el('div', 'pv-sec-label ver-diff-head',
             'v' + full.version + ' 內文（' + f.datetime(full.saved_at) + '・' + full.source_label + '）'));
@@ -369,8 +386,7 @@
       const showDiff = async (v, against) => {
         diffBox.replaceChildren(el('div', 'pv-testing', '⏳ 載入差異…'));
         try {
-          const d = await api.get('/api/strategy-prompt-versions/' + v.id + '/diff',
-            { against: against });
+          const d = await o.diff(v.id, against);
           diffBox.replaceChildren();
           const head = el('div', 'pv-sec-label ver-diff-head');
           const fromTxt = d.from ? 'v' + d.from.version : '（無前一版）';
@@ -390,13 +406,13 @@
       };
 
       const restore = (v) => {
-        const dirty = liveTa().value !== t.body;
+        const dirty = o.liveText() !== o.storedText();
         showDiff(v, 'current');   // what the restore changes, on screen while deciding
         confirmBox.replaceChildren();
         confirmBox.appendChild(el('div', 'ver-confirm-text',
           '回復至 v' + v.version + '：將以 v' + v.version + ' 的內文另存為新版本；目前內容仍保留在版本記錄中，可再回復。' +
-          '引用此策略的洞察任務下次執行即使用回復後的內文。' +
-          (dirty ? '此卡片有尚未儲存的修改，回復後將以 v' + v.version + ' 取代。' : '')));
+          o.applies +
+          (dirty ? o.dirtyWhere + '有尚未儲存的修改，回復後將以 v' + v.version + ' 取代。' : '')));
         const acts = el('div', 'ver-confirm-acts');
         const cancel = el('button', 'btn btn-sm', '取消');
         cancel.type = 'button';
@@ -412,35 +428,20 @@
 
       const doRestore = async (v, okBtn) => {
         okBtn.disabled = true;
-        const bodyAtConfirm = liveTa().value;   // I-12: the text the restore replaces
+        const bodyAtConfirm = o.liveText();   // I-12: the text the restore replaces
         let resp;
         try {
-          resp = await api.post('/api/strategy-prompt-versions/' + v.id + '/restore');
+          resp = await o.restore(v.id);
         } catch (err) {
           okBtn.disabled = false;
           _toast((err && err.message) || '回復失敗', 'fail', err && err.code);
           return;
         }
         confirmBox.hidden = true;
-        const sp = (resp && resp.strategy) || {};
-        t.body = sp.body != null ? sp.body : t.body;
-        t.updated_at = sp.updated_at || t.updated_at;
-        t.current_version = resp && resp.current_version != null
-          ? resp.current_version : t.current_version;
-        /* a reply that lands after the owner kept typing never overwrites the typing: the
-           card is re-rendered only when the restored text actually went in. */
-        if (window.pdField.writeIfUntouched(liveTa(), bodyAtConfirm, t.body)) {
-          const old = t._live.card;
-          const wasOpen = old.classList.contains('open');
-          const fresh = addStrategyCard(t);   // re-checks the scope badge + 同步官方
-          old.replaceWith(fresh);
-          fresh.classList.toggle('open', wasOpen);
-        } else {
-          t._live.meta.textContent = tplMetaText(t);
-        }
+        const done = o.applyRestore(resp || {}, bodyAtConfirm);
         if (resp && resp.changed) {
           _toast('已回復至 v' + v.version, 'ok',
-            t.name + '：另存為 v' + t.current_version + '，下次執行生效');
+            done.name + '：另存為 v' + done.version + '，下次執行生效');
         } else {
           _toast('內容與目前相同', 'ok', 'v' + v.version + ' 與目前內文一致，未產生新版本');
         }
@@ -452,7 +453,7 @@
         listBox.replaceChildren(el('div', 'pv-testing', '⏳ 載入版本記錄…'));
         let resp;
         try {
-          resp = await api.get('/api/strategy-prompt-versions', { strategy_id: t.id });
+          resp = await o.list();
         } catch (err) {
           listBox.replaceChildren(el('div', 'pv-note', '版本記錄載入失敗：' + ((err && err.message) || '')));
           _toast((err && err.message) || '版本記錄載入失敗', 'fail', err && err.code);
@@ -494,6 +495,44 @@
       };
       load();
     }, true);
+  }
+
+  /* The strategy adapter (DEF-033). `t._live` = { card, ta, meta } of the card instance
+     currently in the list: a restore re-renders the card, so the modal must never hold on
+     to the textarea it opened from. */
+  function versionHistory(t) {
+    openVersionHistory({
+      title: t.name,
+      writeDoors: '同步官方',
+      applies: '引用此策略的洞察任務下次執行即使用回復後的內文。',
+      dirtyWhere: '此卡片',
+      list: () => api.get('/api/strategy-prompt-versions', { strategy_id: t.id }),
+      one: (id) => api.get('/api/strategy-prompt-versions/' + id),
+      diff: (id, against) => api.get('/api/strategy-prompt-versions/' + id + '/diff',
+        { against: against }),
+      restore: (id) => api.post('/api/strategy-prompt-versions/' + id + '/restore'),
+      liveText: () => t._live.ta.value,
+      storedText: () => t.body,
+      applyRestore: (resp, bodyAtConfirm) => {
+        const sp = resp.strategy || {};
+        t.body = sp.body != null ? sp.body : t.body;
+        t.updated_at = sp.updated_at || t.updated_at;
+        t.current_version = resp.current_version != null
+          ? resp.current_version : t.current_version;
+        /* a reply that lands after the owner kept typing never overwrites the typing: the
+           card is re-rendered only when the restored text actually went in. */
+        if (window.pdField.writeIfUntouched(t._live.ta, bodyAtConfirm, t.body)) {
+          const old = t._live.card;
+          const wasOpen = old.classList.contains('open');
+          const fresh = addStrategyCard(t);   // re-checks the scope badge + 同步官方
+          old.replaceWith(fresh);
+          fresh.classList.toggle('open', wasOpen);
+        } else {
+          t._live.meta.textContent = tplMetaText(t);
+        }
+        return { name: t.name, version: t.current_version };
+      }
+    });
   }
 
   function addStrategyCard(t) {
@@ -708,9 +747,12 @@
       const sp = await api.put('/api/system-prompt', { body: body });
       D.system_prompt = (sp && sp.body) || body;
       D.system_updated_at = (sp && sp.updated_at) || D.system_updated_at;
-      $('#sys-prompt-meta').textContent =
-        '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') + '・套用於所有策略提示詞之前';
-      _toast('已儲存', 'ok', '系統提示詞已更新，下次 AI 呼叫生效');
+      const before = D.system_version;
+      D.system_version = sp && sp.current_version != null ? sp.current_version : D.system_version;
+      sysMetaSet();
+      _toast('已儲存', 'ok', D.system_version != null && D.system_version !== before
+        ? '系統提示詞已存為 v' + D.system_version + '，下次 AI 呼叫生效'
+        : '系統提示詞已更新，下次 AI 呼叫生效');
     } catch (err) {
       _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
     } finally {
@@ -723,7 +765,7 @@
   if (sysReset) sysReset.addEventListener('click', () => {
     window.confirmDialog({
       title: '重置系統提示詞',
-      body: '將以官方模板庫的最新版本覆蓋目前內容；自訂修改將遺失（策略提示詞不受影響）。',
+      body: '將以官方模板庫的最新版本覆蓋目前內容（策略提示詞不受影響）。目前內容會保留在「版本記錄」中，可隨時回復。',
       confirmLabel: '重置回官方版', danger: true,
       onConfirm: async () => {
         try {
@@ -731,10 +773,9 @@
           const sp = await api.post('/api/system-prompt/reset');
           D.system_prompt = (sp && sp.body) || '';
           D.system_updated_at = (sp && sp.updated_at) || '';
+          D.system_version = sp && sp.current_version != null ? sp.current_version : D.system_version;
           window.pdField.writeIfUntouched($('#sys-prompt'), sysAtConfirm, D.system_prompt);
-          $('#sys-prompt-meta').textContent =
-            '更新 ' + (D.system_updated_at ? f.date(D.system_updated_at) : '—') +
-            '・套用於所有策略提示詞之前';
+          sysMetaSet();
           _toast('已重置', 'ok', '系統提示詞已回到官方版');
         } catch (err) {
           _toast((err && err.message) || '重置失敗', 'fail', err && err.code);
@@ -742,6 +783,33 @@
       }
     });
   });
+
+  /* 版本記錄 (DEF-057, owner ruling 2026-09-24): the system prompt's history, in the same
+     modal as a strategy's. A restore writes the body back into the textarea only when the
+     owner has not typed since confirming (I-12). */
+  const sysVersions = document.getElementById('sys-versions');
+  if (sysVersions) sysVersions.addEventListener('click', () => openVersionHistory({
+    title: '系統提示詞',
+    writeDoors: '重置回官方版',
+    applies: '所有 AI 呼叫下次即使用回復後的內文。',
+    dirtyWhere: '系統提示詞欄位',
+    list: () => api.get('/api/system-prompt/versions'),
+    one: (id) => api.get('/api/system-prompt/versions/' + id),
+    diff: (id, against) => api.get('/api/system-prompt/versions/' + id + '/diff',
+      { against: against }),
+    restore: (id) => api.post('/api/system-prompt/versions/' + id + '/restore'),
+    liveText: () => $('#sys-prompt').value,
+    storedText: () => D.system_prompt,
+    applyRestore: (resp, bodyAtConfirm) => {
+      const sp = resp.prompt || {};
+      D.system_prompt = sp.body != null ? sp.body : D.system_prompt;
+      D.system_updated_at = sp.updated_at || D.system_updated_at;
+      D.system_version = resp.current_version != null ? resp.current_version : D.system_version;
+      window.pdField.writeIfUntouched($('#sys-prompt'), bodyAtConfirm, D.system_prompt);
+      sysMetaSet();
+      return { name: '系統提示詞', version: D.system_version };
+    }
+  }));
 
   /* ================= 新聞整理提示詞 (GET/PUT /api/news-prompt · POST reset) =================
      spec docs/spec/2026-09-10-news-prompt-settings.html (owner D1(a)/D2(b)/D3(a)/D4(a)):
@@ -758,13 +826,15 @@
     const newsBadge = $('#news-prompt-badge'), newsMeta = $('#news-prompt-meta');
     const newsSchema = $('#news-prompt-schema');
     const newsSave = $('#news-save'), newsReset = $('#news-reset');
-    const N = { body: '', updated_at: '', official_version: '', is_official: true };
+    const N = { body: '', updated_at: '', official_version: '', is_official: true,
+      current_version: null };
     const newsBadgeSet = (text, official) => {
       newsBadge.textContent = text;
       newsBadge.className = 'badge prompt-badge ' + (official ? 'is-official' : 'is-custom');
     };
     const newsMetaSet = () => {
-      newsMeta.textContent = '更新 ' + (N.updated_at ? f.date(N.updated_at) : '—') +
+      newsMeta.textContent = (N.current_version != null ? 'v' + N.current_version + '・' : '') +
+        '更新 ' + (N.updated_at ? f.date(N.updated_at) : '—') +
         '・官方 ' + (N.official_version || '—') + '・每日 06:00 新聞管線與手動抓取共用';
     };
     const newsSchemaCheck = (text) => {
@@ -783,6 +853,7 @@
       N.updated_at = (wire && wire.updated_at) || '';
       N.official_version = (wire && wire.official_version) || '';
       N.is_official = !!(wire && wire.is_official);
+      N.current_version = wire && wire.current_version != null ? wire.current_version : null;
       window.pdField.writeIfUntouched(newsTa, sent === undefined ? '' : sent, N.body);   // I-12
       newsBadgeSet(N.is_official ? '與官方版相同' : '已自訂', N.is_official);
       newsMetaSet();
@@ -814,10 +885,29 @@
         restore();
       }
     });
+    /* 版本記錄 (DEF-057): the news-organizer prompt's history, same modal. */
+    const newsVersions = $('#news-versions');
+    if (newsVersions) newsVersions.addEventListener('click', () => openVersionHistory({
+      title: '新聞整理提示詞',
+      writeDoors: '重置回官方版',
+      applies: '下次新聞管線執行即使用回復後的內文。',
+      dirtyWhere: '新聞整理提示詞欄位',
+      list: () => api.get('/api/news-prompt/versions'),
+      one: (id) => api.get('/api/news-prompt/versions/' + id),
+      diff: (id, against) => api.get('/api/news-prompt/versions/' + id + '/diff',
+        { against: against }),
+      restore: (id) => api.post('/api/news-prompt/versions/' + id + '/restore'),
+      liveText: () => newsTa.value,
+      storedText: () => N.body,
+      applyRestore: (resp, bodyAtConfirm) => {
+        if (resp.prompt) newsApply(resp.prompt, bodyAtConfirm);
+        return { name: '新聞整理提示詞', version: N.current_version };
+      }
+    }));
     newsReset.addEventListener('click', () => {
       window.confirmDialog({
         title: '重置新聞整理提示詞',
-        body: '將以官方模板庫的最新版本覆蓋目前內容；自訂修改將遺失（系統提示詞與策略提示詞不受影響）。',
+        body: '將以官方模板庫的最新版本覆蓋目前內容（系統提示詞與策略提示詞不受影響）。目前內容會保留在「版本記錄」中，可隨時回復。',
         confirmLabel: '重置回官方版', danger: true,
         onConfirm: async () => {
           try {
@@ -972,7 +1062,7 @@
       wrap.appendChild(sec);
     });
     wrap.appendChild(el('div', 'cmp-note',
-      '所有變數由計算核心即時組裝注入（LLM 不自行計算）；「單一標的」範圍變數僅在 per_symbol 洞察類型可用。外部資料（FinMind 籌碼基本面、市場情緒）抓取後以快照存入資料庫，供回測重現當時輸入。'));
+      '所有變數由計算核心即時組裝注入（LLM 不自行計算）；「單一標的」範圍變數僅能用於範圍為「單一標的」的洞察任務。外部資料（FinMind 籌碼基本面、市場情緒）抓取後以快照存入資料庫，供回測重現當時輸入。'));
     panel.appendChild(wrap);
     mount(panel);
   })();

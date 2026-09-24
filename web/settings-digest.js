@@ -80,7 +80,11 @@
     var job = jobsById[jobId] || {};
     var row = el('div', 'digest-cfg-row');
 
-    var title = el('div', 'digest-cfg-title', kind === 'daily' ? '每日收盤摘要' : '每週行動清單');
+    /* DEF-051: the edition's name is also what its toasts say — never the job id
+       (`digest_daily`, which shell.js's DIAG_CODE filter even hid, leaving 「已啟用」 with
+       no subject) and never the raw cron the owner did not type (they picked a time). */
+    var label = kind === 'daily' ? '每日收盤摘要' : '每週行動清單';
+    var title = el('div', 'digest-cfg-title', label);
     row.appendChild(title);
 
     /* enable toggle -> PUT {enabled} */
@@ -92,7 +96,7 @@
       var next = !tog.classList.contains('on');
       tog.classList.toggle('on', next);  // optimistic
       putJob(jobId, { enabled: next }).then(function () {
-        toast(next ? '已啟用' : '已停用', 'ok', jobId);
+        toast(next ? '已啟用' : '已停用', 'ok', label);
       }).catch(function (err) {
         tog.classList.toggle('on', !next);  // revert
         toast((err && err.message) || '更新失敗', 'fail', err && err.code);
@@ -132,7 +136,8 @@
           ? (t.m + ' ' + t.h + ' * * mon-fri')
           : (t.m + ' ' + t.h + ' * * ' + DOW_NAMES[Number(dowSel.value)]);
         putJob(jobId, { cron: cron }).then(function () {
-          toast('發送時間已更新', 'ok', jobId + ' · ' + cron);
+          toast('發送時間已更新', 'ok', label + ' · ' +
+            (kind === 'daily' ? '平日 ' : DOW_ZH[Number(dowSel.value)] + ' ') + timeInput.value);
         }).catch(function (err) {
           timeInput.classList.add('field-error');
           toast((err && err.message) || '時間更新失敗', 'fail', err && err.code);
@@ -150,7 +155,7 @@
       runBtn.disabled = true;
       runBtn.textContent = '產生中…';
       api.post('/api/digest/run', { kind: kind }).then(function (resp) {
-        toast('已開始產生摘要', 'ok', jobId + ' #' + ((resp && resp.run_id) || '?'));
+        toast('已開始產生摘要', 'ok', label + '（#' + ((resp && resp.run_id) || '?') + '）');
       }).catch(function (err) {
         if (err && err.status === 403) toast('示範站不開放摘要設定，請於正式站操作', 'fail', 'forbidden');
         else toast((err && err.message) || '產生失敗', 'fail', err && err.code);

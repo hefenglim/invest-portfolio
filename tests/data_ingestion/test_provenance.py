@@ -25,6 +25,7 @@ from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.preview import BatchContext, commit_preview
 from portfolio_dash.data_ingestion.provenance import (
     TABLE_BY_KIND,
+    BatchRows,
     delete_batch,
     existing_hashes,
     open_batch,
@@ -185,6 +186,12 @@ def _NO_ACTIONS(rows: list[StoredCorporateAction]) -> None:  # noqa: N802 - a co
     raise AssertionError(f"unexpected corporate-action rows: {rows}")
 
 
+def _ALLOW(rows: BatchRows) -> bool:  # noqa: N802 - a constant seam
+    """The replay guard lives in ``api/`` and is exercised by the contract tests (DEF-049);
+    these tests are about provenance, so the guard admits every undo."""
+    return True
+
+
 def test_deleting_a_batch_removes_exactly_its_rows(conn: sqlite3.Connection) -> None:
     """The half that makes an import safe to ATTEMPT on real data: a bad batch is undone
     exactly, instead of by restoring a backup and losing everything entered since."""
@@ -195,7 +202,7 @@ def test_deleting_a_batch_removes_exactly_its_rows(conn: sqlite3.Connection) -> 
     batch_id, written, _ = _commit(conn, _HEADER + _DEPOSIT + _DEPOSIT)
     assert len(list_cash_movements(conn)) == 3
 
-    removed = delete_batch(conn, batch_id, delete_actions=_NO_ACTIONS)
+    removed = delete_batch(conn, batch_id, delete_actions=_NO_ACTIONS, guard=_ALLOW)
     assert removed == len(written)
     remaining = list_cash_movements(conn)
     assert len(remaining) == 1
@@ -209,6 +216,6 @@ def test_deleting_a_batch_lets_the_same_file_import_again(
     """Undo must be complete, not merely visible: if the hashes survived the delete, the
     re-import would report every row as a duplicate and the ledger would stay empty."""
     batch_id, _, _ = _commit(conn, _HEADER + _DEPOSIT)
-    delete_batch(conn, batch_id, delete_actions=_NO_ACTIONS)
+    delete_batch(conn, batch_id, delete_actions=_NO_ACTIONS, guard=_ALLOW)
     _, written, dupes = _commit(conn, _HEADER + _DEPOSIT)
     assert len(written) == 1 and dupes == []

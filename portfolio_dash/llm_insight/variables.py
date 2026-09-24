@@ -127,7 +127,7 @@ REGISTRY: tuple[VarSpec, ...] = (
     ),
     VarSpec(
         "symbol_detail_json", "單一標的全檔", "position", "per_symbol", True,
-        "per_symbol 範圍專用：該標的部位、成本、配息史、交易事件、已實現記錄；"
+        "單一標的範圍專用：該標的部位、成本、配息史、交易事件、已實現記錄；"
         "跨帳戶持有時另附 combined（全部帳戶合計）",
         '{"symbol":"2330","shares":1000,"adjusted_avg":"495.00","dividend_events":[…],'
         '"trade_events":[…],"combined":{"account_count":2,"shares":"40",…}}',

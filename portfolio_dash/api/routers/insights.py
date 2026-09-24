@@ -710,7 +710,7 @@ def mount_schedule(
         return JSONResponse(
             status_code=400,
             content=error_body(
-                "validation_error", "on_alert 洞察組合由預警事件觸發，不可排程",
+                "validation_error", "預警觸發任務由預警事件啟動，不可排程",
                 field="cron",
             ),
         )
@@ -1175,6 +1175,18 @@ def _prompt_versions_wire(rec: istore.InsightRecord) -> list[dict[str, Any]] | N
     return [r.model_dump() for r in rec.strategy_versions]
 
 
+def _system_prompt_wire(rec: istore.InsightRecord) -> dict[str, Any] | None:
+    """DEF-057: the system-prompt layer the card was generated with.
+
+    ``None`` = the card predates the record; ``{"used": false, "version": null}`` = no system
+    layer was assembled (the task's 套用系統提示詞 is off, or the zero-LLM anomaly card);
+    otherwise ``used`` true and the version of the body that was (null = 版本不明).
+    """
+    if rec.system_prompt_ref is None:
+        return None
+    return rec.system_prompt_ref.model_dump()
+
+
 def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
     pred = rec.card.prediction
     return {
@@ -1217,6 +1229,7 @@ def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, 
         "created_at": rec.created_at,
         "trigger": _trigger_wire(rec.trigger),
         "prompt_versions": _prompt_versions_wire(rec),
+        "system_prompt_version": _system_prompt_wire(rec),
     }
 
 

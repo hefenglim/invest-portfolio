@@ -1007,28 +1007,21 @@ def facts_through(facts: Facts, day: date) -> Facts:
     )
 
 
-def facts_received_by(facts: Facts, day: date) -> Facts:
-    """The ledger a VALUATION as at *day* reads: every dividend not yet RECEIVED by *day* is
-    left out, every other ledger is untouched (DEF-016, owner ruling 2026-09-24).
+def facts_valued_as_of(facts: Facts, day: date) -> Facts:
+    """The ledger a VALUATION as at *day* reads: every row counts from its OWN date (DEF-016
+    for dividends, widened to trades, openings, FX conversions, cash movements and corporate
+    actions by DEF-056 — owner rulings 2026-09-24).
 
-    Re-derived from the ruling, never read off the app (the independence rule): a confirmed
-    dividend is stored on its PAYMENT date, which can be in the future, and it counts from
-    that day on — in the adjusted cost (總報酬), the cash pool and the XIRR flows alike. Cut on
-    :attr:`DivFact.effective`, like :func:`facts_through`: a 配股 with a known ex-date is owned
-    from the ex-date (R6), cash / DRIP / NET from the payment date.
-
-    Dividends ONLY, as the ruling is: a future-dated TRADE is an open owner decision (R3
-    report K) — when it is ruled, this becomes :func:`facts_through`.
+    Re-derived from the rulings, never read off the app (the independence rule): a row dated
+    after *day* has not happened yet — a confirmed dividend stored on its future PAYMENT
+    date, a trade / opening / conversion entered ahead of its date — so it is in neither the
+    holdings, the adjusted cost (總報酬), the cash pools, the FX pools nor the XIRR flows. That
+    is exactly :func:`facts_through`: the valuation as at *day* IS the world at the close of
+    *day*, so the oracle keeps ONE cut and this name says which question it answers.
+    Dividends cut on :attr:`DivFact.effective` (a 配股 with a known ex-date is owned from
+    the ex-date, R6; cash / DRIP / NET from the payment date).
     """
-    return Facts(
-        txs=facts.txs,
-        divs=[d for d in facts.divs if d.effective <= day],
-        fxs=facts.fxs,
-        openings=facts.openings,
-        cash=facts.cash,
-        instruments=facts.instruments,
-        actions=facts.actions,
-    )
+    return facts_through(facts, day)
 
 
 def trading_financing_cost(facts: Facts, reporting: str, fx_on) -> Decimal:

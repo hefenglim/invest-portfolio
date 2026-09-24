@@ -42,10 +42,15 @@ def organize(
     article_text: str,
     prompt: str,
     *,
+    prompt_version: int | None,
     conn: sqlite3.Connection,
     now: datetime,
 ) -> OrganizedNews:
     """Organize one fetched article into an :class:`OrganizedNews` row.
+
+    ``prompt_version`` (DEF-057) is the news-organizer prompt version *prompt* is — the row
+    records it. Required on purpose: a forgotten argument must be a type error, not a row that
+    silently reads 「未記錄」.
 
     Merges the model output with the discovery fallbacks (title/date/source/lang from the
     :class:`NewsLink`) so a blank field never produces a hollow row. Raises
@@ -73,6 +78,7 @@ def organize(
         tokens_in=completion.tokens_in,
         tokens_out=completion.tokens_out,
         model=completion.model,
+        prompt_version=prompt_version,
         fetched_at=stamp,
         organized_at=stamp,
     )

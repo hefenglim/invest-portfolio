@@ -156,7 +156,7 @@ def _assemble(f: PipelineFacts) -> NodeState:
             sub="停用段跳過",
         )
     if f.r1_mismatch:
-        return NodeState(lv="warn", text="範圍不相容", sub="既有模板含 per_symbol 變數")
+        return NodeState(lv="warn", text="範圍不相容", sub="既有模板含「單一標的」變數")
     if f.unapplied_calibration:
         return NodeState(lv="info", text="有未套用校正版本", sub="可手動套用")
     return NodeState(lv="ok", text=f"{f.live_template_count} 模板啟用")

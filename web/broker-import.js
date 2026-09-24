@@ -281,33 +281,56 @@
         + (b.kind === 'corporate_actions'
           ? '換股時搬到新代號的目標價與目標權重，若之後沒有再改動，會一併移回原代號。' : ''),
       confirmLabel: '復原', danger: true,
-      onConfirm: async () => {
-        try {
-          const r = await api.del('/api/import/batches/' + b.id);
-          if (window.toast) {
-            /* DEF-017: a batch whose rows were all deleted on their ledger tabs answers
-               {deleted: 0, message} — say that, not 「刪除 0 筆」 under 已復原. */
-            if (r && r.deleted === 0) window.toast('沒有可復原的列', 'warn', r.message || '');
-            else window.toast('已復原', 'ok', '刪除 ' + r.deleted + ' 筆');
-            undoRestoreNotes(r).forEach((n) => window.toast(n.title, 'warn', n.detail));
-          }
-          await loadBatches();
-          /* F-04: `pdAfterLedgerChange` was never defined ANYWHERE — the
-             `if (window.…)` guard turned a wrong name into a silent no-op, so an undo
-             toasted 「刪除 3 筆」 over a table still listing all three. The seam ledger.js
-             actually exposes is `pdLedgerRefresh` (ledger.js:788), which input.js:1996 and
-             corp-action-form.js:712 both use correctly. */
-          if (window.pdLedgerRefresh) {
-            try { await window.pdLedgerRefresh(); } catch (e) { /* degrade silently */ }
-          }
-        } catch (err) {
-          /* 422 batch_not_undoable carries its own sentence (the server names the tab to
-             use instead); the list is re-read so a stale 復原 does not stay offered. */
-          if (window.toast) window.toast((err && err.message) || '復原失敗', 'fail', err && err.code);
-          if (err && err.code === 'batch_not_undoable') await loadBatches();
-        }
-      },
+      onConfirm: () => runUndo(b, {}),
     });
+  }
+
+  /* DEF-049 (2026-09-25): the undo runs the SAME replay guard as 刪除 on a ledger row, and
+     answers with the same ack-able 422s — `oversell` (a later sell this batch's rows covered
+     would become 賣超; the server names EACH one: account, date, symbol, shares sold vs
+     held, and that confirming discards its cost basis) and `negative_cash` (a pool this
+     batch's cash / FX rows funded would dip below zero). Both open the ledger tab's own
+     danger dialog — ledger.js `ackConfirm`, shared as window.pdAckConfirm, so the title, the
+     body (the server's sentence) and 「我了解，仍要…」 are ONE implementation — and 確認
+     re-sends carrying EVERY ack given so far (a batch can need both, one after the other).
+     取消 sends nothing: the ledger is exactly as it was. `orphan_correction` has no ack by
+     design (a dividend would lose its position): its reason is toasted, nothing is offered.
+     Without ledger.js on the page the 422 degrades to that same toast — nothing deleted. */
+  async function runUndo(b, acks) {
+    const qs = Object.keys(acks).map((k) => k + '=true').join('&');
+    let r;
+    try {
+      r = await api.del('/api/import/batches/' + b.id + (qs ? '?' + qs : ''));
+    } catch (err) {
+      const retry = (param) => runUndo(b, Object.assign({}, acks, { [param]: true }));
+      if (window.pdAckConfirm && window.pdAckConfirm(err, '復原', retry)) return;
+      /* 422 batch_not_undoable carries its own sentence (the server names the tab to
+         use instead); the list is re-read so a stale 復原 does not stay offered. */
+      if (window.toast) window.toast((err && err.message) || '復原失敗', 'fail', err && err.code);
+      if (err && err.code === 'batch_not_undoable') await loadBatches();
+      return;
+    }
+    if (window.toast) {
+      /* DEF-017: a batch whose rows were all deleted on their ledger tabs answers
+         {deleted: 0, message} — say that, not 「刪除 0 筆」 under 已復原. */
+      if (r && r.deleted === 0) window.toast('沒有可復原的列', 'warn', r.message || '');
+      else window.toast('已復原', 'ok', '刪除 ' + r.deleted + ' 筆');
+      if (r && r.oversell_acknowledged) {
+        window.toast('賣超部位待釐清', 'warn',
+          '受影響的賣出已標示賣超、成本基礎已捨棄（待釐清）；在該賣出日之前補上對應的買進或期初，'
+          + '統計會由帳本重建');
+      }
+      undoRestoreNotes(r).forEach((n) => window.toast(n.title, 'warn', n.detail));
+    }
+    await loadBatches();
+    /* F-04: `pdAfterLedgerChange` was never defined ANYWHERE — the
+       `if (window.…)` guard turned a wrong name into a silent no-op, so an undo
+       toasted 「刪除 3 筆」 over a table still listing all three. The seam ledger.js
+       actually exposes is `pdLedgerRefresh` (ledger.js:788), which input.js:1996 and
+       corp-action-form.js:712 both use correctly. */
+    if (window.pdLedgerRefresh) {
+      try { await window.pdLedgerRefresh(); } catch (e) { /* degrade silently */ }
+    }
   }
 
   /* I-3/I-8: an undone corporate-action batch reports, per event, whether the band and the

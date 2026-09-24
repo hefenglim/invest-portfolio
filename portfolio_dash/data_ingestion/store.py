@@ -3,6 +3,9 @@
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -49,6 +52,27 @@ def _cap_price(v: Decimal) -> Decimal:
 # append-only. No UI viewer this wave — db-stats visibility is enough.
 
 
+#: DEF-049 (2026-09-25): WHICH door removed the row, when it was not the row's own ledger
+#: tab. ``None`` (the default) is every single-row correction, byte-identical to before; a
+#: bulk door sets it for the duration of its transaction with :func:`audit_source`, and every
+#: audit row written inside — including the linked fee a corporate action takes with it — is
+#: tagged. A context variable rather than a parameter threaded through each ``delete_*``,
+#: because the batch undo reaches ``delete_corporate_action`` through the ledger tab's own
+#: ``_delete_actions`` (I-3), and a label that has to be remembered at every hop is the one a
+#: future hop forgets.
+_AUDIT_SOURCE: ContextVar[str | None] = ContextVar("ledger_audit_source", default=None)
+
+
+@contextmanager
+def audit_source(label: str) -> Iterator[None]:
+    """Tag every ``ledger_audit`` row written inside the block with *label* (DEF-049)."""
+    token = _AUDIT_SOURCE.set(label)
+    try:
+        yield
+    finally:
+        _AUDIT_SOURCE.reset(token)
+
+
 def _write_audit(
     conn: sqlite3.Connection,
     table_name: str,
@@ -56,18 +80,37 @@ def _write_audit(
     action: str,
     before: dict[str, object] | None,
 ) -> None:
-    """Record the pre-mutation snapshot of one ledger row (idempotent-agnostic append)."""
+    """Record the pre-mutation snapshot of one ledger row (idempotent-agnostic append).
+
+    ``source`` (DEF-049) is written only when a bulk door set one via :func:`audit_source`;
+    a single-row correction writes the same five columns it always has.
+    """
     if before is None:
         return
+    source = _AUDIT_SOURCE.get()
+    if source is None:
+        conn.execute(
+            "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                table_name,
+                row_id,
+                action,
+                json.dumps(before, ensure_ascii=False, default=str),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        return
     conn.execute(
-        "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at) "
-        "VALUES (?,?,?,?,?)",
+        "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at, source) "
+        "VALUES (?,?,?,?,?,?)",
         (
             table_name,
             row_id,
             action,
             json.dumps(before, ensure_ascii=False, default=str),
             datetime.now(UTC).isoformat(),
+            source,
         ),
     )
 
@@ -257,6 +300,74 @@ def weight_move_from_json(text: str | None) -> MovedWeight | None:
                            weight=Decimal(str(raw["weight"])))
     except (KeyError, ValueError, TypeError, ArithmeticError):
         return None
+
+
+class ChildSeedRecord(BaseModel):
+    """What a SPINOFF's save wrote into ``prices`` for its child (DEF-040 R4) — recorded on
+    the row (``corporate_actions.child_seed_json``) so the delete takes back exactly that.
+
+    ``close`` is ``None`` when the save wrote NO seed: no price was typed, or the
+    ``(child, day)`` slot already held a row (a provider's quote, or a seed nobody owns) and
+    the seed writer refused to overwrite it. Otherwise ``symbol`` / ``as_of`` / ``close`` are
+    the slot and the typed value. A NULL column (every row saved before this record existed,
+    and every non-SPINOFF row) means "unknown": the delete then falls back to the seed
+    signature alone (R3's rule).
+
+    Why a record and not the signature alone: the signature (``source`` + action-day stamp)
+    says "a seed", not "THIS action's seed". An orphan seed — left by a pre-R3 delete, or by
+    a pre-R4 date edit — carries the same signature, so a later SPINOFF on that day would
+    have "taken back" a row that existed before it was saved.
+    """
+
+    close: Decimal | None = None
+    symbol: str | None = None
+    as_of: date | None = None
+
+
+def child_seed_to_json(record: ChildSeedRecord) -> str:
+    """Canonical TEXT for ``corporate_actions.child_seed_json`` (close via :func:`to_db`)."""
+    return json.dumps({
+        "close": to_db(record.close) if record.close is not None else None,
+        "symbol": record.symbol,
+        "as_of": record.as_of.isoformat() if record.as_of is not None else None,
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def child_seed_from_json(text: str | None) -> ChildSeedRecord | None:
+    """The inverse of :func:`child_seed_to_json`; ``None`` (= unknown, R3's rule) for NULL,
+    blank or unreadable text — a hand-edited column never raises into a ledger read."""
+    if not text:
+        return None
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        close = raw.get("close")
+        as_of = raw.get("as_of")
+        symbol = raw.get("symbol")
+        return ChildSeedRecord(
+            close=Decimal(str(close)) if close is not None else None,
+            symbol=str(symbol) if symbol is not None else None,
+            as_of=date.fromisoformat(str(as_of)) if as_of is not None else None)
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+
+
+def set_child_seed(
+    conn: sqlite3.Connection, action_ids: list[int], record: ChildSeedRecord,
+    *, commit: bool = True,
+) -> None:
+    """Re-record what the SPINOFF rows *action_ids* own in ``prices`` (DEF-060: an edit that
+    moves, removes or re-types the seed). Not audited on its own: it is a record of a price
+    side effect, and the edit that causes it already audited the row's before-image."""
+    conn.executemany(
+        "UPDATE corporate_actions SET child_seed_json=? WHERE id=?",
+        [(child_seed_to_json(record), i) for i in action_ids])
+    if commit:
+        conn.commit()
 
 
 class BandRestoreVerdict(BaseModel):
@@ -1165,6 +1276,10 @@ class StoredCorporateAction(BaseModel):
     # F-3: the target WEIGHT this EXCHANGE carried across (``weight_move_json``); ``None``
     # under the same three conditions as ``band_move``.
     weight_move: MovedWeight | None = None
+    # DEF-040 R4: what this SPINOFF's save wrote into ``prices`` for its child
+    # (``child_seed_json``). ``None`` = unknown (a row saved before the record existed, or a
+    # non-SPINOFF row) — the delete then falls back to the seed signature (R3's rule).
+    child_seed: ChildSeedRecord | None = None
 
 
 def insert_corporate_action(
@@ -1181,6 +1296,7 @@ def insert_corporate_action(
     note: str | None = None,
     band_move: MovedBand | None = None,
     weight_move: MovedWeight | None = None,
+    child_seed: ChildSeedRecord | None = None,
     commit: bool = True,
 ) -> int:
     """Insert a corporate_actions row and return its new primary-key id.
@@ -1190,11 +1306,19 @@ def insert_corporate_action(
     :func:`pending_band_move` promised) for this EXCHANGE — recorded on the row so the
     delete can offer the conditional reversal (DEF-021). ``weight_move`` is the same record
     for the target weight (F-3), read back by ``strategy.target_weights.restore_target_weight``.
+
+    ``child_seed`` (DEF-040 R4) is what the save wrote into ``prices`` for a SPINOFF's
+    child. A SPINOFF inserted WITHOUT one — the CSV / broker import doors, which take no
+    child price — records "wrote nothing" explicitly, so its delete (or batch undo) can never
+    take a seed some other save wrote. Every other kind stays NULL.
     """
+    if child_seed is None and kind is CorporateActionKind.SPINOFF:
+        child_seed = ChildSeedRecord()
     cur = conn.execute(
         """INSERT INTO corporate_actions (account_id, date, kind, from_symbol, to_symbol,
-               ratio_to, ratio_from, cost_carry, note, band_move_json, weight_move_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               ratio_to, ratio_from, cost_carry, note, band_move_json, weight_move_json,
+               child_seed_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             account_id,
             action_date.isoformat(),
@@ -1207,6 +1331,7 @@ def insert_corporate_action(
             note,
             band_move_to_json(band_move) if band_move is not None else None,
             weight_move_to_json(weight_move) if weight_move is not None else None,
+            child_seed_to_json(child_seed) if child_seed is not None else None,
         ),
     )
     if commit:
@@ -1237,8 +1362,8 @@ def list_corporate_actions(
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, ratio_from, "
-        f"cost_carry, note, band_move_json, weight_move_json FROM corporate_actions{where} "
-        f"ORDER BY date ASC, id ASC",
+        f"cost_carry, note, band_move_json, weight_move_json, child_seed_json "
+        f"FROM corporate_actions{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
     return [
@@ -1255,6 +1380,7 @@ def list_corporate_actions(
             note=r["note"],
             band_move=band_move_from_json(r["band_move_json"]),
             weight_move=weight_move_from_json(r["weight_move_json"]),
+            child_seed=child_seed_from_json(r["child_seed_json"]),
         )
         for r in rows
     ]
@@ -1272,7 +1398,8 @@ def get_corporate_action(
 
 _CA_CAPTURE = (
     "SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, ratio_from, "
-    "cost_carry, note, band_move_json, weight_move_json FROM corporate_actions WHERE id=?"
+    "cost_carry, note, band_move_json, weight_move_json, child_seed_json "
+    "FROM corporate_actions WHERE id=?"
 )
 
 
@@ -1499,11 +1626,16 @@ def update_transaction(
     return cur.rowcount > 0
 
 
-def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> bool:
+def delete_transaction(
+    conn: sqlite3.Connection, txn_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one trade, auditing its before-image. ``commit=False`` (DEF-049) hands the
+    transaction to a caller that deletes many rows as ONE undo (``provenance.delete_batch``)."""
     _write_audit(conn, "transactions", str(txn_id), "delete",
                  _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
     cur = conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
@@ -1547,11 +1679,15 @@ def update_dividend(
     return cur.rowcount > 0
 
 
-def delete_dividend(conn: sqlite3.Connection, div_id: int) -> bool:
+def delete_dividend(
+    conn: sqlite3.Connection, div_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one dividend, auditing its before-image (``commit`` as ``delete_transaction``)."""
     _write_audit(conn, "dividends", str(div_id), "delete",
                  _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
     cur = conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
@@ -1589,11 +1725,15 @@ def update_fx_conversion(
     return cur.rowcount > 0
 
 
-def delete_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> bool:
+def delete_fx_conversion(
+    conn: sqlite3.Connection, fx_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one conversion, auditing its before-image (``commit`` as ``delete_transaction``)."""
     _write_audit(conn, "fx_conversions", str(fx_id), "delete",
                  _capture(conn, "SELECT * FROM fx_conversions WHERE id=?", (fx_id,)))
     cur = conn.execute("DELETE FROM fx_conversions WHERE id=?", (fx_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 

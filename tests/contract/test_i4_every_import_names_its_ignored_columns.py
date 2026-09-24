@@ -35,8 +35,9 @@ _EXPECTED: dict[str, list[str]] = {
     "opening": [],
     # DEF-009 added ``rebate_period`` (the confirmed 折讓款 credit's trade month).
     "cash": ["id", "corporate_action_id", "rebate_period", "import_batch_id", "source_row_hash"],
+    # DEF-040 R4 added ``child_seed_json`` (what a SPINOFF's save wrote into prices), last.
     "actions": ["id", "band_move_json", "weight_move_json", "import_batch_id",
-                "source_row_hash"],
+                "source_row_hash", "child_seed_json"],
 }
 
 

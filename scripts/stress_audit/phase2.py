@@ -241,9 +241,10 @@ def _j(r):
 def snapshot(api: C.Api):
     facts = C.load_facts_from_api(api)
     dash = api.get("/api/dashboard").json()
-    # DEF-016: a dividend counts from its pay date — replay what the app's as_of has received.
+    # DEF-016 / DEF-056: every row counts from its own date — replay what has happened by the
+    # app's as_of.
     as_of = date.fromisoformat(str(dash["as_of"])[:10])
-    res = O.replay(O.facts_received_by(facts, as_of))
+    res = O.replay(O.facts_valued_as_of(facts, as_of))
     cash = api.get("/api/cash", limit=500).json()
     reported_hold = {(h["account_id"], h["symbol"]): h for h in dash["holdings"]}
     reported_cash = {(b["account_id"], b["ccy"]): dec(b["amount"]) for b in cash["balances"]}

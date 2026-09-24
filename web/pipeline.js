@@ -61,7 +61,7 @@
 
   /* I2 — recent_skips reason enum (04b gating) -> human zh label. */
   var SKIP_REASONS = {
-    R1_scope_mismatch: '範圍不相容（模板含 per_symbol 變數，任務非單一標的）',
+    R1_scope_mismatch: '範圍不相容（模板含「單一標的」變數，任務非單一標的）',   // DEF-053
     R2_universe_empty: '標的宇宙為空（清單已出清）',
     R2_symbols_removed: '部分標的已自動移除',
     R3_no_live_templates: '模板全部停用 — 組裝段為空',
@@ -139,8 +139,9 @@
      surface that lists or counts a universe goes through these two functions, and they
      mirror the backend resolver (api/insight_service.py::_resolve_universe):
        mode:all            -> sorted DISTINCT held symbols
-       mode:all_registered -> sorted DISTINCT registered symbols (/api/instruments, as the
-                              backend's _all_registered_symbols reads list_instruments)
+       mode:all_registered -> sorted DISTINCT held ∪ ACTIVE registered symbols — an
+                              archived (停止追蹤) instrument is out (DEF-059, owner ruling
+                              2026-09-24), exactly as the backend's _all_registered_symbols
        mode:custom         -> the listed symbols, de-duplicated, first occurrence kept
      `dash` is a /api/dashboard payload, `instruments` a /api/instruments payload. */
   function universeSource(dash, instruments) {
@@ -173,7 +174,7 @@
       rows: rows,
       held: rows.filter(function (r) { return r.held; })
         .map(function (r) { return r.symbol; }).sort(),
-      registered: rows.filter(function (r) { return r.registered; })
+      registered: rows.filter(function (r) { return r.held || (r.registered && !r.archived); })
         .map(function (r) { return r.symbol; }).sort()
     };
   }

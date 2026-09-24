@@ -85,7 +85,7 @@
          The one definition lives in pipeline.js and is shared with the 編輯標的 dialog. */
       REF.src = window.ppUniverseSource(res[2], res[4]);
       REF.held = REF.src.held;
-      /* every registered instrument (held + watchlist) — drives the opt-in「含觀察標的」宇宙 */
+      /* held + the ACTIVE watchlist (DEF-059: archived out) — drives the opt-in「含觀察標的」宇宙 */
       REF.registered = REF.src.registered;
       REF.quota = res[3] && res[3].health ? res[3].health.quota_remaining : null;
       /* dismissed (ESC / ✕ / backdrop) while loading → nothing to fill. */
@@ -370,8 +370,10 @@
           return it;
         }).then(function (it) {
           document.querySelectorAll('.pv-backdrop').forEach(function (n) { n.remove(); });
+          /* DEF-053: the owner reads 「預警觸發」 on the wizard's own button — never the scope
+             identifier `on_alert` the payload carries. */
           window.toast('已建立洞察任務', 'ok',
-            payload.name + (payload.enabled ? '' : '：on_alert 任務預設停用，確認監聽規則後再啟用'));
+            payload.name + (payload.enabled ? '' : '：預警觸發任務預設停用，確認監聽規則後再啟用'));
           if (window.ppRefresh) window.ppRefresh();
           /* show the preflight for the freshly-created task. */
           if (it && it.id != null && window.ppPreflight) {

@@ -120,8 +120,13 @@ def test_a_spinoff_saved_without_a_seed_promises_nothing(
 def test_the_import_batch_undo_takes_the_seed_too(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """The batch undo deletes through the SAME ``_delete_actions`` (I-3). A seed for the child
-    on that day — written through the one seed writer — leaves with the imported SPINOFF."""
+    """The batch undo deletes through the SAME ``_delete_actions`` (I-3).
+
+    R4: an imported SPINOFF records that it wrote NO seed (the import takes no child price),
+    so its undo can never take one — ``test_def040_r4_seed_never_overwrites`` pins that. What
+    this pins is the other half: a row with NO record (imported before the record existed)
+    still gets R3's signature rule through the undo, so a legacy import's seed leaves with it.
+    """
     _seed_parent(golden_db)
     r = api_client.post("/api/import/commit", json={
         "kind": "corporate_actions",
@@ -129,6 +134,8 @@ def test_the_import_batch_undo_takes_the_seed_too(
                     f"schwab,{_DAY.isoformat()},SPINOFF,PARN,CHLD,1,2,0.2\n",
         "ack_warnings": True})
     assert r.status_code == 200, r.text
+    golden_db.execute("UPDATE corporate_actions SET child_seed_json=NULL")   # legacy row
+    golden_db.commit()
     write_seed_price(golden_db, symbol="CHLD", market=Market.US, on=_DAY,
                      close=Decimal("50"), tz=GOLDEN_NOW.tzinfo)
     batch = r.json()["import_batch_id"]

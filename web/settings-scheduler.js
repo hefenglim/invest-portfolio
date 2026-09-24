@@ -130,6 +130,13 @@
     if (x && x.label) labelById[x[idKey]] = x.label;
   });
   const jobLabel = (id, desc) => JOB_ZH[id] || labelById[id] || desc || id;
+  /* DEF-051 (2026-09-25): a toast names the job by the SAME label its row shows — never by
+     its machine id. 「✓ 已排入執行 insight:7 #180」 / 「alert_scan #185」 read the id the row
+     beside it had already translated (「AI 洞察任務「市場週報」」 / 「風險警示掃描＋AI 派發」).
+     shell.js's DIAG_CODE filter cannot catch this: it hides a sub-line that IS an error
+     code, and an id followed by 「 #180」 is not one — the fix belongs where the text is
+     built. The run number stays, in 全形 parentheses: 「…「市場週報」（#180）」. */
+  const runNo = (resp) => '（#' + ((resp && resp.run_id) || '?') + '）';
 
   /* ===== FU-D36 (需求七): per-row live run status ==============================
      renderJobs stores each row's 狀態 slot + run button by job_id; GET /api/scheduler/
@@ -463,7 +470,7 @@
         t.disabled = true;
         try {
           await api.put('/api/scheduler/jobs/' + encodeURIComponent(j.id), { enabled: next });
-          _toast('已更新', 'ok', j.id + (next ? ' 已啟用' : ' 已停用'));
+          _toast('已更新', 'ok', jobLabel(j.id, j.desc) + (next ? ' 已啟用' : ' 已停用'));
           dispatchJobsChanged();
         } catch (err) {
           _toast((err && err.message) || '更新失敗', 'fail', err && err.code);
@@ -487,7 +494,7 @@
         cronInput.classList.remove('field-error');
         try {
           await api.put('/api/scheduler/jobs/' + encodeURIComponent(j.id), { cron: cron });
-          _toast('排程已更新', 'ok', j.id + ' · ' + cron);
+          _toast('排程已更新', 'ok', jobLabel(j.id, j.desc) + ' · ' + cron);
           dispatchJobsChanged();
         } catch (err) {
           cronInput.classList.add('field-error');
@@ -545,7 +552,7 @@
         paintStatus(j.id);
         try {
           const resp = await api.post('/api/scheduler/jobs/' + encodeURIComponent(j.id) + '/run');
-          _toast('已排入執行', 'ok', j.id + ' #' + ((resp && resp.run_id) || '?'));
+          _toast('已排入執行', 'ok', jobLabel(j.id, j.desc) + runNo(resp));
           startPolling();  // advance 執行中 -> 成功/失敗 live, then stop when idle
         } catch (err) {
           _toast((err && err.message) || '執行失敗', 'fail', err && err.code);

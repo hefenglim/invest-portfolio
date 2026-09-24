@@ -60,9 +60,19 @@ oversight; the five append-only ledgers are the ones that needed this.
 
 import hashlib
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import Protocol
 
-from portfolio_dash.data_ingestion.store import StoredCorporateAction, list_corporate_actions
+from portfolio_dash.data_ingestion.store import (
+    StoredCorporateAction,
+    audit_source,
+    delete_cash_movement,
+    delete_dividend,
+    delete_fx_conversion,
+    delete_transaction,
+    list_corporate_actions,
+)
 from portfolio_dash.shared.clock import app_now
 
 #: import kind -> the ledger table its writer inserts into. ``openings`` is absent on
@@ -269,34 +279,116 @@ def _action_events(rows: list[StoredCorporateAction]) -> list[list[StoredCorpora
                   reverse=True)
 
 
+@dataclass(frozen=True)
+class BatchRows:
+    """Every ledger row one batch still owns, by table — exactly what its undo would delete.
+
+    Read ONCE inside :func:`delete_batch` and handed to the guard before anything is written,
+    so the guard judges the very id set the delete then removes.
+    """
+
+    batch_id: int
+    ids: Mapping[str, frozenset[int]]
+
+    def of(self, table: str) -> frozenset[int]:
+        """The ids this batch owns in *table* (empty for a table it wrote nothing to)."""
+        return self.ids.get(table, frozenset())
+
+
+def batch_rows(conn: sqlite3.Connection, batch_id: int) -> BatchRows:
+    """The rows that still carry *batch_id*, per provenance table (DEF-017: whichever door
+    removed the others, this is what is left to undo)."""
+    ids: dict[str, frozenset[int]] = {}
+    for table in sorted(set(TABLE_BY_KIND.values())):
+        ids[table] = frozenset(int(r[0]) for r in conn.execute(
+            f"SELECT id FROM {table} WHERE import_batch_id=?",  # noqa: S608 - fixed map
+            (batch_id,)))
+    return BatchRows(batch_id=batch_id, ids=ids)
+
+
+#: DEF-049 (2026-09-25): the REPLAY GUARD a batch undo must pass — INJECTED, never defaulted,
+#: exactly like :data:`ActionSetDeleter`. It receives the :class:`BatchRows` the undo is about
+#: to delete and answers ``True`` (go ahead) or ``False`` (refused — the binder keeps its own
+#: refusal to return, and NOTHING has been written). The binder is
+#: ``api/routers/input_center.py::import_batch_delete``, which binds
+#: ``api/replay_guard.py::batch_undo_guard`` — the SAME ``_replay_block`` every ledger-tab
+#: delete runs (orphan = hard, new/worsened 賣超 = ack-able) plus the cash doors' ack-able
+#: ``negative_cash`` check for the cash/FX rows the batch removes.
+#:
+#: This door used to run a bare ``DELETE … WHERE import_batch_id=?``: undoing an imported buy
+#: that a later hand-entered sell depended on turned that sell into a 賣超 and discarded the
+#: position's cost basis with no question asked, while the 刪除 button on the same buy
+#: answered 422 ``oversell`` (measured on demo 2026-09-24, batch 15 / 2884).
+#:
+#: Rejected: **importing the guard from ``api/``** (``data_ingestion`` may not import upward —
+#: ``architecture.md``); **running it only in the router before calling this function**
+#: (legal, but the id set would be read twice, and the next caller of ``delete_batch`` — a
+#: script, a second bulk door — would undo with no guard at all, which is how this door came
+#: to have none; a REQUIRED argument makes forgetting it a mypy error and a ``TypeError``);
+#: **re-deriving the replay here** (a second owner of the oversell decision — the drift C3's
+#: injection convention exists to prevent).
+BatchUndoGuard = Callable[[BatchRows], bool]
+
+
+class _RowDeleter(Protocol):
+    def __call__(self, conn: sqlite3.Connection, row_id: int, /, *, commit: bool = ...
+                 ) -> bool: ...
+
+
+#: table -> the store's OWN delete for one row: before-image to ``ledger_audit``, then the
+#: keyed DELETE (DEF-049 — the batch undo writes the same audit row the ledger tab's 刪除 does,
+#: tagged 「批次復原 #id」 via ``store.audit_source``; there is no second audit format).
+_ROW_DELETERS: dict[str, _RowDeleter] = {
+    "transactions": delete_transaction,
+    "dividends": delete_dividend,
+    "fx_conversions": delete_fx_conversion,
+    "cash_movements": delete_cash_movement,
+}
+
+
+def undo_source(batch_id: int) -> str:
+    """The ``ledger_audit.source`` every row of this undo is tagged with."""
+    return f"批次復原 #{batch_id}"
+
+
 def delete_batch(
     conn: sqlite3.Connection, batch_id: int, *, delete_actions: ActionSetDeleter,
-    commit: bool = True,
-) -> int:
-    """Delete every ledger row this batch wrote, and the batch record. Returns rows removed.
+    guard: BatchUndoGuard, commit: bool = True,
+) -> int | None:
+    """Delete every ledger row this batch wrote, and the batch record.
+
+    Returns the rows removed, or ``None`` when *guard* refused the undo — in which case
+    nothing at all has been written.
 
     This is the half that makes an import safe to attempt on real data: a bad batch is
     undone exactly, rather than by restoring a backup and losing everything entered since.
 
-    The batch's corporate actions go through *delete_actions* (see :data:`ActionSetDeleter`),
-    one event at a time, newest first; every other table is a plain keyed DELETE. All of it
+    The rows are read once (:func:`batch_rows`) and judged by *guard* (see
+    :data:`BatchUndoGuard`) before the first delete. The batch's corporate actions then go
+    through *delete_actions* (see :data:`ActionSetDeleter`), one event at a time, newest
+    first; every other row through the store's own per-row delete, which audits it. All of it
     is ONE transaction: a failure part-way rolls the whole undo back.
     """
+    rows = batch_rows(conn, batch_id)
+    if not guard(rows):
+        return None
     removed = 0
     try:
-        ids = {int(r[0]) for r in conn.execute(
-            "SELECT id FROM corporate_actions WHERE import_batch_id=?", (batch_id,))}
-        if ids:
-            owned = [a for a in list_corporate_actions(conn) if a.id in ids]
-            for event in _action_events(owned):
-                delete_actions(event)
-                removed += len(event)
-        for table in sorted(set(TABLE_BY_KIND.values()) - {"corporate_actions"}):
-            cur = conn.execute(
-                f"DELETE FROM {table} WHERE import_batch_id=?",  # noqa: S608 - fixed map
-                (batch_id,),
-            )
-            removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        with audit_source(undo_source(batch_id)):
+            action_ids = rows.of("corporate_actions")
+            if action_ids:
+                owned = [a for a in list_corporate_actions(conn) if a.id in action_ids]
+                for event in _action_events(owned):
+                    delete_actions(event)
+                    removed += len(event)
+            # Iterated over the provenance map, not the deleter map: a ledger added to
+            # ``TABLE_BY_KIND`` without a deleter here fails LOUD (KeyError, rolled back)
+            # instead of leaving its rows behind a batch record that is then deleted.
+            for table in sorted(set(TABLE_BY_KIND.values()) - {"corporate_actions"}):
+                for row_id in sorted(rows.of(table)):
+                    # False = already gone (e.g. a linked fee its corporate action took).
+                    if _ROW_DELETERS[table](conn, row_id, commit=False):
+                        removed += 1
         conn.execute("DELETE FROM import_batches WHERE id=?", (batch_id,))
         if commit:
             conn.commit()

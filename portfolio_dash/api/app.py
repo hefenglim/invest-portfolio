@@ -259,6 +259,9 @@ def create_app() -> FastAPI:
                     conn_w, ts=datetime.now(UTC), username=username,
                     method=request.method, path=request.url.path,
                     status=response.status_code, duration_ms=duration_ms,
+                    # DEF-049: the route's own words for what it did (the batch undo's
+                    # batch / rows / acknowledgements), when it set any.
+                    detail=getattr(request.state, action_log.DETAIL_ATTR, None),
                 )
 
             # Respect the get_conn dependency override so the log lands in the SAME

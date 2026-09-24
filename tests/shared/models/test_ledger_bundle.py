@@ -14,9 +14,13 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import (
     Dividend,
+    FXConversion,
     LedgerBundle,
     OpeningInventory,
     Transaction,
+    counts_by,
+    pending_from,
+    valued_rows_as_of,
 )
 
 AAA = Instrument(symbol="AAA", market=Market.US, quote_ccy=Currency.USD,
@@ -97,3 +101,42 @@ def test_without_unregistered_drops_those_rows_from_all_three_ledgers() -> None:
     assert [o.symbol for o in clean.opening] == ["AAA"]
     assert clean.unregistered_symbols == []
     assert len(b.transactions) == 2, "without_unregistered() must not mutate its source"
+
+
+# --- DEF-056: ONE valuation cut, every ledger from its own date ---------------------------
+
+
+def test_valued_as_of_cuts_every_ledger_on_its_own_date() -> None:
+    """Trades, openings and dividends alike (DEF-056 widened DEF-016's dividends-only cut);
+    a 配股 counts from its EX-date, so it is IN before its payment date."""
+    day = date(2026, 6, 2)
+    stock = Dividend(account_id="schwab", symbol="AAA", date=date(2026, 6, 20),
+                     ex_date=date(2026, 6, 1), type=DividendType.STOCK, gross=D("0"),
+                     withholding=D("0"), net=D("0"), reinvest_shares=D("5"))
+    b = LedgerBundle(
+        [_tx("AAA", day), _tx("AAA", date(2026, 6, 3))],
+        [_div("AAA", date(2026, 6, 3)), stock],
+        [_open("AAA", day), _open("AAA", date(2026, 6, 3))],
+        INSTR,
+    )
+    cut = b.valued_as_of(day)
+    assert [t.trade_date for t in cut.transactions] == [day]
+    assert cut.dividends == [stock]
+    assert [o.build_date for o in cut.opening] == [day]
+    assert b.through(day) == cut        # the trend's per-day cut IS the valuation cut
+
+
+def test_the_predicate_is_inclusive_and_the_flag_is_its_complement() -> None:
+    day = date(2026, 6, 2)
+    assert counts_by(day, day) and not counts_by(date(2026, 6, 3), day)
+    assert pending_from(day, day) is None
+    assert pending_from(date(2026, 6, 3), day) == date(2026, 6, 3)
+
+
+def test_valued_rows_as_of_cuts_the_ledgers_the_bundle_does_not_carry() -> None:
+    def conv(d: date) -> FXConversion:
+        return FXConversion(account_id="schwab", date=d, from_ccy=Currency.TWD,
+                            from_amount=D("32000"), to_ccy=Currency.USD, to_amount=D("1000"))
+
+    rows = [conv(date(2026, 6, 2)), conv(date(2026, 6, 3))]
+    assert valued_rows_as_of(rows, date(2026, 6, 2)) == rows[:1]

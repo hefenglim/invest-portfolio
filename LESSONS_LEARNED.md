@@ -1794,3 +1794,28 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   from memory. (4) Before removing a lock, find what the locked fields are keys FOR; give that
   use its own column, then unlock. (5) In this harness subagents cannot write report files into
   the lead's scratchpad — their report arrives in the hand-back message; save it to disk at once.
+- **2026-09-25 — Functional-test manual R3 → R4 (1 bounced fix, 13 rulings / new items, 4 agents).**
+  **Context:** the verifier's R3 pass closed 18 of 19 and bounced DEF-040. **What went wrong.**
+  (a) **The bounced fix was right on the reproduction path and destructive on the neighbour.** The
+  seed price was written and removed correctly when the child had no quote that day; when it
+  already had one, the save replaced it and the delete removed the replacement — while the API
+  promised `restorable` and answered `restored`. The fix had been tested against the reported
+  steps, not against the states the slot could already be in. (b) **A class scan that searched
+  for the defect's SQL missed the defect's doors.** DEF-049's first scan looked for bare
+  `DELETE FROM <ledger>` outside the store and found one; the three 公司行動 delete/edit doors
+  went THROUGH the store and still skipped the replay guard. Walking the route table (every
+  DELETE/PUT that changes a ledger row) found them. (c) **A hand-picked field list certified the
+  fields it named.** DEF-016's guard compared `sell_hint_adjusted_avg` but not the hint's share
+  count, which came from a second holdings path that read all dates — the one value that stayed
+  wrong. (d) **Ellipsis is invisible to an overflow guard.** The 390-px guard looked for page-level
+  horizontal scroll and deliberately skipped `overflow: hidden` elements, so 23 truncated
+  subtitles never registered. **Rules:** (1) For any fix that writes or removes shared state,
+  enumerate what the target slot can already hold (nothing / the market's row / another writer's
+  row / an orphan of our own) and test save + every undo path for each; a promise to restore must
+  come from a record of what was written, not from a signature an orphan can also carry. (2) Scan
+  a class by its ENTRY POINTS (routes, doors, callers) as well as by its statements; the defect is
+  "a door that mutates without the guard", and a statement scan only sees doors that write SQL
+  themselves. (3) Guard a projection by comparing the WHOLE payload before/after, not a list of
+  fields chosen by the author of the fix. (4) A "nothing overflows" guard must also measure
+  clipped content (`scrollWidth > clientWidth` on elements that hide overflow), or truncation
+  passes as tidy.

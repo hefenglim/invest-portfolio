@@ -88,6 +88,15 @@ def _r1_violations(scope: str, bodies: list[str]) -> list[str]:
 # Mirrors alerts_bridge._SIGNAL_RULE_PREFIX.
 _SIGNAL_RULE_PREFIX = "signal_"
 
+# DEF-053 (2026-09-25): a gate message names a task's scope the way the wizard's own buttons
+# do — never by its identifier (`portfolio`, `on_alert` …), which R1 used to interpolate raw.
+_SCOPE_ZH: dict[str, str] = {
+    "per_symbol": "單一標的",
+    "per_market": "單一市場",
+    "portfolio": "全組合",
+    "on_alert": "預警觸發",
+}
+
 
 def _alert_matches(alert_rules: str | list[str] | None, fired_rule: str | None) -> bool:
     """R7 filter: an explicit list matches its members (incl. ``signal_*``); the 'all'
@@ -122,7 +131,8 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
         blocked = True
         gates.append(GateFinding(
             id="R1", lv="block",
-            msg=f"per_symbol 變數 {token} 不可用於 {ctx.scope} 範圍組合",
+            msg=(f"「單一標的」變數 {token} 不可用於範圍為"
+                 f"「{_SCOPE_ZH.get(ctx.scope, ctx.scope)}」的任務"),
             reason="R1_scope_mismatch",
         ))
 

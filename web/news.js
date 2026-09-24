@@ -51,6 +51,15 @@
     }
     var attrib = f.aiAttrib(item.model, item.tokens_in, item.tokens_out, item.cost_usd);
     if (attrib) foot.appendChild(el('span', 'ai-attrib', attrib));
+    /* DEF-057: the news-organizer prompt version this summary was produced with (null =
+       headline-only, or organized before versions were recorded → nothing to name). */
+    if (item.prompt_version != null) {
+      const pv = el('a', 'ai-attrib nw-pver', '整理提示詞 v' + item.prompt_version);
+      pv.href = 'settings.html#prompts/news-prompt';
+      pv.title = '此則摘要以新聞整理提示詞 v' + item.prompt_version +
+        ' 產生；點擊前往 AI 提示詞，於「版本記錄」檢視該版內文';
+      foot.appendChild(pv);
+    }
     m.appendChild(foot);
     $('#nw-back').classList.add('open');
   }

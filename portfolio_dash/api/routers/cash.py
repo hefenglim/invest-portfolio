@@ -76,6 +76,7 @@ from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
+from portfolio_dash.shared.models.ledger import pending_from
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -441,12 +442,20 @@ def cash_overview(
                     # DEF-009 (additive): the trade month a confirmed 折讓款 credit books, so
                     # the edit dialog can say which month stays booked whatever is edited.
                     "rebate_period": m.rebate_period,
+                    # DEF-056 (additive): the day a movement dated after `as_of` starts to
+                    # count — the balances above already leave it out (M5-06) — so the row
+                    # can say why (「未來日期：YYYY-MM-DD 起計入」). None once it counts.
+                    "counts_from": _iso_or_none(pending_from(m.date, as_of)),
                 }
                 for m in page
             ],
             "total_count": len(movements),
         },
     }
+
+
+def _iso_or_none(d: date | None) -> str | None:
+    return d.isoformat() if d is not None else None
 
 
 def _stmt_row_wire(

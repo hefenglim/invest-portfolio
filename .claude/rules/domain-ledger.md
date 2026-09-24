@@ -182,20 +182,32 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   reverse of what happened; **(4)** the stress-audit oracle keeps its own transcription. Demo
   data is unaffected: the one same-day buy+sell pair on the demo ledger (tw_broker 2603
   2026-07-02) already had the buy's id below the sell's.
-- **A dividend counts from the day it is RECEIVED** (DEF-016, owner ruling 2026-09-24). A
-  confirmed dividend is stored on its payment date, and the inbox confirms a declared payout
-  the day it is announced, so that date can lie after the valuation date. Every VALUATION —
-  the book / adjusted cost, 總報酬, XIRR, 已收股利, the B−A attribution, the drawer, the tax
-  package, the sell-hint average — reads `LedgerBundle.received_by(as_of)`, which drops each
-  dividend whose `effective_date` (payment date; the ex-date for a 配股 with one) is later
-  than `as_of`. The cash pool (`as_of`, M5-06) and the trend (`through`, per day) already cut
-  this way. VALIDATION replays (重算, correction-door replay guards, corporate-action
-  reachability) keep the WHOLE ledger — they check what will be stored, not what has been
-  received. Measured before the rule: one confirmed 18,200 TWD dividend paying in 15 days
-  moved XIRR 0.5677 → 0.6703 and 總報酬 111,600 → 129,800 while the cash pool did not move.
-  ⚠ The ruling covers dividends only; future-dated trades / openings / FX conversions (allowed
-  with a warning since DEF-014) still enter the holdings and XIRR at once — recorded as an open
-  owner question, not an oversight.
+- **Every row counts from its OWN date** (DEF-016 for dividends; widened to trades, openings,
+  FX conversions — and with them cash movements and corporate actions — by DEF-056; owner
+  rulings 2026-09-24, option A). A confirmed dividend is stored on its payment date (the inbox
+  confirms a payout the day it is announced) and a trade / opening / conversion may be entered
+  ahead of its date (allowed with a warning since DEF-014), so a row can lie after the
+  valuation date. Every VALUATION as at day D — the book / adjusted cost, holdings, 總報酬,
+  XIRR, 已收股利, allocation, the B−A attribution, the FX pool's realized / unrealized FX, the
+  drawer, 試算, the tax package, the sell hints, rebalance, the stress-audit oracle — reads
+  `LedgerBundle.valued_as_of(D)` (FX conversions and cash movements, which the bundle does not
+  carry: `valued_rows_as_of`), one predicate `counts_by(counts_on, D)` = `counts_on <= D`:
+  a trade from its `trade_date`, an opening from its `build_date`, a dividend from its
+  `effective_date` (payment date; the ex-date for a 配股 with one), a corporate action from its
+  `date`. Actions are cut with the rest because only a date PREFIX is a state that exists: a
+  future split applied to today's shares meets prices that are still pre-split (the stored
+  price basis folds in only splits a fetch has seen), and a future action on a future buy
+  would find no source. The cash pool (`as_of`, M5-06) and the trend (`through`, per day — it
+  delegates to the same cut) already cut this way. VALIDATION replays (重算, correction-door
+  replay guards, corporate-action reachability, the date-aware sell guard, the draft preview
+  which replays as of the trade date since DEF-048) keep the WHOLE ledger — they check what
+  will be stored, not what has happened. A ledger row dated after the SERVER's today carries
+  `counts_from` and reads 「未來日期：YYYY-MM-DD 起計入」. Measured before the rule (golden, day
+  2026-06-11): an 18,200 TWD dividend paying in 15 days moved XIRR 0.5677 → 0.6703 and 總報酬
+  111,600 → 129,800; a 1,000-share 2330 buy dated 2026-07-01 put 2,000 shares in today's holding
+  (market value 639,600 → 1,239,600, XIRR 0.5677 → 0.6577); a 2-for-1 AAPL split dated 2026-07-01
+  doubled the position at the unsplit price (XIRR → 0.8024, 總報酬 → 151,200) — each while the
+  cash pool did not move.
 - **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —

@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 
 from portfolio_dash.llm_insight.cards import InsightCard, Prediction
 from portfolio_dash.llm_insight.composer_store import StrategyVersionRef
+from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
 from portfolio_dash.shared.wire import to_wire
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,10 @@ class InsightRecord(BaseModel):
     # card). None on every card written before the column existed: the page reads
     # 「生成時版本未記錄」, never a version guessed from today's history.
     strategy_versions: list[StrategyVersionRef] | None = None
+    # DEF-057 (owner ruling 2026-09-24): the system-prompt layer the card's prompt was built
+    # with — ``used`` False when none was assembled, else the version of the body that was.
+    # None on every card written before the column existed (「生成時版本未記錄」).
+    system_prompt_ref: SystemPromptRef | None = None
     # DEF-003 (owner ruling 2026-09-24): the confidence AS STORED, before the read-time rule
     # that a card without a prediction carries none (``card.confidence``). Only the figure
     # check reads it — the number is still one the model itself printed, so a body quoting it
@@ -188,6 +193,10 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     # DEF-033 (2026-09-24): additive migration — the strategy versions the card was built
     # from (JSON list of StrategyVersionRef). NULLABLE: an existing row reads "not recorded".
     _add_column_if_missing(conn, "insights", "strategy_versions", "TEXT")
+    # DEF-057 (2026-09-25): additive migration — the system-prompt layer the card was built
+    # with (SystemPromptRef JSON). NULLABLE: an existing row reads "not recorded". NOT part of
+    # the cache fingerprint — the assembled prompt that is already in it contains the body.
+    _add_column_if_missing(conn, "insights", "system_prompt_ref", "TEXT")
     conn.commit()
 
 
@@ -277,6 +286,7 @@ def add_card(
     prompt_figures: str = "",
     trigger: InsightTrigger | None = None,
     strategy_versions: list[StrategyVersionRef] | None = None,
+    system_prompt_ref: SystemPromptRef | None = None,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
 
@@ -298,6 +308,8 @@ def add_card(
     ``trigger`` (DEF-037) is what produced the card; ``None`` stores NULL (tests, legacy).
     ``strategy_versions`` (DEF-033) is the version of every strategy layer the prompt was
     assembled from (``assemble.Assembly.strategy_versions``); ``None`` stores NULL.
+    ``system_prompt_ref`` (DEF-057) is the system layer of the same Assembly; ``None`` stores
+    NULL (tests, legacy).
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -307,8 +319,8 @@ def add_card(
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
         "price_at_create, ceiling_at_create, tokens_in, tokens_out, prompt_figures, "
-        "trigger_json, strategy_versions) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "trigger_json, strategy_versions, system_prompt_ref) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -334,6 +346,7 @@ def add_card(
             prompt_figures,
             None if trigger is None else trigger.model_dump_json(exclude_none=True),
             _versions_json(strategy_versions),
+            None if system_prompt_ref is None else system_prompt_ref.model_dump_json(),
         ),
     )
     conn.commit()
@@ -358,6 +371,18 @@ def _versions_from_row(row: sqlite3.Row) -> list[StrategyVersionRef] | None:
         return [StrategyVersionRef.model_validate(x) for x in parsed]
     except (ValueError, TypeError, ValidationError):
         logger.warning("insight %s: stored strategy_versions is unreadable", row["id"])
+        return None
+
+
+def _system_ref_from_row(row: sqlite3.Row) -> SystemPromptRef | None:
+    """The recorded system-prompt layer, or None (legacy / unreadable — never raises)."""
+    raw = row["system_prompt_ref"] if "system_prompt_ref" in row.keys() else None
+    if raw is None:
+        return None
+    try:
+        return SystemPromptRef.model_validate_json(raw)
+    except (ValueError, TypeError, ValidationError):
+        logger.warning("insight %s: stored system_prompt_ref is unreadable", row["id"])
         return None
 
 
@@ -460,6 +485,7 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         ),
         trigger=_trigger_from_row(row),
         strategy_versions=_versions_from_row(row),
+        system_prompt_ref=_system_ref_from_row(row),
         stated_confidence=row["confidence"],
     )
 
