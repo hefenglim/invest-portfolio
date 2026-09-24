@@ -27,8 +27,10 @@
    Until then the names below are hard-coded here, so renaming an account in the DB does NOT
    change what the frontend shows.
 
-   Load this BEFORE any dependent script (app.js / detail.js / ledger.js). Dependents
-   degrade gracefully (id fallback, no crash) if it is absent. */
+   Load this FIRST on every page — before api.js too (DEF-044, 2026-09-24): api.js resolves
+   the backend's {account:<id>} tokens through this resolver on every response and reports a
+   missing names.js as a console error at load. Dependents degrade gracefully (id fallback, no
+   crash) if it is absent; tests/contract/test_names_js_before_api_js.py pins the order. */
 (function () {
   'use strict';
 

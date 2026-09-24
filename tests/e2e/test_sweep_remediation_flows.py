@@ -159,6 +159,12 @@ def test_the_rebalance_footer_total_equals_the_visible_fields(
     page.click(".rb-open-btn")
     expect(page.locator(".rb-drawer")).to_be_visible(timeout=20000)
     expect(page.locator(".rb-input").first).to_be_visible(timeout=20000)
+    # The footer is drawn by the FIRST preview's response (rebalance.js update() → renderFoot),
+    # not when the fields appear — reading it right after the fields showed was a race (R3 gate
+    # run: fail / pass / fail on the unchanged test; footer == [] with no console error, the
+    # same footer held 5 cells a moment later, and /api/rebalance/preview took 10–13 ms on both
+    # e6fd9f4 and the R3 tree). Wait for the footer cell this test compares.
+    expect(page.locator(".rb-kv", has_text="目標合計")).to_be_visible(timeout=20000)
 
     shown = page.eval_on_selector_all(
         ".rb-input", "els => els.map(e => Number(e.value) || 0)")

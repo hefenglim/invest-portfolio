@@ -122,6 +122,29 @@ def _resolve_markets(data: DashboardData) -> list[str]:
     return sorted({h.market.value for h in data.holdings})
 
 
+def held_in_book(data: DashboardData) -> set[str]:
+    """The symbols HELD in the computed book: a position with shares != 0 in any account.
+
+    DEF-041 (owner ruling 2026-09-24): the ONE definition of "held" for the insight
+    producers — the ``mode:all`` universe, its draft-preflight twin, and the on_alert
+    持倉提點 dispatch all read it. ``data.holdings`` is the dashboard's replay of the ledgers
+    (``build_book``), one row per (account, symbol), so the union is taken over accounts; a
+    declared short (shares < 0) is a live position and counts. It is never re-derived from
+    the ledger rows (``current_shares``) — that would be a second owner of the answer.
+    """
+    return {h.symbol for h in data.holdings if h.shares != 0}
+
+
+def held_symbols_for_alerts(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+) -> set[str]:
+    """The held set the alert dispatcher filters on (DEF-041) — registered into the
+    scheduler by ``api/app.py`` (``register_alert_held_fn``), because ``scheduler/`` cannot
+    replay the book. One dashboard build per dispatch pass (the dispatcher calls it lazily,
+    at most once)."""
+    return held_in_book(build_dashboard(conn, now=now, reporting=reporting))
+
+
 def _all_registered_symbols(conn: sqlite3.Connection) -> list[str]:
     """Every registered instrument symbol (held + watchlist) — the opt-in ``all_registered``
     universe (P2 batch 3). Watch symbols are entry candidates, so a checkup task MAY analyse
@@ -149,7 +172,7 @@ def _resolve_universe(
 ) -> list[str]:
     """The per_symbol universe: custom list, all current holdings (``mode:all``, the
     default), or holdings + watchlist (``mode:all_registered`` — explicit opt-in)."""
-    held = sorted({h.symbol for h in data.holdings})
+    held = sorted(held_in_book(data))
     universe = it.universe
     if isinstance(universe, dict):
         mode = universe.get("mode")
@@ -737,7 +760,12 @@ def _score_one(
         conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id,
         calibration_version=due.calibration_version, is_shadow=due.is_shadow,
         status="scored", quant_hit=quant_hit, narrative_score=narrative_score, miss=miss,
-        actual_value=_actual_value(actual), confidence=due.confidence, now=now, notes=note,
+        actual_value=_actual_value(actual),
+        # DEF-003 (owner ruling 2026-09-24): a narrative card (no prediction) is scored on its
+        # narrative, but carries no confidence into the row — so it can never reach the
+        # calibration curve / gap populations, whatever the card's column holds.
+        confidence=due.confidence if prediction is not None else None,
+        now=now, notes=note,
     )
 
 
@@ -1244,7 +1272,7 @@ def _resolve_universe_raw(
     """Resolve a per_symbol universe value (mode:all → holdings, mode:custom → listed,
     mode:all_registered → holdings + watchlist). The draft-preflight twin of
     ``_resolve_universe`` (spec 07 §7.2 dry run)."""
-    held = sorted({h.symbol for h in data.holdings})
+    held = sorted(held_in_book(data))
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":

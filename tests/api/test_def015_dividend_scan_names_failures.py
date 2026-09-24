@@ -94,15 +94,18 @@ _MAYBK = InstrumentRef(symbol="1155", market=Market.MY)
 
 
 def test_the_registry_records_a_reason_per_failed_symbol() -> None:
-    events, sources, failed, reasons = _reg(us=["yfinance", "stooq"]).fetch_dividends_explained(
-        [_2330, _AAPL, _TSLA, _MAYBK])
+    """DEF-047 (owner ruling 2026-09-24) re-cut this pin: TSLA — yfinance ANSWERED with no
+    series — used to be listed here as a failure (「yfinance 無配息資料」). A source that
+    answered is not a failed fetch; TSLA is now ``empty``, and only real failures remain."""
+    events, sources, failed, reasons, empty = _reg(
+        us=["yfinance", "stooq"]).fetch_dividends_explained([_2330, _AAPL, _TSLA, _MAYBK])
     assert sources == {"2330": "finmind"} and len(events) == 1
-    assert failed == ["AAPL", "TSLA", "1155"]
+    assert failed == ["AAPL", "1155"]
     assert reasons == {
         "AAPL": "yfinance 逾時、stooq 回應錯誤",
-        "TSLA": "yfinance 無配息資料、stooq 回應錯誤",
         "1155": "無可用的配息資料來源",
     }
+    assert empty == ["TSLA"]
     # The unexplained entry point keeps its three-tuple (every existing caller).
     assert _reg().fetch_dividends([_AAPL])[2] == ["AAPL"]
 
@@ -112,19 +115,22 @@ def test_refresh_dividends_carries_the_reasons() -> None:
     create_tables(conn)
     summary = refresh_dividends(conn, _reg(), [_2330, _AAPL, _TSLA], now=_NOW)
     conn.close()
-    assert summary.failed_reasons == {"AAPL": "yfinance 逾時", "TSLA": "yfinance 無配息資料"}
+    assert summary.failed_reasons == {"AAPL": "yfinance 逾時"}
+    assert summary.failed == ["AAPL"] and summary.empty == ["TSLA"]   # DEF-047
 
 
 # --- ONE formatter ------------------------------------------------------------------------
 
 
 def test_one_sentence_names_every_failure_with_its_reason() -> None:
-    summary = RefreshSummary(ok={"2330": "finmind"}, failed=["TSLA", "AAPL"],
+    summary = RefreshSummary(ok={"2330": "finmind"}, failed=["NVDA", "AAPL"],
                              failed_reasons={"AAPL": "yfinance 逾時",
-                                             "TSLA": "yfinance 無配息資料"},
-                             fetched_at=_NOW)
+                                             "NVDA": "yfinance 連線失敗"},
+                             empty=["TSLA"], fetched_at=_NOW)
+    # DEF-047: the no-dividend symbol is counted apart, before — and never inside — 失敗.
     assert describe_refresh(summary) == (
-        "1 檔事件已更新，2 檔失敗（AAPL：yfinance 逾時；TSLA：yfinance 無配息資料）")
+        "1 檔事件已更新，1 檔無配息紀錄（TSLA），"
+        "2 檔失敗（AAPL：yfinance 逾時；NVDA：yfinance 連線失敗）")
     clean = RefreshSummary(ok={"2330": "finmind"}, failed=[], fetched_at=_NOW)
     assert describe_refresh(clean) == "1 檔事件已更新"
     # A summary built before reasons existed still names the symbol.

@@ -42,6 +42,11 @@
     border: 1px solid var(--amber); border-radius: 3px; padding: 0 6px; line-height: 16px;
   }
   .insight-trigger:hover { text-decoration: underline; }
+  /* DEF-033: 提示詞 vN — the strategy-prompt version the card was generated with. The foot
+     gains a sixth item, so it wraps instead of pushing the attribution off a phone screen. */
+  .insight-foot { flex-wrap: wrap; }
+  .insight-pver { text-decoration: none; white-space: nowrap; }
+  a.insight-pver:hover { text-decoration: underline; }
   .insight-conf .gap-warn { color: var(--amber); }
   .preview-tag {
     position: absolute; top: 10px; right: 12px;
@@ -235,6 +240,10 @@
 </div>
 </div>
 
+<!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
+     tokens through window.pdNames on every response, so the resolver must exist before the
+     first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
+<script src="names.js?v=0.1.28"></script>
 <script src="api.js?v=0.1.28"></script>
 <script src="shell.js?v=0.1.28"></script>
 <script src="format.js?v=0.1.28"></script>
@@ -318,9 +327,14 @@
      line of code above it. The code always distinguished them; only the FORMAT hid it.
      Now: an integer percent, plus an explicit tooltip on the 0 case, because 0% is a real
      self-assessment (極低信心) and must not read as "not provided". */
+  /* DEF-003 (owner ruling 2026-09-24): the PREDICTION decides. A card without one is a
+     description — 「純描述・無預測」, never a confidence, even when the stored card carries a
+     confidence value (measured on the demo: 25 of 40 prediction-less cards did, and the
+     page printed 「信心 0%」 for #182). The server already serves such a card with
+     confidence null; this reads the prediction too, so neither half alone decides. */
   function confChip(card) {
     if (card.unreadable) return null;
-    if (card.confidence == null) {
+    if (card.prediction == null || card.confidence == null) {
       return el('span', 'insight-conf', '純描述・無預測');
     }
     var chip = el('span', 'insight-conf');
@@ -399,6 +413,31 @@
     return label ? el('span', 'insight-time', label) : null;
   }
 
+  /* DEF-033 (owner ruling 2026-09-24): the strategy-prompt version(s) this card was
+     generated with, as the server recorded them at generation (`prompt_versions`, one entry
+     per strategy layer). null = the card predates the record → 「生成時版本未記錄」, never a
+     version guessed from today's history; [] = no prompt was assembled (the zero-LLM 資料異常
+     card) → nothing to name. Links to 設定 › AI 提示詞, where each strategy's 版本記錄 lives. */
+  function promptVersionChip(card) {
+    var pv = card.prompt_versions;
+    if (pv === undefined) return null;
+    if (pv === null) {
+      var none = el('span', 'insight-time insight-pver', '生成時版本未記錄');
+      none.title = '此卡片產生於提示詞版本記錄啟用之前，無法得知當時使用的策略提示詞版本';
+      return none;
+    }
+    if (!pv.length) return null;
+    var a = el('a', 'insight-time insight-pver',
+      '提示詞 ' + pv.map(function (r) {
+        return r.version == null ? '版本不明' : 'v' + r.version;
+      }).join('・'));
+    a.href = 'settings.html#prompts';
+    a.title = pv.map(function (r) {
+      return '策略「' + r.name + '」' + (r.version == null ? ' 版本不明' : ' v' + r.version);
+    }).join('\n') + '\n點擊前往 AI 提示詞，於策略卡「版本記錄」檢視該版內文';
+    return a;
+  }
+
   function cardNode(card) {
     var c = el('div', 'insight-card');
     var head = el('div', 'insight-head');
@@ -416,6 +455,8 @@
     if (trig) foot.appendChild(trig);
     var conf = confChip(card);
     if (conf) foot.appendChild(conf);
+    var pver = promptVersionChip(card);
+    if (pver) foot.appendChild(pver);
     var flagged = figureFlagPill(card);
     if (flagged) foot.appendChild(flagged);
     foot.appendChild(attribNode(card));
@@ -468,6 +509,8 @@
     if (trig) foot.appendChild(trig);
     var conf = confChip(card);
     if (conf) foot.appendChild(conf);
+    var pver = promptVersionChip(card);
+    if (pver) foot.appendChild(pver);
     var flagged = figureFlagPill(card);
     if (flagged) foot.appendChild(flagged);
     foot.appendChild(attribNode(card));

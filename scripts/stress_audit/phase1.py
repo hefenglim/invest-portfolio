@@ -627,10 +627,16 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
               reports=False):
     """Full oracle-vs-system reconciliation at the current state."""
     phase = f"phase1:{label}"
-    facts = C.load_facts_from_db(db_path)
+    raw = C.load_facts_from_db(db_path)
     # BEFORE any API call: the dashboard must be built over the daily series, or the trend
     # family would compare an app that could not value a day against an oracle that could.
-    _ensure_daily_prices(db_path, facts)
+    _ensure_daily_prices(db_path, raw)
+    dash = api.get("/api/dashboard").json()
+    # DEF-016: the valuation reads only the dividends RECEIVED by the app's own as_of (read
+    # back from the response, as the XIRR family does). The raw facts stay for the checks
+    # that compare stored ROWS (ledger APIs, the dated cash statement).
+    as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
+    facts = O.facts_received_by(raw, as_of)
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)
@@ -639,8 +645,6 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     # that state (oversold -> not computable; short -> negative terminal value) and the
     # scenario always closes the short before the final full-KPI reconcile.
     oversold = any(h.shares < O.ZERO for h in res.holdings.values())
-
-    dash = api.get("/api/dashboard").json()
 
     # ---- A0. Corporate actions the oracle REFUSED (spec §5) ----
     # Op-logged, not asserted here: which rule fired is scenario knowledge, so the
@@ -721,7 +725,7 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         exp = res.cash.get(pool, O.ZERO)
         got = app_bal.get(pool, O.ZERO)
         ev.check("cash.balance", "|".join(pool), exp, got, phase)
-    _reconcile_cash_statement(ev, facts, res, app_bal, phase)
+    _reconcile_cash_statement(ev, raw, res, app_bal, phase)
 
     # ---- D. FX pools + realized/unrealized ----
     _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation)
@@ -739,7 +743,7 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     _reconcile_integrity(ev, res, facts, phase)
 
     # ---- F. Ledger APIs row-by-row (raw facts) ----
-    _reconcile_ledger_api(ev, api, facts, phase)
+    _reconcile_ledger_api(ev, api, raw, phase)
 
     # ---- G. Exports (CSV) ----
     _reconcile_exports(ev, api, res, prices, phase, valuation)

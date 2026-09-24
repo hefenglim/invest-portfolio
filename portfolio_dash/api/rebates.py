@@ -13,11 +13,12 @@ State: NONE except a skip table (``rebate_skips``). A month becomes PENDING (con
 on the 1st of the FOLLOWING month; before that it is ACCRUING — surfaced by
 :func:`detect_accruing` as a NON-confirmable forecast (owner #1) so a trade entered THIS
 month is visible immediately, not only next month. A pending month is suppressed when
-(a) a confirmed rebate cash movement (kind ``rebate``) for that account maps back to it —
-DUAL-KEYED by BOTH the movement's date (structural: the trade month is the month before the
-refund date, robust to a note edit) AND the 「YYYY-MM 折讓款」 note tag (documented contract) —
-or (b) the month is skipped. The dual key is the double-credit guard (F2d/F12): a booked
-month cannot re-surface after its (user-editable) note is changed. Self-healing — nothing is
+(a) a confirmed rebate cash movement for that account maps back to it — by the explicit
+``rebate_period`` link the confirm writes (DEF-009: survives ANY edit of the row), or, for an
+unlinked REBATE row, DUAL-KEYED by BOTH the movement's date (the trade month is the month
+before the refund date) AND the 「YYYY-MM 折讓款」 note tag — or (b) the month is skipped.
+Either way it is the double-credit guard (F2d/F12): a booked month cannot re-surface after
+the row is edited. Self-healing — nothing is
 auto-written, and confirm recomputes/validates server-side. Mirrors the dividend-inbox
 posture (compute-on-read, ungated in guest mode).
 """
@@ -29,7 +30,11 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
-from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
+from portfolio_dash.data_ingestion.fees import (
+    booked_discount,
+    forecast_tw_rebate,
+    rebate_applies,
+)
 from portfolio_dash.data_ingestion.rules_binding import rule_sets_for
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
@@ -177,21 +182,26 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _rebate_accounts(conn: sqlite3.Connection) -> dict[str, tuple[Account, Decimal]]:
-    """account_id -> (account, rebate_rate) for every account ANY of whose bound rule sets
-    rebates (>0).
+def _rebate_accounts(
+    conn: sqlite3.Connection,
+) -> dict[str, tuple[Account, Decimal, Decimal]]:
+    """account_id -> (account, rebate_rate, discount) for every account ANY of whose bound
+    rule sets rebates (>0).
 
     Batch B: an account may bind several rule sets (one per market); the first bound set
     (alphabetical, per ``rule_sets_for``) with ``rebate_rate > 0`` supplies the rate.
     Behaviour-identical today — only the TW rule set rebates, and every account binds a
     single market, so exactly one rule set is ever consulted.
+
+    ``discount`` (DEF-010) is that SAME rule set's current settlement discount — the fallback
+    for a trade whose own fee snapshot does not record one (:func:`booked_discount`).
     """
-    out: dict[str, tuple[Account, Decimal]] = {}
+    out: dict[str, tuple[Account, Decimal, Decimal]] = {}
     for a in list_accounts(conn):
         for rule_name in rule_sets_for(conn, a.account_id):
-            rate = get_fee_rule_set(rule_name, conn).rebate_rate
-            if rate > _ZERO:
-                out[a.account_id] = (a, rate)
+            rs = get_fee_rule_set(rule_name, conn)
+            if rs.rebate_rate > _ZERO:
+                out[a.account_id] = (a, rs.rebate_rate, rs.discount)
                 break
     return out
 
@@ -207,22 +217,26 @@ def _skips(conn: sqlite3.Connection) -> set[tuple[str, str]]:
 def _confirmed_months(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     """(account_id, ``YYYY-MM``) trade months already booked by a confirmed rebate credit.
 
-    A confirmed rebate is a ``REBATE``-kind cash movement dated the 1st of the refund month
-    (the month AFTER the trade month). Each booking is mapped back to its trade month by TWO
-    independent keys, so a booked month can NEVER re-surface and be double-credited (F2d/F12)
-    after an edit:
+    **The explicit link first (DEF-009, 2026-09-24).** A credit booked by the confirm
+    endpoint carries ``rebate_period`` — the month it books — and that link alone decides,
+    whatever the row's kind, date or note now say. The owner ruled the row fully editable
+    (it was locked precisely because those three fields WERE the key), so the key had to
+    stop being the fields. Changing its kind to something else does NOT re-open the month
+    either (the conservative reading — the money was received once); deleting the row does.
 
-    * STRUCTURAL (robust to a note edit): the trade month is the month BEFORE the movement's
-      date. Survives the owner editing the movement's free-text note tag.
+    **The legacy keys for an unlinked REBATE row** — one entered by hand on the cash page or
+    imported by CSV, neither of which names a month: a ``REBATE``-kind movement dated the 1st
+    of the refund month maps back by TWO independent keys, so a booked month never
+    re-surfaces after a note edit (F2d/F12):
+
+    * STRUCTURAL: the trade month is the month BEFORE the movement's date.
     * NOTE TAG (documented contract): the ``{YYYY-MM} 折讓款`` fingerprint month.
-
-    Either match suppresses the month; both agree for an unedited booking. (Breaking the
-    structural key too would require also changing the movement's date/kind — the cash-page
-    edit modal locks those on a rebate row, and a backend guard on the movement PUT is the
-    belt-and-braces stop; see the router.)
     """
     out: set[tuple[str, str]] = set()
     for m in list_cash_movements(conn):
+        if m.rebate_period is not None:
+            out.add((m.account_id, m.rebate_period))
+            continue
         if m.kind.upper() != REBATE_KIND:
             continue
         py, pm = _prev_month(m.date.year, m.date.month)
@@ -257,8 +271,13 @@ def _aggregate(conn: sqlite3.Connection) -> list[PendingRebate]:
             continue
         if t.fees is None or t.fees <= _ZERO:  # skip fee-free rows (nothing to rebate)
             continue
-        rate = accts[t.account_id][1]
-        trade_expected = forecast_tw_rebate(t.fees, rate)
+        _account, rate, current_discount = accts[t.account_id]
+        # DEF-010: a fee already discounted at settlement earns no refund. The trade's OWN
+        # snapshot says which regime charged it; the rule set answers only when it is silent.
+        discount = booked_discount(t.fee_rule_snapshot, fallback=current_discount)
+        if not rebate_applies(discount):
+            continue  # not forecast, not counted: 快照已打折的交易不列入退款預估 (B-16)
+        trade_expected = forecast_tw_rebate(t.fees, rate, discount=discount)
         key = (t.account_id, _month_key(t.trade_date))
         cell = agg.setdefault(key, [_ZERO, _ZERO])
         cell[0] += t.fees

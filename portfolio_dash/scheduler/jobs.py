@@ -9,7 +9,7 @@ import inspect
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -900,6 +900,25 @@ def register_alert_compute_runner(fn: AlertComputeRunner | None) -> None:
     _ALERT_COMPUTE_RUNNER = fn
 
 
+# Alert-card held-set seam (DEF-041, owner ruling 2026-09-24): the on_alert 持倉提點 card is
+# dispatched only for a symbol currently HELD, and "held" is read from the COMPUTED book — the
+# dashboard replay's holdings with shares != 0, across accounts — which ``scheduler/`` may not
+# build (architecture.md). The app registers ``api.insight_service.held_symbols_for_alerts``.
+# Unregistered while an insight runner IS registered, the dispatcher is told "cannot tell"
+# (None): symbol alerts are held back unconsumed and the run detail says so — never carded
+# for a watchlist symbol, never silently dropped. Deliberately NOT the quote job's
+# ``_HELD_SYMBOLS_FN`` above: that one re-derives shares from the ledger rows
+# (``current_shares > 0``), a second definition the owner ruling rules out for this door.
+AlertHeldFn = Callable[..., Set[str]]
+_ALERT_HELD_FN: AlertHeldFn | None = None
+
+
+def register_alert_held_fn(fn: AlertHeldFn | None) -> None:
+    """Register (or clear with None) the alert-card held-set reader (app wiring seam)."""
+    global _ALERT_HELD_FN
+    _ALERT_HELD_FN = fn
+
+
 def _compute_alerts_for_scan(conn: sqlite3.Connection, *, now: datetime) -> list[Alert]:
     """Compute the current spec-03 alerts for the scan (reporting ccy = TWD).
 
@@ -937,6 +956,23 @@ def _skipped_note(skipped: list[alerts_bridge.AlertEvent]) -> str:
     return f"；略過 {len(skipped)} 條非個股預警（不產個股卡）：{'、'.join(items)}"
 
 
+def _not_held_note(not_held: list[alerts_bridge.AlertEvent]) -> str:
+    """「；略過 N 條觀察標的預警（未持有，不產卡）：drawdown_from_peak 1234、…」 or "" (DEF-041)."""
+    if not not_held:
+        return ""
+    items = [f"{ev.rule_id} {ev.symbol or ''}".strip() for ev in not_held]
+    return f"；略過 {len(not_held)} 條觀察標的預警（未持有，不產卡）：{'、'.join(items)}"
+
+
+def _held_unknown_note(held_unknown: list[alerts_bridge.AlertEvent]) -> str:
+    """The symbol alerts held back because the held set could not be read (DEF-041)."""
+    if not held_unknown:
+        return ""
+    return (
+        f"；{len(held_unknown)} 條個股預警暫不派發（無法判定是否持有，下次掃描重試）"
+    )
+
+
 def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     """Compute alerts → record events → dispatch subscribing on_alert combos (R7).
 
@@ -965,10 +1001,22 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     runner = _INSIGHT_RUNNER
     dispatched = 0
     skipped: list[alerts_bridge.AlertEvent] = []
+    not_held: list[alerts_bridge.AlertEvent] = []
+    held_unknown: list[alerts_bridge.AlertEvent] = []
     if runner is not None:
         set_progress("alert_scan", "派發 AI 預警卡")
-        result = alerts_bridge.dispatch_alert_events_ex(conn, runner, now=now)
+        held_fn = _ALERT_HELD_FN
+
+        def _held() -> Set[str] | None:
+            # DEF-041: the computed book's held set, read lazily (only when a symbol alert
+            # with a subscriber is waiting); None = not wired → the dispatcher holds back.
+            return held_fn(conn, now=now) if held_fn is not None else None
+
+        result = alerts_bridge.dispatch_alert_events_ex(
+            conn, runner, now=now, held_symbols=_held
+        )
         dispatched, skipped = result.dispatched, result.skipped
+        not_held, held_unknown = result.not_held, result.held_unknown
     else:
         # No runner wired (scheduler-only process): still consume events so they do not
         # pile up; cards are produced once the app wires the runner on the next scan.
@@ -985,7 +1033,8 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
         notify_detail = "notify: error"
     return (
         f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched; "
-        f"{notify_detail}{_skipped_note(skipped)}"
+        f"{notify_detail}{_skipped_note(skipped)}{_not_held_note(not_held)}"
+        f"{_held_unknown_note(held_unknown)}"
     )
 
 

@@ -629,7 +629,13 @@ def test_alert_advice_preset_reaches_the_runner_on_a_fired_alert(
                fired_rule: str, fired_symbol: str | None, trigger: object) -> None:
         ran.append((it_id, fired_rule, fired_symbol))
 
-    n = alerts_bridge.dispatch_alert_events(golden_db, runner, now=now)
+    # DEF-041: the held set is the REAL computed book of the golden ledger (2330 is held).
+    from portfolio_dash.api.insight_service import held_symbols_for_alerts
+
+    def held() -> set[str]:
+        return held_symbols_for_alerts(golden_db, now=now)
+
+    n = alerts_bridge.dispatch_alert_events(golden_db, runner, now=now, held_symbols=held)
     assert n == 1 and len(ran) == 1
     it_id, fired_rule, fired_symbol = ran[0]
     assert fired_rule == "target_cross" and fired_symbol == "2330"
@@ -638,7 +644,9 @@ def test_alert_advice_preset_reaches_the_runner_on_a_fired_alert(
     ).fetchone()["name"]
     assert name == "持倉提點"
     # the event was consumed, and a second dispatch of the same key debounces.
-    assert alerts_bridge.dispatch_alert_events(golden_db, runner, now=now) == 0
+    assert alerts_bridge.dispatch_alert_events(
+        golden_db, runner, now=now, held_symbols=held
+    ) == 0
 # --- per_market tasks over the API (2026-07-05 spec) ----------------------------
 
 

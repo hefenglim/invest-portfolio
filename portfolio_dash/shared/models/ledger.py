@@ -80,9 +80,21 @@ class Dividend(BaseModel):
         ordering, ``LedgerBundle.through`` and ``before_action_on`` must agree, and three
         copies of a rule is how two of them drift.
         """
-        if self.type is DividendType.STOCK and self.ex_date is not None:
-            return self.ex_date
-        return self.date
+        return dividend_effective_date(self.type, self.date, self.ex_date)
+
+
+def dividend_effective_date(
+    div_type: DividendType | str, pay_date: Date, ex_date: Date | None
+) -> Date:
+    """:attr:`Dividend.effective_date`'s rule for a caller holding the raw fields — a STORED
+    row (``data_ingestion.store.StoredDividend``) or a wire row — rather than the model.
+
+    The property delegates here, so the rule has ONE home; see the property for why only a
+    STOCK dividend with a known ex-date moves off the payment date.
+    """
+    if DividendType(div_type) is DividendType.STOCK and ex_date is not None:
+        return ex_date
+    return pay_date
 
 
 class FXConversion(BaseModel):
@@ -162,6 +174,30 @@ class LedgerBundle:
             actions=[a for a in self.actions if a.date <= day],
             unreadable_actions=[u for u in self.unreadable_actions if u.date <= day],
         )
+
+    def received_by(self, day: date) -> "LedgerBundle":
+        """The ledger a VALUATION as at *day* reads: every dividend not yet received by *day*
+        is left out; every other ledger is untouched (DEF-016, owner ruling 2026-09-24).
+
+        A confirmed dividend is stored on its PAYMENT date (R6), and that date can lie in the
+        future — the inbox confirms a declared payout the day it is announced. The book used
+        to replay it at once: the adjusted cost fell, 總報酬 rose, and XIRR received a cash
+        inflow dated AFTER its own terminal value, while the cash pool (``cash_balances``
+        with ``as_of``, M5-06) and the trend (:meth:`through`, per day) both — correctly —
+        still ignored it. The ruling: a dividend counts from the day it is received, on
+        every surface, so the valuation reads it through this cut.
+
+        ``effective_date``, never ``date`` — the same rule :meth:`through` uses: a 配股 with a
+        known ex-date is OWNED from the ex-date (R6), and the quoted price has already dropped
+        by then, so it must stay in. Cash / DRIP / NET move on the payment date.
+
+        ⚠ Dividends ONLY, on purpose. A future-dated TRADE (allowed with a warning since
+        DEF-014) is the same class of question and is NOT cut here — that widening is an
+        open owner decision (R3 report K, DEF-016). :meth:`through` is the all-ledgers cut
+        if the owner rules for it.
+        """
+        return replace(
+            self, dividends=[d for d in self.dividends if d.effective_date <= day])
 
     def before_action_on(self, day: date) -> "LedgerBundle":
         """Everything that replays BEFORE a corporate action dated *day* (2026-08-11).

@@ -113,6 +113,10 @@
   <div class="nw-modal" id="nw-modal"></div>
 </div>
 
+<!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
+     tokens through window.pdNames on every response, so the resolver must exist before the
+     first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
+<script src="names.js?v=0.1.28"></script>
 <script src="api.js?v=0.1.28"></script>
 <script src="shell.js?v=0.1.28"></script>
 <script src="format.js?v=0.1.28"></script>

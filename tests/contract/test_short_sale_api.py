@@ -67,7 +67,10 @@ def _open_short_with_dividend(client: TestClient, conn: sqlite3.Connection) -> N
     client.post("/api/input/manual/commit", json={
         "account_id": "schwab", "symbol": "AAPL", "side": "sell", "date": "2026-06-10",
         "shares": "100", "price": "260", "short_sale": True})
-    insert_dividend(conn, account_id="schwab", symbol="AAPL", div_date=date(2026, 6, 20),
+    # Paid ON the valuation day (GOLDEN_NOW is 2026-06-11), inside the open-short window. It
+    # was 2026-06-20 — after the clock — and a dividend counts from its pay date (DEF-016), so
+    # the valuation surfaces rightly ignored it until then.
+    insert_dividend(conn, account_id="schwab", symbol="AAPL", div_date=date(2026, 6, 11),
                     div_type=DividendType.CASH, gross=Decimal("50"),
                     withholding=Decimal("0"), net=Decimal("50"))
 

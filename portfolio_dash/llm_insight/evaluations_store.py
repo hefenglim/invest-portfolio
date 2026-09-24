@@ -41,6 +41,39 @@ _BUCKETS: tuple[tuple[str, int, int], ...] = (
 )
 
 
+def _insights_exists(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insights'"
+    ).fetchone() is not None
+
+
+def _predicted_clause(conn: sqlite3.Connection, col: str = "insight_id") -> str:
+    """SQL predicate: the evaluation's card is NOT a card stored without a prediction.
+
+    DEF-003 (owner ruling 2026-09-24): ``prediction`` decides — a card with no prediction
+    carries no confidence and never enters the calibration curve, the calibration gap, the
+    rolling gap or the ceiling-violation rate. Evaluation rows copy the card's confidence at
+    scoring time, so a row scored from such a card (a legacy narrative card, or one scored
+    before :func:`due_insights` stopped handing its confidence on) still holds the stored
+    value; this predicate is the ONE read-side exclusion every confidence population applies.
+    An evaluation whose card row does not exist (a card deleted by
+    ``scripts/delete_insight_cards.py``, or a test fixture) is not KNOWN to be
+    prediction-less and stays in. Without an ``insights`` table (an evaluations-only
+    connection — architecture.md: a cross-table read degrades to "no rows") nothing is known,
+    so the predicate is a no-op.
+    """
+    if not _insights_exists(conn):
+        return "1 = 1"
+    return f"{col} NOT IN (SELECT id FROM insights WHERE prediction IS NULL)"
+
+
+def _predictionless_ids(conn: sqlite3.Connection) -> set[int]:
+    """Ids of cards stored without a prediction (DEF-003) — empty without the table."""
+    if not _insights_exists(conn):
+        return set()
+    return {int(r[0]) for r in conn.execute("SELECT id FROM insights WHERE prediction IS NULL")}
+
+
 class Evaluation(BaseModel):
     """One ``insight_evaluations`` row."""
 
@@ -297,7 +330,10 @@ def due_insights(
             symbol=r["symbol"],
             calibration_version=r["calibration_version"],
             is_shadow=bool(r["is_shadow"]),
-            confidence=r["confidence"],
+            # DEF-003: the source of every evaluation row's confidence. A card stored without
+            # a prediction hands none on, so its evaluation can never join a confidence
+            # population (the scorer copies this value into the row).
+            confidence=r["confidence"] if r["prediction"] is not None else None,
             prediction=r["prediction"],
             due_at=r["due_at"],
             created_at=r["created_at"],
@@ -399,9 +435,13 @@ def calibration_bins(
     For each non-empty 0-20..80-100 confidence bucket: the average claimed confidence
     (``claimed_pct``) vs the actual hit rate (``actual_pct``, miss == not-hit), and their
     absolute difference in percentage points (``calibration_error_pp``). Active (non-shadow)
-    scored rows with a stated confidence only. All percentages are Decimal STRINGS.
+    scored rows with a stated confidence only, and never a row whose card has no prediction
+    (DEF-003, :func:`_predicted_clause`). All percentages are Decimal STRINGS.
     """
-    where = "is_shadow = 0 AND status = 'scored' AND confidence IS NOT NULL"
+    where = (
+        "is_shadow = 0 AND status = 'scored' AND confidence IS NOT NULL AND "
+        + _predicted_clause(conn)
+    )
     params: tuple[Any, ...] = ()
     if insight_type_id is not None:
         where += " AND insight_type_id = ?"
@@ -451,7 +491,8 @@ def scored_confidence_hits(conn: sqlite3.Connection) -> list[tuple[int, bool]]:
     """
     rows = conn.execute(
         "SELECT confidence, miss FROM insight_evaluations "
-        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL"
+        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL AND "
+        + _predicted_clause(conn)  # DEF-003
     ).fetchall()
     return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
 
@@ -469,8 +510,9 @@ def recent_confidence_hits(
     """
     rows = conn.execute(
         "SELECT confidence, miss FROM insight_evaluations "
-        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL "
-        "ORDER BY id DESC LIMIT ?",
+        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL AND "
+        + _predicted_clause(conn)  # DEF-003 — filtered BEFORE the window, never after
+        + " ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
@@ -539,7 +581,8 @@ def ceiling_violations(conn: sqlite3.Connection) -> dict[str, Any]:
     already reads that table for ``due_insights``.
 
     Population (owner ruling 2026-08-26): every non-shadow card carrying BOTH a stated
-    confidence and a recorded ceiling.
+    confidence and a recorded ceiling — and a prediction (DEF-003, owner ruling 2026-09-24:
+    a card without one carries no confidence, so it cannot have claimed too much).
 
     * **Not restricted to scored cards.** A violation is a fact about the moment of
       creation; gating it on evaluation would lag the number by a full horizon and would
@@ -570,7 +613,7 @@ def ceiling_violations(conn: sqlite3.Connection) -> dict[str, Any]:
         "       SUM(CASE WHEN confidence > ceiling_at_create THEN 1 ELSE 0 END) AS v "
         "FROM insights "
         "WHERE is_shadow = 0 AND confidence IS NOT NULL "
-        "  AND ceiling_at_create IS NOT NULL"
+        "  AND ceiling_at_create IS NOT NULL AND prediction IS NOT NULL"
     ).fetchone()
     n = int(row["n"] or 0)
     violations = int(row["v"] or 0)
@@ -617,7 +660,12 @@ def miss_samples_for_version(
             "insight_id": r["insight_id"],
             "narrative_score": r["narrative_score"],
             "quant_hit": _opt_bool(r["quant_hit"]),
-            "confidence": r["confidence"],
+            # DEF-003: a card stored without a prediction carries no confidence — the master
+            # must not rewrite rules against a number the card never stood behind.
+            "confidence": (
+                None if r["card_title"] is not None and r["card_prediction"] is None
+                else r["confidence"]
+            ),
             "actual_value": r["actual_value"],
             "notes": r["notes"],
             "evaluated_at": r["evaluated_at"],
@@ -630,7 +678,7 @@ def miss_samples_for_version(
     ]
 
 
-def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
+def _row_wire(r: sqlite3.Row, predictionless: set[int]) -> dict[str, Any]:
     return {
         "id": r["id"],
         "insight_id": r["insight_id"],
@@ -642,7 +690,9 @@ def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
         "narrative_score": r["narrative_score"],
         "miss": bool(r["miss"]),
         "actual_value": r["actual_value"],
-        "confidence": r["confidence"],
+        # DEF-003: the 預測明細 row (and its CSV export) of a prediction-less card shows no
+        # confidence, exactly as the card itself does.
+        "confidence": None if int(r["insight_id"]) in predictionless else r["confidence"],
         "evaluated_at": r["evaluated_at"],
     }
 
@@ -746,8 +796,9 @@ def ai_score(
         "quant_hit_rate": _ratio_str(total_quant_hit, total_quant_n),
         "avg_narrative": _avg_str(total_narr_sum, total_narr_n),
     }
+    predictionless = _predictionless_ids(conn)
     all_rows = [
-        _row_wire(r)
+        _row_wire(r, predictionless)
         for r in conn.execute(
             "SELECT * FROM insight_evaluations ORDER BY id DESC"
         )

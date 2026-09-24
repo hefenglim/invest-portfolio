@@ -15,6 +15,7 @@ is reconciled exactly.
 from __future__ import annotations
 
 import time
+from datetime import date
 from decimal import Decimal
 
 import common as C
@@ -239,8 +240,10 @@ def _j(r):
 # ------------------------------------------------------------------ reconciliation
 def snapshot(api: C.Api):
     facts = C.load_facts_from_api(api)
-    res = O.replay(facts)
     dash = api.get("/api/dashboard").json()
+    # DEF-016: a dividend counts from its pay date — replay what the app's as_of has received.
+    as_of = date.fromisoformat(str(dash["as_of"])[:10])
+    res = O.replay(O.facts_received_by(facts, as_of))
     cash = api.get("/api/cash", limit=500).json()
     reported_hold = {(h["account_id"], h["symbol"]): h for h in dash["holdings"]}
     reported_cash = {(b["account_id"], b["ccy"]): dec(b["amount"]) for b in cash["balances"]}

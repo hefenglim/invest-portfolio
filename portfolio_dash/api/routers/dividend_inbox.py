@@ -34,6 +34,8 @@ def list_inbox(
         refreshed = {
             "updated": outcome.updated,
             "failed": outcome.failed,
+            # DEF-047: answered-but-no-dividends, kept apart from `failed` (additive).
+            "empty": outcome.empty,
             "text": inbox.scan_sentence(outcome, len(rows)),
         }
     return {

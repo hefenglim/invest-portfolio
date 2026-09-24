@@ -27,14 +27,24 @@ from pathlib import Path
 _WEB = Path(__file__).resolve().parents[2] / "web"
 _INPUT = _WEB / "input.js"
 
-#: Endpoints whose success changes the ledger (and therefore every holdings figure).
+#: Endpoints whose success changes the ledger (and therefore every holdings figure) — and
+#: the shared per-row acknowledgement flow that commits one ON BEHALF of its caller
+#: (DEF-025, ``web/import-ack.js``: ``pdImportAck.commit`` IS a write to /api/import/commit).
 _LEDGER_WRITE = re.compile(
     r"""\.(?:post|put|del)\(\s*['"`]/api/(?:import/commit|import/batches|input/manual/commit"""
-    r"""|ledgers/|cash/movements|cash/fx|dividends/inbox|rebates)""")
+    r"""|ledgers/|cash/movements|cash/fx|dividends/inbox|rebates)|\bpdImportAck\.commit\(""")
 
 #: Scripts on trades.html that write the ledger WITHOUT reaching the seam, with the reason.
 #: An entry that stops being true gets deleted (test_the_pending_list_is_not_stale).
 _PENDING: dict[str, str] = {}
+
+#: Shared helpers that write for a CALLER and hand the response back; the caller settles
+#: through the seam, and the caller is itself held to this file's rules (it matches
+#: ``pdImportAck.commit(`` above). A helper that refreshed on its own would be the second
+#: refresh DEF-019 removed.
+_DELEGATES: dict[str, str] = {
+    "import-ack.js": "returns the commit response to input.js / broker-import.js, which settle",
+}
 
 
 def _strip(src: str) -> str:
@@ -189,12 +199,18 @@ def test_every_other_ledger_writer_on_the_page_calls_the_seam() -> None:
         if not _LEDGER_WRITE.search(src):
             continue
         writers.append(name)
-        if name in _PENDING:
+        if name in _PENDING or name in _DELEGATES:
             continue
         if not re.search(r"window\.pdLedgerRefresh\(", src):
             offenders[name] = "writes the ledger and never calls window.pdLedgerRefresh"
     assert {"broker-import.js", "corp-action-form.js", "ledger.js"} <= set(writers), writers
     assert not offenders, offenders
+    # Every delegate is really used by a script this test holds to the seam.
+    for name in _DELEGATES:
+        assert name in scripts, f"{name} is not loaded on trades.html"
+        users = [s for s in scripts if s not in (name, "input.js") and (_WEB / s).exists()
+                 and "pdImportAck.commit(" in (_WEB / s).read_text(encoding="utf-8")]
+        assert users or "pdImportAck.commit(" in _INPUT.read_text(encoding="utf-8"), name
 
 
 def test_the_pending_list_is_not_stale() -> None:

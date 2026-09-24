@@ -121,6 +121,46 @@ def _drop_column_if_present(
         conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
 
+#: The note fingerprint the rebate inbox's confirm writes (``api/rebates.py::month_tag``).
+_REBATE_TAG_SUFFIX = " 折讓款"
+
+
+def _tagged_month(note: str) -> str | None:
+    """``YYYY-MM`` from a 「YYYY-MM 折讓款」 note, else None (the inbox's own parse)."""
+    if not note.endswith(_REBATE_TAG_SUFFIX):
+        return None
+    head = note[: -len(_REBATE_TAG_SUFFIX)]
+    if (len(head) == 7 and head[4] == "-" and head[:4].isdigit() and head[5:].isdigit()
+            and 1 <= int(head[5:]) <= 12):
+        return head
+    return None
+
+
+def _backfill_rebate_period(conn: sqlite3.Connection) -> None:
+    """Link every pre-existing REBATE credit to the trade month it books (DEF-009).
+
+    The month is the one the inbox ALREADY treated as booked, so the migration moves no month
+    from credited to open: the 「YYYY-MM 折讓款」 note tag the confirm endpoint writes when it
+    parses (the system's own record of which month was confirmed), else the month before the
+    credit's date (the refund is booked on the 1st of the month after the trade month). Runs
+    only when the column is first created — a REBATE entered later by hand stays unlinked and
+    keeps the legacy keys, exactly as before.
+    """
+    rows = conn.execute(
+        "SELECT id, date, note FROM cash_movements "
+        "WHERE UPPER(kind) = 'REBATE' AND rebate_period IS NULL"
+    ).fetchall()
+    for row in rows:
+        tagged = _tagged_month(str(row[2] or ""))
+        if tagged is not None:
+            period = tagged
+        else:
+            y, m = int(str(row[1])[:4]), int(str(row[1])[5:7])
+            y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+            period = f"{y:04d}-{m:02d}"
+        conn.execute("UPDATE cash_movements SET rebate_period=? WHERE id=?", (period, row[0]))
+
+
 def create_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     # R6 (review ⑧): the EX-DIVIDEND date. NULLABLE with NO default on purpose — every
@@ -182,6 +222,19 @@ def create_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_cash_movements_corporate_action "
         "ON cash_movements(corporate_action_id)"
     )
+    # rebate_period (DEF-009, 2026-09-24): the TRADE MONTH ('YYYY-MM') a confirmed 折讓款
+    # credit books. The rebate inbox used to recognise a credited month only from the row's
+    # own kind + date + note, which is why those three were locked on the cash page — any of
+    # them edited would re-open the month and invite a second credit. The owner ruled the row
+    # fully editable; this explicit link is what makes that safe: the inbox reads it first and
+    # it survives every edit (``api/rebates.py::_confirmed_months``). Additive and nullable —
+    # a movement that is not a rebate credit keeps NULL. Backfilled ONCE, when the column is
+    # first added, from exactly the keys the inbox read until now (see the helper).
+    had_rebate_period = "rebate_period" in {
+        r[1] for r in conn.execute("PRAGMA table_info(cash_movements)")}
+    _add_column_if_missing(conn, "cash_movements", "rebate_period", "TEXT")
+    if not had_rebate_period:
+        _backfill_rebate_period(conn)
     # band_move_json (DEF-021, 2026-09-23): what `store.move_target_band` moved when this
     # EXCHANGE was recorded — from/to symbol, the two levels and their `target_set_at` —
     # as canonical JSON text. It exists so the delete can be CONDITIONALLY reversible: the

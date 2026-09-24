@@ -82,7 +82,18 @@ class PipelineNodes(BaseModel):
 
 
 def _trigger(f: PipelineFacts) -> NodeState:
-    """Trigger node: manual (unscheduled) → warn ("won't auto-run"); scheduled → ok."""
+    """Trigger node: scheduled → ok; ``on_alert`` → ok (event-triggered); otherwise manual →
+    warn ("won't auto-run").
+
+    DEF-043 (2026-09-24): this read ``scheduled`` alone, so an ``on_alert`` task — which by
+    design can never carry a schedule (``PUT …/schedule`` refuses it, spec 03) and runs every
+    time a subscribed alert fires — read 「未排程（手動）・不會自動執行」 and was counted under
+    需注意 on the pipeline page, while the task's own dry-run G1 said 「由風險預警事件觸發」 ✓
+    and ``alert_scan`` was dispatching it. The scope decides first, exactly as G1
+    (``insight_service._g0_g1``) does: one task, one answer to "how does this run?".
+    """
+    if f.scope == "on_alert":
+        return NodeState(lv="ok", text="預警觸發", sub="風險預警命中時自動執行")
     if not f.scheduled:
         return NodeState(lv="warn", text="未排程（手動）", sub="不會自動執行")
     return NodeState(lv="ok", text="已排程")

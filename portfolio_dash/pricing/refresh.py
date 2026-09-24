@@ -248,10 +248,11 @@ def refresh_dividends(
     degradation contract: failed symbols are recorded in the summary, never
     raised (`data-and-pricing.md` — never crash, never fabricate).
     """
-    events, sources, failed, reasons = registry.fetch_dividends_explained(instruments)
+    events, sources, failed, reasons, empty = registry.fetch_dividends_explained(instruments)
     if events:
         upsert_dividend_events(conn, events, fetched_at=now)
-    return RefreshSummary(ok=sources, failed=failed, failed_reasons=reasons, fetched_at=now)
+    return RefreshSummary(ok=sources, failed=failed, failed_reasons=reasons, empty=empty,
+                          fetched_at=now)
 
 
 def describe_refresh(summary: RefreshSummary) -> str:
@@ -265,6 +266,10 @@ def describe_refresh(summary: RefreshSummary) -> str:
     says only what was updated.
     """
     head = f"{len(summary.ok)} 檔事件已更新"
+    # DEF-047 (owner ruling 2026-09-24): a source that answered with no dividend records is
+    # a normal outcome — counted, named, and NOT a failure (no 「失敗」, no warn face).
+    if summary.empty:
+        head += f"，{len(summary.empty)} 檔無配息紀錄（{'、'.join(sorted(summary.empty))}）"
     if not summary.failed:
         return head
     detail = "；".join(

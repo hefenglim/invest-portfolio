@@ -26,6 +26,9 @@ from portfolio_dash.api.insight_service import (
 from portfolio_dash.api.insight_service import (
     generate_calibrations_for_all as insight_generate_calibrations,
 )
+from portfolio_dash.api.insight_service import (
+    held_symbols_for_alerts as insight_held_symbols_for_alerts,
+)
 from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
 from portfolio_dash.api.news_service import run_news_daily
 from portfolio_dash.api.routers import (
@@ -86,6 +89,7 @@ from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
     register_alert_compute_runner,
+    register_alert_held_fn,
     register_calibration_runner,
     register_digest_runner,
     register_dividend_scan_runner,
@@ -189,6 +193,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
     # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
     register_insight_runner(insight_run_for_id)
+    # DEF-041: the on_alert 持倉提點 card is dispatched only for HELD symbols; "held" is the
+    # computed book's answer, which scheduler/ cannot replay — bound here, next to the runner.
+    register_alert_held_fn(insight_held_symbols_for_alerts)
     # Wire the Loop-2/3 evolution runners (price-/master-bearing reads live in the api seam).
     register_evaluation_runner(insight_evaluate_due)
     register_calibration_runner(insight_generate_calibrations)

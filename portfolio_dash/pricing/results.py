@@ -66,4 +66,10 @@ class RefreshSummary(BaseModel):
     #: dividend path records reasons today, and a summary without them still renders — the
     #: formatter then says the source gave none rather than inventing one.
     failed_reasons: dict[str, str] = Field(default_factory=dict)
+    #: keys a source ANSWERED for with no data at all (DEF-047, owner ruling 2026-09-24).
+    #: Additive, dividend path only: a symbol that never paid a dividend is the common case,
+    #: not a failure, so it is kept OUT of ``failed`` (which drives every warn face) and
+    #: reported on its own — 「1 檔無配息紀錄」. A quote/FX/history refresh never fills it:
+    #: there, a listed symbol with no price IS a failed fetch.
+    empty: list[str] = Field(default_factory=list)
     fetched_at: datetime

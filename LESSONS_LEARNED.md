@@ -1766,3 +1766,31 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   the mutant is on disk, and the resume protocol after any interruption is: markers = 0, fixed
   signatures present, then re-run the mutations. (4) Never edit a source file with a script that
   rewrites the whole file through a text codec; edit in place and verify the blob hash.
+
+- **2026-09-24 — Functional-test manual R2 → R3 (2 bounced fixes, 17 rulings / new items, 4 agents).**
+  **Context:** the verifier's R2 pass closed 27 of 29, bounced two, and the owner ruled 17 more
+  items into work. **What went wrong.** (a) **Both bounced fixes had green guards that matched
+  source strings.** DEF-023's test asserted `"renderUnappliedBanner();" in <function body>` — the
+  call was present, but after an early `return` guarded by an unrelated condition, so the block
+  never rendered; the guard pinned the bug's exact position as the spec. DEF-017's guards tested
+  the API and grepped the page; nobody deleted a row and then looked at the same page. (b) **A
+  per-row acknowledgement that lived only in one page's JS** (DEF-027, R2) was a convention: the
+  server still accepted a file-wide `ack_warnings: true`, and the CSV and AI doors pre-ticked the
+  very rows the broker page asked about one by one (DEF-025). (c) **A wrong id in a handoff note
+  became a deletion order.** The R2 note said the bad card was "#207"; the verifier copied it and
+  the owner ruled "delete #207". #207 is a legitimate 2884 card — the bad one was #192, and a
+  second of the same class (#97) existed. A read-only look at the row before acting caught it.
+  (d) **A lock can be a dedup key in disguise.** The rebate row's date/kind/note were locked
+  because the inbox recognised a credited month from exactly those fields (DEF-009); unlocking
+  them first needed a structural link column, or an edit would have re-opened the month.
+  **Rules:** (1) A guard for "X is rendered / refreshed / enforced" must EXECUTE the code — Node
+  against a stub DOM, Playwright, or TestClient — never search the source for the call; a string
+  guard certifies the text, not the control flow around it. (2) A safety rule belongs to the
+  server that writes; the page only explains it. If one door asks per row, every door that can
+  reach the same write must, and the endpoint must refuse otherwise. (3) Before any ordered
+  deletion, re-identify the target from the database by its CONTENT (symbol, title, date), not by
+  the id in a note — and make the deletion script refuse targets that look legitimate (here: a
+  card whose symbol is a registered instrument). Write every id you hand over from a query, not
+  from memory. (4) Before removing a lock, find what the locked fields are keys FOR; give that
+  use its own column, then unlock. (5) In this harness subagents cannot write report files into
+  the lead's scratchpad — their report arrives in the hand-back message; save it to disk at once.

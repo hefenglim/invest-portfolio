@@ -65,6 +65,16 @@ _ID_EMBED = re.compile(r"(?:^|\.)(?:account_id|account|acct|acct_id)$")
 #: (the inbox's ``_mk(_acct_name=account.name)`` — no f-string, so the first scanner could
 #: not see it; the handover named it by line).
 _NAME_FIELD = re.compile(r"(?:acct|account)_name$")
+#: Formatting wrappers that pass their argument straight into the text (DEF-045, 2026-09-24).
+#: The first scanner matched the WHOLE interpolated expression, so ``{_esc(account_id)}`` —
+#: the cash-statement report's 「帳戶 TW Broker（tw_broker）」 header — was invisible to it.
+#: A wrapper is unwrapped before matching; ``account_ref(...)`` is not a wrapper, it is the fix.
+_PASS_THROUGH = frozenset({"_esc", "str", "escape", "html.escape", "_s"})
+#: The accounts registry reader. DEF-045's second blind spot: the 帳本報告 printed 「TW Broker」
+#: through ``{a.account_id: a.name for a in list_accounts(conn)}`` and a ``.get()`` lookup —
+#: the English label never passed through an f-string, so no f-string rule could see it. Any
+#: ``.name`` read off a row this call yields is now a finding (``<file>:list_accounts→<x>.name``).
+_REGISTRY_CALL = "list_accounts"
 
 #: Sites that may embed the id or the name, keyed ``"<file>:<expression>"``, each with the
 #: reason it is not a user-facing sentence about an account.
@@ -98,6 +108,19 @@ _ALLOWED: dict[str, str] = {
     "strategy/alerts.py:acct_id":
         "the alert's stable id key (`fx_drift:<acct>`), never rendered — its title uses the "
         "display name",
+    # --- `.name` read off list_accounts() rows (DEF-045 detector) ---------------------------
+    "api/routers/accounts.py:list_accounts→a.name":
+        "GET /api/accounts wire field `name` (the stored registry record); web/ reads only "
+        "`account_id` from it and names it through pdNames (ledger.js loadAccounts, "
+        "corp-action-form.js) — test_account_name_single_source pins the frontend side",
+    "api/routers/ledgers.py:list_accounts→a.name":
+        "the ledger rows' wire field `account` (API compatibility); every ledger table renders "
+        "`account_id` through pdNames (G-01, test_account_name_single_source)",
+    "api/routers/symbol.py:list_accounts→a.name":
+        "the drawer activity rows' wire field `account`; detail.js renders `account_id` "
+        "through acctZh (G-01, test_account_name_single_source)",
+    "data_ingestion/agents.py:list_accounts→a.name":
+        "the LLM prompt's account roster (`id=name (ccy)`), read by the model, not the owner",
 }
 
 #: Sites still embedding a name or a bare id in a user-facing sentence, deferred to a later
@@ -108,6 +131,34 @@ _ALLOWED: dict[str, str] = {
 #: ``shared/oversold.py``, the 「帳戶 X 不存在」 envelopes call ``unknown_account_message``
 #: (allowed above: the id IS the missing thing), and the rest embed ``account_ref``.
 _PENDING: dict[str, str] = {}
+
+
+def _unwrap(expr: ast.expr) -> ast.expr:
+    """Strip pass-through formatting calls: ``_esc(x.account_id)`` is ``x.account_id``."""
+    while (isinstance(expr, ast.Call) and len(expr.args) == 1 and not expr.keywords
+           and ast.unparse(expr.func) in _PASS_THROUGH):
+        expr = expr.args[0]
+    return expr
+
+
+def _registry_name_reads(tree: ast.AST) -> list[tuple[str, int]]:
+    """``<x>.name`` where ``x`` iterates ``list_accounts(...)`` (a comprehension or a for)."""
+    out: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        loops: list[tuple[ast.expr, ast.expr, ast.AST]] = []
+        if isinstance(node, ast.DictComp | ast.ListComp | ast.SetComp | ast.GeneratorExp):
+            loops = [(g.target, g.iter, node) for g in node.generators]
+        elif isinstance(node, ast.For):
+            loops = [(node.target, node.iter, node)]
+        for target, it, scope in loops:
+            if not (isinstance(target, ast.Name) and isinstance(it, ast.Call)
+                    and ast.unparse(it.func).split(".")[-1] == _REGISTRY_CALL):
+                continue
+            for sub in ast.walk(scope):
+                if (isinstance(sub, ast.Attribute) and sub.attr == "name"
+                        and isinstance(sub.value, ast.Name) and sub.value.id == target.id):
+                    out.append((f"{_REGISTRY_CALL}→{target.id}.name", sub.lineno))
+    return out
 
 
 def _embeds() -> dict[str, list[int]]:
@@ -122,9 +173,12 @@ def _embeds() -> dict[str, list[int]]:
             for part in node.values:
                 if not isinstance(part, ast.FormattedValue):
                     continue
-                expr = ast.unparse(part.value)
+                raw = ast.unparse(part.value)
+                expr = ast.unparse(_unwrap(part.value))
                 if _NAME_EMBED.match(expr) or _ID_EMBED.search(expr):
-                    found.setdefault(f"{rel}:{expr}", []).append(part.lineno)
+                    found.setdefault(f"{rel}:{raw}", []).append(part.lineno)
+        for key, line in _registry_name_reads(tree):
+            found.setdefault(f"{rel}:{key}", []).append(line)
         for node in ast.walk(tree):
             pairs: list[tuple[str, ast.expr]] = []
             if isinstance(node, ast.Call):
@@ -175,6 +229,20 @@ def test_the_guard_bites() -> None:
     for expr in ("account_ref(account_id)", "names.get(acct_id, acct_id)", "accounts"):
         assert not _ID_EMBED.search(expr), expr
     assert _NAME_FIELD.search("_acct_name") and _NAME_FIELD.search("account_name")
+    # DEF-045: a wrapped id, and a label read off the registry with no f-string at all.
+    wrapped = ast.parse('h = f"帳戶 {_esc(acct_name)}（{_esc(account_id)}）"').body[0]
+    parts = [p for p in ast.walk(wrapped) if isinstance(p, ast.FormattedValue)]
+    assert [ast.unparse(_unwrap(p.value)) for p in parts] == ["acct_name", "account_id"]
+    assert _ID_EMBED.search(ast.unparse(_unwrap(parts[1].value)))
+    assert not _ID_EMBED.search(ast.unparse(_unwrap(
+        ast.parse("_esc(account_ref(account_id))", mode="eval").body)))
+    reads = _registry_name_reads(ast.parse("\n".join([
+        "accts = {a.account_id: a.name for a in list_accounts(conn)}",
+        "for acct in store.list_accounts(conn):",
+        "    label = acct.name",
+        "ok = {a.account_id for a in list_accounts(conn)}",
+    ])))
+    assert sorted(k for k, _ in reads) == ["list_accounts→a.name", "list_accounts→acct.name"]
 
 
 def test_the_shared_helpers_own_the_grammar() -> None:
@@ -222,19 +290,24 @@ function response(status, body) {
   };
 }
 function sandbox(withNames) {
+  const errors = [];
   const sb = {
     window: { location: { pathname: '/index.html', replace: function () {} } },
     document: { dispatchEvent: function () {}, createElement: function () { return {}; },
                 body: { appendChild: function () {} } },
     CustomEvent: function (type, init) { this.type = type; this.detail = init && init.detail; },
     AbortController: function () { this.signal = {}; this.abort = function () {}; },
-    URLSearchParams: URLSearchParams, URL: URL, setTimeout: setTimeout, console: console,
+    URLSearchParams: URLSearchParams, URL: URL, setTimeout: setTimeout,
+    console: { error: function () { errors.push([].slice.call(arguments).join(' ')); },
+               warn: console.warn, log: console.log },
     fetch: null,
   };
   sb.globalThis = sb;
+  sb.consoleErrors = errors;
   vm.createContext(sb);
-  vm.runInContext(apiSrc, sb);
+  // The page order (DEF-044): names.js BEFORE api.js, exactly as every web/*.html loads them.
   if (withNames) vm.runInContext(namesSrc, sb);
+  vm.runInContext(apiSrc, sb);
   return sb;
 }
 const OK = JSON.stringify({
@@ -259,6 +332,7 @@ const ERR = JSON.stringify({ error: { code: 'oversell_unacknowledged',
     out[withNames ? 'with_names' : 'without_names'] = {
       body: body,
       err: { message: err.message, code: err.code, field: err.field, issues: err.issues },
+      console_errors: sb.consoleErrors,
     };
   }
   process.stdout.write(JSON.stringify(out));
@@ -319,8 +393,9 @@ def test_the_fetch_layer_resolves_tokens_in_the_error_envelope(
 def test_without_names_js_the_id_itself_is_shown(
     resolved: dict[str, dict[str, object]],
 ) -> None:
-    """The pages that load api.js alone (settings / news / …) degrade to the id, never to
-    a raw token and never to a crash."""
+    """A page that breaks the load order degrades to the id, never to a raw token and never
+    to a crash — and (DEF-044) says so LOUDLY: api.js reports the missing names.js at load.
+    Five pages shipped without names.js and the silent id fallback hid it for a round."""
     body = resolved["without_names"]["body"]
     err = resolved["without_names"]["err"]
     assert isinstance(body, dict) and isinstance(err, dict)
@@ -328,6 +403,12 @@ def test_without_names_js_the_id_itself_is_shown(
     assert body["rows"][0] == "schwab"
     assert err["message"] == "需確認賣超（tw_broker）"
     assert "{account:" not in json.dumps(resolved, ensure_ascii=False)
+    errors = resolved["without_names"]["console_errors"]
+    assert isinstance(errors, list) and len(errors) == 1, errors
+    loud = errors[0]
+    assert "names.js must be loaded before api.js" in str(loud)
+    # …and a page with the right order is silent: the smoke e2e counts console errors.
+    assert resolved["with_names"]["console_errors"] == []
 
 
 # ---------------------------------------------------------------------------------------

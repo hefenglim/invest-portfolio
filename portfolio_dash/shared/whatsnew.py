@@ -70,6 +70,19 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, strategy-prompt version history (functional-test DEF-033, 2026-09-24) ---
+    Feature(
+        version="0.1.29",
+        id="strategy-prompt-versions",
+        title="策略提示詞有了版本記錄：每次儲存都留一版，可對照差異、回復任一版",
+        desc="以前儲存或「同步官方」會直接蓋掉原本的內文，改壞了只能從官方版重來。現在每張策略卡"
+        "都有「版本記錄」：每次儲存、同步官方或回復都另存一版（標明來源與時間），可以檢視任一版的"
+        "內文、和前一版或目前的內文逐行對照，並把任一版回復成新的一版——歷史永遠不會被改寫。"
+        "洞察卡頁尾也會標出生成時用的是哪一版；這個功能上線前產生的卡則寫「生成時版本未記錄」",
+        href="settings.html#prompts",
+        area="系統設定 → AI 提示詞 → 策略卡",
+        target="#tpl-list",
+    ),
     # --- v0.1.29, news-organizer prompt settings (2026-09-10) -----------------------------
     Feature(
         version="0.1.29",

@@ -14,6 +14,7 @@ booked, for every branch.  A fourth branch added later fails it automatically.
 """
 
 import sqlite3
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -553,9 +554,23 @@ def _mirror(
     was = _realized_on(conn, body.date)
     _tx(conn, side, str(body.shares), str(body.price), body.date,
         short=body.short_sale, fee=fee, tax=tax)
-    book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    # DEF-048 (owner ruling 2026-09-24): the projected columns are the position ON THE TRADE
+    # DATE right after this row — so the replay is cut exactly there: every event that books
+    # before the written row plus the row itself (it holds the highest id, so it is the last
+    # of its day's trades; that day's dividends, rank 40, book after it). Until DEF-048 this
+    # compared against the WHOLE-ledger end state, which is the reading the owner overruled.
+    written = load_ledger_bundle(conn)
+    cut = replace(
+        written,
+        opening=[o for o in written.opening if o.build_date <= body.date],
+        actions=[a for a in written.actions if a.date <= body.date],
+        transactions=[t for t in written.transactions if t.trade_date <= body.date],
+        dividends=[d for d in written.dividends if d.effective_date < body.date],
+    )
+    book = build_book(cut, allow_oversell=True)
     held = next((h for h in book.holdings
                  if (h.account_id, h.symbol) == ("schwab", "TSLA")), None)
+    assert pp["as_of"] == body.date.isoformat()
 
     shares_key = "remain_shares" if pp["kind"] == "sell" else "new_shares"
     booked_shares = held.shares if held is not None else D("0")
@@ -614,11 +629,11 @@ def test_backdated_sell_realizes_against_the_position_that_existed_on_its_own_da
 
 
 def test_backdated_buy_projects_the_averages_the_replay_will_hold() -> None:
-    """A buy 補登 ahead of a later sell: the sell then removes a DIFFERENT fraction.
+    """A buy 補登 ahead of a later sell: the card shows the position ON 2026-06-15.
 
-    Reading the end state instead makes the projected average land on the pre-existing
-    position plus this trade's cost — an average the ledger never holds, because the later
-    sell was replayed against a book that did not contain this buy.
+    DEF-048 (owner ruling 2026-09-24): 2,000 held then + this 100 = 2,100, at the averages the
+    replay holds on that date — not the 1,600 of the end state after the later sell, which
+    was the M4-01 reading the owner overruled (the later sell is a different day's event).
     """
     conn = _conn()
     _tx(conn, Side.BUY, "2000", "600", date(2026, 1, 6), fee="171")
@@ -626,7 +641,9 @@ def test_backdated_buy_projects_the_averages_the_replay_will_hold() -> None:
     body = ManualBody(account_id="schwab", symbol="TSLA", side="BUY",
                       date=date(2026, 6, 15), shares=D("100"), price=D("500"))
     pp = _mirror(conn, body, fee="71")
-    assert pp["new_shares"] == "1600"
+    assert pp["old_shares"] == "2000"
+    assert pp["new_shares"] == "2100"
+    assert pp["backdated"] is True
     conn.close()
 
 

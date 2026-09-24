@@ -14,6 +14,12 @@ literal at all: its flag is a variable the dialog's decision sets.
 Why the e2e suite did not catch it: ``test_broker_web_import_flow`` asserted the first
 commit's status was 200 and that 「全部寫入完成」 appeared. The corpus's PREH sell IS a 賣超
 against an empty ledger; the test encoded the blanket ack as the expected behaviour.
+
+DEF-025 (2026-09-24): this file used to ALSO pin the broker door's per-row flow by grepping its
+source for five strings. That flow now lives in ``web/import-ack.js``, shared by the CSV and AI
+doors, and is pinned by RUNNING it (``test_def025_import_ack_front.py``) and at the server
+(``test_def025_bulk_oversell_needs_its_own_ack.py``: a 賣超 row not named in ``ack_rows`` is
+refused whatever flag a page sends). What stays here is the literal scan — the class guard.
 """
 
 from __future__ import annotations
@@ -41,20 +47,14 @@ def _code(path: Path) -> str:
     return _LINE_COMMENT.sub(_blank, _BLOCK_COMMENT.sub(_blank, src))
 
 
-def test_the_broker_door_never_acknowledges_by_literal() -> None:
-    src = _code(_WEB / "broker-import.js")
-    assert not _ACK_LITERAL.search(src), (
-        "web/broker-import.js sends ack_warnings: true as a literal — the acknowledgement "
-        "must come from the per-row dialog's decision (DEF-027)"
-    )
-    # The per-row path exists: the server's refusal code is handled, the rows are fetched
-    # through the preview door, and the dialog's ticks start unticked.
-    assert "warnings_unacknowledged" in src
-    assert "/api/import/preview" in src
-    assert "bk-warn-tick" in src
-    assert re.search(r"ack_warnings:\s*ack\b", src), "the flag is the dialog's decision"
-    # …and the ticked rows travel as `select` indices, never as a re-rendered CSV (F-03).
-    assert re.search(r"body\.select\s*=\s*select", src)
+def test_the_per_row_doors_never_acknowledge_by_literal() -> None:
+    """The broker door and the shared per-row flow it now delegates to (DEF-025)."""
+    for name in ("broker-import.js", "import-ack.js"):
+        src = _code(_WEB / name)
+        assert not _ACK_LITERAL.search(src), (
+            f"web/{name} sends ack_warnings: true as a literal — the acknowledgement must "
+            "come from the per-row dialog's decision (DEF-027 / DEF-025)"
+        )
 
 
 def test_every_literal_ack_in_web_sits_inside_a_dialogs_confirm() -> None:

@@ -438,6 +438,9 @@ def cash_overview(
                                      if m.account_id in accounts else None),
                     "acq_rate": (None if m.acq_home_amount is None or m.amount == _ZERO
                                  else decimal_str(m.acq_home_amount / m.amount)),
+                    # DEF-009 (additive): the trade month a confirmed 折讓款 credit books, so
+                    # the edit dialog can say which month stays booked whatever is edited.
+                    "rebate_period": m.rebate_period,
                 }
                 for m in page
             ],
@@ -652,21 +655,13 @@ def edit_movement(
     if existing is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"紀錄 #{move_id} 不存在"))
-    # FE-D1 (R8.1): a booked 折讓款 (REBATE) credit is the structural suppression anchor for its
-    # trade month — api/rebates._confirmed_months maps it back by movement DATE (and, as a
-    # secondary key, the note tag). Editing the note is safe (the date key still suppresses, and
-    # a test relies on that), but changing the KIND (drops it from the confirmed set) or the DATE
-    # (re-anchors it to a different month) would let the original month re-surface as pending and
-    # be confirmed — and credited — a second time. Block those two; amount stays correctable. To
-    # reverse a rebate, delete the row instead.
-    if existing.kind.upper() == "REBATE" and (
-        body.kind.strip().upper() != "REBATE"
-        or body.date != existing.date
-    ):
-        return JSONResponse(status_code=400, content=error_body(
-            "validation_error",
-            "折讓款的類型與日期已鎖定以避免重複入帳（可修正金額或備註；如需撤銷請刪除此筆）",
-            field="kind"))
+    # DEF-009 (owner ruling 2026-09-24): a booked 折讓款 row is FULLY editable — date / kind /
+    # amount / note — like any hand-entered row. It used to be locked here (FE-D1 R8.1) because
+    # the rebate inbox recognised a credited month from those very fields, so editing them
+    # re-opened the month for a second credit. The credit now carries an explicit
+    # ``rebate_period`` link the inbox reads first and no edit touches
+    # (``api/rebates._confirmed_months``), and every edit leaves its before-image in
+    # ``ledger_audit`` (``store.update_cash_movement``). To reverse a rebate, delete the row.
     # The SAME shared guard the POST door and the CSV door run, plus ``exclude_id``: the
     # edited row's own prior effect is stripped from the pool first (self-exclusion), so
     # raising a withdrawal within the headroom its OLD amount already consumed is not

@@ -34,6 +34,7 @@ if TYPE_CHECKING:  # annotation only — fees.py stays a pure calculation module
     from portfolio_dash.shared.models.assets import Instrument
 
 _ZERO = Decimal("0")
+_ONE = Decimal("1")
 _CENT = Decimal("0.01")
 _INT = Decimal("1")
 
@@ -322,12 +323,53 @@ def compute_fees(
     return _my(rules, notional, is_etf, snap)
 
 
-def forecast_tw_rebate(fee: Decimal, rebate_rate: Decimal) -> Decimal:
+def rebate_applies(discount: Decimal) -> bool:
+    """Can a trade CHARGED under *discount* earn a charge-first refund at all? (DEF-010)
+
+    ``discount`` and ``rebate_rate`` are two ways to record ONE broker benefit — charge less
+    now, or charge full and refund later (``markets-and-fees.md``). A fee computed with
+    ``discount < 1`` has already had the benefit taken off at settlement; forecasting a
+    ``rebate_rate`` refund on top of it counts the same benefit twice. Measured on demo
+    2026-09-24: ten TW trades snapshotted ``discount 0.23`` + ``rebate_rate 0.77`` and eight
+    of them were forecast a 77 % refund (e.g. fee 199 → expected 153) in /api/rebates.
+    """
+    return discount >= _ONE
+
+
+def booked_discount(snapshot: Mapping[str, str], *, fallback: Decimal) -> Decimal:
+    """The ``discount`` a stored trade was CHARGED under, read off its fee snapshot.
+
+    ``fee_rule_snapshot`` is provenance — which regime produced the fee of record — so it is
+    the authority for "was this fee already discounted?", not today's rule set (a rule edited
+    since would re-label history). A snapshot without a parseable ``discount`` (a supplied
+    fee from a broker statement, an empty legacy ``{}``) says nothing about it, and the
+    account's CURRENT rule set answers instead (*fallback*): never guessed, never ``1`` by
+    decree.
+    """
+    raw = snapshot.get("discount")
+    if raw is None:
+        return fallback
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return fallback
+    return value if value.is_finite() else fallback
+
+
+def forecast_tw_rebate(fee: Decimal, rebate_rate: Decimal, *, discount: Decimal) -> Decimal:
     """FORECAST-ONLY: the expected TW monthly rebate for one trade = floor(fee × rebate_rate).
 
     NEVER money of record and NEVER used by ``compute_fees`` (FE-D1): the 群益 2.3折 model
     charges the full 0.1425% at settlement and refunds 77% next month, confirmed off-ledger.
     Wave B surfaces this as a preview hint and a pending-confirmation inbox item. Floored per
     the 券商 convention (遇小數點無條件捨去): floor(142×0.77)=109, floor(156×0.77)=120.
+
+    ``discount`` is REQUIRED, with no default, on purpose (DEF-010): every forecaster must
+    say which settlement regime the fee was charged under, and a fee already discounted at
+    settlement (``discount < 1``) forecasts ``0`` — see :func:`rebate_applies`. A default of
+    ``1`` is exactly how the three forecasters (inbox, draft hint, rebalance) went on
+    counting the benefit twice; a missing argument is now a mypy error and a ``TypeError``.
     """
+    if not rebate_applies(discount):
+        return _ZERO
     return (fee * rebate_rate).quantize(_INT, rounding=ROUND_DOWN)

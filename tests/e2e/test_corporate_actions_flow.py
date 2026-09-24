@@ -1271,13 +1271,17 @@ def test_corporate_action_csv_template_round_trips_through_the_browser(
     expect(page.locator("#csv-body tr").nth(1)).to_contain_text("尚未註冊")   # the EXCHANGE
     expect(page.locator("#csv-body tr").nth(2)).to_contain_text("自動建立")   # the SPINOFF
 
-    # A soft row blocks until acknowledged, then commits — the 賣超 tier, unchanged. The CSV
-    # pane asks by POSTing without the ack, taking the 422, and re-committing from a confirm
-    # dialog; so the first response here is the refusal and the second is the write.
+    # A soft row blocks until acknowledged, then commits. The CSV pane asks by POSTing
+    # without the ack, taking the 422, and re-committing from the per-row dialog (DEF-025,
+    # web/import-ack.js: each warning row ticked on its own); so the first response here is
+    # the refusal and the last is the write.
     page.click("#csv-confirm")
-    page.wait_for_selector(".modal-backdrop .modal-foot .btn-primary")
+    dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
+    expect(dialog).to_be_visible()
+    for tick in dialog.locator("input.imp-warn-tick").all():
+        tick.check()
     with page.expect_response("**/api/import/commit") as cm:
-        page.click(".modal-backdrop .modal-foot .btn-primary")
+        dialog.locator("button", has_text="寫入勾選的警告列").click()
     assert cm.value.status == 200, cm.value.text()
     assert cm.value.json()["written"] == 2
     # …and the acknowledged SPINOFF really did create its child, inheriting TW/TWD from 2330.

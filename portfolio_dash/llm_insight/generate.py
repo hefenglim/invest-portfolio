@@ -376,6 +376,9 @@ def run_insight_type(
                     horizon_days=effective_horizon, input_snapshot=snapshot, model="(none)",
                     cost_usd=Decimal("0"), now=now, is_shadow=inputs.is_shadow,
                     horizon_basis=inputs.horizon_basis, trigger=inputs.trigger,
+                    # DEF-033: no prompt was assembled for this card — an empty list, which
+                    # the page reads as "nothing to name", not as 「未記錄」.
+                    strategy_versions=[],
                 )
                 created += 1
             continue
@@ -468,6 +471,9 @@ def run_insight_type(
             # handed to the model above — the figure check's comparison population. Same
             # reason as price_at_create / ceiling_at_create: unrecoverable after the fact.
             prompt_figures=figure_check.prompt_figures_json(prompt),
+            # DEF-033 (owner ruling 2026-09-24): the strategy versions this prompt was
+            # assembled from — the same Assembly object that produced ``prompt`` above.
+            strategy_versions=assembled.strategy_versions,
         )
         created += 1
 

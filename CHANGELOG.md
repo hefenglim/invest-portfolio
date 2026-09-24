@@ -9,6 +9,117 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R2 → R3 — 2 re-verification failures + 17 new items, 4 M / 15 L (2026-09-24).**
+The verifier's R2 pass on `e6fd9f4` closed 27 of 29 defects, bounced DEF-023 (複驗未過) and
+DEF-017 (partial), and wrote the owner's rulings of 2026-09-24 into the register: DEF-006 / 018 are
+non-defects (manual expectations change), DEF-003 / 009 / 010 / 013 / 016 / 025 / 033 became work,
+and DEF-039 … 048 were opened (3 of them the developer's own R2 observations, ruled). All 19 are
+fixed under the manual's §4 contract, and the 12 case expectations the rulings change (A-01, A-04,
+A-09, A-11, B-10, B-16, B-17, C-02, C-04b, D-10, G-09, I-06) are synced in the manual (v3.1) and the
+workbook's 測試案例 F column at the owner's instruction.
+
+*The two bounced fixes — both had GREEN guards that only matched source strings*
+
+- **The dashboard's 「公司行動無法套用」 block now renders (DEF-023, re-verification).** R2 called
+  `renderUnappliedBanner()` from inside `renderUnregisteredBanner()` AFTER its early
+  `if (!syms.length) return;`, so the block needed an unrelated unregistered symbol to appear — never,
+  on the demo. `renderHeader()` now calls both banners independently. The R2 guard asserted the call
+  string existed inside that function and so pinned the bug; it is now a Node-executed render of
+  app.js's header against a stub DOM plus an e2e on a fully-registered ledger. A scan of every
+  render call placed after an unrelated early return found 106 sites, 1 real.
+- **「最近匯入」 follows a same-page ledger delete, and the undo dialog quotes a live count (DEF-017).**
+  The single refresh seam skipped the batch list for every external caller — which is exactly how
+  the ledger tab's edit/delete arrive — and the undo dialog quoted the list's cached `row_count`
+  (「將刪除 1 筆」, then deleted 0). The seam now reloads the list on every ledger change, and the
+  undo re-reads the batch before opening; a batch that is gone or unreadable never gets a
+  destructive confirm. Class: no confirm dialog for a destructive action may quote a cached count
+  (31 dialogs scanned).
+
+*Owner rulings implemented*
+
+- **CSV / AI oversell rows need their OWN acknowledgement, enforced by the server (DEF-025, M).**
+  `/api/import/commit` let one file-wide `ack_warnings: true` write every oversell row — R2's
+  per-row acks (DEF-027) were a broker-page convention, not a rule. The commit now takes `ack_rows`
+  and refuses (422 `oversell_rows_unacknowledged`, naming each row and 「成本基礎會被永久捨棄」,
+  writing nothing) when a row that will be written oversells without its own ack. The broker page's
+  dialog became the shared `web/import-ack.js`, used by the CSV, broker and AI doors; oversell rows
+  are never pre-ticked.
+- **Strategy prompts keep every version (DEF-033, M).** New append-only table
+  `strategy_prompt_versions`; every door that writes a body (new, official copy, save, 同步官方,
+  restore) appends a version with its source; restore writes a NEW version; existing bodies are
+  back-filled as v1. Settings gets 版本記錄 (view, line diff via stdlib difflib against the previous
+  or current version, restore); insight cards record the versions they were assembled from
+  (`insights.strategy_versions`, additive) and older cards say 「生成時版本未記錄」. The cache
+  fingerprint is unchanged — the assembled prompt already contains the body.
+- **The ledger's 編輯 correction runs the same `validate_transaction` as a new entry (DEF-042, M).**
+  `validate_transaction(replacing=)` validates "the ledger without this row + the edited row", so
+  the row is no longer its own duplicate or its own cover and only problems the EDIT introduces
+  block. The edit dialog previews on open and requires the same per-warning acknowledgements; its
+  fee/tax back-fill now goes through `pdField.autoFill`.
+- **A dividend counts from the day it is received (DEF-016).** `LedgerBundle.received_by(as_of)`
+  drops dividends whose effective date is after the valuation date; the book, 總報酬, XIRR, 已收股利,
+  B−A, drawer, tax package, sell hints and the stress-audit oracle read it. Measured: one confirmed
+  18,200 TWD dividend paying in 15 days moved XIRR 0.5677 → 0.6703 while the cash pool did not move.
+  Rule recorded in `domain-ledger.md`; future-dated trades are an open owner question.
+- **The trade draft shows the position AS OF the trade date (DEF-048).** A back-dated draft read
+  today's holdings (2884 on 2025-01-02 showed 100 → 200 where the ledger then held 0). It now replays
+  to the trade date with the draft appended last, and says so (「以交易日 … 當時的部位試算」).
+- **當沖 + 放空 together is allowed and visible (DEF-013).** Both flags were already stored; the
+  ledger rows and the printed ledger now carry 「當沖」「放空」 badges, the manual form explains the
+  combination (當沖 0.15% outranks ETF 0.1%), and the edit dialog can express it.
+- **Deleting a SPINOFF removes the child seed price it wrote, when no real quote replaced it
+  (DEF-040).** New `pricing/seed.py` (pricing stays the only writer of `prices`) identifies a seed
+  row by its own signature; single, group and CSV-batch deletes share it; the confirm and toast
+  explain when it cannot be reversed.
+- **Rebates: a trade already discounted at settlement forecasts no refund (DEF-010).**
+  `forecast_tw_rebate(..., *, discount)` — `discount` is now required, so a forgotten argument is a
+  type error — returns 0 for `discount < 1`; the inbox, the draft hint and the rebalance summary
+  follow. `scripts/clean_rebate_snapshots.py` makes the 8 ruled demo snapshots coherent
+  (`rebate_rate` → "0", original recorded, fee untouched, one `ledger_audit` row each).
+- **Confirmed rebate rows are fully editable, and every cash edit is audited (DEF-009).** The lock
+  existed because the inbox recognised a credited month from the row's own date/kind/note. The new
+  nullable `cash_movements.rebate_period` is the structural link (back-filled once on first boot),
+  so an edit can no longer re-open the month; cash updates and deletes now write `ledger_audit`.
+- **Prediction decides (DEF-003).** A card with no prediction shows 「純描述・無預測」 and never
+  enters a confidence population (calibration curve, ceiling-violation rate, calib-gap alert,
+  backtest ceiling, rolling window); stored values are ignored at read time, not rewritten.
+- **Alert-triggered 持倉提點 cards only for held symbols (DEF-041).** The single dispatch point takes a
+  REQUIRED `held_symbols` (from the computed book); watchlist alerts stay listed but produce no card,
+  and the run detail says how many were skipped.
+- **No dividend data is not a failure (DEF-047).** The registry separates `empty` (a clean answer with
+  no events) from `failed`; the inbox toast reads 「M 檔無配息紀錄」 without the warning colour.
+
+*Display and seams*
+
+- **Every page that loads `api.js` loads `names.js` first (DEF-044).** Five pages lacked it and
+  degraded `{account:id}` tokens to raw ids silently; api.js now reports a missing names.js with a
+  console error the page-smoke e2e fails on, and a contract test reads every page's script order.
+- **Export reports print the zh account name (DEF-045).** The ledger report and the cash-statement
+  report now emit account tokens resolved at the download seam; the AST guard's two blind spots
+  (a wrapped `_esc(...)` interpolation; a name flowing through a dict) are closed, and a behavioural
+  test downloads every export.
+- **Decimal wire strings are formatted before they are spoken (DEF-039).** The broker-statement hint
+  printed 28-decimal ledger shares; 12 sites of the class were fixed (23 found).
+- **An on_alert task reads as alert-triggered on the pipeline page (DEF-043).**
+- **Data (DEF-046).** `scripts/delete_insight_cards.py` removes a bad card with its evaluations and
+  an audit row per deleted row. The card is **#192** — the "#207" in the developer's R2 handoff note
+  was a wrong id (#207 is a legitimate 2884 card and refuses to be deleted by the script's guard).
+
+*Gates*
+
+- ruff (`portfolio_dash tests scripts`) clean; `mypy --strict` 890 files, 0 issues (fresh cache).
+- pytest without e2e: 6,082 passed / 5 skipped / 0 failed (the skips are the 3 key-gated probe
+  parsers and the 2 punctuation files excluded by name, as before). Run in the foreground in four
+  parts — a detached hidden-window run crawled at ~0.35 CPU-seconds per second (8× slower than
+  R2's) while the same tests took 75 s in the foreground.
+- e2e: 72 files, 272 passed, in 12 foreground chunks. One pre-existing race surfaced:
+  `test_the_rebalance_footer_total_equals_the_visible_fields` read the footer right after the
+  fields appeared, but the footer is drawn by the first preview's response; the unchanged test
+  went fail / pass / fail, `/api/rebalance/preview` measured 10–13 ms on both `e6fd9f4` and this
+  tree, and the footer held its 5 cells a moment later. The test now waits for the footer cell
+  it compares (4 / 4 passes).
+- stress-audit phase 1: ops=128, pass=6,025, fail=0 (the oracle carries the pay-date rule).
+
 **Functional-test manual R1 → R2 remediation — 29 defects, 2 H / 17 M / 10 L (2026-09-23).**
 The verifier's first black-box pass over the 120-case manual (`docs/audit/2026-09-22-functional-
 test-manual.md` + `.xlsx`) on `755c88a` ran every case (PASS 86 / FAIL 19 / OBSERVE 6 / BLOCKED 8 /

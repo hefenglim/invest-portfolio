@@ -482,6 +482,14 @@ def build_dashboard(
     unregistered = bundle.unregistered_symbols
     if unregistered:
         bundle = bundle.without_unregistered()
+    # 1c. A dividend counts from the day it is RECEIVED (DEF-016, owner ruling 2026-09-24).
+    # A confirmed payout is stored on its payment date, which can be in the future; replaying
+    # it now lowered the adjusted cost (總報酬 up) and handed XIRR an inflow dated after its
+    # own terminal value, while the cash pool and the trend already ignored it. ONE cut, here,
+    # so the book, XIRR, the received-dividend summary, the FX pool and the trend all read the
+    # same ledger — and every surface built on this function (drawer, exports, alerts,
+    # insights, snapshots) inherits it.
+    bundle = bundle.received_by(as_of)
     # Read-only local views of the (now filtered) bundle, for the steps below.
     txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
 

@@ -489,8 +489,12 @@ def test_legacy_csv_account_alias_preview_and_commit(
     # commit: the soft alias is a warn -> the server 422s once (warnings_unacknowledged), the
     # frontend raises the ack dialog; confirming re-commits with ack_warnings and lands the row.
     page.click("#csv-confirm")
-    page.wait_for_selector(".modal-backdrop .modal-foot .btn-primary")
-    page.click(".modal-backdrop .modal-foot .btn-primary")
+    # DEF-025: the CSV door acknowledges row by row (web/import-ack.js).
+    dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
+    dialog.wait_for(state="visible")
+    for tick in dialog.locator("input.imp-warn-tick").all():
+        tick.check()
+    dialog.locator("button", has_text="寫入勾選的警告列").click()
     page.wait_for_selector("#csv-result", state="visible")
 
     landed = _holding(base, "AAPL", "moomoo_my")

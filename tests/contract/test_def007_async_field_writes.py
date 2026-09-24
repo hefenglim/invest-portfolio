@@ -181,10 +181,6 @@ _OWN_GUARD: dict[str, str] = {
     "inst-quickadd.js: if (namePristine && r.name && !(wasAiResolve && nameIn.value)) "
     "nameIn.value = r.name;":
         "gated on namePristine (and never over an AI-resolved name)",
-    "ledger.js: if (resp && !feeDirty && resp.fee !== undefined) fFee.value = resp.fee;":
-        "gated on feeDirty, set by the edit modal's fee input handler",
-    "ledger.js: if (resp && !taxDirty && resp.tax !== undefined) fTax.value = resp.tax;":
-        "gated on taxDirty, set by the edit modal's tax input handler",
 }
 
 

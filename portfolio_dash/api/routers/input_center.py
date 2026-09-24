@@ -58,7 +58,7 @@ from portfolio_dash.data_ingestion.dividend_import import (
     build_dividend_preview,
     write_dividend_row,
 )
-from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
+from portfolio_dash.data_ingestion.fees import forecast_tw_rebate, rebate_applies
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
 from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
 from portfolio_dash.data_ingestion.import_templates import (
@@ -92,6 +92,8 @@ from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rul
 from portfolio_dash.data_ingestion.store import (
     MovedWeight,
     StoredCorporateAction,
+    StoredTransaction,
+    get_transaction,
     list_accounts,
     list_cash_movements,
     list_corporate_actions,
@@ -223,18 +225,24 @@ def _book_of(bundle: LedgerBundle) -> Book | None:
         return None
 
 
-def _book_or_none(conn: sqlite3.Connection) -> Book | None:
+def _book_or_none(conn: sqlite3.Connection, *, as_of: date) -> Book | None:
     """The cost-basis replay over the current ledger, or ``None`` when it cannot be booked.
+
+    ``as_of`` is the valuation day (required, no default): a dividend counts from its pay
+    date (DEF-016), so the ledger is cut exactly as ``build_dashboard`` cuts it and the sell
+    hint's 均價 is the dashboard row's own figure.
 
     Never-500 (lesson: degrade at EVERY ``build_book`` call site). Split out of
     :func:`_holdings_or_none` so :func:`_position_preview` can tell a WITHHELD position from
     an absent one off the SAME replay — ``Book.holdings`` is the only source that answers
     both, and asking a second share path instead is how two answers to one question appear.
     """
-    return _book_of(_to_models(conn))
+    return _book_of(_to_models(conn).received_by(as_of))
 
 
-def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding] | None:
+def _holdings_or_none(
+    conn: sqlite3.Connection, *, as_of: date
+) -> dict[tuple[str, str], Holding] | None:
     """(account_id, symbol) → open Holding from the VERIFIED cost-basis replay (build_book),
     or ``None`` when the ledger is un-bookable.
 
@@ -258,22 +266,26 @@ def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding
     :func:`_position_preview` for why the two silent refusal paths leave nothing for this
     seam to withhold.
     """
-    book = _book_or_none(conn)
+    book = _book_or_none(conn, as_of=as_of)
     if book is None:
         return None
     return {(h.account_id, h.symbol): h for h in book.holdings if not _unclear(h)}
 
 
-def _adjusted_avg_by_position(conn: sqlite3.Connection) -> dict[tuple[str, str], Decimal]:
+def _adjusted_avg_by_position(
+    conn: sqlite3.Connection, *, as_of: date
+) -> dict[tuple[str, str], Decimal]:
     """(account_id, symbol) → adjusted_avg for the FU-D44 sell hints — a thin projection of
     :func:`_holdings_or_none` (one build_book replay; un-bookable → EMPTY map so the hint
     simply hides, the same degradation as before)."""
-    return {key: h.adjusted_avg for key, h in (_holdings_or_none(conn) or {}).items()}
+    return {key: h.adjusted_avg
+            for key, h in (_holdings_or_none(conn, as_of=as_of) or {}).items()}
 
 
 @router.get("/input/holdings")
 def input_holdings(
-    account: str, conn: sqlite3.Connection = Depends(get_conn)
+    account: str, conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Per-account held / closed symbols: 股利 picker (FU-D35) + sell-entry hints (FU-D44).
 
@@ -322,7 +334,7 @@ def input_holdings(
         shares = current_shares(conn, account, sym)
         if shares > _ZERO:
             if avg_map is None:
-                avg_map = _adjusted_avg_by_position(conn)
+                avg_map = _adjusted_avg_by_position(conn, as_of=now.date())
             avg = avg_map.get((account, sym))
             held.append({
                 "symbol": sym, "name": names.get(sym) or sym,
@@ -370,6 +382,12 @@ class ManualBody(BaseModel):
     #: field adds is the chance to answer at the moment the user is already looking at the
     #: symbol, instead of after a sell has already priced the guess.
     new_symbol_is_etf: bool | None = None
+    #: PREVIEW ONLY — the ledger 更正 modal previews a REPLACEMENT for this stored row
+    #: (DEF-042, owner ruling 2026-09-24: an edit runs the same ``validate_transaction`` as a
+    #: new entry). The findings are then those of "the ledger without that row + this one",
+    #: and the new-position / cash lines — which describe an ADDED row — are withheld.
+    #: The commit door ignores it: an edit is written by ``PUT /api/ledgers/transactions``.
+    replaces_txn_id: int | None = None
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
@@ -610,11 +628,21 @@ def _position_preview(
       trade books: 0 rows for a short extension or an undeclared oversell, 1 otherwise. So
       ``realized_pnl`` / ``cost_removed`` / ``covered_shares`` are READ off the booked row
       instead of re-derived, and the three sell branches cannot drift apart again.
-    * ``after`` — the WHOLE ledger + the draft. Its holding is what the position will look
-      like once the row is written, so ``remain_shares`` / ``new_shares`` and both averages
-      come from ``Holding`` — where the averages are ``total / shares`` computed on read
-      (domain-ledger.md: project the TOTALS, then divide on read — here we do not even
-      project, we replay).
+    * ``after`` — the WHOLE ledger + the draft, built only for a back-dated draft and only
+      as a bookability check: a row the ledger could not replay once written gets no
+      projection at all.
+
+    **The projected columns are the TRADE-DATE position** (DEF-048, owner ruling
+    2026-09-24). ``old_*`` come from ``before``'s holding and ``remain_shares`` /
+    ``new_shares`` + both averages from ``at_date``'s — the position just before and just
+    after THIS trade on its own date, which is exactly what the replay books once the row is
+    written (it replays by date; the draft takes the highest id, so it is the last of its
+    day's trades). Until DEF-048 the ``old_*`` triple was TODAY's holding and the new columns
+    were the whole-ledger end state, so a 補登 of 2884 on 2025-01-02 — when nothing was held
+    yet — read 「持股 100 → 200、原始均價 93.20 → 61.70」 instead of 「— → 100」. The averages
+    are still ``total / shares`` computed on read (domain-ledger.md: never project an average,
+    project the totals — here they are replayed). ``as_of`` names that date on the wire and
+    ``backdated`` says whether later events exist, so the card can say which day it shows.
 
     Until M4-01 all of it was arithmetic on ``book.holdings`` — the ledger's END state — with
     ``body.date`` never consulted, so a row that is not the last event was projected against a
@@ -625,14 +653,17 @@ def _position_preview(
     guard went date-aware on 2026-07-31 (``holdings.shares_through``); the money on the same
     card did not, and the check strip said 「可寫入」 over all of it.
 
-    Wire shape is UNCHANGED — same keys, same types, same null conventions:
+    Wire shape — same keys, types and null conventions as M4-01, plus DEF-048's two:
 
     * SELL → ``cost_removed`` / ``realized_pnl`` (null on the two branches that book no row),
       ``realized_shares`` / ``short_opened`` / ``oversell`` / ``note`` from the branch,
-      ``remain_shares`` + both averages from the post-write holding (averages null when the
-      replay holds no position at all, e.g. a full exit). Not held → null.
-    * BUY → ``new_shares`` + both averages from the post-write holding; against an open short
-      it also carries ``covered_shares`` / ``realized_pnl`` / ``note`` from the cover row.
+      ``remain_shares`` + both averages from the trade-date holding after the draft (averages
+      null when the replay holds no position at all, e.g. a full exit). Held neither today
+      nor on the trade date → null.
+    * BUY → ``new_shares`` + both averages from the trade-date holding after the draft;
+      against an open short it also carries ``covered_shares`` / ``realized_pnl`` / ``note``.
+    * both → ``as_of`` (the trade date the columns describe) and ``backdated`` (true when the
+      ledger holds events after the draft, i.e. today's position differs from the one shown).
 
     ``gross`` is kept in the signature for the caller's existing contract; the replay derives
     proceeds from the draft's own ``quantity × price``, which is that same number by
@@ -720,13 +751,17 @@ def _position_preview(
         realized_pnl = sum((r.realized for r in booked), _ZERO) if booked else None
         cost_removed = (sum((r.adjusted_cost_removed for r in booked), _ZERO)
                         if booked else None)
-        # The position as the DRAFT sees it (picks the branch) and as the LEDGER will hold it
-        # once the row is written (the projected columns). Before M4-01 both were the same
-        # end-state ``Holding``, which is why a row landing anywhere but last was projected
-        # against a position it never meets.
+        # The position as the DRAFT sees it (picks the branch, and is the 「原」 side) and as
+        # the replay holds it right AFTER the draft on the same date (the 「新」 side). Before
+        # M4-01 both were the end-state ``Holding``; until DEF-048 the new side still was.
         prior = next((h for h in before.holdings if (h.account_id, h.symbol) == key), None)
+        if prior is not None and _unclear(prior):
+            # The trade-date position is 待釐清 even if today's is not — same withholding, for
+            # the same reason as ``held`` above: its totals and share count disagree.
+            return None
         prior_shares = prior.shares if prior is not None else _ZERO
-        final = next((h for h in after.holdings if (h.account_id, h.symbol) == key), None)
+        final = next((h for h in at_date.holdings if (h.account_id, h.symbol) == key), None)
+        dated = {"as_of": body.date.isoformat(), "backdated": not latest}
         # A flat position is DROPPED by the replay (``if shares == _ZERO: continue``), so
         # there is no average to report — the null the BUY branch already returns on an
         # exact cover, now reached through the replay's own rule instead of a copy of it.
@@ -743,7 +778,12 @@ def _position_preview(
             # rather than "nobody wired this branch". The other three branches genuinely need
             # a prior position (there is no cost to remove and no basis to discard without
             # one), so they still bail out here.
-            if held is None and not body.short_sale:
+            #
+            # Held NEITHER today NOR on the trade date (DEF-048's class): a back-dated sell of
+            # a position that has since been closed was withheld here because only TODAY was
+            # asked, although on its own date it is an ordinary sale. Held today but not then
+            # still projects — as the oversell it will be booked as.
+            if held is None and prior is None and not body.short_sale:
                 return None
             # THREE branches, because ``build_book`` has three (review 2026-08-24). One
             # formula used to be applied to all of them, which invented a realized P&L for two
@@ -802,7 +842,8 @@ def _position_preview(
                 "remain_shares": decimal_str(new_shares),
                 "new_original_avg": new_original_avg,
                 "new_adjusted_avg": new_adjusted_avg,
-                **_old_position_fields(held),
+                **_old_position_fields(prior),
+                **dated,
             }
         if prior_shares < _ZERO:
             # A buy against an open short COVERS it first (cost_basis.py, owner rule
@@ -819,14 +860,16 @@ def _position_preview(
                 "realized_pnl": decimal_str(
                     realized_pnl if realized_pnl is not None else _ZERO),
                 "note": "回補空單：以本次每股成本結算，剩餘股數以本次成本為起點",
-                **_old_position_fields(held),
+                **_old_position_fields(prior),
+                **dated,
             }
         return {
             "kind": "buy",
             "new_shares": decimal_str(new_shares),
             "new_original_avg": new_original_avg,
             "new_adjusted_avg": new_adjusted_avg,
-            **_old_position_fields(held),
+            **_old_position_fields(prior),
+            **dated,
         }
     except (ValueError, KeyError, ArithmeticError):
         return None
@@ -875,8 +918,15 @@ def manual_preview(
     body: ManualBody,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, Any]:
-    draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date())
+) -> Any:
+    replacing: StoredTransaction | None = None
+    if body.replaces_txn_id is not None:
+        replacing = get_transaction(conn, body.replaces_txn_id)
+        if replacing is None:
+            return JSONResponse(status_code=404, content=error_body(
+                "not_found", f"交易 #{body.replaces_txn_id} 不存在"))
+    draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date(),
+                              replacing=replacing)
     gross = body.shares * body.price
     total = (
         -(gross + draft.fee + draft.tax)
@@ -891,22 +941,30 @@ def manual_preview(
         draft.instrument.market if draft.instrument is not None else None,
     )
     issues = list(draft.issues)
-    overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax, as_of=now.date())
+    # The overdraft warning and the two cash lines describe an ADDED row; for an edit they
+    # would count the stored row twice, so the edit preview withholds them (DEF-042) — the
+    # edit door has no cash gate, exactly as before.
+    overdraft = (None if replacing is not None else
+                 _cash_overdraft_issue(conn, body, draft.fee, draft.tax, as_of=now.date()))
     if overdraft is not None:
         issues.append(overdraft)
     # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
     # month's refund = floor(resolved fee × rebate_rate). Null when the account never rebates
-    # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies.
+    # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies —
+    # and (DEF-010) null when the rule set ALSO discounts at settlement: the draft's fee was
+    # computed with that discount, so a refund on top of it would count the benefit twice.
     rebate_estimate = (
-        decimal_str(forecast_tw_rebate(draft.fee, rule.rebate_rate))
-        if rule is not None and rule.rebate_rate > _ZERO
+        decimal_str(forecast_tw_rebate(draft.fee, rule.rebate_rate, discount=rule.discount))
+        if rule is not None and rule.rebate_rate > _ZERO and rebate_applies(rule.discount)
         else None
     )
     # R6-E (additive): the drawer-parity position what-if + the display-only account-cash line,
     # both SERVER-computed as Decimal strings (the frontend renders only). null on any
     # degradation / unregistered symbol / incomplete inputs — the base preview never fails.
-    position_preview = _position_preview(conn, body, draft.fee, draft.tax, gross)
-    account_cash, cash_bal = _account_cash(conn, body, as_of=now.date())
+    position_preview = (None if replacing is not None else
+                        _position_preview(conn, body, draft.fee, draft.tax, gross))
+    account_cash, cash_bal = ((None, None) if replacing is not None else
+                              _account_cash(conn, body, as_of=now.date()))
     # R7 A3 (additive, C5): projected pool AFTER settlement = balance + the ALREADY-SIGNED total
     # (BUY total is negative, SELL positive), in the SAME quote ccy as account_cash. Emitted only
     # when the balance is known (else null) — a pure Decimal add over figures already computed,
@@ -1332,6 +1390,58 @@ class ImportCommitBody(BaseModel):
     #: not re-parse what the server has already parsed correctly (F-03, 2026-08-27 — the
     #: button was labelled 「確認寫入勾選列」 and wrote the whole paste).
     select: list[int] | None = None
+    #: DEF-025 (owner ruling 2026-09-24): the 賣超 rows the owner acknowledged ONE BY ONE, as
+    #: ``PreviewRow.index`` values. ``ack_warnings`` releases the file-level gate for the
+    #: ordinary warnings; it does NOT cover a 賣超 row, whose acknowledgement permanently
+    #: discards a cost basis (the STICKY rule) — that row is written only when its own index
+    #: is listed here, exactly as the manual door writes one only under its own
+    #: ``ack_oversell``. See :data:`_OVERSELL_KIND` in :func:`import_commit`.
+    ack_rows: list[int] | None = None
+
+
+#: The one finding whose acknowledgement discards a cost basis (``domain-ledger.md``: 賣超 is
+#: STICKY). Every bulk door commits through :func:`import_commit`, so this is where the
+#: per-row acknowledgement is enforced for all of them — the CSV paste, the broker
+#: statement, the AI door — and not in any one page.
+_OVERSELL_KIND = "sell_exceeds_holdings"
+
+
+def _unacknowledged_oversells(
+    preview: ImportPreview, *, accept: set[int], acked: set[int], already: set[str],
+    hashes: dict[int, str],
+) -> list[PreviewRow]:
+    """The 賣超 rows this commit would WRITE without their own acknowledgement.
+
+    Only rows that would actually be written count: a deselected row, a refused row, and a
+    row already in the ledger (a re-import — ``commit_preview`` skips it as a duplicate) are
+    not being acknowledged by anyone, so they are not asked about.
+    """
+    return [
+        r for r in preview.rows
+        if r.index in accept and not r.has_hard_issue
+        and hashes.get(r.index) not in already
+        and r.index not in acked
+        and any(i.kind == _OVERSELL_KIND for i in r.issues)
+    ]
+
+
+def _oversell_rows_response(rows: list[PreviewRow]) -> JSONResponse:
+    """422 ``oversell_rows_unacknowledged`` — names every row, and the consequence."""
+    names = "、".join(
+        f"第 {r.index + 1} 列" + (f" {r.raw.get('symbol', '')}" if r.raw.get("symbol") else "")
+        for r in rows)
+    issues = [
+        {"sev": "warn", "code": _OVERSELL_KIND, "field": "shares", "row": r.index + 1,
+         "n": r.index,
+         "text": f"第 {r.index + 1} 列 {r.raw.get('symbol', '')}："
+                 + next(i.message for i in r.issues if i.kind == _OVERSELL_KIND)}
+        for r in rows
+    ]
+    return JSONResponse(status_code=422, content=error_body(
+        "oversell_rows_unacknowledged",
+        f"{names} 是賣超，需逐列勾選確認後才寫入：確認後這個部位的成本基礎會被永久捨棄"
+        "（待釐清），之後再買回也不會還原",
+        issues=issues))
 
 
 @router.post("/import/commit")
@@ -1430,6 +1540,17 @@ def import_commit(
         )
     )
     already = existing_hashes(conn, body.kind, hashes.values())
+    # DEF-025 (owner ruling 2026-09-24): a 賣超 row is written only under ITS OWN
+    # acknowledgement. Checked AFTER the QA-01 narrowing, on the rows that will really be
+    # written: a row whose 賣超 only appeared under the narrowed batch was already dropped
+    # into ``skipped`` above, so every row asked about here was on the owner's screen.
+    # Before this the CSV door pre-ticked a 賣超 row and one generic 「部分列有警告（如賣超）」
+    # dialog wrote it through the blanket ``ack_warnings`` (measured, R1 I-06).
+    unacked = _unacknowledged_oversells(
+        preview, accept=accept, acked=set(body.ack_rows or ()), already=already,
+        hashes=hashes)
+    if unacked:
+        return _oversell_rows_response(unacked)
     # The batch record is created ONLY if this commit will write something. A refused or
     # fully-duplicate import leaving an empty batch behind would fill the history with rows
     # that claim an import happened and own no data — and the list exists to be read.
@@ -1606,6 +1727,9 @@ def import_batch_delete(
                                if o["band_restore"] is not None]
         out["weight_restore"] = [o["weight_restore"] for o in outcomes
                                  if o["weight_restore"] is not None]
+        # DEF-040: a SPINOFF's seed price, reported like the band and the weight.
+        out["child_price_restore"] = [o["child_price_restore"] for o in outcomes
+                                      if o["child_price_restore"] is not None]
     if removed == 0:
         # Every row was already deleted on its ledger tab (a stale page's 復原 button). The
         # empty record is cleared above; the answer names why nothing was deleted.

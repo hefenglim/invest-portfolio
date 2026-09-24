@@ -202,6 +202,8 @@ class RefreshOutcome(BaseModel):
     updated: int
     failed: list[dict[str, str]]
     text: str
+    #: DEF-047: symbols whose source answered with no dividend records — normal, not failed.
+    empty: list[str] = []
 
 
 def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> RefreshOutcome:
@@ -222,7 +224,7 @@ def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> R
         return RefreshOutcome(updated=0, failed=[], text="無持倉可偵測")
     summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
     return RefreshOutcome(updated=len(summary.ok), failed=refresh_failures(summary),
-                          text=describe_refresh(summary))
+                          text=describe_refresh(summary), empty=sorted(summary.empty))
 
 
 def scan_sentence(outcome: RefreshOutcome, pending: int) -> str:

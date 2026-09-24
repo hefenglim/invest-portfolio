@@ -40,8 +40,8 @@ def test_groups_by_month_and_floors_per_trade(golden_db: sqlite3.Connection) -> 
     # Σ per-trade floor(fee × 0.77): floor(109.34)=109 + floor(120.12)=120 = 229
     assert hit.expected == Decimal("229")
     assert hit.expected == (
-        forecast_tw_rebate(Decimal("142"), Decimal("0.77"))
-        + forecast_tw_rebate(Decimal("156"), Decimal("0.77"))
+        forecast_tw_rebate(Decimal("142"), Decimal("0.77"), discount=Decimal("1"))
+        + forecast_tw_rebate(Decimal("156"), Decimal("0.77"), discount=Decimal("1"))
     )
     assert hit.ccy == "TWD"
 

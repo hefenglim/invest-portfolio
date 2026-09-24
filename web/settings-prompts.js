@@ -321,6 +321,181 @@
     });
   }
 
+  /* ================= 版本記錄 (DEF-033, owner ruling 2026-09-24) =================
+     Every save keeps a version; the owner can read any version, see what changed, and
+     restore ANY version. The history, the zh source labels and the line diff all come from
+     the server (GET /api/strategy-prompt-versions?strategy_id= · …/{id}/diff); this modal
+     renders them and computes nothing. 回復此版 = POST …/{id}/restore, which the server
+     records as a NEW version (history is never rewritten), so a restore can itself be
+     undone from the same list. */
+  const tplMetaText = (t) =>
+    (t.current_version != null ? 'v' + t.current_version + '・' : '') +
+    '更新 ' + f.date(t.updated_at);
+
+  /* `t._live` = { card, ta, meta } of the card instance currently in the list: a restore
+     re-renders the card, so the modal must never hold on to the textarea it opened from. */
+  function versionHistory(t) {
+    const liveTa = () => t._live.ta;
+    openModal('版本記錄 — ' + t.name, (body) => {
+      body.appendChild(el('div', 'pv-note',
+        '每次儲存、同步官方或回復都會留下一版。回復＝以選定版本的內文另存為新版本，舊版本不會被改寫，隨時可再回復。'));
+      const listBox = el('div', 'ver-list');
+      /* The restore confirmation lives INSIDE this modal, not in confirmDialog: that dialog
+         stacks at z 72 and this settings modal at 80 (styles.css overlay ladder), so a
+         confirmDialog opened from here would sit behind it, unclickable. Inline also lets
+         the owner read the diff of exactly what the restore changes while deciding. */
+      const confirmBox = el('div', 'ver-confirm');
+      confirmBox.hidden = true;
+      const diffBox = el('div', 'ver-diff');
+      body.appendChild(listBox);
+      body.appendChild(confirmBox);
+      body.appendChild(diffBox);
+
+      /* 檢視: one version's full text (GET /api/strategy-prompt-versions/{id}). */
+      const showBody = async (v) => {
+        diffBox.replaceChildren(el('div', 'pv-testing', '⏳ 載入內文…'));
+        try {
+          const full = await api.get('/api/strategy-prompt-versions/' + v.id);
+          diffBox.replaceChildren();
+          diffBox.appendChild(el('div', 'pv-sec-label ver-diff-head',
+            'v' + full.version + ' 內文（' + f.datetime(full.saved_at) + '・' + full.source_label + '）'));
+          diffBox.appendChild(el('pre', 'pv-pre ver-body-pre', full.body || ''));
+        } catch (err) {
+          diffBox.replaceChildren(el('div', 'pv-note', '內文載入失敗：' + ((err && err.message) || '')));
+          _toast((err && err.message) || '內文載入失敗', 'fail', err && err.code);
+        }
+      };
+
+      const showDiff = async (v, against) => {
+        diffBox.replaceChildren(el('div', 'pv-testing', '⏳ 載入差異…'));
+        try {
+          const d = await api.get('/api/strategy-prompt-versions/' + v.id + '/diff',
+            { against: against });
+          diffBox.replaceChildren();
+          const head = el('div', 'pv-sec-label ver-diff-head');
+          const fromTxt = d.from ? 'v' + d.from.version : '（無前一版）';
+          head.textContent = '差異 ' + fromTxt + ' → v' + d.to.version + '：' +
+            (d.identical ? '兩版內容相同' : '＋' + d.added + ' 行・－' + d.removed + ' 行');
+          diffBox.appendChild(head);
+          const pre = el('pre', 'pv-pre ver-diff-pre');
+          (d.lines || []).forEach((ln) => {
+            const mark = ln.op === 'add' ? '+ ' : ln.op === 'del' ? '- ' : '  ';
+            pre.appendChild(el('span', 'ver-line ver-' + ln.op, mark + ln.text));
+          });
+          diffBox.appendChild(pre);
+        } catch (err) {
+          diffBox.replaceChildren(el('div', 'pv-note', '差異載入失敗：' + ((err && err.message) || '')));
+          _toast((err && err.message) || '差異載入失敗', 'fail', err && err.code);
+        }
+      };
+
+      const restore = (v) => {
+        const dirty = liveTa().value !== t.body;
+        showDiff(v, 'current');   // what the restore changes, on screen while deciding
+        confirmBox.replaceChildren();
+        confirmBox.appendChild(el('div', 'ver-confirm-text',
+          '回復至 v' + v.version + '：將以 v' + v.version + ' 的內文另存為新版本；目前內容仍保留在版本記錄中，可再回復。' +
+          '引用此策略的洞察任務下次執行即使用回復後的內文。' +
+          (dirty ? '此卡片有尚未儲存的修改，回復後將以 v' + v.version + ' 取代。' : '')));
+        const acts = el('div', 'ver-confirm-acts');
+        const cancel = el('button', 'btn btn-sm', '取消');
+        cancel.type = 'button';
+        cancel.addEventListener('click', () => { confirmBox.hidden = true; });
+        const ok = el('button', 'btn btn-sm btn-primary ver-confirm-ok', '確認回復至 v' + v.version);
+        ok.type = 'button';
+        ok.addEventListener('click', () => doRestore(v, ok));
+        acts.appendChild(cancel);
+        acts.appendChild(ok);
+        confirmBox.appendChild(acts);
+        confirmBox.hidden = false;
+      };
+
+      const doRestore = async (v, okBtn) => {
+        okBtn.disabled = true;
+        const bodyAtConfirm = liveTa().value;   // I-12: the text the restore replaces
+        let resp;
+        try {
+          resp = await api.post('/api/strategy-prompt-versions/' + v.id + '/restore');
+        } catch (err) {
+          okBtn.disabled = false;
+          _toast((err && err.message) || '回復失敗', 'fail', err && err.code);
+          return;
+        }
+        confirmBox.hidden = true;
+        const sp = (resp && resp.strategy) || {};
+        t.body = sp.body != null ? sp.body : t.body;
+        t.updated_at = sp.updated_at || t.updated_at;
+        t.current_version = resp && resp.current_version != null
+          ? resp.current_version : t.current_version;
+        /* a reply that lands after the owner kept typing never overwrites the typing: the
+           card is re-rendered only when the restored text actually went in. */
+        if (window.pdField.writeIfUntouched(liveTa(), bodyAtConfirm, t.body)) {
+          const old = t._live.card;
+          const wasOpen = old.classList.contains('open');
+          const fresh = addStrategyCard(t);   // re-checks the scope badge + 同步官方
+          old.replaceWith(fresh);
+          fresh.classList.toggle('open', wasOpen);
+        } else {
+          t._live.meta.textContent = tplMetaText(t);
+        }
+        if (resp && resp.changed) {
+          _toast('已回復至 v' + v.version, 'ok',
+            t.name + '：另存為 v' + t.current_version + '，下次執行生效');
+        } else {
+          _toast('內容與目前相同', 'ok', 'v' + v.version + ' 與目前內文一致，未產生新版本');
+        }
+        diffBox.replaceChildren();
+        load();
+      };
+
+      const load = async () => {
+        listBox.replaceChildren(el('div', 'pv-testing', '⏳ 載入版本記錄…'));
+        let resp;
+        try {
+          resp = await api.get('/api/strategy-prompt-versions', { strategy_id: t.id });
+        } catch (err) {
+          listBox.replaceChildren(el('div', 'pv-note', '版本記錄載入失敗：' + ((err && err.message) || '')));
+          _toast((err && err.message) || '版本記錄載入失敗', 'fail', err && err.code);
+          return;
+        }
+        listBox.replaceChildren();
+        const versions = (resp && resp.versions) || [];
+        if (!versions.length) {
+          listBox.appendChild(el('div', 'pv-note', '尚無版本記錄'));
+          return;
+        }
+        versions.forEach((v) => {
+          const row = el('div', 'ver-row' + (v.is_current ? ' is-current' : ''));
+          row.dataset.version = String(v.version);
+          const no = el('span', 'ver-no', 'v' + v.version);
+          row.appendChild(no);
+          if (v.is_current) row.appendChild(el('span', 'badge ver-current', '目前'));
+          row.appendChild(el('span', 'ver-time', f.datetime(v.saved_at)));
+          row.appendChild(el('span', 'ver-src',
+            v.source_label + (v.restored_from != null ? '（回復自 v' + v.restored_from + '）' : '')));
+          row.appendChild(el('span', 'ver-size', f.num(v.lines, 0) + ' 行'));
+          const acts = el('span', 'ver-acts');
+          const mk = (label, fn, cls) => {
+            const b = el('button', 'btn btn-sm' + (cls ? ' ' + cls : ''), label);
+            b.type = 'button';
+            b.addEventListener('click', fn);
+            acts.appendChild(b);
+            return b;
+          };
+          mk('檢視', () => showBody(v));
+          if (v.version > 1) mk('對照前一版', () => showDiff(v, 'previous'));
+          if (!v.is_current) {
+            mk('對照目前', () => showDiff(v, 'current'));
+            mk('回復此版', () => restore(v), 'btn-primary ver-restore');
+          }
+          row.appendChild(acts);
+          listBox.appendChild(row);
+        });
+      };
+      load();
+    }, true);
+  }
+
   function addStrategyCard(t) {
     const card = el('div', 'tpl-card');
     const head = el('div', 'tpl-head');
@@ -331,7 +506,8 @@
       ? '含「單一標的」變數 — 只能被範圍為「單一標的」的洞察類型引用'
       : '僅使用全組合變數 — 任何範圍的洞察類型皆可引用';
     head.appendChild(scopeBadge);
-    head.appendChild(el('span', 'tpl-meta', '更新 ' + f.date(t.updated_at)));
+    const metaEl = el('span', 'tpl-meta', tplMetaText(t));
+    head.appendChild(metaEl);
     const right = el('span', 'right');
     if (!t.enabled) right.appendChild(el('span', 'pill pill-off', '停用'));
     const tg = el('button', 'toggle' + (t.enabled ? ' on' : ''));
@@ -362,6 +538,7 @@
     ta.rows = 4;
     ta.value = t.body;
     body.appendChild(ta);
+    t._live = { card: card, ta: ta, meta: metaEl };   // DEF-033: what 版本記錄 writes back to
 
     /* 插入變數（讀取數據變數總表） */
     body.appendChild(varInsertRow(ta));
@@ -384,6 +561,8 @@
           { name: t.name, body: ta.value, enabled: t.enabled !== false });
         t.body = (sp && sp.body) || ta.value;
         t.updated_at = (sp && sp.updated_at) || t.updated_at;
+        if (sp && sp.current_version != null) t.current_version = sp.current_version;
+        metaEl.textContent = tplMetaText(t);   // DEF-033: the save's version number
       } catch (err) {
         _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
         return;
@@ -395,12 +574,16 @@
       scopeBadge.title = ps
         ? '含「單一標的」變數 — 只能被範圍為「單一標的」的洞察類型引用'
         : '僅使用全組合變數 — 任何範圍的洞察類型皆可引用';
-      window.toast('已儲存', 'ok', t.name + '：內文已寫入資料庫，下次執行生效');
+      window.toast('已儲存', 'ok', t.name + '：內文已寫入資料庫' +
+        (t.current_version != null ? '（v' + t.current_version + '）' : '') + '，下次執行生效');
     }, '寫入資料庫並依最新內文重新檢查範圍徽章'));
     actions.appendChild(mkBtn('預覽提示詞', null, () => previewPrompt(t, ta),
       '變數代入目前快照，檢視實際送出的完整提示詞'));
     actions.appendChild(mkBtn('測試送出', null, () => testSend(t, ta),
       '經 LiteLLM 實際送出一次並回傳洞察結果（費用照記）'));
+    /* DEF-033: every saved version, the diff between any two, and 回復此版. */
+    actions.appendChild(mkBtn('版本記錄', 'tpl-versions', () => versionHistory(t),
+      '檢視每次儲存的版本、比對差異，並可回復任一版'));
     /* W7 (AI-D37): 同步官方 vX — only when the row's name matches an official template
        AND its body has drifted. The overwrite goes through from-template's replace mode;
        every task bound to this strategy id runs the new body on its next pass. */
@@ -410,7 +593,7 @@
         window.confirmDialog({
           title: '同步官方 ' + tpl.version,
           body: '將以官方「' + tpl.name + ' ' + tpl.version + '」覆寫此策略內文；' +
-            '你的自訂修改將遺失，引用此策略的洞察任務下次執行即升版。',
+            '目前的內文會保留在「版本記錄」中，可隨時回復。引用此策略的洞察任務下次執行即升版。',
           confirmLabel: '覆寫為官方版', danger: true,
           onConfirm: async () => {
             const bodyAtConfirm = ta.value;   // I-12: the text the overwrite discards
@@ -419,6 +602,7 @@
                 { name: t.name, mode: 'replace', strategy_id: t.id });
               t.body = (sp && sp.body) || t.body;
               t.updated_at = (sp && sp.updated_at) || t.updated_at;
+              if (sp && sp.current_version != null) t.current_version = sp.current_version;
               /* DEF-007 class: a reply that lands after the owner kept typing must not
                  overwrite what they typed — only the text that was there at confirm. */
               window.pdField.writeIfUntouched(ta, bodyAtConfirm, t.body);
@@ -432,7 +616,7 @@
             card.replaceWith(addStrategyCard(t));
           },
         });
-      }, '以官方模板覆寫內文（自訂修改將遺失；綁定的任務原地升版）'));
+      }, '以官方模板覆寫內文（目前內文保留在版本記錄，可回復；綁定的任務原地升版）'));
     }
     actions.appendChild(mkBtn('封存', 'btn-danger', () => deleteStrategy(t, card),
       '被洞察類型引用時將阻擋'));

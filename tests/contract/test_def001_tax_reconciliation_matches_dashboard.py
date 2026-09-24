@@ -27,8 +27,9 @@ import csv
 import io
 import sqlite3
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,10 @@ from portfolio_dash.shared.models.enums import Side
 from tests.conftest import DashboardClientFactory
 
 D = Decimal
+#: After every row of the scenario, the 2026-08-07 post-close dividend included. A dividend
+#: counts from its pay date (DEF-016, owner ruling 2026-09-24), so a clock BEFORE it (the
+#: suite default, 2026-06-11) would see a package in which the dividend has not arrived yet.
+_PAID = datetime(2026, 9, 1, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
 def _tw(conn: sqlite3.Connection, symbol: str) -> None:
@@ -128,7 +133,7 @@ _FILING = "## Realized gains — 申報用"
 def test_the_reconciliation_line_is_the_dashboard_figure_byte_for_byte(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
-    client = dashboard_client_factory(_seed_2026)
+    client = dashboard_client_factory(_seed_2026, now=_PAID)
     with _package(client) as zf:
         summary = zf.read("summary.md").decode("utf-8")
     dashboard = _dashboard_realized(client, "TWD")
@@ -138,7 +143,7 @@ def test_the_reconciliation_line_is_the_dashboard_figure_byte_for_byte(
 def test_the_post_close_dividend_is_named_under_the_reconciliation_line(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
-    client = dashboard_client_factory(_seed_2026)
+    client = dashboard_client_factory(_seed_2026, now=_PAID)
     with _package(client) as zf:
         summary = zf.read("summary.md").decode("utf-8")
     recon = _section(summary, _RECON)
@@ -152,7 +157,7 @@ def test_the_filing_line_is_untouched_by_the_fix(
 ) -> None:
     """The ruling's constraint: the FILING subtotal must not move. It is Σ realized_original
     over SALES only — the post-close dividend is income, declared on the dividends sheet."""
-    client = dashboard_client_factory(_seed_2026)
+    client = dashboard_client_factory(_seed_2026, now=_PAID)
     with _package(client) as zf:
         summary = zf.read("summary.md").decode("utf-8")
         text = zf.read("realized_gains_2026.csv")[3:].decode("utf-8")
@@ -171,7 +176,7 @@ def test_a_ledger_spanning_years_still_reconciles_and_says_how(
     """The dashboard's realized is CUMULATIVE; the package is year-cut. With a 2025 sale in
     the ledger the 2026 line cannot equal the dashboard, so the gap is printed and the
     cumulative total is printed beside it — and THAT one equals the dashboard exactly."""
-    client = dashboard_client_factory(_seed_across_years)
+    client = dashboard_client_factory(_seed_across_years, now=_PAID)
     with _package(client) as zf:
         summary = zf.read("summary.md").decode("utf-8")
     recon = _section(summary, _RECON)
@@ -184,7 +189,7 @@ def test_a_ledger_spanning_years_still_reconciles_and_says_how(
 def test_a_single_year_ledger_prints_no_cross_year_lines(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
-    client = dashboard_client_factory(_seed_2026)
+    client = dashboard_client_factory(_seed_2026, now=_PAID)
     with _package(client) as zf:
         summary = zf.read("summary.md").decode("utf-8")
     assert "本年度以外" not in summary

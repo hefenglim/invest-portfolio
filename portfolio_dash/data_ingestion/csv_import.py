@@ -115,6 +115,11 @@ EXPORT_ONLY_COLUMNS: dict[str, str] = {
     # what IT moved; replaying the old record would describe settings the file never set.
     "band_move_json": "換股時目標價的搬移紀錄，匯入換股時依目前設定重新處理，不沿用舊紀錄",
     "weight_move_json": "換股時目標權重的搬移紀錄，匯入換股時依目前設定重新處理，不沿用舊紀錄",
+    # DEF-009: the trade month a CONFIRMED 折讓款 credit books. Only the rebate inbox's confirm
+    # writes it; a re-imported row is a hand-entered credit and keeps the legacy keys (the
+    # month before its date / its 「YYYY-MM 折讓款」 note), which name the same month.
+    "rebate_period": (
+        "折讓款確認入帳所對應的交易月份，只由收件匣確認寫入；匯入後依日期與備註辨識月份"),
 }
 
 # A column-name annotation from the downloadable template — half- or full-width parentheses,

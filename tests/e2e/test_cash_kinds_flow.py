@@ -295,9 +295,12 @@ def test_edit_dialog_offers_the_cost_field_on_a_foreign_rebate(
     """REBATE is the third acquiring kind and the form has NO button for it — the edit
     dialog is its only manual surface, so that is where its 取得成本 field is asserted.
 
-    The dialog also LOCKS a 折讓款's kind/date (the rebate inbox's suppression key). Breaks if
-    ``ACQUIRING_KINDS`` drops ``rebate`` (an unrelated amount edit then NULLs a recorded cost
-    basis — data loss, not a display bug) or if the lock is lifted.
+    DEF-009 (owner ruling 2026-09-24) REVERSED the lock this test used to pin: a 折讓款 row is
+    fully editable like a hand-entered one (the inbox's dedup reads the credit's explicit
+    ``rebate_period`` link now, not its fields). Breaks if ``ACQUIRING_KINDS`` drops ``rebate``
+    (an unrelated amount edit then NULLs a recorded cost basis — data loss, not a display bug),
+    or if the lock comes back, or if the kind picker stops offering the row's own kind (a
+    no-op save would then silently rewrite the 折讓款 into the first option, 入金).
     """
     base = flow_server(_seed_funded_with_rebate)
     page = fresh_page
@@ -313,8 +316,13 @@ def test_edit_dialog_offers_the_cost_field_on_a_foreign_rebate(
     # The acquisition cost is present and pre-filled with the STORED HOME AMOUNT (F1).
     acq = modal.locator(".field", has_text="取得成本").locator("input")
     expect(acq).to_have_value("3960")
-    # …and the rebate's kind/date are locked rather than editable.
-    expect(modal.locator(".field", has_text="方向").locator("input")).to_be_disabled()
+    # …and every field of the rebate is editable, its own kind pre-selected (DEF-009).
+    kind = modal.locator(".field", has_text="方向").locator("select")
+    expect(kind).to_be_enabled()
+    expect(kind).to_have_value("rebate")
+    expect(modal.locator(".field", has_text="日期").locator("input")).to_be_enabled()
+    expect(modal.locator(".field", has_text="備註").locator("input")).to_be_enabled()
+    expect(modal).to_contain_text("稽核軌跡")
 
     assert console_errors == [] and page_errors == []
 

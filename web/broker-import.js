@@ -36,6 +36,9 @@
    ticks are re-sent (as `select`) under the acknowledgement; the rest are skipped. The
    server's own shrink-only rule (QA-01) then drops any row whose warning only appeared
    because of the narrowing, so the acknowledgement never covers a warning nobody saw.
+   Since DEF-025 (2026-09-24) the ticked rows also travel as `ack_rows`, and the SERVER
+   refuses a 賣超 row that is not named there — and the whole flow moved to
+   web/import-ack.js, so the CSV and AI doors ask the very same question.
 
    ⚠ **Stop on the first refusal.** If one kind comes back with rejected rows, the remaining
    kinds are NOT sent. Rows that depend on a position must not be written against a position
@@ -61,6 +64,12 @@
      the no-names.js fallback. */
   const acctZh = (id) => (window.pdNames ? window.pdNames.account(id) : String(id));
   const brokerZh = (id) => (window.pdNames ? window.pdNames.broker(id) : String(id));
+  /* DEF-039 (2026-09-24): a share count the page SAYS in a sentence goes through the one
+     share formatter (web/format.js — grouped, up to 6 dp, trailing zeros trimmed). The
+     opening-gap hint printed `ledger_shares` verbatim: that figure is the ledger's replayed
+     holding, a DRIP quotient with 28 decimals (「已持有 85.03925507… 股」). Values the page
+     WRITES (the openings CSV's gap) stay the raw wire string — never a formatted one. */
+  const fmtShares = (v) => (window.fmt ? window.fmt.shares(v) : String(v));
 
   /* zh labels for the import kinds, so the report and the batch list agree with the chips
      the owner already knows from the 標準範本 mode. */
@@ -224,7 +233,38 @@
     return live + '（原寫入 ' + wrote + '）';
   }
 
-  function undoBatch(b) {
+  /* DEF-017 (R2 bounce): a destructive confirm must quote the figure the server will act on
+     NOW, never the one this page cached. Measured: a dividend deleted on its ledger tab left
+     最近匯入 at 「1」, and 復原 then promised 「將刪除…1 筆股利紀錄」 and deleted 0. The list is
+     re-read after every ledger change on this page (input.js refreshAfterLedgerChange), and —
+     because another tab or another page can still empty a batch behind this one — the batch
+     is ALSO re-read here, before the dialog opens. A batch no longer listed has no rows left
+     (list_batches drops empty batches), so no dialog is offered for it; if the re-read itself
+     fails, no dialog is offered either — an undo whose count cannot be confirmed is not
+     confirmed on a guess. Resolves to the fresh batch row, or null. */
+  async function liveBatch(id) {
+    let resp;
+    try {
+      resp = await api.get('/api/import/batches?limit=500');
+    } catch (err) {
+      if (window.toast) {
+        window.toast('無法確認這批匯入目前的筆數', 'fail',
+          ((err && err.message) || '請稍後再試') + '（未刪除任何資料）');
+      }
+      return null;
+    }
+    const hit = ((resp && resp.batches) || []).find((x) => x.id === id) || null;
+    if (!hit) {
+      if (window.toast) window.toast('沒有可復原的列', 'warn', '此批次的列已在帳本中刪除');
+      await loadBatches();
+    }
+    return hit;
+  }
+
+  async function undoBatch(cached) {
+    const b = await liveBatch(cached.id);
+    if (!b) return;
+    if (String(b.row_count) !== String(cached.row_count)) await loadBatches();
     window.confirmDialog({
       title: '復原這批匯入',
       /* Names the count and the kind. "Undo the import" is not enough to decide on — the
@@ -597,20 +637,21 @@
       if (o.satisfied) {
         row.appendChild(el('label', null, '期初庫存　' + o.symbol + '　不需補'));
         row.appendChild(el('span', 'hint',
-          '帳本' + asOf + '已持有 ' + o.ledger_shares + ' 股'
-          + (o.shares ? '，足以涵蓋這份對帳單需要的 ' + o.shares + ' 股' : '')
+          '帳本' + asOf + '已持有 ' + fmtShares(o.ledger_shares) + ' 股'
+          + (o.shares ? '，足以涵蓋這份對帳單需要的 ' + fmtShares(o.shares) + ' 股' : '')
           + '，不會再新增期初庫存。'));
         box.appendChild(row);
         return;
       }
       const need = o.shares
-        ? '對帳單需要 ' + o.shares + ' 股，帳本' + asOf + '已有 ' + o.ledger_shares + ' 股，仍缺 ' + o.gap + ' 股'
-        : '（股數未知）帳本' + asOf + '持有 ' + o.ledger_shares + ' 股';
+        ? '對帳單需要 ' + fmtShares(o.shares) + ' 股，帳本' + asOf + '已有 '
+          + fmtShares(o.ledger_shares) + ' 股，仍缺 ' + fmtShares(o.gap) + ' 股'
+        : '（股數未知）帳本' + asOf + '持有 ' + fmtShares(o.ledger_shares) + ' 股';
       row.appendChild(el('label', null, '期初庫存　' + o.symbol + '　' + need));
       const cost = el('input', 'input');
       cost.type = 'number'; cost.min = '0'; cost.step = '0.01';
       cost.id = 'bk-opening-cost-' + idx;
-      cost.placeholder = o.gap ? '這 ' + o.gap + ' 股當初買進的總金額（含手續費與稅）' : '當初買進的總金額（含手續費與稅）';
+      cost.placeholder = o.gap ? '這 ' + fmtShares(o.gap) + ' 股當初買進的總金額（含手續費與稅）' : '當初買進的總金額（含手續費與稅）';
       row.appendChild(cost);
       row.appendChild(el('span', 'hint',
         '這是匯出檔開始之前就持有、而帳本裡還沒有的部位。成本填 0 會讓這個部位的成本基礎永久歸零，'
@@ -784,143 +825,31 @@
     return { symbol: '', date: '', shares: '', type: '' };
   }
 
-  /* ★ DEF-027: the acknowledgement dialog. Every warning row, one per line, with the
-     server's own message and — for a 賣超 — the consequence in words; each checkbox starts
-     UNTICKED. Resolves to one of:
-       { mode: 'ack',  keep: Set<n> }  write the ticked warning rows under the ack
-       { mode: 'skip' }                write only the rows without a warning
-       { mode: 'cancel' }              stop the run here
-     Built on the app's own modal (the same classes shell.js's confirmDialog and input.js's
-     賣超 dialog use), never on window.confirm — one line of text cannot list ten rows. */
-  function warningsDialog(step, warns) {
-    return new Promise((resolve) => {
-      const backdrop = el('div', 'modal-backdrop');
-      const modal = el('div', 'modal');
-      modal.style.width = 'min(680px, calc(100vw - 40px))';
-      const head = el('div', 'modal-head');
-      head.appendChild(el('h3', 'modal-title', '匯入警告確認 —— ' + (KIND_ZH[step.kind] || step.kind)));
-      const x = el('button', 'modal-close', '✕');
-      x.type = 'button';
-      head.appendChild(x);
-      modal.appendChild(head);
-      const body = el('div', 'modal-body');
-      body.appendChild(el('div', null,
-        '⚠ 以下 ' + warns.length + ' 列在寫入前檢核時有警告。預設不寫入；只有你勾選並確認的列才會帶著警告寫入，'
-        + '其餘列照常寫入。'));
-      body.appendChild(el('div', 'hint',
-        '賣超列一旦確認：這個部位的成本基礎會被永久捨棄，並在儀表板標示為待釐清；之後再買回也不會還原。'
-        + '如果是分割／換股／分拆造成的，請先取消、補登公司行動，再重新上傳整份對帳單。'));
-      const wrap = el('div', 'table-wrap');
-      const table = el('table', 'data');
-      const thead = el('thead');
-      const hr = el('tr');
-      hr.appendChild(el('th', null, ''));
-      [['代號', 'col-text'], ['日期', 'col-text'], ['類型', 'col-text'], ['股數', 'num'], ['警告', 'col-text']]
-        .forEach(([label, cls]) => hr.appendChild(el('th', cls, label)));
-      thead.appendChild(hr);
-      table.appendChild(thead);
-      const tbody = el('tbody');
-      const keep = new Set();
-      const ok = el('button', 'btn btn-danger', '寫入勾選的警告列');
-      ok.type = 'button';
-      ok.disabled = true;
-      warns.forEach((w) => {
-        const lab = rowLabel(step, w.n);
-        const tr = el('tr');
-        const td = el('td');
-        const cb = el('input');
-        cb.type = 'checkbox';
-        cb.checked = false;                            // never pre-ticked
-        cb.className = 'bk-warn-tick';
-        cb.dataset.n = String(w.n);
-        cb.addEventListener('change', () => {
-          if (cb.checked) keep.add(w.n); else keep.delete(w.n);
-          ok.disabled = keep.size === 0;
-        });
-        td.appendChild(cb);
-        tr.appendChild(td);
-        tr.appendChild(el('td', 'col-text', lab.symbol || '—'));
-        tr.appendChild(el('td', 'col-text', lab.date || '—'));
-        tr.appendChild(el('td', 'col-text', lab.type || '—'));
-        tr.appendChild(el('td', 'num', lab.shares || '—'));
-        const why = el('td', 'col-text');
-        why.appendChild(el('div', null, w.reason || '有警告'));
-        /* I-13: the preview row carries its findings' KINDS (`kinds`), so the 賣超 line is
-           keyed on `sell_exceeds_holdings` — it used to pattern-match the server's
-           sentence 「賣出 N 股，超過…」, which any rewording would have silently broken. */
-        if ((w.kinds || []).indexOf('sell_exceeds_holdings') !== -1) {
-          why.appendChild(el('div', 'hint', '→ 賣超：確認後成本基礎永久捨棄（待釐清），之後再買回也不會還原'));
-        }
-        tr.appendChild(why);
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-      wrap.appendChild(table);
-      body.appendChild(wrap);
-      modal.appendChild(body);
-      const foot = el('div', 'modal-foot');
-      const cancel = el('button', 'btn', '取消，停在這一步');
-      cancel.type = 'button';
-      const skip = el('button', 'btn', '略過所有警告列，只寫入其他列');
-      skip.type = 'button';
-      foot.appendChild(cancel);
-      foot.appendChild(skip);
-      foot.appendChild(ok);
-      modal.appendChild(foot);
-      backdrop.appendChild(modal);
-      const finish = (decision) => { backdrop.remove(); resolve(decision); };
-      x.addEventListener('click', () => finish({ mode: 'cancel' }));
-      cancel.addEventListener('click', () => finish({ mode: 'cancel' }));
-      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) finish({ mode: 'cancel' }); });
-      skip.addEventListener('click', () => finish({ mode: 'skip' }));
-      ok.addEventListener('click', () => finish({ mode: 'ack', keep: new Set(keep) }));
-      document.body.appendChild(backdrop);
-    });
-  }
-
-  /* One kind, committed. Unacknowledged first; on `warnings_unacknowledged` the warning
-     rows are fetched, shown, and only the ticked ones are re-sent — narrowed through
-     `select`, under the ack. Returns the commit response, or { cancelled: true }. */
-  async function commitStep(step, actionsCsv) {
-    let select = step.select;
-    let ack = false;
-    for (;;) {
-      const body = {
-        kind: step.kind, csv_text: step.text, ack_warnings: ack,
-        source_name: files.map((f) => f.name).join('+'),
-        broker: $('#bk-broker').value,
-      };
-      if (select !== null) body.select = select;
-      /* Trades are validated against the actions arriving in the SAME run — see the module
-         header. Without this the guard measures a post-split sell against a pre-split count
-         and demands the one acknowledgement that discards a cost basis. */
-      if (step.kind === 'transactions' && actionsCsv) body.pending_actions_csv = actionsCsv;
-      try {
-        return await api.post('/api/import/commit', body);
-      } catch (err) {
-        if (!(err && err.status === 422 && err.code === 'warnings_unacknowledged' && !ack)) throw err;
-        const pvBody = { kind: step.kind, csv_text: step.text };
-        if (step.kind === 'transactions' && actionsCsv) pvBody.pending_actions_csv = actionsCsv;
-        const pv = await api.post('/api/import/preview', pvBody);
-        const chosen = select === null ? null : new Set(select);
-        const warns = ((pv && pv.rows) || [])
-          .filter((r) => r.status === 'warn' && (chosen === null || chosen.has(r.n)))
-          .map((r) => ({ n: r.n, reason: r.reason, kinds: r.kinds || [] }));
-        if (!warns.length) {
-          /* Every warning row is already deselected — nothing to confirm. The ack only
-             releases the server's whole-file gate; the rows it would cover are not sent. */
-          ack = true;
-          continue;
-        }
-        const decision = await warningsDialog(step, warns);
-        if (decision.mode === 'cancel') return { cancelled: true };
-        const warnIdx = new Set(warns.map((w) => w.n));
-        const base = chosen === null ? ((pv && pv.rows) || []).map((r) => r.n) : Array.from(chosen);
-        select = base.filter((n) => !warnIdx.has(n) || (decision.mode === 'ack' && decision.keep.has(n)));
-        ack = true;
-        if (!select.length) return { written: 0, skipped: base.length };
-      }
+  /* ★ DEF-027 → DEF-025: the acknowledgement lives in web/import-ack.js, shared with the CSV
+     and AI doors. One kind, committed: UNACKNOWLEDGED first; on the server's 422 the warning
+     rows are fetched through /api/import/preview and shown one by one (代號／日期／類型／股數,
+     the server's sentence, and for a 賣超 「成本基礎會被永久捨棄」), each UNTICKED; only the
+     ticked ones are re-sent — narrowed through `select`, named in `ack_rows` (the server
+     refuses a 賣超 row that is not). Returns the commit response, or { cancelled: true }. */
+  function commitStep(step, actionsCsv) {
+    const body = {
+      kind: step.kind, csv_text: step.text,
+      source_name: files.map((f) => f.name).join('+'),
+      broker: $('#bk-broker').value,
+    };
+    if (step.select !== null) body.select = step.select;
+    const previewBody = { kind: step.kind, csv_text: step.text };
+    /* Trades are validated against the actions arriving in the SAME run — see the module
+       header. Without this the guard measures a post-split sell against a pre-split count
+       and demands the one acknowledgement that discards a cost basis. */
+    if (step.kind === 'transactions' && actionsCsv) {
+      body.pending_actions_csv = actionsCsv;
+      previewBody.pending_actions_csv = actionsCsv;
     }
+    return window.pdImportAck.commit({
+      body: body, previewBody: previewBody, title: KIND_ZH[step.kind] || step.kind,
+      label: (row) => rowLabel(step, row.n),
+    });
   }
 
   async function commitAll() {

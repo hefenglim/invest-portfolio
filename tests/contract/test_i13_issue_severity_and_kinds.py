@@ -54,10 +54,16 @@ def test_preview_rows_carry_their_kinds(
 
 
 def test_the_broker_door_keys_the_oversell_line_on_the_kind() -> None:
-    src = (_ROOT / "web/broker-import.js").read_text(encoding="utf-8")
-    assert "indexOf('sell_exceeds_holdings')" in src
-    assert not re.search(r"/\^賣出", src), "the 賣超 line still pattern-matches the sentence"
-    assert "kinds: r.kinds || []" in src
+    """The 賣超 line moved with the dialog to web/import-ack.js (DEF-025, shared by the CSV,
+    AI and broker doors); it still keys on the finding's KIND, never on the sentence. The
+    behaviour itself is RUN in test_def025_import_ack_front.py."""
+    src = (_ROOT / "web/import-ack.js").read_text(encoding="utf-8")
+    assert "const OVERSELL = 'sell_exceeds_holdings';" in src
+    assert "indexOf(OVERSELL)" in src
+    assert "kinds: w.kinds || []" in src
+    for name in ("web/import-ack.js", "web/broker-import.js"):
+        body = (_ROOT / name).read_text(encoding="utf-8")
+        assert not re.search(r"/\^賣出", body), "the 賣超 line still pattern-matches the sentence"
 
 
 def test_the_builder_keeps_no_second_membership_filter() -> None:

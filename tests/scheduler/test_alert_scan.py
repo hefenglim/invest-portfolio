@@ -37,8 +37,10 @@ def conn() -> Iterator[sqlite3.Connection]:
 @pytest.fixture(autouse=True)
 def _clear_runner() -> Iterator[None]:
     jobs.register_insight_runner(None)
+    jobs.register_alert_held_fn(None)
     yield
     jobs.register_insight_runner(None)
+    jobs.register_alert_held_fn(None)
 
 
 def test_alert_scan_records_events_and_dispatches(
@@ -65,6 +67,8 @@ def test_alert_scan_records_events_and_dispatches(
         calls.append((insight_type_id, fired_rule, fired_symbol))
 
     jobs.register_insight_runner(runner)
+    # DEF-041: the 持倉提點 card is for HELD symbols — 2330 is held in this scenario.
+    jobs.register_alert_held_fn(lambda c, *, now: {"2330"})
     detail = jobs.alert_scan(conn, now=NOW)
     # event recorded + consumed; subscriber dispatched once
     assert calls == [(sub.id, "vol_spike", "2330")]

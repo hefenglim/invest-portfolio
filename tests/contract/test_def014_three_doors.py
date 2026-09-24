@@ -123,9 +123,12 @@ def test_the_broker_page_writes_through_the_csv_door() -> None:
     """``/api/broker/convert`` only converts; the transactions it produces are previewed
     and committed by the page through the two CSV endpoints, so every finding above
     reaches a broker statement unchanged. A broker-specific write endpoint would have to
-    appear here first."""
+    appear here first. Since DEF-025 the commit itself goes through the shared per-row
+    acknowledgement flow (``web/import-ack.js``), so both files are read."""
     src = (_WEB / "broker-import.js").read_text(encoding="utf-8")
-    posts = set(re.findall(r"api\.post\(\s*'(/api/[^']+)'", src))
+    shared = (_WEB / "import-ack.js").read_text(encoding="utf-8")
+    assert "pdImportAck.commit(" in src
+    posts = set(re.findall(r"api\.post\(\s*'(/api/[^']+)'", src + shared))
     assert "/api/broker/convert" in posts
     assert "/api/import/commit" in posts
     assert not [p for p in posts if p.startswith("/api/broker/") and p != "/api/broker/convert"], (

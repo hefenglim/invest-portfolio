@@ -64,10 +64,13 @@ def build_tax_package_zip(
 ) -> ExportArtifact:
     """Build the annual tax package zip (realized gains + dividends + FX realized + summary).
 
-    ``now`` is accepted for signature parity with sibling exports (audit logging is the
-    router's concern); the package content is year-cut, not as-of ``now``.
+    The package content is year-cut. ``now`` also cuts one thing (DEF-016, owner ruling
+    2026-09-24): a dividend whose pay date is still ahead has not been RECEIVED, so it is
+    neither income on the dividends sheet nor a realized row in the reconciliation — the
+    same cut ``build_dashboard`` applies, which is what keeps the 「對帳用」 line equal to the
+    dashboard figure (DEF-001) for a package generated before a confirmed payout lands.
     """
-    bundle = load_ledger_bundle(conn)
+    bundle = load_ledger_bundle(conn).received_by(now.date())
     divs = bundle.dividends
     instruments = bundle.instruments
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,

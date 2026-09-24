@@ -86,7 +86,13 @@
       chip.innerHTML = '<span class="dot"></span>資料新鮮';
       chip.removeAttribute('href');
     }
+    /* Two INDEPENDENT banners, each called from here. DEF-023 (R2 bounce): the unapplied
+       block used to be called from inside renderUnregisteredBanner, AFTER that function's
+       `if (!syms.length || !page) return;` — so it rendered only on a ledger that ALSO had an
+       unregistered symbol, i.e. never on the demo. A block whose condition is its own list
+       is never nested under another block's early return. */
     renderUnregisteredBanner();
+    renderUnappliedBanner();
   }
 
   /* Unregistered-symbol warning (2026-07-02): ledger rows whose symbol has no
@@ -109,7 +115,6 @@
     link.href = 'instruments.html';
     bar.appendChild(link);
     page.insertBefore(bar, page.firstChild);
-    renderUnappliedBanner();
   }
 
   /* DEF-023 (2026-09-23): corporate actions the replay REFUSED to book get a VISIBLE

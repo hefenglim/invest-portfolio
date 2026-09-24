@@ -74,7 +74,11 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import OpeningInventory, Transaction
+from portfolio_dash.shared.models.ledger import (
+    OpeningInventory,
+    Transaction,
+    dividend_effective_date,
+)
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -642,7 +646,14 @@ def symbol_detail(
                 "side": "sell", "shares": decimal_str(tx.quantity),
                 "price": decimal_str(tx.price), "fee": decimal_str(tx.fees),
                 "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy}))
-    for d in sym_divs:
+    # Only what has been RECEIVED moves the position (DEF-016, owner ruling 2026-09-24): the
+    # book behind 部位摘要 is cut at the valuation day (``build_dashboard``), so a DRIP / 配股
+    # whose effective date is still ahead is neither a share event here nor a term of the
+    # footer below — or the footer would add shares the position does not hold yet and print
+    # ⚠ 對帳不一致 over a correct book. ``dividend_events`` above still lists every row.
+    received_divs = [d for d in sym_divs
+                     if dividend_effective_date(d.type, d.date, d.ex_date) <= as_of]
+    for d in received_divs:
         dt = DividendType(d.type)
         if dt in _REINVEST_TYPES and d.reinvest_shares is not None:
             aev.append((d.date, int(EventPriority.DIVIDEND), {
@@ -675,14 +686,14 @@ def symbol_detail(
     # aggregate/detail pairs have drifted three times before.
     deltas = {aid: _corporate_delta(conn, action_index, aid, symbol) for aid in acct_ids}
     activity_reconcile = {
-        "total": _reconcile(sym_holdings, sym_opening, sym_txs, sym_divs,
+        "total": _reconcile(sym_holdings, sym_opening, sym_txs, received_divs,
                             _sum(list(deltas.values()))),
         "by_account": {
             aid: _reconcile(
                 [h for h in sym_holdings if h.account_id == aid],
                 [o for o in sym_opening if o.account_id == aid],
                 [t for t in sym_txs if t.account_id == aid],
-                [d for d in sym_divs if d.account_id == aid],
+                [d for d in received_divs if d.account_id == aid],
                 deltas[aid],
             )
             for aid in acct_ids

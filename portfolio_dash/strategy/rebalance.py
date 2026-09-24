@@ -398,9 +398,11 @@ def compute_rebalance(
         })
 
         for lg in legs:
-            leg_rate = rules_by_acct[lg.account_id].rebate_rate
-            if leg_rate > _ZERO:  # convert to reporting ccy (leg fee is in the row's quote ccy)
-                rebate_estimate_total += convert(forecast_tw_rebate(lg.fee, leg_rate), rate)
+            leg_rules = rules_by_acct[lg.account_id]
+            if leg_rules.rebate_rate > _ZERO:  # convert to reporting ccy (leg fee: quote ccy)
+                # DEF-010: a leg priced with a settlement discount forecasts no refund (0).
+                rebate_estimate_total += convert(forecast_tw_rebate(
+                    lg.fee, leg_rules.rebate_rate, discount=leg_rules.discount), rate)
 
         turnover_reporting += convert(total_amount, rate)
         total_fees_reporting += convert(total_fee + total_tax, rate)

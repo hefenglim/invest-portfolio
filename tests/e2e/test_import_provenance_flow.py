@@ -120,8 +120,12 @@ def _upload_and_commit(page: Page, name: str, *, expect_warning: bool) -> dict[s
     assert cm.value.json()["error"]["code"] == "warnings_unacknowledged"
     dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
     expect(dialog).to_be_visible()
+    # DEF-025: the CSV door acknowledges ROW BY ROW (web/import-ack.js), every box unticked.
+    for tick in dialog.locator("input.imp-warn-tick").all():
+        assert not tick.is_checked(), "a warning row must never start ticked"
+        tick.check()
     with page.expect_response("**/api/import/commit") as acked:
-        dialog.locator("button", has_text="確認寫入").click()
+        dialog.locator("button", has_text="寫入勾選的警告列").click()
     assert acked.value.status == 200, f"acked commit status {acked.value.status}"
     acked_body: dict[str, Any] = acked.value.json()
     return acked_body

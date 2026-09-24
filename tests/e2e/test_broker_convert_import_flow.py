@@ -159,18 +159,24 @@ def _import_file(page: Page, chip: str, path: Path, *, warn_rows: int) -> dict[s
     preview = _upload(page, chip, path)
     assert sum(1 for r in preview["rows"] if r["status"] == "warn") == warn_rows, preview["rows"]
     assert [r for r in preview["rows"] if r["status"] == "error"] == []
+    # DEF-025: a 賣超 row is never pre-ticked — the owner ticks it deliberately, as here.
+    for cb in page.locator("#csv-body input[type=checkbox]:not(:disabled)").all():
+        cb.check()
     page.wait_for_function(
         "() => { const b = document.querySelector('#csv-confirm'); return b && !b.disabled; }")
     with page.expect_response("**/api/import/commit") as cm:
         page.click("#csv-confirm")
     if warn_rows:
-        # A soft issue holds the write until the owner confirms it in the dialog.
+        # A soft issue holds the write until the owner confirms it — row by row (DEF-025).
         assert cm.value.status == 422, f"{path.name}: expected the warning gate"
         assert cm.value.json()["error"]["code"] == "warnings_unacknowledged"
         dialog = page.locator(".modal-backdrop .modal", has_text="匯入警告確認")
         expect(dialog).to_be_visible()
+        for tick in dialog.locator("input.imp-warn-tick").all():
+            assert not tick.is_checked(), "a warning row must never start ticked"
+            tick.check()
         with page.expect_response("**/api/import/commit") as acked:
-            dialog.locator("button", has_text="確認寫入").click()
+            dialog.locator("button", has_text="寫入勾選的警告列").click()
         assert acked.value.status == 200, f"{path.name}: acked commit {acked.value.status}"
         acked_body: dict[str, Any] = acked.value.json()
         return acked_body

@@ -45,11 +45,14 @@ class Assembly(BaseModel):
 
     ``layers`` is for the 07 preview (per-layer inspection); ``prompt`` is what the LLM
     receives; ``tokens_used`` aggregates the registry tokens rendered across all layers.
+    ``strategy_versions`` (DEF-033) names the version of every strategy layer that was
+    rendered — what a card generated from this prompt records.
     """
 
     layers: list[Layer]
     prompt: str
     tokens_used: list[str]
+    strategy_versions: list[cs.StrategyVersionRef] = []
 
 
 def assemble_layers(
@@ -81,6 +84,7 @@ def assemble_layers(
 
     if it is None:
         return Assembly(layers=[], prompt="", tokens_used=[])
+    versions: list[cs.StrategyVersionRef] = []
 
     # 1) system prompt (optional).
     if it.use_system_prompt:
@@ -93,6 +97,12 @@ def assemble_layers(
         if sp is None or not sp.enabled or sp.archived:
             continue
         layers.append(Layer(kind="template", name=sp.name, rendered=_render(sp.body)))
+        # DEF-033: the version of the body just rendered — looked up BY BODY, so what the
+        # card records is the text it was actually built from, never a number read beside it.
+        versions.append(cs.StrategyVersionRef(
+            strategy_id=sp.id, name=sp.name,
+            version=cs.version_of_body(conn, sp.id, sp.body),
+        ))
 
     # 3) calibration (only when self_correct AND a live version is in effect). The shadow
     #    path overrides the active version with the explicit ``calibration_version``.
@@ -119,4 +129,6 @@ def assemble_layers(
             )
 
     prompt = _LAYER_SEP.join(lyr.rendered for lyr in layers)
-    return Assembly(layers=layers, prompt=prompt, tokens_used=tokens_used)
+    return Assembly(
+        layers=layers, prompt=prompt, tokens_used=tokens_used, strategy_versions=versions
+    )

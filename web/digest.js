@@ -147,7 +147,7 @@
     var parts = [];
     parts.push(m.name ? (m.name + '（' + m.symbol + '）') : m.symbol);
     if (m.close != null) {
-      parts.push('股價 ' + m.close);
+      parts.push('股價 ' + f.exact(m.close));   // DEF-039: exact digits, grouped
       if (m.fetched_at) parts.push('更新 ' + f.datetime(m.fetched_at));
       else if (m.quote_date) parts.push('更新 ' + f.date(m.quote_date));
     } else {

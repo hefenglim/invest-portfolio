@@ -408,7 +408,29 @@ table.vars-table td.vars-desc { white-space: normal; min-width: 220px; }
 .tpl-head .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .tpl-body { padding: 0 14px 12px; display: none; }
 .tpl-card.open .tpl-body { display: block; }
-.tpl-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+.tpl-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;
+  flex-wrap: wrap; }
+/* DEF-033: 版本記錄 modal — the history list and the server-computed line diff. */
+.ver-list { display: flex; flex-direction: column; gap: 4px; }
+.ver-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 11px; padding: 6px 8px; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); }
+.ver-row.is-current { border-color: rgba(88, 166, 221, 0.45); }
+.ver-no { font-family: var(--font-num); font-weight: 700; min-width: 32px; }
+.ver-time, .ver-size { font-family: var(--font-num); color: var(--text-3); }
+.ver-src { color: var(--text-2); }
+.ver-acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.ver-diff-pre { max-height: 320px; }
+.ver-confirm { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--amber); border-radius: var(--radius-sm); font-size: 11.5px;
+  line-height: 1.6; color: var(--text-2); }
+.ver-confirm[hidden] { display: none; }
+.ver-confirm-acts { display: flex; gap: 8px; justify-content: flex-end; }
+.ver-line { display: block; white-space: pre-wrap; }
+.ver-line.ver-add { background: rgba(63, 185, 80, 0.14); color: var(--text); }
+.ver-line.ver-del { background: rgba(248, 81, 73, 0.14); color: var(--text-2);
+  text-decoration: line-through; }
+.ver-line.ver-same { color: var(--text-3); }
 .tpl-vars { font-size: 10px; color: var(--text-3); margin-top: 6px; }
 .tpl-vars code {
   font-family: var(--font-num);

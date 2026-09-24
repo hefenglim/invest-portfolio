@@ -42,6 +42,21 @@
      loads api.js without names.js). Pinned equal by tests/contract/test_account_ref_seam.py. */
   const ACCOUNT_REF = /\{account:([^{}\s]+)\}/g;
 
+  /* DEF-044 (2026-09-24): every page loads web/names.js BEFORE this file, so the resolver
+     exists before the first response can land (a names.js tag AFTER api.js leaves a window in
+     which an early response is resolved without it). Five pages — settings / insights /
+     instruments / news / data-center — shipped with no names.js at all, and the id fallback
+     below hid it: 排程中心 printed 「fx_drift 帳戶 moomoo_my」 and nothing anywhere went red.
+     The fallback stays — a readable id beats a raw `{account:…}` token or a crash on the
+     owner's screen — but a page that breaks the load order now says so LOUDLY, at load, before
+     any token has to happen by: a console error, which the page-smoke e2e (zero console errors
+     on every page) turns into a red build. tests/contract/test_names_js_before_api_js.py pins
+     the order on every page statically and runs this check. */
+  if (!window.pdNames || typeof window.pdNames.resolveRefs !== 'function') {
+    console.error('[pdApi] web/names.js must be loaded before api.js: account names on this '
+      + 'page will degrade to raw account ids.');
+  }
+
   function _resolveText(s) {
     if (s.indexOf('{account:') === -1) return s;        // fast path: byte-identical
     const names = window.pdNames;

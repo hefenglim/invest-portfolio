@@ -26,7 +26,6 @@ from portfolio_dash.data_ingestion.store import (
     StoredFxConversion,
     StoredOpening,
     StoredTransaction,
-    list_accounts,
     list_cash_movements,
     list_corporate_actions,
     list_dividends,
@@ -47,6 +46,7 @@ from portfolio_dash.export.report_html import (
     _page_header,
     _version_line,
 )
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.corporate_actions import KIND_ZH
 
@@ -55,6 +55,18 @@ _DIV_TYPE_ZH = {"CASH": "現金", "STOCK": "配股", "DRIP": "DRIP", "NET": "淨
 
 
 # --- shared helpers -----------------------------------------------------------------------
+
+
+def _acct_label(account_id: str) -> str:
+    """The 帳戶 cell's text: an ``{account:<id>}`` token, never ``accounts.name`` (DEF-045).
+
+    The backend has no zh account name — ``web/names.js`` is the one naming authority — and
+    this report used to print the English API label (「TW Broker」「Charles Schwab」) beside a
+    screen that says 台灣券商 / 嘉信 Schwab. The report is downloaded through
+    ``web/api.js::download``, whose ``_resolveBlobRefs`` swaps every token for the display name
+    (HTML-escaped) before the file is saved, exactly as for every other response.
+    """
+    return _esc(account_ref(account_id))
 
 
 def _in_range(d: date, frm: str | None, to: str | None) -> bool:
@@ -84,11 +96,18 @@ def _sym_cell(symbol: str, name: str) -> str:
     )
 
 
-def _side_chip(side_value: str) -> str:
+def _side_chip(side_value: str, *, daytrade: bool = False, short_sale: bool = False) -> str:
+    """The 買/賣 chip, plus DEF-013's 「當沖」「放空」 (owner ruling 2026-09-24) — the two
+    persisted flags that change what a row books, printed wherever the row is."""
     buy = side_value.upper() == "BUY"
     cls = "buy" if buy else "sell"
     label = "買" if buy else "賣"
-    return f'<span class="chip {cls}">{label}</span>'
+    out = f'<span class="chip {cls}">{label}</span>'
+    if daytrade:
+        out += ' <span class="chip">當沖</span>'
+    if short_sale:
+        out += ' <span class="chip">放空</span>'
+    return out
 
 
 def _totals_line(label: str, totals: dict[str, Decimal]) -> str:
@@ -138,7 +157,6 @@ def _section(title: str, count: int, head: str, rows: str, totals_lines: list[st
 
 def _transactions_section(
     txs: list[StoredTransaction],
-    accts: dict[str, str],
     names: dict[str, str],
     ccys: dict[str, str],
     frm: str | None,
@@ -155,12 +173,13 @@ def _transactions_section(
         gross = t.quantity * t.price
         net = -(gross + t.fees + t.tax) if t.side.value == "BUY" else (gross - t.fees - t.tax)
         _add(net_totals, ccy, net)
+        side = _side_chip(t.side.value, daytrade=t.daytrade, short_sale=t.short_sale)
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(t.trade_date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(t.account_id, t.account_id))}</td>'
+            f'<td class="l">{_acct_label(t.account_id)}</td>'
             f"{_sym_cell(t.symbol, names.get(t.symbol, ''))}"
-            f'<td class="l">{_side_chip(t.side.value)}</td>'
+            f'<td class="l">{side}</td>'
             f'<td class="num">{_fmt_shares(t.quantity)}</td>'
             f'<td class="num">{_fmt_amount(t.price, ccy)}</td>'
             f'<td class="num">{_fmt_amount(t.fees, ccy)}</td>'
@@ -182,7 +201,6 @@ def _transactions_section(
 
 def _dividends_section(
     divs: list[StoredDividend],
-    accts: dict[str, str],
     names: dict[str, str],
     ccys: dict[str, str],
     frm: str | None,
@@ -204,7 +222,7 @@ def _dividends_section(
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(d.date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(d.account_id, d.account_id))}</td>'
+            f'<td class="l">{_acct_label(d.account_id)}</td>'
             f"{_sym_cell(d.symbol, names.get(d.symbol, ''))}"
             f'<td class="l">{_esc(_DIV_TYPE_ZH.get(d.type.upper(), d.type))}</td>'
             f'<td class="num">{_fmt_amount(d.gross, ccy)}</td>'
@@ -227,7 +245,6 @@ def _dividends_section(
 
 def _fx_section(
     convs: list[StoredFxConversion],
-    accts: dict[str, str],
     frm: str | None,
     to: str | None,
 ) -> str:
@@ -255,7 +272,7 @@ def _fx_section(
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(c.date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(c.account_id, c.account_id))}</td>'
+            f'<td class="l">{_acct_label(c.account_id)}</td>'
             f'<td class="num">{_amount_ccy(c.from_amount, c.from_ccy.value)}</td>'
             f'<td class="num">{_amount_ccy(c.to_amount, c.to_ccy.value)}</td>'
             f'<td class="num">{rate}</td>'
@@ -275,7 +292,6 @@ def _fx_section(
 
 def _openings_section(
     openings: list[StoredOpening],
-    accts: dict[str, str],
     names: dict[str, str],
     ccys: dict[str, str],
     frm: str | None,
@@ -292,7 +308,7 @@ def _openings_section(
         _add(cost_totals, ccy, o.original_cost_total)
         rows.append(
             "<tr>"
-            f'<td class="l">{_esc(accts.get(o.account_id, o.account_id))}</td>'
+            f'<td class="l">{_acct_label(o.account_id)}</td>'
             f"{_sym_cell(o.symbol, names.get(o.symbol, ''))}"
             f'<td class="num">{_fmt_shares(o.shares)}</td>'
             f'<td class="num">{_fmt_amount(o.original_avg, ccy)}</td>'
@@ -313,7 +329,6 @@ def _openings_section(
 
 def _actions_section(
     actions: list[StoredCorporateAction],
-    accts: dict[str, str],
     names: dict[str, str],
     frm: str | None,
     to: str | None,
@@ -349,7 +364,7 @@ def _actions_section(
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(a.date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(a.account_id, a.account_id))}</td>'
+            f'<td class="l">{_acct_label(a.account_id)}</td>'
             f'<td class="l">{_esc(KIND_ZH.get(a.kind.upper(), a.kind))}</td>'
             f"{moves}"
             f'<td class="num">{_fmt_shares(a.ratio_from)} → {_fmt_shares(a.ratio_to)}</td>'
@@ -372,7 +387,6 @@ def _actions_section(
 
 def _cash_section(
     moves: list[StoredCashMovement],
-    accts: dict[str, str],
     frm: str | None,
     to: str | None,
 ) -> str:
@@ -403,7 +417,7 @@ def _cash_section(
         rows.append(
             "<tr>"
             f'<td class="num">{_esc(m.date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(m.account_id, m.account_id))}</td>'
+            f'<td class="l">{_acct_label(m.account_id)}</td>'
             f'<td class="l">{_esc(CASH_KIND_ZH.get(m.kind.upper(), m.kind))}</td>'
             f'<td class="num">{_amount_ccy(signed, ccy)}</td>'
             f'<td class="num">{_esc(acq)}</td>'
@@ -436,7 +450,6 @@ def build_ledgers_report_html(
     conn: sqlite3.Connection, *, now: datetime, frm: str | None, to: str | None
 ) -> ExportArtifact:
     """Build the print-optimized 帳本報告 for [frm, to] (read-only; no writes)."""
-    accts = {a.account_id: a.name for a in list_accounts(conn)}
     insts = list_instruments(conn)
     names = {i.symbol: i.name for i in insts}
     ccys = {i.symbol: i.quote_ccy.value for i in insts}
@@ -444,12 +457,12 @@ def build_ledgers_report_html(
     body = "\n".join(
         [
             _header_html(now, frm, to),
-            _transactions_section(list_transactions(conn), accts, names, ccys, frm, to),
-            _dividends_section(list_dividends(conn), accts, names, ccys, frm, to),
-            _fx_section(list_fx_conversions(conn), accts, frm, to),
-            _openings_section(list_opening(conn), accts, names, ccys, frm, to),
-            _actions_section(list_corporate_actions(conn), accts, names, frm, to),
-            _cash_section(list_cash_movements(conn), accts, frm, to),
+            _transactions_section(list_transactions(conn), names, ccys, frm, to),
+            _dividends_section(list_dividends(conn), names, ccys, frm, to),
+            _fx_section(list_fx_conversions(conn), frm, to),
+            _openings_section(list_opening(conn), names, ccys, frm, to),
+            _actions_section(list_corporate_actions(conn), names, frm, to),
+            _cash_section(list_cash_movements(conn), frm, to),
             _page_footer("帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。"),
         ]
     )

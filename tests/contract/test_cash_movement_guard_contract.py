@@ -42,6 +42,13 @@ covering-balance branch names the withdrawal's OWN day with the cause 「出金�
 quoting the pool at four decimals, and every figure is at the currency's minor unit with
 thousands and a U+2212 minus. Same status, same code, same field, same verdict.
 
+⚠ TWO pins were re-recorded on 2026-09-24 for DEF-009 (owner ruling: a 折讓款 row is fully
+editable — 日期／類型／金額／備註 — and every edit is audited). ``edit_rebate_kind`` and
+``edit_rebate_date`` used to answer 400 「折讓款的類型與日期已鎖定…」; the lock is gone (the
+inbox's dedup now reads the credit's explicit ``rebate_period`` link instead of its fields),
+so the ORDINARY deposit-side guard answers them exactly as it answers ``edit_rebate_amount``
+on this ledger — 422 ``negative_cash`` — and neither writes. Same sequence, same final ledger.
+
 The cases run as ONE ordered sequence against one ledger, because several of them only mean
 something in sequence: the withdraw messages quote a balance that earlier rows created, the
 self-exclusion edit needs a row to edit, and the REBATE lock needs a booked rebate. The final
@@ -227,20 +234,21 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "600000"},
      "status": 400, "err": {"code": "validation_error", "field": "kind",
                             "message": f"未知類型 nope{_KINDS}"}},
-    {"n": "edit_rebate_kind_locked", "m": _PUT, "target": "rebate_ok", "b": {
+    # DEF-009: no longer locked — the ordinary deposit-side guard answers (see the docstring).
+    {"n": "edit_rebate_kind", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-02", "kind": "deposit",
         "ccy": "TWD", "amount": "153"},
-     "status": 400, "err": {
-         "code": "validation_error", "field": "kind",
-         "message": "折讓款的類型與日期已鎖定以避免重複入帳"
-                    "（可修正金額或備註；如需撤銷請刪除此筆）"}},
-    {"n": "edit_rebate_date_locked", "m": _PUT, "target": "rebate_ok", "b": {
+     "status": 422, "err": {
+         "code": "negative_cash",
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-01-05 降至 −500,000 — "
+                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
+    {"n": "edit_rebate_date", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-03", "kind": "rebate",
         "ccy": "TWD", "amount": "153"},
-     "status": 400, "err": {
-         "code": "validation_error", "field": "kind",
-         "message": "折讓款的類型與日期已鎖定以避免重複入帳"
-                    "（可修正金額或備註；如需撤銷請刪除此筆）"}},
+     "status": 422, "err": {
+         "code": "negative_cash",
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-01-05 降至 −500,000 — "
+                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     # Amount stays correctable — but the deposit-side ack guard still applies, and here the
     # tw_broker pool was already negative at the 2026-01-05 buy, so it answers negative_cash.
     {"n": "edit_rebate_amount", "m": _PUT, "target": "rebate_ok", "b": {

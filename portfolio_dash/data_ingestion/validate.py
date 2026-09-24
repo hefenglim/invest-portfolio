@@ -39,6 +39,7 @@ from portfolio_dash.data_ingestion.holdings import (
 from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import (
+    StoredTransaction,
     get_instrument,
     get_opening,
     list_accounts,
@@ -506,6 +507,57 @@ def siblings_booked_before(batch: Sequence[TxnInput], inp: TxnInput) -> list[Txn
     ]
 
 
+def _replacement_flows(
+    conn: sqlite3.Connection, inp: TxnInput, replacing: StoredTransaction
+) -> tuple[dict[tuple[str, str], list[tuple[date, int, Decimal]]],
+           dict[tuple[str, str], list[tuple[date, int, Decimal]]]]:
+    """The share flows that turn the STORED ledger into "the ledger without *replacing* + the
+    edited row" for :func:`validate_transaction`'s two counts (DEF-042, 2026-09-24).
+
+    Returns ``(net, on_date)`` as :data:`PendingFlows`-shaped dicts, to be ADDED to the pending
+    flows of the net count (``current_shares``) and of the date-aware count (``shares_through``)
+    respectively:
+
+    * both carry the stored row's own flow NEGATED, at the stored row's own ``(date, TRADE)``
+      cut — so every cut that includes the stored row includes its cancellation too, and the
+      row is exactly absent from both counts (the corporate-action walk included: a pending
+      flow joins the walk at its cut like a stored one). Keyed on the STORED (account,
+      symbol), so a re-keying edit removes the shares from the position it leaves;
+    * ``on_date`` also cancels every stored trade of the edited row's (account, symbol) dated
+      ON the edited row's trade date with a HIGHER id. Trades of one day replay in id order
+      (DEF-012), and an edit keeps its id, so those rows book AFTER it and cannot cover it —
+      the manual door never needed this because a new row takes the highest id.
+    """
+    delta = replacing.quantity if replacing.side is Side.BUY else -replacing.quantity
+    cancel = (replacing.trade_date, int(EventPriority.TRADE), -delta)
+    key = (replacing.account_id, replacing.symbol)
+    net: dict[tuple[str, str], list[tuple[date, int, Decimal]]] = {key: [cancel]}
+    on_date: dict[tuple[str, str], list[tuple[date, int, Decimal]]] = {key: [cancel]}
+    for r in conn.execute(
+        "SELECT side, quantity FROM transactions "
+        "WHERE account_id=? AND symbol=? AND trade_date=? AND id>?",
+        (inp.account_id, inp.symbol, inp.trade_date.isoformat(), replacing.id),
+    ):
+        qty = from_db(r["quantity"])
+        later = qty if r["side"] == Side.BUY.value else -qty
+        on_date.setdefault((inp.account_id, inp.symbol), []).append(
+            (inp.trade_date, int(EventPriority.TRADE), -later))
+    return net, on_date
+
+
+def _merge_flows(
+    base: PendingFlows, extra: Mapping[tuple[str, str], Sequence[tuple[date, int, Decimal]]]
+) -> PendingFlows:
+    """*base* with *extra*'s flows appended per key (neither input is mutated)."""
+    if not extra:
+        return base
+    out: dict[tuple[str, str], list[tuple[date, int, Decimal]]] = {
+        k: list(v) for k, v in base.items()}
+    for k, v in extra.items():
+        out.setdefault(k, []).extend(v)
+    return out
+
+
 def _ledger_start(conn: sqlite3.Connection, account_id: str) -> date | None:
     """The earliest date on any of the five ledgers for *account_id*, or ``None`` when the
     account has no record at all (DEF-014). ISO dates sort as text, so ``MIN`` is the
@@ -572,6 +624,7 @@ def validate_transaction(
     today: date | None = None,
     index: ActionIndex | None = None,
     batch: Sequence[TxnInput] = (),
+    replacing: StoredTransaction | None = None,
 ) -> list[Issue]:
     """Run validation checks on *inp* against the current ledger state.
 
@@ -592,7 +645,66 @@ def validate_transaction(
     through the share walker, so a sibling buy dated before a split reaches a later sell
     already multiplied. Left empty (the default, and every single-row door) the guard
     behaves exactly as it did: this widens what the check can SEE, never what it permits.
+
+    *replacing* is the STORED row *inp* is about to replace — the ledger 更正 door (DEF-042,
+    owner ruling 2026-09-24: an edit runs THIS function, with the same findings as a new
+    entry). The 賣超 counts and the duplicate check are then computed against "the ledger
+    without that row + *inp*": the row no longer covers or strands itself (see
+    :func:`_replacement_flows`, which also keeps the same-day id order an edit preserves), and
+    it is not its own duplicate. ``trade_before_ledger_start`` deliberately still counts the
+    stored row's OWN date as a record of the account: moving a row earlier than everything
+    the account has recorded (its own old date included) is the question that advisory asks,
+    and editing the account's first row in place must not raise it. ``None`` (every entry
+    door) is byte-identical to before.
     """
+    if replacing is None:
+        return _row_findings(conn, inp, today=today, index=index, batch=batch, replacing=None)
+    # THE EDIT DOOR (DEF-042). Every finding of the replacement is computed, and then the ones
+    # this edit does not INTRODUCE are scoped out — the H3 / H8 rule the correction door's
+    # replay guard has applied since the audit ("a pre-existing, unrelated oversell/orphan
+    # never poisons the correction"), applied to this function's findings:
+    #
+    # * a HARD finding identical — same kind, same sentence — to one the stored row already
+    #   carries is the legacy row's own condition, not the edit's. A US stock booked in a TWD
+    #   account before H1 existed, or a 1.5-股 TW row from before L12, stays correctable (its
+    #   note, its fee) — the LOW-3 rule ``ledgers._mutation_guard`` states for coherence —
+    #   while an edit that changes the quantity changes the sentence and is refused like a
+    #   new entry would be;
+    # * ``sell_exceeds_holdings`` is scoped the same way: an acked 賣超 row edited in place is
+    #   not a new 賣超, and the sentence carries the quantities, so a WORSE one is new;
+    # * every other soft finding and every advisory is kept: they are facts about the row
+    #   the owner is about to save, which is exactly what the ruling asks the edit to show.
+    post = _row_findings(conn, inp, today=today, index=index, batch=batch,
+                         replacing=replacing)
+    stored = TxnInput(
+        account_id=replacing.account_id, symbol=replacing.symbol, side=replacing.side,
+        quantity=replacing.quantity, price=replacing.price, trade_date=replacing.trade_date,
+        fee=replacing.fees, tax=replacing.tax, daytrade=replacing.daytrade,
+        short_sale=replacing.short_sale, note=replacing.note,
+    )
+    carried = {
+        (i.kind, i.message)
+        for i in _row_findings(conn, stored, today=today, index=index, batch=(),
+                               replacing=replacing)
+        if not i.needs_confirm or i.kind == "sell_exceeds_holdings"
+    }
+    return [
+        i for i in post
+        if not ((not i.needs_confirm or i.kind == "sell_exceeds_holdings")
+                and (i.kind, i.message) in carried)
+    ]
+
+
+def _row_findings(
+    conn: sqlite3.Connection,
+    inp: TxnInput,
+    *,
+    today: date | None,
+    index: ActionIndex | None,
+    batch: Sequence[TxnInput],
+    replacing: StoredTransaction | None,
+) -> list[Issue]:
+    """:func:`validate_transaction`'s checks, unscoped — see that function for every rule."""
     issues: list[Issue] = []
 
     # --- account exists (+ its market, for the coherence guard) ---
@@ -664,6 +776,9 @@ def validate_transaction(
             return inst_memo[symbol]
 
         pending = pending_share_flows(batch, exclude=inp, instrument_of=instrument_of)
+        replaced_net, replaced_on_date = (
+            _replacement_flows(conn, inp, replacing) if replacing is not None else ({}, {}))
+        pending = _merge_flows(pending, replaced_net)
         held = current_shares(
             conn, inp.account_id, inp.symbol, index=walk_index, pending=pending)
         # DATE-AWARE (2026-07-31): the position that must cover the sell is the one that
@@ -678,8 +793,15 @@ def validate_transaction(
         # stored ledger's rows all precede a pending one (lower ids), so the manual door —
         # whose batch is empty — is unchanged: every stored same-day buy still counts.
         before_me = siblings_booked_before(batch, inp)
-        pending_then = pending_share_flows(
-            before_me, exclude=inp, instrument_of=instrument_of)
+        pending_then = _merge_flows(pending_share_flows(
+            before_me, exclude=inp, instrument_of=instrument_of), replaced_on_date)
+        # Rows of the SAME day entered after the edited one (same key), which the edit door's
+        # message names; the stored row's own cancellation is not one of them.
+        later_stored = replacing is not None and conn.execute(
+            "SELECT 1 FROM transactions WHERE account_id=? AND symbol=? AND trade_date=? "
+            "AND id>? LIMIT 1",
+            (inp.account_id, inp.symbol, inp.trade_date.isoformat(), replacing.id),
+        ).fetchone() is not None
         held_then = shares_through(
             conn, inp.account_id, inp.symbol,
             on=inp.trade_date, index=walk_index, pending=pending_then,
@@ -699,7 +821,13 @@ def validate_transaction(
                 and (row.account_id, row.symbol) == (inp.account_id, inp.symbol)
                 for row in batch
             )
-            if inp.quantity > held_then and inp.quantity <= held and later_same_day:
+            if inp.quantity > held_then and inp.quantity <= held and later_stored:
+                # The edit door's version of the sentence below: the cover is a row entered
+                # LATER on the same day, and an edited row keeps its place in that order.
+                msg = (f"賣出 {inp.quantity} 股，超過賣出當下持有的 {held_then} 股"
+                       f"（同日較晚登錄的列會在這筆之後才入帳，不能先拿來抵；"
+                       f"目前淨額 {held} 股）")
+            elif inp.quantity > held_then and inp.quantity <= held and later_same_day:
                 # The cover exists — it is simply LISTED BELOW this sell on the same day,
                 # so the ledger will book it afterwards. Say so, or the owner reads
                 # 「那一天只有 N 股」 while looking at the buy right under it.
@@ -765,7 +893,8 @@ def validate_transaction(
             ))
 
     # --- duplicate trade (M7, soft): an identical row already exists ---
-    if _duplicate_exists(conn, inp):
+    if _duplicate_exists(conn, inp,
+                         exclude_id=replacing.id if replacing is not None else None):
         issues.append(
             Issue(
                 kind="duplicate_trade",
@@ -1969,16 +2098,22 @@ def validate_cash_movement(
         inp, account, pool=pool, batch=batch, exclude_id=exclude_id)
 
 
-def _duplicate_exists(conn: sqlite3.Connection, inp: TxnInput) -> bool:
+def _duplicate_exists(
+    conn: sqlite3.Connection, inp: TxnInput, *, exclude_id: int | None = None
+) -> bool:
     """True iff a stored transaction matches account+symbol+side+qty+price+date exactly.
 
     Quantity/price are compared as Decimals (not raw strings) so trailing-zero
     variations still match. Best-effort soft guard — never blocks, only warns.
+
+    *exclude_id* is the row an edit replaces (DEF-042): a correction must not be reported as
+    a duplicate of the very row it corrects.
     """
     rows = conn.execute(
         "SELECT quantity, price FROM transactions "
-        "WHERE account_id=? AND symbol=? AND side=? AND trade_date=?",
-        (inp.account_id, inp.symbol, inp.side.value, inp.trade_date.isoformat()),
+        "WHERE account_id=? AND symbol=? AND side=? AND trade_date=? AND id IS NOT ?",
+        (inp.account_id, inp.symbol, inp.side.value, inp.trade_date.isoformat(),
+         exclude_id),
     ).fetchall()
     for r in rows:
         if from_db(r["quantity"]) == inp.quantity and from_db(r["price"]) == inp.price:

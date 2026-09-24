@@ -108,6 +108,9 @@ _LABELS: list[tuple[str, str, str]] = [
     ("POST", "/api/strategy-prompts", "策略模板新增"),
     ("PUT", "/api/strategy-prompts", "策略模板變更"),
     ("DELETE", "/api/strategy-prompts", "策略模板刪除"),
+    # DEF-033: the version history's one write (a restore is a NEW version). Its own prefix,
+    # so the ``/api/strategy-prompts`` rows above can never claim it as 「策略模板新增」.
+    ("POST", "/api/strategy-prompt-versions", "策略模板回復版本"),
     # 公司行動 write door (its /preview sibling is excluded above, so the order is safe).
     ("POST", "/api/ledgers/corporate-actions", "公司行動新增"),
     ("DELETE", "/api/instruments", "刪除標的"),

@@ -8,7 +8,8 @@ a cache hit (zero LLM, spec 04.10). ``due_at`` is the prediction maturity date (
 calendar-day horizon from the card's prediction, overriding the task default); a
 pure-narrative card has no prediction → ``due_at`` is NULL.
 
-Pure persistence over its own table: stdlib + pydantic + ``llm_insight.cards`` only (NOT
+Pure persistence over its own table: stdlib + pydantic + ``llm_insight.cards`` /
+``llm_insight.composer_store`` (the strategy-version ref a card records, DEF-033) only (NOT
 pricing / data_ingestion / api / scheduler — ``architecture.md``). No money in float —
 ``cost_usd`` and ``target_pct`` persist as canonical Decimal strings via the wire encoder.
 """
@@ -24,6 +25,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+from portfolio_dash.llm_insight.composer_store import StrategyVersionRef
 from portfolio_dash.shared.wire import to_wire
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,16 @@ class InsightRecord(BaseModel):
     # text), the task's schedule, or a manual run. None on every card written before the
     # column existed: a legacy card claims no trigger rather than a guessed one.
     trigger: InsightTrigger | None = None
+    # DEF-033 (owner ruling 2026-09-24): the strategy-prompt version of every strategy layer
+    # the card's prompt was built from (``[]`` = no prompt was used — the zero-LLM anomaly
+    # card). None on every card written before the column existed: the page reads
+    # 「生成時版本未記錄」, never a version guessed from today's history.
+    strategy_versions: list[StrategyVersionRef] | None = None
+    # DEF-003 (owner ruling 2026-09-24): the confidence AS STORED, before the read-time rule
+    # that a card without a prediction carries none (``card.confidence``). Only the figure
+    # check reads it — the number is still one the model itself printed, so a body quoting it
+    # is not an unverified figure. Every display / scoring consumer reads ``card.confidence``.
+    stated_confidence: int | None = None
     # M7-08 (owner ruling, option C, 2026-09-06): True when the stored ``prediction`` blob
     # could not be read back through the card schema (a required field the schema grew
     # later, a narrowed Literal, a corrupt blob, a NULLed confidence). The card is then
@@ -173,6 +185,9 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     # DEF-037 (2026-09-23): additive migration — the card's trigger (InsightTrigger JSON).
     # NULLABLE: every existing row reads "trigger not recorded", never a guessed source.
     _add_column_if_missing(conn, "insights", "trigger_json", "TEXT")
+    # DEF-033 (2026-09-24): additive migration — the strategy versions the card was built
+    # from (JSON list of StrategyVersionRef). NULLABLE: an existing row reads "not recorded".
+    _add_column_if_missing(conn, "insights", "strategy_versions", "TEXT")
     conn.commit()
 
 
@@ -261,6 +276,7 @@ def add_card(
     tokens_out: int = 0,
     prompt_figures: str = "",
     trigger: InsightTrigger | None = None,
+    strategy_versions: list[StrategyVersionRef] | None = None,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
 
@@ -280,6 +296,8 @@ def add_card(
     model stated it even when it exceeds the ceiling (AI-D33/AI-D38: a validator that
     rewrote the model's own stated confidence would be the defect, not the fix).
     ``trigger`` (DEF-037) is what produced the card; ``None`` stores NULL (tests, legacy).
+    ``strategy_versions`` (DEF-033) is the version of every strategy layer the prompt was
+    assembled from (``assemble.Assembly.strategy_versions``); ``None`` stores NULL.
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -289,8 +307,8 @@ def add_card(
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
         "price_at_create, ceiling_at_create, tokens_in, tokens_out, prompt_figures, "
-        "trigger_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "trigger_json, strategy_versions) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -315,12 +333,32 @@ def add_card(
             tokens_out,
             prompt_figures,
             None if trigger is None else trigger.model_dump_json(exclude_none=True),
+            _versions_json(strategy_versions),
         ),
     )
     conn.commit()
     rec = _get(conn, int(cur.lastrowid or 0))
     assert rec is not None  # just inserted
     return rec
+
+
+def _versions_json(refs: list[StrategyVersionRef] | None) -> str | None:
+    if refs is None:
+        return None
+    return json.dumps([r.model_dump() for r in refs], ensure_ascii=False)
+
+
+def _versions_from_row(row: sqlite3.Row) -> list[StrategyVersionRef] | None:
+    """The recorded strategy versions, or None (legacy / unreadable — never raises)."""
+    raw = row["strategy_versions"] if "strategy_versions" in row.keys() else None
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return [StrategyVersionRef.model_validate(x) for x in parsed]
+    except (ValueError, TypeError, ValidationError):
+        logger.warning("insight %s: stored strategy_versions is unreadable", row["id"])
+        return None
 
 
 def _card_from_row(row: sqlite3.Row) -> tuple[InsightCard, bool]:
@@ -334,6 +372,16 @@ def _card_from_row(row: sqlite3.Row) -> tuple[InsightCard, bool]:
     is dropped (never guessed at), and the row id is logged so the operator can find it.
     Only the prediction blob is tolerated; the narrative columns are NOT NULL TEXT and
     need no such guard.
+
+    DEF-003 (owner ruling 2026-09-24): ``prediction`` decides. A card stored WITHOUT a
+    prediction carries no confidence, whatever the column holds — it is a description, and a
+    confidence with nothing to be right or wrong about is not a confidence (measured on the
+    demo: 25 of 40 prediction-less cards stored one, and the page printed 「信心 0%」 for them).
+    The rule is applied HERE, on read, because cards are append-only: the stored value is
+    left as the model emitted it (``InsightRecord.stated_confidence``) and every consumer —
+    the page, the API, the scoring pass — reads the ruled value. A card whose prediction was
+    stored but cannot be read (``unreadable``) keeps its confidence: it HAD a prediction,
+    and M7-08 already renders it as 待釐清 rather than as a description.
     """
     narrative: dict[str, Any] = {
         "title": row["title"],
@@ -341,7 +389,7 @@ def _card_from_row(row: sqlite3.Row) -> tuple[InsightCard, bool]:
         "body_md": row["body_md"],
         "tags": json.loads(row["tags"]),
         "symbol": row["symbol"],
-        "confidence": row["confidence"],
+        "confidence": row["confidence"] if row["prediction"] is not None else None,
     }
     try:
         prediction = (
@@ -411,6 +459,8 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
             (row["prompt_figures"] or "") if "prompt_figures" in row.keys() else ""
         ),
         trigger=_trigger_from_row(row),
+        strategy_versions=_versions_from_row(row),
+        stated_confidence=row["confidence"],
     )
 
 

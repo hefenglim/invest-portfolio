@@ -121,8 +121,13 @@ def test_the_dashboard_renders_a_visible_block_with_an_entry_per_row() -> None:
     assert "unappliedActionHref(u)" in body
     href = _fn(src, "unappliedActionHref")
     assert "trades.html?ledger=action" in href and "action_id" in href
-    # Wired into the render pass (not defined and forgotten).
-    assert "renderUnappliedBanner();" in _fn(src, "renderUnregisteredBanner")
+    # Wired into the render pass (not defined and forgotten). ⚠ R2 bounce: this used to assert
+    # the call sat inside renderUnregisteredBanner — which it did, AFTER that function's early
+    # return, so the block never rendered without an unregistered symbol. Whether it RENDERS
+    # is now proven by running the code: tests/contract/test_def023_unapplied_banner_renders.py.
+    # Here only the negative is pinned: it is not nested under the other banner again.
+    assert "renderUnappliedBanner();" not in _fn(src, "renderUnregisteredBanner")
+    assert "renderUnappliedBanner();" in _fn(src, "renderHeader")
     assert "renderUnregisteredBanner();" in _fn(src, "renderHeader")
     # And it renders NOTHING on a clean ledger.
     assert "if (!rows.length || !page) return;" in body

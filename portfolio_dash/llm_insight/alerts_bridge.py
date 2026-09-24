@@ -16,8 +16,9 @@ independently, spec 4.9 R7).
 Pure ``llm_insight`` persistence: stdlib + ``shared``/``composer_store`` only.
 """
 
+import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,16 @@ from portfolio_dash.llm_insight.insights_store import InsightTrigger
 # duck-typed so the scheduler/api seam can register ``insight_service.run_for_id`` without
 # this layer importing api.
 AlertRunner = Callable[..., object]
+
+# DEF-041 (owner ruling 2026-09-24): the symbols currently HELD — a position with shares != 0
+# in any account, read from the COMPUTED book (``api/insight_service.py::
+# held_symbols_for_alerts`` replays it; this layer may not). Zero-arg: the binder closes over
+# the connection and the clock, and the dispatcher calls it at most ONCE per pass, and only
+# when a symbol alert with a subscriber is actually waiting. ``None`` = cannot tell (the
+# reader is not wired, or it failed) — never read as "nothing is held".
+HeldSymbols = Callable[[], Set[str] | None]
+
+logger = logging.getLogger(__name__)
 
 _DEBOUNCE_HOURS = 24
 
@@ -332,23 +343,32 @@ def _trigger_of(event: AlertEvent, scope: str) -> InsightTrigger:
 
 
 class DispatchResult(BaseModel):
-    """What one dispatch pass did: cards run, and events kept OFF the cards (DEF-037)."""
+    """What one dispatch pass did: cards run, and events kept OFF the cards (DEF-037/041)."""
 
     dispatched: int = 0
     # events a subscriber WOULD have received but whose scope is not a card scope; an event
     # with no subscriber at all is not listed (nothing was withheld from anyone).
     skipped: list[AlertEvent] = Field(default_factory=list)
+    # DEF-041: symbol alerts a subscriber would have received for a symbol NOT held (a
+    # watchlist-only symbol). Consumed, listed in the run detail, never a card.
+    not_held: list[AlertEvent] = Field(default_factory=list)
+    # DEF-041: symbol alerts left UNCONSUMED because what is held could not be read — the
+    # next scan decides them. Holding them back is the only answer that neither bills a card
+    # for a watchlist symbol nor drops a held symbol's card for good.
+    held_unknown: list[AlertEvent] = Field(default_factory=list)
 
 
 def dispatch_alert_events(
-    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime
+    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime,
+    held_symbols: HeldSymbols,
 ) -> int:
     """:func:`dispatch_alert_events_ex`, returning only the dispatched count (legacy shape)."""
-    return dispatch_alert_events_ex(conn, runner, now=now).dispatched
+    return dispatch_alert_events_ex(conn, runner, now=now, held_symbols=held_symbols).dispatched
 
 
 def dispatch_alert_events_ex(
-    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime
+    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime,
+    held_symbols: HeldSymbols,
 ) -> DispatchResult:
     """Process unconsumed alert events → run subscribing on_alert combos (R7).
 
@@ -361,8 +381,17 @@ def dispatch_alert_events_ex(
     DEF-037: only a ``symbol`` / ``portfolio`` event reaches a card (:func:`card_target`),
     and the runner is handed the event itself as ``trigger`` — its rule, id, scope and the
     rule engine's title/detail — so the card is FED the alert it describes and records it.
+
+    DEF-041 (owner ruling 2026-09-24): a ``symbol`` event reaches a card only when that symbol
+    is HELD (*held_symbols* — the computed book, injected, required: a forgotten binding is a
+    ``TypeError``, never a silent return to carding the watchlist). A watchlist-only symbol's
+    alert stays in the alert list and the bell; it is consumed here and reported in
+    ``not_held``, and no card is produced. When the held set cannot be read, symbol events
+    are left unconsumed (``held_unknown``) for the next scan. Portfolio events are unaffected.
     """
     result = DispatchResult()
+    held: Set[str] | None = None
+    held_read = False
     for event in unconsumed_events(conn):
         subscribers = on_alert_subscribers(conn, event.rule_id)
         scope, fired_symbol = card_target(event)
@@ -371,6 +400,21 @@ def dispatch_alert_events_ex(
                 result.skipped.append(event)
             mark_consumed(conn, event.id)
             continue
+        if scope == "symbol" and subscribers:
+            if not held_read:  # at most ONE book read per pass, and only when needed
+                held_read = True
+                try:
+                    held = held_symbols()
+                except Exception:  # noqa: BLE001 — an unreadable book defers, never crashes
+                    logger.exception("held-symbols reader failed; symbol alerts deferred")
+                    held = None
+            if held is None:
+                result.held_unknown.append(event)
+                continue  # NOT consumed: the next scan decides it
+            if fired_symbol not in held:
+                result.not_held.append(event)
+                mark_consumed(conn, event.id)
+                continue
         trigger = _trigger_of(event, scope)
         for it in subscribers:
             key = debounce_key(it.id, event.rule_id, event.symbol)

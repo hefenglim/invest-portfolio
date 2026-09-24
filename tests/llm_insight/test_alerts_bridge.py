@@ -248,13 +248,15 @@ def test_dispatch_runs_each_subscriber_once_and_debounces(conn: sqlite3.Connecti
                fired_rule: str, fired_symbol: str, trigger: object) -> None:
         calls.append((insight_type_id, fired_rule, fired_symbol))
 
-    ab.dispatch_alert_events(conn, runner, now=NOW)
+    # DEF-041: a symbol alert reaches a card only for a HELD symbol — 2330 is held here.
+    ab.dispatch_alert_events(conn, runner, now=NOW, held_symbols=lambda: {"2330"})
     assert calls == [(sub.id, "single_weight", "2330")]
     # a second dispatch (same event consumed; debounce holds) does not re-run
     calls.clear()
     ab.record_event(conn, rule_id="single_weight", symbol="2330",
                     now=NOW + timedelta(hours=1), scope="symbol")
-    ab.dispatch_alert_events(conn, runner, now=NOW + timedelta(hours=1))
+    ab.dispatch_alert_events(conn, runner, now=NOW + timedelta(hours=1),
+                             held_symbols=lambda: {"2330"})
     assert calls == []  # debounced within 24h
 
 
@@ -265,7 +267,7 @@ def test_dispatch_no_subscribers_is_noop(conn: sqlite3.Connection) -> None:
     def runner(c: sqlite3.Connection, insight_type_id: int, **kw: object) -> None:
         calls.append(insight_type_id)
 
-    ab.dispatch_alert_events(conn, runner, now=NOW)
+    ab.dispatch_alert_events(conn, runner, now=NOW, held_symbols=lambda: set())
     assert calls == []
     # the event is still marked consumed (no subscriber wants it)
     assert ab.unconsumed_events(conn) == []

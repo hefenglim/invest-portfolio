@@ -164,8 +164,9 @@ def compute_whatif(
     )
     from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
-    # 1. Ledgers — the same bundle build_dashboard step 1 loads.
-    bundle = load_ledger_bundle(conn)
+    # 1. Ledgers — the same bundle build_dashboard step 1 loads, cut the same way: a dividend
+    # counts from its pay date (DEF-016), so the 試算's 「原」 position is the drawer's own row.
+    bundle = load_ledger_bundle(conn).received_by(now.date())
     instruments = bundle.instruments
     try:
         book = build_book(bundle)

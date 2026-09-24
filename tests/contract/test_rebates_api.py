@@ -203,32 +203,29 @@ def test_confirmed_month_not_double_booked_after_note_edit(
     assert _balance(api_client, _TW, "TWD") == booked_balance
 
 
-def test_rebate_movement_kind_and_date_are_locked(
+def test_rebate_movement_kind_and_date_are_editable_and_the_month_stays_booked(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """F2d residual guard: a booked 折讓款 movement may have its amount (and note) corrected, but
-    its kind and date are LOCKED — changing the date re-anchors the structural suppression month
-    and changing the kind drops it from the confirmed set, either of which would let the month be
-    confirmed (and credited) a second time. The backend PUT rejects both with 400."""
+    """DEF-009 (owner ruling 2026-09-24) REPLACES the F2d lock this test used to pin: a booked
+    折讓款 movement's date and kind are now correctable like any row's. The double-credit risk
+    the lock existed for is closed by the credit's explicit ``rebate_period`` link instead —
+    the month stays booked after either edit, so it can never be confirmed a second time."""
     _seed_may_trade(golden_db)  # 2026-05 pending, estimate 109
     r = api_client.post("/api/rebates/confirm",
                         json={"account_id": _TW, "month": "2026-05", "amount": "109"})
     assert r.status_code == 200
     move_id = r.json()["id"]
     base = {"account_id": _TW, "ccy": "TWD", "amount": "109", "ack_negative": True}
-    # date change (would re-anchor 2026-05's suppression to another month) -> 400
     d = api_client.put(f"/api/cash/movements/{move_id}",
                        json={**base, "date": "2026-07-01", "kind": "rebate", "note": None})
-    assert d.status_code == 400 and d.json()["error"]["field"] == "kind"
-    # kind change (would drop it from the confirmed set) -> 400
+    assert d.status_code == 200, d.json()
     k = api_client.put(f"/api/cash/movements/{move_id}",
-                       json={**base, "date": "2026-06-01", "kind": "deposit", "note": None})
-    assert k.status_code == 400
-    # amount-only correction (same kind + date) -> allowed
-    ok = api_client.put(f"/api/cash/movements/{move_id}",
-                        json={**base, "date": "2026-06-01", "kind": "rebate",
-                              "amount": "100", "note": None})
-    assert ok.status_code == 200
+                       json={**base, "date": "2026-07-01", "kind": "deposit", "note": None})
+    assert k.status_code == 200, k.json()
+    assert all(x["month"] != "2026-05" for x in _rows(api_client) if x["account_id"] == _TW)
+    again = api_client.post("/api/rebates/confirm",
+                            json={"account_id": _TW, "month": "2026-05", "amount": "109"})
+    assert again.status_code == 400 and again.json()["error"]["field"] == "month"
 
 
 def test_confirm_400s(api_client: TestClient, golden_db: sqlite3.Connection) -> None:

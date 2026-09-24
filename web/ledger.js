@@ -375,6 +375,9 @@
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
     ok.addEventListener('click', () => onSave({ ok: ok, dismiss: dismiss }));
     document.body.appendChild(backdrop);
+    /* The same handle onSave receives, returned so a dialog can gate 儲存 BEFORE any save
+       (editTx: the entry door's per-warning acknowledgement, DEF-042). */
+    return { ok: ok, dismiss: dismiss };
   }
   const inp = (value, type, step) => {
     const n = el('input', 'input');
@@ -398,64 +401,92 @@
     return sel(ids.map((id) => [id, acctZh(id)]), current);
   };
 
-  /* ===== the edit modal's issue panel (M3-02 / M3-03, 2026-09-03) =====
-     `editTx` reuses `POST /api/input/manual/preview` for the computed fee/tax. It read ONLY
-     `resp.fee` / `resp.tax` and dropped `resp.issues` on the floor, so an edit that moved a
-     trade to 2099-12-31 wrote 200 in silence while the modal's OWN response carried
-     「交易日期 2099-12-31 晚於今日,確認無誤?」.
+  /* ===== the edit modal's issue panel (M3-02 / M3-03 2026-09-03; DEF-042 2026-09-24) =====
+     `editTx` previews through `POST /api/input/manual/preview` WITH `replaces_txn_id`: the
+     server then runs the SAME `validate_transaction` the entry door runs, over "the ledger
+     without this row + the edited row" (DEF-042, owner ruling 2026-09-24). Until then the
+     preview asked the ENTRY question (「如果再新增這一筆」), so the row was its own duplicate,
+     its own cover and its own 賣超, and this panel had to drop or re-word those findings — and
+     a date moved before the position's opening build date saved with nothing acknowledged.
 
-     Rendering that payload verbatim is NOT the fix, because the preview answers a different
-     question: 「如果 ADD 這一筆會怎樣」. This modal REPLACES row #id, so an issue transfers
-     only when it is still true of a replacement:
-
-       * pure field predicates (未來日期／tick／lot／etf_flag_unknown…) transfer unchanged;
+     What the panel does now, the entry door's flow (input.js renderManual) applied here:
+       * every soft warning gets its OWN tick and 儲存 waits for all of them (M4-02) — keyed by
+         code + sentence, so a re-worded warning is a warning not yet read;
+       * `sell_exceeds_holdings` is shown WITHOUT a tick: the save answers 422 `oversell` and
+         the 賣超確認 dialog is this door's one destructive acknowledgement (it also covers the
+         OTHER rows an edit can strand, which no preview of this row can see);
+       * advisories (info) never gate; hard findings (error) do not disable 儲存 — the server
+         refuses them with the same sentence and the modal stays open (M3-04 (d));
        * `symbol_auto_register` / `symbol_needs_market` are true as a FACT and false as a
-         PROMISE — the entry door auto-registers an unknown symbol, this door answers 400
-         「未註冊標的 X — 請先至「標的管理」註冊」. The preview promised 「寫入時將自動查詢並
-         註冊」 and 儲存 then said the opposite, so the text is replaced with the one THIS door
-         will honour (M3-03). The refusal itself is correct — a correction door must not
-         auto-create instruments — it is the promise that was wrong;
-       * `duplicate_trade` matches on 帳戶+代號+買賣+日期+股數+價格 and the ledger still holds
-         THIS row, so the match may be the row being edited. The modal cannot tell which, so
-         it states the fork instead of asserting a duplicate (domain-ledger.md: a surface that
-         cannot know which branch applies must SAY so, not pick one);
-       * `sell_exceeds_holdings` / `cash_overdraft` are computed over a ledger that ALREADY
-         contains this row, so the preview's figure double-counts it. Dropped: the save-time
-         replay guard (422 `oversell` + its ack dialog) is this door's authority for the
-         first and the second has no edit-door equivalent — a second, wrong answer beside the
-         authoritative one is the 「one app must not show three answers」 trap.
-
-     Anything NOT listed renders verbatim: a new server issue must surface by default, since
-     silently swallowing the payload is the defect this replaced. */
-  const EDIT_ISSUE_DROP = ['sell_exceeds_holdings', 'cash_overdraft'];
+         PROMISE on this door, which answers 400 instead of auto-registering (M3-03).
+     Anything else renders verbatim: a new server issue must surface by default. */
   function editIssueWire(i, symbol) {
-    if (!i || EDIT_ISSUE_DROP.indexOf(i.code) >= 0) return null;
+    if (!i) return null;
     if (i.code === 'symbol_auto_register' || i.code === 'symbol_needs_market') {
       return { sev: 'error', code: i.code,
         text: '未註冊標的 ' + symbol + ' — 帳本更正不會自動註冊；請先至「標的管理」註冊，'
           + '再回來儲存這筆修改' };
     }
-    if (i.code === 'duplicate_trade') {
-      return { sev: 'warn', code: i.code,
-        text: '另有一筆同帳戶、代號、買賣、日期、股數、價格的紀錄 — 若那就是本筆'
-          + '（只改了費用／稅／備註）可忽略；若不是，儲存後帳本會有兩筆相同紀錄' };
-    }
     return i;
   }
   const ISSUE_GLYPH = { error: '✕', warn: '⚠', info: 'ℹ' };
+  const editAckKey = (i) => i.code + '\n' + i.text;
+  const needsTick = (i) => i.sev === 'warn' && i.code !== 'sell_exceeds_holdings';
   /* Paint the translated list into `box`; hides its whole .field row when empty so a clean
-     edit shows no stray gap. */
-  function renderEditIssues(box, list) {
+     edit shows no stray gap. `acks` (ack key → true) holds the ticks and `onTick` repaints.
+     Returns true when every warning that needs a tick has one. */
+  function renderEditIssues(box, list, acks, onTick) {
+    const store = acks || {};
+    const live = list.filter(needsTick).map(editAckKey);
+    Object.keys(store).forEach((k) => { if (live.indexOf(k) < 0) delete store[k]; });
+    let allAcked = true;
     box.replaceChildren();
-    list.forEach((i) => {
+    list.forEach((i, idx) => {
       const sev = i.sev === 'error' || i.sev === 'warn' ? i.sev : 'info';
       const div = el('div', 'issue issue-' + sev);
       div.appendChild(el('span', null, ISSUE_GLYPH[sev]));
-      div.appendChild(el('span', null, i.text));
+      if (sev !== 'warn') {
+        div.appendChild(el('span', null, i.text));
+        box.appendChild(div);
+        return;
+      }
+      const col = el('div');
+      col.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0;';
+      col.appendChild(el('span', null, i.text));
+      if (!needsTick(i)) {
+        const sub = el('span', null, '儲存時會再請你確認賣超：確認後這個部位的成本基礎會被永久捨棄');
+        sub.style.cssText = 'font-size:10px;color:var(--text-3);line-height:1.5;';
+        col.appendChild(sub);
+      } else {
+        const key = editAckKey(i);
+        const lab = el('label', 'edit-ack');
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.id = 'edit-ack-' + idx;
+        cb.checked = store[key] === true;
+        cb.addEventListener('change', () => {
+          if (cb.checked) store[key] = true; else delete store[key];
+          if (onTick) onTick();
+        });
+        lab.appendChild(cb);
+        lab.appendChild(el('span', null, '我了解，仍要儲存。'));
+        col.appendChild(lab);
+        if (store[key] !== true) allAcked = false;
+      }
+      div.appendChild(col);
       box.appendChild(div);
     });
     if (box.parentElement) box.parentElement.style.display = list.length ? '' : 'none';
+    return allAcked;
   }
+
+  /* DEF-013 (owner ruling 2026-09-24): 當沖 + 放空 together is a TW same-day short-then-cover
+     and is allowed. The SAME sentence as the entry form's (input.js DAYTRADE_SHORT_NOTE): the
+     tax rate that applies (當沖 outranks ETF — markets-and-fees.md, QA-19) and what the short
+     declaration books. Display-only text; no figure is computed here. */
+  const DAYTRADE_SHORT_NOTE = '當沖＋放空（先賣後買）：這筆賣出的證交稅以當沖 0.15% 計算'
+    + '（當沖優先於 ETF 的 0.1%）；同時宣告為放空，賣出股數可以超過持股，帳本以收到的價金作為'
+    + '空單成本，買回回補時才結算已實現損益 — 請記得登錄同日買回的那一筆。';
 
   function editTx(t) {
     const fDate = inp(t.date, 'date');
@@ -467,8 +498,37 @@
     const fFee = inp(t.fee, 'number', 'any');
     const fTax = inp(t.tax, 'number', 'any');
     const fNote = inp(t.note || '');
+    /* DEF-013: the two sell-side flags, correctable here like every other field. Both are
+       persisted columns; the PUT preserves them when absent, so they are always sent. */
+    const flag = (id, label, on) => {
+      const lab = el('label', 'hint daytrade-line');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.id = id;
+      cb.checked = !!on;
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(' ' + label));
+      return { line: lab, box: cb };
+    };
+    const fDaytrade = flag('edit-daytrade', '當沖（賣出稅 0.15%）', t.daytrade);
+    const fShort = flag('edit-short', '放空（賣出股數可超過持股）', t.short_sale);
+    const flags = el('div');
+    flags.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+    flags.appendChild(fDaytrade.line);
+    flags.appendChild(fShort.line);
+    const comboNote = el('div', 'hint edit-combo-note', DAYTRADE_SHORT_NOTE);
+    flags.appendChild(comboNote);
+    const syncFlags = () => {
+      const sell = fSide.value === 'sell';
+      /* Both are SELL-side (input.js setSide): on a buy they are hidden AND cleared, so a
+         stale tick can never exempt a buy from anything or reprice it. */
+      fDaytrade.line.hidden = !sell;
+      fShort.line.hidden = !sell;
+      if (!sell) { fDaytrade.box.checked = false; fShort.box.checked = false; }
+      comboNote.hidden = !(sell && fDaytrade.box.checked && fShort.box.checked);
+    };
     /* audit M6: track whether the user explicitly edited fee/tax. When a core field
-       (帳戶/代號/方向/股數/價格/日期) changes and fee/tax are NOT dirty, the modal
+       (帳戶/代號/方向/股數/價格/日期/當沖) changes and fee/tax are NOT dirty, the modal
        re-fetches the computed fee/tax from the entry preview seam and the backend
        recomputes them from the new account's rule set + regenerates the snapshot. An
        explicit fee/tax edit is honored as an override (snapshot tagged override:true). */
@@ -476,34 +536,76 @@
     let taxDirty = false;
     fFee.addEventListener('input', () => { feeDirty = true; });
     fTax.addEventListener('input', () => { taxDirty = true; });
+    /* DEF-007 / I-12: every fee/tax figure that lands after an await goes through
+       window.pdField.autoFill (format.js) — it replaces only what the PAGE put in the field.
+       The stored figures were put there by the page when the dialog opened, so they are
+       recorded as the page's own; anything the owner types since is theirs and stays. */
+    fFee.dataset.pdAuto = fFee.value;
+    fTax.dataset.pdAuto = fTax.value;
     const issueBox = el('div', 'issues');
+    /* The panel's state: the latest translated findings, the ticks, and whether a preview is
+       in flight — 儲存 waits for the latest one, the entry door's `hasServer` rule, so a save
+       can never outrun the warning its own values raise. */
+    const panel = { list: [], acks: {}, pending: false };
+    let ui0 = null;
+    function gate() {
+      const allAcked = renderEditIssues(issueBox, panel.list, panel.acks, gate);
+      if (ui0 && !ui0.ok.classList.contains('is-busy')) {
+        ui0.ok.disabled = panel.pending || !allAcked;
+      }
+    }
     /* recompute() is fired by every core-field change, so responses can land out of order; a
        monotonic token keeps the LAST request the one on screen. Harmless for fee/tax (one
        number replacing another) and load-bearing for the issue list, where a stale response
-       would leave a warning standing for a value the user has already changed. */
+       would leave a warning standing for a value the user has already changed.
+       `writeFees` is false on OPEN and on the 放空 toggle: neither is a fee-bearing change, and
+       the PUT keeps the stored fee/tax when no core field moved — so those previews carry the
+       field values as overrides and never write the engine's figure over a broker-supplied
+       fee (data-and-pricing.md — a supplied fee is the money that actually left). */
     let previewSeq = 0;
-    async function recompute() {
+    async function recompute(writeFees) {
       if (!window.pdApi) return;
       const seq = ++previewSeq;
       const symbol = fSym.value.trim();
-      try {
-        const resp = await window.pdApi.post('/api/input/manual/preview', {
-          account_id: fAcc.value, symbol: symbol, side: fSide.value,
-          date: fDate.value, shares: fShares.value || '0', price: fPrice.value || '0',
-        });
-        if (seq !== previewSeq) return;
-        if (resp && !feeDirty && resp.fee !== undefined) fFee.value = resp.fee;
-        if (resp && !taxDirty && resp.tax !== undefined) fTax.value = resp.tax;
-        renderEditIssues(issueBox, ((resp && resp.issues) || [])
-          .map((i) => editIssueWire(i, symbol)).filter((i) => i !== null));
-      } catch (e) {
-        /* best-effort; the save-time recompute is the source of truth. Clear the panel so a
-           warning from an earlier value never outlives the request that replaced it. */
-        if (seq === previewSeq) renderEditIssues(issueBox, []);
+      const body = {
+        account_id: fAcc.value, symbol: symbol, side: fSide.value,
+        date: fDate.value, shares: fShares.value || '0', price: fPrice.value || '0',
+        daytrade: fDaytrade.box.checked, short_sale: fShort.box.checked,
+        replaces_txn_id: t.id,
+      };
+      if (!writeFees) {
+        if (fFee.value.trim() !== '') body.fee_override = fFee.value.trim();
+        if (fTax.value.trim() !== '') body.tax_override = fTax.value.trim();
       }
+      panel.pending = true;
+      gate();
+      try {
+        const resp = await window.pdApi.post('/api/input/manual/preview', body);
+        if (seq !== previewSeq) return;
+        if (writeFees && resp && !feeDirty && resp.fee !== undefined) {
+          window.pdField.autoFill(fFee, resp.fee);
+        }
+        if (writeFees && resp && !taxDirty && resp.tax !== undefined) {
+          window.pdField.autoFill(fTax, resp.tax);
+        }
+        panel.list = ((resp && resp.issues) || [])
+          .map((i) => editIssueWire(i, symbol)).filter((i) => i !== null);
+      } catch (e) {
+        /* best-effort; the save-time validation is the source of truth. Clear the panel so a
+           warning from an earlier value never outlives the request that replaced it. */
+        if (seq !== previewSeq) return;
+        panel.list = [];
+      }
+      panel.pending = false;
+      gate();
     }
-    [fShares, fPrice].forEach((n) => n.addEventListener('input', recompute));
-    [fAcc, fSym, fSide, fDate].forEach((n) => n.addEventListener('change', recompute));
+    [fShares, fPrice, fDate].forEach((n) => n.addEventListener('input', () => recompute(true)));
+    [fAcc, fSym, fSide, fDate].forEach((n) => n.addEventListener('change', () => {
+      syncFlags();
+      recompute(true);
+    }));
+    fDaytrade.box.addEventListener('change', () => { syncFlags(); recompute(true); });
+    fShort.box.addEventListener('change', () => { syncFlags(); recompute(false); });
     /* FU-D7: a per-field 還原自動 (↺) affordance beside fee/tax. Once you type in the
        dialog the field is dirty and there is otherwise no way back within it; this clears
        the dirty flag and re-runs recompute() so the account's computed value returns and
@@ -514,7 +616,13 @@
       const btn = el('button', 'btn btn-sm edit-revert', '↺ 還原自動');
       btn.type = 'button';
       btn.title = '清除手動費用／稅，改回依帳戶規則自動計算';
-      btn.addEventListener('click', () => { clearDirty(); recompute(); });
+      /* 還原自動 hands the field back to the page: what is in it now is declared the page's
+         own, so the recomputed figure may replace it (pdField.autoFill's own rule). */
+      btn.addEventListener('click', () => {
+        clearDirty();
+        field.dataset.pdAuto = field.value;
+        recompute(true);
+      });
       wrap.appendChild(btn);
       return wrap;
     };
@@ -525,9 +633,10 @@
     const warn = el('div', 'hint',
       '⚠ 更改「代號」或「帳戶」會把這筆交易移到另一個持倉，兩邊的成本、損益與報酬將自動重建；' +
       '新代號必須與帳戶市場相符且已註冊，會先做賣超與孤兒紀錄檢核；未手動改費用／稅時會依新帳戶規則重算。');
-    editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
+    ui0 = editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
-      ['股數', fShares], ['價格', fPrice], ['手續費', feeCell], ['交易稅', taxCell], ['備註', fNote],
+      ['股數', fShares], ['價格', fPrice], ['', flags],
+      ['手續費', feeCell], ['交易稅', taxCell], ['備註', fNote],
       ['', issueBox],
       ['', warn],
     ], async (ui) => {
@@ -537,15 +646,16 @@
         date: fDate.value, shares: fShares.value, price: fPrice.value,
         fee: fFee.value, tax: fTax.value, note: fNote.value.trim() || null,
         fee_overridden: feeDirty, tax_overridden: taxDirty,
+        daytrade: fDaytrade.box.checked, short_sale: fShort.box.checked,
         ack_oversell: ack,
       }), '編輯', ui);
     });
-    /* The panel starts collapsed and stays that way until a core field changes. Opening the
-       dialog deliberately does NOT run recompute(): fee/tax are not dirty at that moment, so
-       a preview on open would silently overwrite a broker-supplied fee with the engine's own
-       figure on a row the user only came to add a note to (data-and-pricing.md — a supplied
-       fee is the money that actually left the account). */
-    renderEditIssues(issueBox, []);
+    syncFlags();
+    /* DEF-042: the findings of the row AS IT STANDS are shown on open — the entry door never
+       lets 確認寫入 go without a preview, and a row that already carries a warning (a future
+       date, a date before its opening) must be acknowledged before it is saved again, not
+       only after a field is touched. Fees are NOT written back on open (see recompute). */
+    recompute(false);
   }
 
   const DIV_TYPE_OPTS = [['cash', '現金'], ['stock', '配股'], ['drip', 'DRIP'], ['net', '淨額']];
@@ -636,6 +746,19 @@
       tr.appendChild(symCell(t.symbol, t.name));
       const tdSide = el('td', 'col-text');
       tdSide.appendChild(dirChip(t.side));
+      /* DEF-013 (owner ruling 2026-09-24): the two flags that change what this row books are
+         visible on the row — both read off the row's own persisted columns (the wire's
+         `daytrade` / `short_sale`), the same chips the CSV / AI previews already show. */
+      if (t.daytrade) {
+        const dt = el('span', 'dir-chip dir-daytrade tx-flag-daytrade', '當沖');
+        dt.title = '當日沖銷：賣出證交稅以當沖稅率 0.15% 計（優先於 ETF 的 0.1%）';
+        tdSide.appendChild(dt);
+      }
+      if (t.short_sale) {
+        const sh = el('span', 'dir-chip dir-short tx-flag-short', '放空');
+        sh.title = '宣告放空：帳本以收到的價金作為空單成本，買回回補時結算已實現損益';
+        tdSide.appendChild(sh);
+      }
       tr.appendChild(tdSide);
       tr.appendChild(el('td', 'num', f.shares(t.shares)));
       tr.appendChild(el('td', 'num', f.price(t.price, t.ccy)));
@@ -860,6 +983,18 @@
         window.toast('目標權重未移回', 'warn', wr.reason || '');
       }
     }
+    /* DEF-040 (owner ruling 2026-09-24): the SPINOFF child's seed price, reported the same way
+       — removed with the action, or kept with the server's reason (a real quote replaced it,
+       or another action still creates that child on that day). */
+    const cp = resp.child_price_restore;
+    if (cp) {
+      if (cp.restored) {
+        window.toast('已移除子公司起始價', 'ok',
+          '分拆已刪除，' + cp.symbol + ' 在 ' + f.date(cp.date) + ' 的起始價（登錄時寫入的）一併移除');
+      } else {
+        window.toast('子公司起始價未移除', 'warn', cp.reason || '');
+      }
+    }
   }
 
   /* The sentence(s) the delete confirm adds for a corporate action: which fee leaves with
@@ -877,8 +1012,10 @@
       const m = a.band_move;
       const br = a.band_restore || {};
       const parts = [];
-      if (m.target_low !== null && m.target_low !== undefined) parts.push('下限 ' + m.target_low);
-      if (m.target_high !== null && m.target_high !== undefined) parts.push('上限 ' + m.target_high);
+      /* DEF-039: a band level restated by a split ratio is an unrounded quotient — shown
+         through f.exact (the D44 formatter for a level the owner may act on), not verbatim. */
+      if (m.target_low !== null && m.target_low !== undefined) parts.push('下限 ' + f.exact(m.target_low));
+      if (m.target_high !== null && m.target_high !== undefined) parts.push('上限 ' + f.exact(m.target_high));
       if (br.restorable) {
         s += '　登錄時移到 ' + m.to_symbol + ' 的目標價（' + parts.join('、')
           + '）未再改動，會自動移回 ' + m.from_symbol + '。';
@@ -896,6 +1033,17 @@
           + '）未再改動，會自動移回 ' + w.from_symbol + '。';
       } else {
         s += '　目標權重不會移回：' + (wr.reason || '登錄時搬移的目標權重已不在原狀') + '。';
+      }
+    }
+    /* DEF-040: the SPINOFF child's seed price, through the same predicate the delete runs
+       (`child_price_restore` on the list row, computed over the whole set). */
+    const cp = a.child_price_restore;
+    if (cp) {
+      if (cp.restorable) {
+        s += '　登錄時寫入的子公司起始價（' + cp.symbol + '，' + f.date(cp.date)
+          + '）尚未被正式報價覆蓋，會一併移除。';
+      } else {
+        s += '　子公司起始價不會移除：' + (cp.reason || '') + '。';
       }
     }
     return s;

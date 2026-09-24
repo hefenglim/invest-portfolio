@@ -182,6 +182,20 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   reverse of what happened; **(4)** the stress-audit oracle keeps its own transcription. Demo
   data is unaffected: the one same-day buy+sell pair on the demo ledger (tw_broker 2603
   2026-07-02) already had the buy's id below the sell's.
+- **A dividend counts from the day it is RECEIVED** (DEF-016, owner ruling 2026-09-24). A
+  confirmed dividend is stored on its payment date, and the inbox confirms a declared payout
+  the day it is announced, so that date can lie after the valuation date. Every VALUATION —
+  the book / adjusted cost, 總報酬, XIRR, 已收股利, the B−A attribution, the drawer, the tax
+  package, the sell-hint average — reads `LedgerBundle.received_by(as_of)`, which drops each
+  dividend whose `effective_date` (payment date; the ex-date for a 配股 with one) is later
+  than `as_of`. The cash pool (`as_of`, M5-06) and the trend (`through`, per day) already cut
+  this way. VALIDATION replays (重算, correction-door replay guards, corporate-action
+  reachability) keep the WHOLE ledger — they check what will be stored, not what has been
+  received. Measured before the rule: one confirmed 18,200 TWD dividend paying in 15 days
+  moved XIRR 0.5677 → 0.6703 and 總報酬 111,600 → 129,800 while the cash pool did not move.
+  ⚠ The ruling covers dividends only; future-dated trades / openings / FX conversions (allowed
+  with a warning since DEF-014) still enter the holdings and XIRR at once — recorded as an open
+  owner question, not an oversight.
 - **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —

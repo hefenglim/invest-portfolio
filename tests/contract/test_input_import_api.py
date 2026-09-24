@@ -62,8 +62,10 @@ def test_import_commit_acked_writes_nonhard_rejects_hard(api_client: TestClient)
     # `rejected`, not `skipped` (2026-08-14): the row was REFUSED, and 「跳過」 reads as
     # "the caller didn't tick it". Asserting `skipped == 0` here is the load-bearing half —
     # without it the old bucket could quietly keep receiving hard rows as well.
+    # DEF-025: the oversell row (index 1) is written only under its OWN ack (`ack_rows`).
     r = api_client.post("/api/import/commit",
-                        json={"kind": "transactions", "csv_text": _TXN_CSV, "ack_warnings": True})
+                        json={"kind": "transactions", "csv_text": _TXN_CSV, "ack_warnings": True,
+                              "ack_rows": [1]})
     assert r.status_code == 200
     body = r.json()
     assert body["written"] == 2 and body["rejected"] == 1 and body["skipped"] == 0

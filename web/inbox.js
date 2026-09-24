@@ -253,7 +253,9 @@
           '（' + acctZh(r.account_id) + '）'));
         let sub;
         if (r.kind === 'stock') {
-          sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + r.per_share +
+          /* DEF-039: 元 of par per share, a provider Decimal — exact digits via f.exact
+             (f.money would round a 0.5 元 dividend to TWD's 0 dp). */
+          sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + f.exact(r.per_share) +
             ' 元（面額制）・除權時持有 ' + f.shares(r.shares_held) + ' 股 → 預估配得 ' +
             f.shares(r.est_reinvest_shares) + ' 股（$0 成本）';
         } else if (r.kind === 'drip') {

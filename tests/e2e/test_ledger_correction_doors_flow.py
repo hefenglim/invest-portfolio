@@ -25,6 +25,7 @@ page: a contract test on the endpoint passes today and passed before the fix.
 import json
 import urllib.request
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -140,10 +141,17 @@ def test_edit_modal_surfaces_preview_issues_restated_for_a_correction(
 
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#tx-body tr.expandable")
-    page.locator("#tx-body tr.expandable").first.locator(".wl-actions .btn").first.click()
+    # DEF-042 (2026-09-24): opening the dialog DOES preview now — the row's own findings must
+    # be shown before it is saved again, as the entry door never commits without a preview —
+    # but that preview writes NO fee back (it would overwrite a broker-supplied fee with the
+    # engine's own figure). The golden row is clean, so the panel stays collapsed.
+    row = page.locator("#tx-body tr.expandable").first
+    stored_fee = row.locator("td").nth(7).inner_text().strip()
+    with page.expect_response("**/api/input/manual/preview"):
+        row.locator(".wl-actions .btn").first.click()
     page.wait_for_selector(".modal-title:has-text('編輯交易')")
-    # No preview has run yet, so the panel is collapsed — opening the dialog must not fire
-    # one (it would overwrite a broker-supplied fee with the engine's own figure).
+    shown = page.locator(".modal-body .field:nth-child(8) input").input_value()
+    assert Decimal(shown) == Decimal(stored_fee.replace(",", "")), (shown, stored_fee)
     assert page.locator(".modal-body .issues .issue").count() == 0
 
     # ---- M3-02: a future trade date is warned about, not written in silence ------------
@@ -162,6 +170,14 @@ def test_edit_modal_surfaces_preview_issues_restated_for_a_correction(
     assert "自動查詢並註冊" not in panel, (
         "the entry door's auto-register PROMISE must not be shown on the correction door"
     )
+
+    # ---- DEF-042: the future date is acknowledged like the entry door's, one tick each --
+    save = page.locator(".modal-foot .btn-primary")
+    assert save.is_disabled(), "an unacknowledged warning must hold 儲存, as on the entry door"
+    page.locator(".modal-body .issue-warn:has-text('晚於今日') input[type=checkbox]").check()
+    page.wait_for_function(
+        "() => { const b = document.querySelector('.modal-foot .btn-primary');"
+        " return b && !b.disabled; }")
 
     # ---- and the save agrees with what the panel said --------------------------------
     with page.expect_response("**/api/ledgers/transactions/**") as saved:

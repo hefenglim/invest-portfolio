@@ -48,8 +48,9 @@ def test_tw_min_fee_enforced() -> None:
 
 
 def test_tw_forecast_rebate_floor() -> None:
-    assert forecast_tw_rebate(Decimal("142"), _TW.rebate_rate) == Decimal("109")
-    assert forecast_tw_rebate(Decimal("156"), _TW.rebate_rate) == Decimal("120")
+    one = _TW.discount  # charge-first: the fee is the FULL fee, so the refund applies
+    assert forecast_tw_rebate(Decimal("142"), _TW.rebate_rate, discount=one) == Decimal("109")
+    assert forecast_tw_rebate(Decimal("156"), _TW.rebate_rate, discount=one) == Decimal("120")
 
 
 # ---- Schwab: SELL-only SEC + TAF, no tax ----

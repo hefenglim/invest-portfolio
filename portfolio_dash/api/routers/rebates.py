@@ -134,9 +134,11 @@ def confirm(
     bad = movement_guard(conn, guard)
     if bad is not None:
         return bad
+    # DEF-009: the credit carries the month it books as an explicit link, so the cash page
+    # may correct its kind / date / amount / note and the month still reads as booked.
     move_id = insert_cash_movement(
         conn, account_id=body.account_id, move_date=refund_date, kind=svc.REBATE_KIND,
-        ccy=acct.settlement_ccy, amount=body.amount, note=note)
+        ccy=acct.settlement_ccy, amount=body.amount, note=note, rebate_period=body.month)
     return {
         "id": move_id, "account_id": body.account_id, "month": body.month,
         "amount": decimal_str(body.amount), "ccy": acct.settlement_ccy.value,

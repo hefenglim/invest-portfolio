@@ -1007,6 +1007,30 @@ def facts_through(facts: Facts, day: date) -> Facts:
     )
 
 
+def facts_received_by(facts: Facts, day: date) -> Facts:
+    """The ledger a VALUATION as at *day* reads: every dividend not yet RECEIVED by *day* is
+    left out, every other ledger is untouched (DEF-016, owner ruling 2026-09-24).
+
+    Re-derived from the ruling, never read off the app (the independence rule): a confirmed
+    dividend is stored on its PAYMENT date, which can be in the future, and it counts from
+    that day on — in the adjusted cost (總報酬), the cash pool and the XIRR flows alike. Cut on
+    :attr:`DivFact.effective`, like :func:`facts_through`: a 配股 with a known ex-date is owned
+    from the ex-date (R6), cash / DRIP / NET from the payment date.
+
+    Dividends ONLY, as the ruling is: a future-dated TRADE is an open owner decision (R3
+    report K) — when it is ruled, this becomes :func:`facts_through`.
+    """
+    return Facts(
+        txs=facts.txs,
+        divs=[d for d in facts.divs if d.effective <= day],
+        fxs=facts.fxs,
+        openings=facts.openings,
+        cash=facts.cash,
+        instruments=facts.instruments,
+        actions=facts.actions,
+    )
+
+
 def trading_financing_cost(facts: Facts, reporting: str, fx_on) -> Decimal:
     """The reporting-currency P&L effect of the three AI-D48 cash kinds.
 

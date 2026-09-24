@@ -124,9 +124,9 @@
       $('#' + id).addEventListener('input', schedulePreview);
     });
     const mdt = $('#m-daytrade');
-    if (mdt) mdt.addEventListener('change', schedulePreview);
+    if (mdt) mdt.addEventListener('change', () => { syncComboNote(); schedulePreview(); });
     const msh = $('#m-short');
-    if (msh) msh.addEventListener('change', schedulePreview);
+    if (msh) msh.addEventListener('change', () => { syncComboNote(); schedulePreview(); });
     $('#m-fee-pencil').addEventListener('click', () => toggleOverride('fee'));
     $('#m-tax-pencil').addEventListener('click', () => toggleOverride('tax'));
     $('#m-fee').addEventListener('input', schedulePreview);
@@ -162,6 +162,28 @@
     if (window.toast) window.toast('已清除表單', 'ok');
   }
 
+  /* DEF-013 (owner ruling 2026-09-24): 當沖 + 放空 together is ALLOWED — a TW same-day
+     short-then-cover (現股當沖先賣後買). When both are ticked the form says what the pair
+     means: which tax rate applies (當沖 0.15% outranks the ETF 0.1% — markets-and-fees.md,
+     QA-19) and what the short declaration books. The SAME sentence as the ledger edit modal's
+     (ledger.js DAYTRADE_SHORT_NOTE). Display-only text; the rate itself is the server's. */
+  const DAYTRADE_SHORT_NOTE = '當沖＋放空（先賣後買）：這筆賣出的證交稅以當沖 0.15% 計算'
+    + '（當沖優先於 ETF 的 0.1%）；同時宣告為放空，賣出股數可以超過持股，帳本以收到的價金作為'
+    + '空單成本，買回回補時才結算已實現損益 — 請記得登錄同日買回的那一筆。';
+  function syncComboNote() {
+    const anchor = $('#m-short-line');
+    if (!anchor) return;
+    let note = $('#m-combo-note');
+    if (!note) {
+      note = el('div', 'hint daytrade-line', DAYTRADE_SHORT_NOTE);
+      note.id = 'm-combo-note';
+      note.hidden = true;
+      anchor.parentNode.insertBefore(note, anchor.nextSibling);
+    }
+    const dt = $('#m-daytrade'), sc = $('#m-short');
+    note.hidden = !(m.side === 'sell' && dt && dt.checked && sc && sc.checked);
+  }
+
   function setSide(s) {
     m.side = s;
     $('#m-side-buy').classList.toggle('active', s === 'buy');
@@ -178,6 +200,7 @@
     const dl = $('#m-daytrade-line'), dt = $('#m-daytrade');
     if (dl) dl.hidden = s !== 'sell';
     if (dt && s !== 'sell') dt.checked = false;
+    syncComboNote();
     schedulePreview();
   }
 
@@ -343,11 +366,19 @@
     /* fractional shares (DRIP $0-cost adds) show up to 4 dp; whole counts stay integer —
        a STRING shape check on the wire value, not arithmetic. */
     const sharesTxt = f.shares(held.shares);
-    sharesHint.appendChild(fillBtn('可賣 ' + sharesTxt + ' 股', '#m-shares', held.shares));
+    /* DEF-048's class: these two figures are TODAY's holding (GET /api/input/holdings has no
+       date). For a back-dated sell they are labelled as such — the draft card below is the
+       trade-date authority (it replays the ledger to that day) — instead of reading as what
+       could be sold on the date typed above. ISO dates compare as strings. */
+    const backdated = ($('#m-date').value || TODAY) < TODAY;
+    const today = backdated ? '今日' : '';
+    const sharesBtn = fillBtn(today + '可賣 ' + sharesTxt + ' 股', '#m-shares', held.shares);
+    if (backdated) sharesBtn.title = '這是今天的持股；交易日當時的部位請看下方草稿（點擊帶入）';
+    sharesHint.appendChild(sharesBtn);
     if (held.adjusted_avg != null) {
       priceHint.hidden = false;
-      priceHint.appendChild(
-        fillBtn('持有均價 ' + f.price(held.adjusted_avg, it.ccy), '#m-price', held.adjusted_avg));
+      priceHint.appendChild(fillBtn(today + '持有均價 ' + f.price(held.adjusted_avg, it.ccy),
+        '#m-price', held.adjusted_avg));
     }
   }
 
@@ -696,6 +727,17 @@
          a null so the row reads「—」and not「— USD」. */
       const amt = (v) => f.money(v, ccy) + (v == null ? '' : ' ' + ccy);
       const sgn = (v) => f.signed(v, ccy) + (v == null ? '' : ' ' + ccy);
+      /* DEF-048 (owner ruling 2026-09-24): the 原 → 新 pairs below are the position ON THE
+         TRADE DATE (the server replays the ledger to that day, the draft appended last). A
+         補登 is therefore not compared with TODAY's holding — say which day the card shows,
+         or 「— → 100」 reads as a contradiction of the 200 shares on the holdings list. */
+      if (pp && pp.backdated) {
+        const asOf = el('div', 'pc-row pc-asof');
+        asOf.style.opacity = '.8';
+        asOf.textContent = '以交易日 ' + f.date(pp.as_of) + ' 當時的部位試算'
+          + '（寫入後帳本依日期重播；該日之後的紀錄不在這幾列）';
+        rows.appendChild(asOf);
+      }
       if (pp && pp.kind === 'sell') {
         pcPair('持股', f.shares(pp.old_shares), f.shares(pp.remain_shares));
         /* On the 賣超 branch the projected average is ZERO because the replay DISCARDS the
@@ -1001,7 +1043,7 @@
       const ar = resp && resp.auto_registered;
       const arTxt = ar
         ? '；已自動註冊 ' + ar.symbol + (ar.name ? ' ' + ar.name : '') +
-          (ar.last != null ? '（現價 ' + ar.last + '）' : '')
+          (ar.last != null ? '（現價 ' + f.exact(ar.last) + '）' : '')   // DEF-039
         : '';
       window.toast('寫入成功', 'ok', '交易已寫入帳本 ' + id + arTxt);
     }
@@ -1380,7 +1422,12 @@
       const tdCb = el('td');
       const cb = el('input');
       cb.type = 'checkbox';
-      cb.checked = r.status !== 'error';
+      /* DEF-025 (owner ruling 2026-09-24, 比照手動輸入): a 賣超 row is never PRE-ticked. Its
+         acknowledgement permanently discards the position's cost basis, so the owner ticks it
+         after reading why — and the commit then asks once more, naming the row (web/import-
+         ack.js). Every other non-error row still starts ticked. */
+      const oversold = !!(window.pdImportAck && window.pdImportAck.isOversell(r));
+      cb.checked = r.status !== 'error' && !oversold;
       cb.disabled = r.status === 'error';
       /* The row's own PreviewRow.index, which the commit sends back as `select` (F-03).
          These boxes existed, were pre-ticked, and were bound to nothing: unticking two of
@@ -1401,6 +1448,10 @@
       tr.appendChild(el('td', 'col-text ' + st[1], st[0]));
       const why = rowReasonParts(r);
       const tdWhy = el('td', 'err-msg', why.gating);
+      if (oversold) {
+        tdWhy.appendChild(el('div', 'row-info',
+          '賣超：預設不勾選。勾選並確認寫入後，這個部位的成本基礎會被永久捨棄（待釐清）'));
+      }
       appendInfoLines(tdWhy, why.info);
       tr.appendChild(tdWhy);
       tbody.appendChild(tr);
@@ -1442,42 +1493,37 @@
   }
 
   /* Commit the pasted CSV. The backend re-derives from csv_text (re-validates vs the
-     current ledger) and returns {written, skipped} as ints (safe). 422
-     warnings_unacknowledged -> confirmDialog -> re-commit with ack_warnings:true. */
+     current ledger) and returns {written, skipped} as ints (safe).
+     DEF-025 (2026-09-24): a warning is acknowledged ROW BY ROW through the one shared flow
+     (web/import-ack.js — the broker door's DEF-027 dialog): every warning row among the
+     ticked ones is listed, UNTICKED, a 賣超 with 「成本基礎會被永久捨棄」, and only the rows
+     ticked there are written (`select` + `ack_rows`; the server refuses a 賣超 row that is
+     not in `ack_rows`). It used to be ONE generic 「部分列有警告（如賣超）— 確認後一併寫入？」
+     that wrote every ticked row, the pre-ticked 賣超 included. */
   async function commitCsv() {
     const paste = $('#csv-paste');
     const csvText = paste ? paste.value.trim() : '';
     if (!csvText) return;
-    const commitBody = (ack) => {
-      const b = { kind: csvKind, csv_text: csvText, ack_warnings: ack,
-                  select: csvSelectedRows(),
-                  source_name: csvSourceName || '貼上 CSV' };   // DEF-017
-      if (csvDateFormat) b.date_format = csvDateFormat;  // FU-D19: carry the pinned format
-      return b;
-    };
+    const body = { kind: csvKind, csv_text: csvText, select: csvSelectedRows(),
+                   source_name: csvSourceName || '貼上 CSV' };   // DEF-017
+    const previewBody = { kind: csvKind, csv_text: csvText };
+    if (csvDateFormat) {   // FU-D19: carry the pinned format — to the re-preview as well
+      body.date_format = csvDateFormat;
+      previewBody.date_format = csvDateFormat;
+    }
+    const label = (CSV_KINDS.find((k) => k[1] === csvKind) || [csvKind])[0];
     try {
-      const resp = await api.post('/api/import/commit', commitBody(false));
+      const resp = await window.pdImportAck.commit({
+        body: body, previewBody: previewBody, title: label });
+      if (resp && resp.cancelled) {
+        if (window.toast) window.toast('已取消，未寫入任何列', 'warn');
+        return;
+      }
       onCsvWritten(resp);
     } catch (err) {
       /* FU-D19: server refused because the date column is still ambiguous — never a guess. */
       if (err && err.status === 422 && err.code === 'date_ambiguity_unresolved') {
         if (window.toast) window.toast('日期格式不明確', 'fail', '請先於上方選擇日期格式再寫入');
-        return;
-      }
-      if (err && err.status === 422 && err.code === 'warnings_unacknowledged') {
-        window.confirmDialog({
-          title: '匯入警告確認',
-          body: '部分列有警告（如賣超）— 確認後一併寫入？',
-          confirmLabel: '確認寫入',
-          onConfirm: async () => {
-            try {
-              const resp = await api.post('/api/import/commit', commitBody(true));
-              onCsvWritten(resp);
-            } catch (e2) {
-              if (window.toast) window.toast((e2 && e2.message) || '匯入失敗', 'fail', e2 && e2.code);
-            }
-          }
-        });
         return;
       }
       if (window.toast) window.toast((err && err.message) || '匯入失敗', 'fail', err && err.code);
@@ -1982,14 +2028,17 @@
      unchecked row is never written (C7, per kind). `prevChecked` (Fable F4d) preserves the
      state across a LOCAL re-render (an inline register or an edit re-validation).
      DEF-036: a row whose own text contradicts its shares × price is never PRE-ticked — the
-     owner ticks it after reading why, and commitAi asks once more before writing it. */
+     owner ticks it after reading why, and commitAi asks once more before writing it.
+     DEF-025: nor is a 賣超 row — its acknowledgement discards a cost basis; the commit then
+     names it row by row (web/import-ack.js) before it is written. */
   function aiCheckboxCell(kind, r, prevChecked) {
     const td = el('td');
     const cb = el('input'); cb.type = 'checkbox';
     const localErr = !!aiRowErr(kind, r.n);
     cb.disabled = r.status === 'error' || localErr;
+    const oversold = !!(window.pdImportAck && window.pdImportAck.isOversell(r));
     const wanted = prevChecked && (String(r.n) in prevChecked)
-      ? !!prevChecked[String(r.n)] : (r.status !== 'error' && !aiIsMismatch(r));
+      ? !!prevChecked[String(r.n)] : (r.status !== 'error' && !aiIsMismatch(r) && !oversold);
     cb.checked = cb.disabled ? false : wanted;
     /* A typo in one box disables the tick for as long as it stands; the owner's own choice
        is remembered on the box and comes back when the value is fixed. */
@@ -2500,6 +2549,19 @@
     let failed = null;
     for (const p of plan) {
       try {
+        if (p.kind === 'transactions') {
+          /* DEF-025: the one AI kind whose rows can be a 賣超 is acknowledged ROW BY ROW
+             through the shared flow (web/import-ack.js) — never under the generic 「AI 草稿中
+             部分列有警告」 below, which a pre-ticked 賣超 used to ride. A cancelled dialog
+             writes nothing and leaves the kind's rows on screen, retry-able. */
+          const resp = await window.pdImportAck.commit({
+            body: { kind: p.kind, csv_text: p.picked.text, source_name: 'AI 輸入' },
+            title: AI_KIND_ZH[p.kind] });
+          if (!(resp && resp.cancelled)) {
+            done.push({ kind: p.kind, resp: resp, text: p.picked.text, ns: p.picked.ns });
+          }
+          continue;
+        }
         const resp = await api.post('/api/import/commit', aiCommitBody(p, false));
         done.push({ kind: p.kind, resp: resp, text: p.picked.text, ns: p.picked.ns });
       } catch (err) {
@@ -2602,8 +2664,13 @@
      fabricate). */
   async function onAiCommitted(kind, resp, committedCsv, ns) {
     const o = commitOutcome(resp);
+    /* DEF-025: a row left unticked in the acknowledgement dialog (skipped_rows code
+       `deselected`) did not land either — it stays on screen with the refused ones. */
+    const declined = (Array.isArray(resp && resp.skipped_rows) ? resp.skipped_rows : [])
+      .filter((x) => x && x.code === 'deselected').map((x) => x.row - 1);
     const stoppedAt = o.rejectedRows.map((x) => x.row - 1)
-      .concat(o.blocked.map((x) => x.row - 1));
+      .concat(o.blocked.map((x) => x.row - 1)).concat(declined)
+      .sort((a, b) => a - b);                              // keep the drafts' own order
     const partial = o.deselected > 0 || outcomeStopped(o) > 0;
     /* FU-D45 + #10 + DEF-019: flash + auto-switch only on FULL success. `cash` has no ledger
        tab on this page (highlightCommitted no-ops for it by design); the refresh still runs. */
@@ -2747,9 +2814,15 @@
     Object.keys(acctHoldingsCache).forEach((k) => { delete acctHoldingsCache[k]; });
     /* The 最近匯入 card (broker-import.js) serves BOTH import modes, so an ordinary CSV
        commit has to refresh it too — otherwise the undo control goes stale at exactly the
-       moment it is wanted, right after an import that looks wrong. An EXTERNAL caller
-       (broker-import.js itself) has already reloaded it. */
-    if (!o.external && window.pdReloadImportBatches) {
+       moment it is wanted, right after an import that looks wrong.
+       DEF-017 (R2 bounce): this used to be skipped for EVERY external caller, on the theory
+       that the external caller was broker-import.js and had reloaded it already. But
+       ledger.js's edit/delete reach this seam as external callers too, and deleting a row
+       on a ledger tab changes a batch's LIVE count (or empties it) — the list kept saying
+       「1」 and its undo dialog promised a delete of 1 row, then deleted 0. The list is now
+       re-read after EVERY ledger change; the extra GET after broker-import's own reload is
+       cheap, and a list that is sometimes fresh is not a list anyone can trust. */
+    if (window.pdReloadImportBatches) {
       try { await window.pdReloadImportBatches(); } catch (e) { /* degrade silently */ }
     }
     if (ledgerTables) {

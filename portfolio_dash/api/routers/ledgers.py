@@ -29,7 +29,7 @@ and all three are audit findings, not preferences:
 
 import sqlite3
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime, time
+from datetime import date, datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
@@ -107,6 +107,7 @@ from portfolio_dash.data_ingestion.validate import (
     CashMovementInput,
     CorporateActionInput,
     Issue,
+    TxnInput,
     identifier_change_repair,
     restated_band,
     unknown_account_message,
@@ -114,11 +115,16 @@ from portfolio_dash.data_ingestion.validate import (
     validate_corporate_action,
     validate_corporate_action_change,
     validate_opening_cost,
+    validate_transaction,
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
-from portfolio_dash.pricing.results import PriceRow
-from portfolio_dash.pricing.store import upsert_prices
+from portfolio_dash.pricing.seed import (
+    SeedPriceVerdict,
+    pending_seed_removal,
+    remove_seed_price,
+    write_seed_price,
+)
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, CashKind, movement_sign
 from portfolio_dash.shared.corporate_actions import (
@@ -203,6 +209,10 @@ def transactions(
             # ledger (domain-ledger.md) and the trades page cannot tell a declared
             # short from an ordinary sell.
             "short_sale": t.short_sale,
+            # DEF-013 (2026-09-24): the 當沖 flag is a persisted column (audit MED-1), so the
+            # row's 「當沖」 badge reads the row itself — not the fee snapshot, which a
+            # supplied fee/tax leaves without a rate — and the edit modal can preserve it.
+            "daytrade": t.daytrade,
         })
     return _page(out, limit, offset)
 
@@ -572,8 +582,12 @@ class TxEditBody(BaseModel):
     tax_overridden: bool = False
     # audit MED-1: same-day round-trip flag, persisted on the row so an edit-recompute
     # reproduces the TW sell-side day-trade tax rate. None = preserve the stored value
-    # (the wire never carries daytrade this round; preservation via None is the contract).
+    # (preservation via None is the contract; the edit modal sends it since DEF-013).
     daytrade: bool | None = None
+    # DEF-013 (2026-09-24): the 放空 declaration, correctable here like 當沖. None = preserve.
+    # Un-declaring a short that exceeds holdings turns it into a 賣超, which the replay guard
+    # below answers with the ordinary 422 ``oversell`` + ack.
+    short_sale: bool | None = None
 
 
 def _recompute_edit_fees(
@@ -647,7 +661,26 @@ def edit_transaction(
     txn_id: int,
     body: TxEditBody,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
+    """Correct one transaction row — through the SAME ``validate_transaction`` a new entry
+    runs (DEF-042, owner ruling 2026-09-24).
+
+    Until DEF-042 this door ran only its own field guard and the replay guard, so a date
+    moved before the position's opening build date (DEF-014), into the future, or a sell
+    moved onto a day it was not covered all saved without the findings the entry door
+    raises. Now the replacement is validated as "the ledger without this row + the edited
+    row" (``validate_transaction(replacing=...)``), and the outcome mirrors
+    ``POST /api/input/manual/commit`` exactly:
+
+    * a HARD finding the edit introduces → 400 with the issue list (a legacy row's OWN hard
+      condition stays correctable — see ``validate_transaction``);
+    * the edited sell itself exceeding its holdings → 422 ``oversell`` until
+      ``ack_oversell``, alongside the replay guard's scoping of every OTHER row it strands;
+    * soft warnings and advisories are acknowledged in the edit modal, the same UI contract
+      as the entry door (whose server gates only the two above), and are returned in the
+      200 body so a caller of this route sees what it saved over.
+    """
     existing = get_transaction(conn, txn_id)
     if existing is None:
         return JSONResponse(status_code=404,
@@ -660,29 +693,52 @@ def edit_transaction(
     if body.shares <= 0 or body.price <= 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "股數與價格必須大於 0", field="shares"))
-    # None on the wire = preserve the stored daytrade flag (MED-1: the wire never carries it).
+    # None on the wire = preserve the stored flag (MED-1 for 當沖, DEF-013 for 放空).
     effective_daytrade = body.daytrade if body.daytrade is not None else existing.daytrade
+    effective_short = body.short_sale if body.short_sale is not None else existing.short_sale
     resolved = _recompute_edit_fees(conn, body, existing, effective_daytrade)
     if isinstance(resolved, JSONResponse):
         return resolved
     fee, tax, snapshot = resolved
+    side = parse_side(body.side)
     edited = existing.model_copy(update={
         "account_id": body.account_id, "symbol": body.symbol,
-        "side": parse_side(body.side), "quantity": body.shares, "price": body.price,
+        "side": side, "quantity": body.shares, "price": body.price,
         "fees": fee, "tax": tax, "trade_date": body.date, "note": body.note,
         "daytrade": effective_daytrade,
+        # A 放空 declaration only exists on a sell; an edit that turns the row into a buy
+        # drops it rather than storing a flag the replay would then read on a buy.
+        "short_sale": effective_short and side is Side.SELL,
     })
+    findings = validate_transaction(
+        conn,
+        TxnInput(account_id=edited.account_id, symbol=edited.symbol, side=edited.side,
+                 quantity=edited.quantity, price=edited.price, trade_date=edited.trade_date,
+                 fee=fee, tax=tax, daytrade=edited.daytrade, short_sale=edited.short_sale,
+                 note=edited.note),
+        today=now.date(), replacing=existing)
+    hard = [i for i in findings if not i.needs_confirm]
+    if hard:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", hard[0].message,
+            issues=[issue_wire(i) for i in findings]))
     would_be = [edited if t.id == txn_id else t for t in list_transactions(conn)]
     blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, txs=would_be)
     if blocked is not None:
         return blocked
+    own = next((i for i in findings if i.kind == "sell_exceeds_holdings"), None)
+    if own is not None and not body.ack_oversell:
+        # The row's OWN shortfall, which the replay guard may not report when the position
+        # was already flagged — the entry door answers it with the same 422, so this does.
+        return _oversell_response(own.message)
     update_transaction(
         conn, txn_id, account_id=body.account_id, symbol=body.symbol,
-        side=parse_side(body.side), quantity=body.shares, price=body.price,
+        side=side, quantity=body.shares, price=body.price,
         fees=fee, tax=tax, trade_date=body.date, daytrade=effective_daytrade,
-        note=body.note, fee_rule_snapshot=snapshot,
+        note=body.note, fee_rule_snapshot=snapshot, short_sale=edited.short_sale,
     )
-    return {"ok": True, "id": txn_id, "fee": decimal_str(fee), "tax": decimal_str(tax)}
+    return {"ok": True, "id": txn_id, "fee": decimal_str(fee), "tax": decimal_str(tax),
+            "issues": [issue_wire(i) for i in findings]}
 
 
 @router.delete("/ledgers/transactions/{txn_id}")
@@ -1664,6 +1720,12 @@ def corporate_actions(
         if m.corporate_action_id is not None:
             fees_by_action.setdefault(m.corporate_action_id, m)
     unapplied = _unapplied_index(conn)
+    # DEF-040: the seed verdict is a property of the SET (one event, one child, one day) —
+    # a single row of a multi-account set cannot be deleted alone (F-32), so the promise is
+    # computed over the set the delete will actually take.
+    sets: dict[tuple[str, date, str], list[StoredCorporateAction]] = {}
+    for x in list_corporate_actions(conn):
+        sets.setdefault((x.from_symbol, x.date, x.kind), []).append(x)
     out: list[dict[str, Any]] = []
     for a in list_corporate_actions(conn, account_id=account_id, symbol=symbol):
         if not _in_range(a.date, frm, to):
@@ -1701,6 +1763,11 @@ def corporate_actions(
             "weight_move": _weight_moved_wire(a.weight_move),
             "weight_restore": _weight_restore_wire(
                 pending_weight_restore(conn, a.weight_move)),
+            # DEF-040: whether deleting this SPINOFF takes the child's seed price with it —
+            # the same predicate the delete runs, quoted beforehand (null on other kinds, and
+            # when the child has no price row on the action day at all).
+            "child_price_restore": _seed_wire(_pending_seed(
+                conn, sets.get((a.from_symbol, a.date, a.kind), [a]))),
             # DEF-023: the replay's refusal, on the row that caused it.
             "unapplied": {"reason": reason} if reason is not None else None,
         })
@@ -1903,7 +1970,8 @@ def _seed_child_price(
     headline return goes dark for a reason nothing on the page explains. The owner reading
     the child's opening price off the same statement can end that in one box.
 
-    **Written through** ``pricing.store.upsert_prices``, from ``api/`` — ``pricing/`` owns
+    **Written through** ``pricing.seed.write_seed_price`` (DEF-040: the one owner of the
+    seed's signature, over ``pricing.store.upsert_prices``), from ``api/`` — ``pricing/`` owns
     every write to ``prices`` (``architecture.md``) and ``data_ingestion`` may not reach in.
 
     **``fetched_at`` is the ACTION DAY, not ``now``** (QA-05). The owner typed an *as-traded*
@@ -1948,12 +2016,10 @@ def _seed_child_price(
     if inst is None:
         return None
     try:
-        upsert_prices(
-            conn,
-            [PriceRow(instrument=inst.symbol, market=inst.market, as_of=inp.date,
-                      close=close, source="manual")],
-            fetched_at=datetime.combine(inp.date, time.min, tzinfo=now.tzinfo),
-        )
+        # DEF-040: through pricing's ONE owner of the seed signature (source + action-day
+        # stamp), so the delete can recognise — and conditionally remove — exactly this row.
+        write_seed_price(conn, symbol=inst.symbol, market=inst.market, on=inp.date,
+                         close=close, tz=now.tzinfo)
     except sqlite3.OperationalError:
         return None
     return inst.symbol
@@ -2167,11 +2233,17 @@ def _delete_actions(
     fees = [m for a in rows for m in linked_cash_movements(conn, a.id)]
     recorded = next((a.band_move for a in rows if a.band_move is not None), None)
     recorded_weight = next((a.weight_move for a in rows if a.weight_move is not None), None)
+    seed = _seed_target(conn, rows)
     try:
         for a in rows:
             delete_corporate_action(conn, a.id, commit=False)
         verdict = restore_target_band(conn, recorded, commit=False)
         weight_verdict = restore_target_weight(conn, recorded_weight, now=now, commit=False)
+        # DEF-040: the child's seed price leaves with the SPINOFF that wrote it — through
+        # pricing's function, bound here, under the same commit — unless a real quote has
+        # replaced it since (or another action still creates the same child that day).
+        seed_verdict = (None if seed is None else remove_seed_price(
+            conn, symbol=seed[0], on=seed[1], still_used=seed[2], commit=False))
         if commit:
             conn.commit()
     except Exception:
@@ -2184,6 +2256,52 @@ def _delete_actions(
         "band_restore": _band_restore_wire(verdict),
         "weight_restored": None if weight_verdict is None else weight_verdict.restored,
         "weight_restore": _weight_restore_wire(weight_verdict),
+        "child_price_removed": None if seed_verdict is None else seed_verdict.removed,
+        "child_price_restore": _seed_wire(seed_verdict),
+    }
+
+
+def _seed_target(
+    conn: sqlite3.Connection, rows: Sequence[StoredCorporateAction]
+) -> tuple[str, date, bool] | None:
+    """The ``(child, day, still_used)`` whose seed price a delete of *rows* may take with it
+    (DEF-040) — ``None`` when *rows* hold no SPINOFF. A set is one event, so it has one child
+    and one day; ``still_used`` is True when a SPINOFF that is NOT being deleted creates the
+    same child on the same day (the seed then still belongs to that one)."""
+    spin = next((a for a in rows
+                 if a.kind.strip().upper() == CorporateActionKind.SPINOFF.value), None)
+    if spin is None:
+        return None
+    leaving = {a.id for a in rows}
+    still_used = any(
+        a.id not in leaving and a.kind.strip().upper() == CorporateActionKind.SPINOFF.value
+        and a.to_symbol == spin.to_symbol and a.date == spin.date
+        for a in list_corporate_actions(conn, symbol=spin.to_symbol)
+    )
+    return spin.to_symbol, spin.date, still_used
+
+
+def _pending_seed(
+    conn: sqlite3.Connection, rows: Sequence[StoredCorporateAction]
+) -> SeedPriceVerdict | None:
+    """What deleting *rows* WOULD do to the child's seed price — the confirm's read of the
+    predicate :func:`_delete_actions` then runs."""
+    seed = _seed_target(conn, rows)
+    if seed is None:
+        return None
+    return pending_seed_removal(conn, symbol=seed[0], on=seed[1], still_used=seed[2])
+
+
+def _seed_wire(verdict: SeedPriceVerdict | None) -> dict[str, Any] | None:
+    """DEF-040's promise (list) / outcome (delete) on the wire — the band/weight shape."""
+    if verdict is None:
+        return None
+    return {
+        "symbol": verdict.symbol,
+        "date": verdict.as_of.isoformat(),
+        "restorable": verdict.removable,
+        "restored": verdict.removed,
+        "reason": verdict.reason,
     }
 
 

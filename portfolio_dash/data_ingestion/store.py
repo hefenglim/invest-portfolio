@@ -1453,8 +1453,12 @@ def update_transaction(
     daytrade: bool,
     note: str | None = None,
     fee_rule_snapshot: dict[str, str] | None = None,
+    short_sale: bool | None = None,
 ) -> bool:
     """Full-row transaction correction; returns False when the id does not exist.
+
+    ``short_sale`` (DEF-013, 2026-09-24): the 放空 declaration is correctable on the edit
+    door like 當沖 is; ``None`` leaves the stored flag untouched (the pre-DEF-013 contract).
 
     ``daytrade`` is persisted (audit MED-1) so a recompute reproduces the sell-side TW tax
     rate; the caller supplies the effective value explicitly (no default — the single
@@ -1488,6 +1492,9 @@ def update_transaction(
                 json.dumps(fee_rule_snapshot), txn_id,
             ),
         )
+    if short_sale is not None:
+        conn.execute("UPDATE transactions SET short_sale=? WHERE id=?",
+                     (1 if short_sale else 0, txn_id))
     conn.commit()
     return cur.rowcount > 0
 
@@ -1647,6 +1654,10 @@ class StoredCashMovement(BaseModel):
     # DEF-020: the corporate action this movement was booked FOR (a reorganisation-fee
     # WITHDRAW); None for every movement entered on its own. See schema.py.
     corporate_action_id: int | None = None
+    # DEF-009: the TRADE MONTH ('YYYY-MM') a confirmed 折讓款 credit books; None for every
+    # other movement. Set by the rebate inbox's confirm, never re-pointed by an edit, and
+    # read FIRST by the inbox's dedup — so kind / date / note are free to be corrected.
+    rebate_period: str | None = None
 
 
 def insert_cash_movement(
@@ -1660,21 +1671,23 @@ def insert_cash_movement(
     note: str | None = None,
     acq_home_amount: Decimal | None = None,
     corporate_action_id: int | None = None,
+    rebate_period: str | None = None,
     commit: bool = True,
 ) -> int:
     """Insert a cash_movements row and return its new primary-key id.
 
     Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
     Single-row and manual callers keep the default ``commit=True`` and are unchanged.
-    ``corporate_action_id`` links a reorganisation fee to its action (DEF-020).
+    ``corporate_action_id`` links a reorganisation fee to its action (DEF-020);
+    ``rebate_period`` links a confirmed 折讓款 credit to its trade month (DEF-009).
     """
     cur = conn.execute(
         "INSERT INTO cash_movements "
-        "(account_id, date, kind, ccy, amount, note, acq_home_amount, corporate_action_id) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "(account_id, date, kind, ccy, amount, note, acq_home_amount, corporate_action_id, "
+        "rebate_period) VALUES (?,?,?,?,?,?,?,?,?)",
         (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
          None if acq_home_amount is None else to_db(acq_home_amount),
-         corporate_action_id),
+         corporate_action_id, rebate_period),
     )
     if commit:
         conn.commit()
@@ -1691,7 +1704,8 @@ def list_cash_movements(
         params = [account_id]
     rows = conn.execute(
         f"SELECT id, account_id, date, kind, ccy, amount, note, acq_home_amount, "
-        f"corporate_action_id FROM cash_movements{where} ORDER BY date ASC, id ASC",
+        f"corporate_action_id, rebate_period FROM cash_movements{where} "
+        f"ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
     return [
@@ -1703,6 +1717,7 @@ def list_cash_movements(
                              else from_db(r["acq_home_amount"])),
             corporate_action_id=(None if r["corporate_action_id"] is None
                                  else int(r["corporate_action_id"])),
+            rebate_period=r["rebate_period"],
         )
         for r in rows
     ]
@@ -1731,8 +1746,17 @@ def update_cash_movement(
     commit: bool = True,
 ) -> bool:
     """Update one movement in place. ``corporate_action_id`` is deliberately not a
-    parameter: the link is set by the writer that books the fee and is never re-pointed.
-    ``commit=False`` lets the corporate-action edit sync its fee under one commit."""
+    parameter: the link is set by the writer that books the fee and is never re-pointed —
+    and neither is ``rebate_period`` (DEF-009), for the same reason.
+    ``commit=False`` lets the corporate-action edit sync its fee under one commit.
+
+    Every correction captures the pre-edit row to ``ledger_audit`` first (DEF-009: the owner
+    ruled an auto-booked 折讓款 row fully editable ON CONDITION that each edit is audited; the
+    cash ledger was the one ledger whose edits left no before-image at all — measured on demo
+    2026-09-24: 12 ``transactions`` update rows, 0 ``cash_movements``).
+    """
+    _write_audit(conn, "cash_movements", str(move_id), "update",
+                 _capture(conn, "SELECT * FROM cash_movements WHERE id=?", (move_id,)))
     cur = conn.execute(
         "UPDATE cash_movements SET account_id=?, date=?, kind=?, ccy=?, amount=?, "
         "note=?, acq_home_amount=? WHERE id=?",
@@ -1747,6 +1771,10 @@ def update_cash_movement(
 def delete_cash_movement(
     conn: sqlite3.Connection, move_id: int, *, commit: bool = True
 ) -> bool:
+    """Delete one movement, capturing its before-image to ``ledger_audit`` (DEF-009's class:
+    a cash correction leaves a trail, exactly like the other ledgers' deletes)."""
+    _write_audit(conn, "cash_movements", str(move_id), "delete",
+                 _capture(conn, "SELECT * FROM cash_movements WHERE id=?", (move_id,)))
     cur = conn.execute("DELETE FROM cash_movements WHERE id=?", (move_id,))
     if commit:
         conn.commit()

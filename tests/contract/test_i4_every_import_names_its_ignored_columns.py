@@ -33,7 +33,8 @@ _EXPECTED: dict[str, list[str]] = {
     "dividends": ["id", "import_batch_id", "source_row_hash"],
     "fx": ["id", "import_batch_id", "source_row_hash"],
     "opening": [],
-    "cash": ["id", "corporate_action_id", "import_batch_id", "source_row_hash"],
+    # DEF-009 added ``rebate_period`` (the confirmed 折讓款 credit's trade month).
+    "cash": ["id", "corporate_action_id", "rebate_period", "import_batch_id", "source_row_hash"],
     "actions": ["id", "band_move_json", "weight_move_json", "import_batch_id",
                 "source_row_hash"],
 }

@@ -139,7 +139,11 @@ def test_v6_a_structurally_invalid_buy_cannot_silently_fund_the_sell(
     assert refused.status_code == 422, refused.text
     assert refused.json()["error"]["code"] == "warnings_unacknowledged"
     assert _txn_rows(client) == []
-    acked = _commit(client, _BROKEN_COVER, ack_warnings=True).json()
+    # DEF-025: the blanket ack no longer writes a 賣超 row; the row's OWN ack does.
+    blanket = _commit(client, _BROKEN_COVER, ack_warnings=True)
+    assert blanket.status_code == 422
+    assert blanket.json()["error"]["code"] == "oversell_rows_unacknowledged"
+    acked = _commit(client, _BROKEN_COVER, ack_warnings=True, ack_rows=[1]).json()
     assert acked["written"] == 1 and acked.get("rejected") == 1  # informed ack + loud buy
     assert acked["rejected_rows"][0]["kind"] == "non_positive_price"
 
@@ -154,7 +158,8 @@ def test_v6_with_a_selection_gets_the_same_protection(
     refused = _commit(client, _BROKEN_COVER, select=[1], ack_warnings=False)
     assert refused.status_code == 422, refused.text
     assert _txn_rows(client) == []
-    acked = _commit(client, _BROKEN_COVER, select=[1], ack_warnings=True).json()
+    acked = _commit(client, _BROKEN_COVER, select=[1], ack_warnings=True,
+                    ack_rows=[1]).json()  # DEF-025: the 賣超 row's own ack
     assert acked["written"] == 1 and acked.get("rejected") == 1
     assert [r["symbol"] for r in _txn_rows(client)] == ["AAPL"]
 
@@ -197,7 +202,8 @@ def test_an_acked_genuine_oversell_still_writes_under_narrowing(
     preview = client.post("/api/import/preview",
                           json={"kind": "transactions", "csv_text": csv_text}).json()
     assert preview["rows"][0]["status"] == "warn"    # the ack below is informed
-    response = _commit(client, csv_text, select=[0], ack_warnings=True)
+    response = _commit(client, csv_text, select=[0], ack_warnings=True,
+                       ack_rows=[0])  # DEF-025: the 賣超 row's own ack
     assert response.status_code == 200, response.text
     out = response.json()
     assert out["written"] == 1 and out["skipped"] == 1

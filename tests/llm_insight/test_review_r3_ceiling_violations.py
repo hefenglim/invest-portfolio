@@ -27,15 +27,23 @@ from zoneinfo import ZoneInfo
 
 from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import insights_store as istore
-from portfolio_dash.llm_insight.cards import InsightCard
+from portfolio_dash.llm_insight.cards import InsightCard, Prediction
 
 NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
 def _card(confidence: int | None) -> InsightCard:
+    # DEF-003 (owner ruling 2026-09-24): a confidence belongs to a PREDICTION — a card stored
+    # without one carries none and is outside this population (pinned in
+    # tests/llm_insight/test_def003_prediction_decides.py). These fixtures used to state a
+    # confidence on a prediction-less card; they now carry the prediction it belongs to.
+    prediction = (
+        Prediction(metric="price_change", direction="up", horizon_days=5)
+        if confidence is not None else None
+    )
     return InsightCard(
         title="t", summary="s", body_md="b", tags=["x"],
-        confidence=confidence, prediction=None, symbol="AAPL",
+        confidence=confidence, prediction=prediction, symbol="AAPL",
     )
 
 

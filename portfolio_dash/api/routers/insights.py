@@ -26,7 +26,7 @@ from portfolio_dash.api.routers.scheduler import get_scheduler, insight_task_run
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
-from portfolio_dash.llm_insight import figure_check, official_templates
+from portfolio_dash.llm_insight import figure_check, official_templates, prompt_diff
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.ops.notify import RULE_CATALOG
@@ -240,7 +240,9 @@ def create_strategy_prompt(
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     cs.ensure_seeded(conn)
-    sp = cs.create_strategy(conn, name=payload.name, body=payload.body, now=now)
+    sp = cs.create_strategy(
+        conn, name=payload.name, body=payload.body, now=now, source="create"
+    )
     return sp.model_dump()
 
 
@@ -267,8 +269,9 @@ def create_strategy_from_template(
     ``mode="replace"`` (W7, AI-D37) instead overwrites an existing row's body in place:
     the UI offers it as「同步官方 vX」when the row's name matches an official template and
     its body has drifted. The name/archived gate is re-verified HERE — a replayed request
-    must not overwrite a row the owner renamed or archived. ``strategy_prompts`` carries
-    no version column; the overwrite re-stamps ``updated_at``. R1 (scope/token fit) is
+    must not overwrite a row the owner renamed or archived. The overwrite is a VERSION
+    (DEF-033, source ``sync_official``): the body it replaces stays in the history and can be
+    restored, so 同步官方 no longer destroys the owner's edits. R1 (scope/token fit) is
     deliberately NOT pre-validated — the run-time gate is the honest net, same seam
     doctrine as the strategy PUT.
     """
@@ -303,7 +306,7 @@ def create_strategy_from_template(
             )
         sp = cs.update_strategy(
             conn, existing.id, name=existing.name, body=tpl["body"],
-            enabled=existing.enabled, now=now,
+            enabled=existing.enabled, now=now, source="sync_official",
         )
         assert sp is not None  # just fetched above
         return sp.model_dump()
@@ -315,7 +318,9 @@ def create_strategy_from_template(
         while name in taken:
             name = f"{tpl['name']}（官方{tpl['version']}·{n}）"
             n += 1
-    sp = cs.create_strategy(conn, name=name, body=tpl["body"], now=now)
+    sp = cs.create_strategy(
+        conn, name=name, body=tpl["body"], now=now, source="official_copy"
+    )
     return sp.model_dump()
 
 
@@ -329,7 +334,7 @@ def update_strategy_prompt(
     cs.ensure_seeded(conn)
     sp = cs.update_strategy(
         conn, strategy_id, name=payload.name, body=payload.body,
-        enabled=payload.enabled, now=now,
+        enabled=payload.enabled, now=now, source="user_save",
     )
     if sp is None:
         return JSONResponse(
@@ -361,6 +366,158 @@ def delete_strategy_prompt(
             content=error_body("not_found", f"未知策略提示詞：{strategy_id}"),
         )
     return {"id": strategy_id, "outcome": outcome}
+
+
+# --- strategy-prompt version history (DEF-033) -----------------------------------
+# Owner ruling 2026-09-24: every save keeps a version; the owner can read any version, see
+# what changed, and restore ANY version (a restore is itself a new version — history is
+# never rewritten). The routes live under their own ``/strategy-prompt-versions`` prefix so
+# the action log can label the one write here (restore) without the ``/strategy-prompts``
+# prefix row claiming it as 「策略模板新增」 (``api/action_log.py`` matches by prefix).
+
+
+def _version_meta(v: cs.StrategyVersion, current: int | None) -> dict[str, Any]:
+    """The list/detail view of one version (no body). ``source_label`` is zh, server-owned."""
+    return {
+        "id": v.id,
+        "strategy_id": v.strategy_id,
+        "version": v.version,
+        "name": v.name,
+        "source": v.source,
+        "source_label": cs.VERSION_SOURCE_LABELS.get(v.source, v.source),
+        "restored_from": v.restored_from,
+        "saved_at": v.saved_at,
+        "chars": len(v.body),
+        "lines": len(v.body.splitlines()),
+        "is_current": current is not None and v.version == current,
+    }
+
+
+def _unknown_version(version_id: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content=error_body("not_found", f"未知策略提示詞版本：{version_id}"),
+    )
+
+
+@router.get("/strategy-prompt-versions")
+def list_strategy_prompt_versions(
+    strategy_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """A strategy's whole version history, newest first (DEF-033)."""
+    cs.ensure_seeded(conn)
+    sp = cs.get_strategy(conn, strategy_id)
+    if sp is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知策略提示詞：{strategy_id}"),
+        )
+    return {
+        "strategy_id": sp.id,
+        "name": sp.name,
+        "archived": sp.archived,
+        "current_version": sp.current_version,
+        "versions": [
+            _version_meta(v, sp.current_version) for v in cs.list_versions(conn, sp.id)
+        ],
+    }
+
+
+@router.get("/strategy-prompt-versions/{version_id}")
+def get_strategy_prompt_version(
+    version_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """One version, with its full body (DEF-033)."""
+    cs.ensure_seeded(conn)
+    v = cs.get_version(conn, version_id)
+    if v is None:
+        return _unknown_version(version_id)
+    sp = cs.get_strategy(conn, v.strategy_id)
+    current = sp.current_version if sp is not None else None
+    return {**_version_meta(v, current), "body": v.body}
+
+
+@router.get("/strategy-prompt-versions/{version_id}/diff")
+def diff_strategy_prompt_version(
+    version_id: int,
+    against: str = "current",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Line diff between this version and another of the SAME strategy (DEF-033).
+
+    ``against`` = ``current`` (default — the strategy's newest version), ``previous`` (the
+    version saved just before this one: what that save changed) or another version's id.
+    The diff always reads CHRONOLOGICALLY — ``from`` is the lower version number, ``to``
+    the higher — so ``del`` lines are text the later version dropped and ``add`` lines text
+    it introduced. ``previous`` of version 1 has no ``from``: every line reads as added.
+    """
+    cs.ensure_seeded(conn)
+    v = cs.get_version(conn, version_id)
+    if v is None:
+        return _unknown_version(version_id)
+    sp = cs.get_strategy(conn, v.strategy_id)
+    current = sp.current_version if sp is not None else None
+    other: cs.StrategyVersion | None
+    if against == "current":
+        other = cs.latest_version(conn, v.strategy_id)
+    elif against == "previous":
+        other = cs.get_version_by_number(conn, v.strategy_id, v.version - 1)
+    else:
+        try:
+            other_id = int(against)
+        except ValueError:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"against 非有效值：{against}", field="against"))
+        other = cs.get_version(conn, other_id)
+        if other is None:
+            return _unknown_version(other_id)
+        if other.strategy_id != v.strategy_id:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", "只能比對同一則策略提示詞的版本", field="against"))
+    if other is None:  # "previous" of version 1 (or a strategy with one version)
+        older, newer = None, v
+    elif other.version <= v.version:
+        older, newer = other, v
+    else:
+        older, newer = v, other
+    diff = prompt_diff.line_diff(older.body if older is not None else "", newer.body)
+    return {
+        "from": _version_meta(older, current) if older is not None else None,
+        "to": _version_meta(newer, current),
+        "identical": older is not None and diff.identical,
+        "added": diff.added,
+        "removed": diff.removed,
+        "lines": [ln.model_dump() for ln in diff.lines],
+    }
+
+
+@router.post("/strategy-prompt-versions/{version_id}/restore")
+def restore_strategy_prompt_version(
+    version_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Make an old version's body current again — as a NEW version (DEF-033).
+
+    ``changed`` is False when the chosen body already is the current one (nothing written,
+    no version added). An archived strategy is refused with 409.
+    """
+    cs.ensure_seeded(conn)
+    try:
+        outcome = cs.restore_version(conn, version_id, now=now)
+    except cs.RestoreRefusedError as exc:
+        return JSONResponse(status_code=409, content=error_body("conflict", exc.reason))
+    if outcome is None:
+        return _unknown_version(version_id)
+    sp, changed = outcome
+    chosen = cs.get_version(conn, version_id)
+    assert chosen is not None  # restore_version just read it
+    return {
+        "strategy": {**sp.model_dump(), "scope": _strategy_scope(sp.body)},
+        "changed": changed,
+        "restored_from": chosen.version,
+        "current_version": sp.current_version,
+    }
 
 
 # --- insight-types CRUD -------------------------------------------------------
@@ -485,7 +642,9 @@ def enable_official_pack(
         sp = strategies_by_name.get(tpl["name"])
         strategy_reused = sp is not None
         if sp is None:
-            sp = cs.create_strategy(conn, name=tpl["name"], body=tpl["body"], now=now)
+            sp = cs.create_strategy(
+                conn, name=tpl["name"], body=tpl["body"], now=now, source="official_copy"
+            )
             strategies_by_name[sp.name] = sp
         it = cs.create_insight_type(
             conn, name=preset["name"], scope=preset["scope"],
@@ -968,6 +1127,8 @@ def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[st
     The card's own stored ``prediction`` and ``confidence`` join the population (second
     re-verification 2026-09-17): a body echoing 「target_pct: 0.05」 is quoting the
     card's forecast, which is the one number the model legitimately originates.
+    ``stated_confidence`` is the value AS STORED (DEF-003 hides it from every display of a
+    prediction-less card, but the model still printed it — quoting it is not a fabrication).
     """
     pred = rec.card.prediction
     flags = figure_check.check_figures(
@@ -977,7 +1138,7 @@ def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[st
         own_figures=figure_check.card_own_figures(
             target_pct=pred.target_pct if pred is not None else None,
             horizon_days=pred.horizon_days if pred is not None else None,
-            confidence=rec.card.confidence,
+            confidence=rec.stated_confidence,
         ),
     )
     return flags.model_dump()
@@ -1001,6 +1162,17 @@ def _trigger_wire(trigger: istore.InsightTrigger | None) -> dict[str, Any] | Non
         _RULE_LABEL.get(trigger.rule, trigger.rule) if trigger.rule is not None else None
     )
     return wire
+
+
+def _prompt_versions_wire(rec: istore.InsightRecord) -> list[dict[str, Any]] | None:
+    """DEF-033: the strategy-prompt version(s) the card was generated with.
+
+    ``None`` = the card predates the record (the page prints 「生成時版本未記錄」); ``[]`` = no
+    prompt was assembled (the zero-LLM anomaly card); otherwise one entry per strategy layer.
+    """
+    if rec.strategy_versions is None:
+        return None
+    return [r.model_dump() for r in rec.strategy_versions]
 
 
 def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
@@ -1044,6 +1216,7 @@ def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, 
         "tokens_out": rec.tokens_out,
         "created_at": rec.created_at,
         "trigger": _trigger_wire(rec.trigger),
+        "prompt_versions": _prompt_versions_wire(rec),
     }
 
 

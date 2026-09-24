@@ -121,7 +121,7 @@ def test_the_error_row_is_rejected_and_the_acked_sell_writes(
     client = dashboard_client_factory(_seed)
     csv = (_HEADER + "tw_broker,2884,buy,2026-09-23,1.5,45.20\n"
            + "tw_broker,2884,sell,2026-09-23,101,45.20\n")
-    out = _commit(client, csv, ack_warnings=True).json()
+    out = _commit(client, csv, ack_warnings=True, ack_rows=[1]).json()  # DEF-025: own ack
     assert out["written"] == 1 and out["rejected"] == 1 and out["skipped"] == 0
     assert out["rejected_rows"][0]["row"] == 1
     assert "skipped_rows" not in out

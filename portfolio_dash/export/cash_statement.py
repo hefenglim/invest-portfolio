@@ -39,6 +39,7 @@ from portfolio_dash.export.report_html import (
     _version_line,
 )
 from portfolio_dash.portfolio.cash import CashLine, account_statement
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
@@ -94,8 +95,7 @@ def build_cash_statement_csv(
 ) -> ExportArtifact | None:
     """Reconciliation-grade CSV of one account's cash statement (all pools when ``ccy`` is
     None). Unknown account → None (router answers 400). Raw source-precision strings."""
-    accts = {a.account_id: a.name for a in list_accounts(conn)}
-    if account not in accts:
+    if account not in {a.account_id for a in list_accounts(conn)}:
         return None
     movements, fx, txs, divs, instruments = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy)
@@ -259,11 +259,14 @@ def _pool_section(
     )
 
 
-def _header(acct_name: str, account_id: str, ccy: Currency | None, now: datetime) -> str:
+def _header(account_id: str, ccy: Currency | None, now: datetime) -> str:
     gen = now.strftime("%Y-%m-%d %H:%M")
     scope = ccy.value if ccy is not None else "全部幣別"
     meta = [
-        f"帳戶 {_esc(acct_name)}（{_esc(account_id)}）",
+        # DEF-045: the account as an ``{account:<id>}`` token, resolved to its display name by
+        # web/api.js's download seam (``_resolveBlobRefs``) — it read 「帳戶 TW Broker
+        # （tw_broker）」: the English API label plus the raw id, on a page the owner prints.
+        f"帳戶 {_esc(account_ref(account_id))}",
         f"幣別 {_esc(scope)}",
         f"生成時間 {_esc(gen)}",
         _version_line(),
@@ -279,8 +282,7 @@ def build_cash_statement_report_html(
     conn: sqlite3.Connection, *, account: str, ccy: Currency | None, now: datetime
 ) -> ExportArtifact | None:
     """Print-optimized 現金收支明細 report (one section per pool). Unknown account → None."""
-    accts = {a.account_id: a.name for a in list_accounts(conn)}
-    if account not in accts:
+    if account not in {a.account_id for a in list_accounts(conn)}:
         return None
     movements, fx, txs, divs, instruments = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy)
@@ -289,7 +291,7 @@ def build_cash_statement_report_html(
         '<section><p class="note">此帳戶尚無現金收支紀錄</p></section>'
     ]
     body = "\n".join([
-        _header(accts[account], account, ccy, now),
+        _header(account, ccy, now),
         *sections,
         _page_footer("本明細為帳本重算結果；更正以新紀錄沖銷，原紀錄永久保留。"),
     ])

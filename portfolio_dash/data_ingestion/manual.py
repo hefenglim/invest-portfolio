@@ -21,7 +21,7 @@ from portfolio_dash.data_ingestion.resolve import (
     suggestion_tail,
 )
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
-from portfolio_dash.data_ingestion.store import insert_transaction
+from portfolio_dash.data_ingestion.store import StoredTransaction, insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.assets import Instrument
 
@@ -50,6 +50,7 @@ def enter_transaction(
     *,
     confirm: bool = False,
     today: date | None = None,
+    replacing: StoredTransaction | None = None,
 ) -> TxnDraft:
     """Run the full manual-entry pipeline for a single transaction.
 
@@ -67,13 +68,21 @@ def enter_transaction(
         inp:      Validated :class:`TxnInput` from the caller.
         confirm:  When True, write the transaction if no hard issues block it.
                   Soft issues (``needs_confirm=True``) are bypassed on confirm.
+        replacing: The stored row a ledger EDIT is previewing a replacement for (DEF-042);
+                  handed to ``validate_transaction`` so the findings are those of the ledger
+                  without that row. A preview only — combining it with ``confirm`` would
+                  INSERT a second row, so that is refused.
 
     Returns:
         A :class:`TxnDraft` capturing the resolved instrument, computed
         fee/tax, all issues found, and the write outcome.
     """
+    if confirm and replacing is not None:
+        raise ValueError("replacing is a preview-only argument; an edit writes through the "
+                         "ledger correction door, never through an insert")
     # --- 1. Validate ---
-    issues: list[Issue] = list(validate_transaction(conn, inp, today=today))
+    issues: list[Issue] = list(
+        validate_transaction(conn, inp, today=today, replacing=replacing))
 
     # --- 2. Resolve symbol ---
     res = resolve(conn, inp.symbol)

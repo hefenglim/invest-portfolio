@@ -51,8 +51,9 @@
   const ACQUIRING_KINDS = ['deposit', 'opening', 'rebate'];
   /* Kinds the edit dialog may offer. An imported row's kind MUST appear here or a no-op
      edit silently rewrites it to the first option — a money-of-record mutation from a
-     dialog the user only opened to fix a note. REBATE is excluded on purpose: its row is
-     locked (see openEdit). */
+     dialog the user only opened to fix a note. REBATE is not offered to other rows (a
+     hand-entered row is never turned INTO a rebate credit here); a 折讓款 row gets its own
+     kind appended in openEdit, so its no-op edit keeps it (DEF-009). */
   const EDITABLE_KINDS = [
     ['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金'],
     ['interest', '利息'], ['interest_expense', '融資利息'], ['broker_fee', '券商費用'],
@@ -598,34 +599,25 @@
   }
 
   function openEdit(m) {
-    /* F2d/F12 — double-credit guard: a 折讓款 (rebate) movement is a system-tagged cash
-       refund whose {kind, note, date} form the suppression key the rebate inbox uses to
-       avoid re-listing (and re-crediting) an already-booked month. Editing any of those
-       would break the tag and re-surface the month. So on a REBATE row we LOCK kind/note/
-       date and allow ONLY the amount to be corrected (the actual refund vs. the estimate);
-       to undo a booking the owner deletes the row instead. The PUT re-sends the ORIGINAL
-       kind/note/date verbatim. A backend guard on the movement PUT is the belt-and-braces
-       stop for direct API calls (see the escalation note). */
+    /* DEF-009 (owner ruling 2026-09-24): a 折讓款 (rebate) row is FULLY editable — 日期／
+       類型／金額／備註 — exactly like a hand-entered row, so a wrongly booked refund can be
+       repaired instead of only deleted. It used to lock kind/note/date because the rebate
+       inbox recognised a credited month from those fields (F2d/F12); the credit now carries
+       an explicit `rebate_period` link the inbox reads first, which no edit here touches, so
+       the month stays booked whatever is corrected. Every edit is recorded in the audit
+       trail server-side (ledger_audit). */
     const isRebate = m.kind === 'rebate';
     const fDate = el('input', 'input'); fDate.type = 'date'; fDate.value = m.date;
-    let fKind;
-    if (isRebate) {
-      fKind = el('input', 'input');
-      fKind.value = KIND_LABEL.rebate;  // 折讓款
-      fKind.disabled = true;
-      fDate.disabled = true;
-    } else {
-      fKind = el('select', 'select');
-      EDITABLE_KINDS.forEach(([v, label]) => {
+    const fKind = el('select', 'select');
+    (isRebate ? EDITABLE_KINDS.concat([['rebate', KIND_LABEL.rebate]]) : EDITABLE_KINDS)
+      .forEach(([v, label]) => {
         const o = el('option', null, label); o.value = v;
         if (m.kind === v) o.selected = true;
         fKind.appendChild(o);
       });
-    }
     const fAmt = el('input', 'input'); fAmt.type = 'number'; fAmt.step = '0.01';
     fAmt.value = m.amount;
     const fNote = el('input', 'input'); fNote.value = m.note || '';
-    if (isRebate) fNote.disabled = true;
     /* spec 2026-07-30: the acquisition cost MUST appear in the edit dialog. The PUT is a
        full replace, so a dialog that omitted this field would silently NULL a recorded
        cost basis on any unrelated edit (note/amount) — a data loss, not a display bug.
@@ -680,9 +672,11 @@
       body.appendChild(w);
     });
     if (isRebate) {
-      body.appendChild(el('div', 'inbox-rule',
-        '折讓款為系統標記的現金退款 — 類型／備註／日期已鎖定以避免重複入帳，僅可修正金額；' +
-        '若要撤銷此筆退款，請直接刪除。'));
+      body.appendChild(el('div', 'inbox-rule', m.rebate_period
+        ? '此筆為 ' + m.rebate_period + ' 月份的折讓款入帳。日期、類型、金額、備註皆可修改，'
+          + '每次修改都會寫入稽核軌跡；修改後 ' + m.rebate_period
+          + ' 仍視為已入帳，不會重新出現在待確認退款。若要撤銷此筆退款，請直接刪除。'
+        : '此筆為折讓款。日期、類型、金額、備註皆可修改，每次修改都會寫入稽核軌跡。'));
     }
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
@@ -700,11 +694,10 @@
       const send = async (ack) => {
         const payload = {
           account_id: m.account_id,
-          // rebate rows re-send the ORIGINAL kind/note/date (locked) — only the amount changes.
-          date: isRebate ? m.date : fDate.value,
-          kind: isRebate ? 'rebate' : fKind.value,
+          date: fDate.value,
+          kind: fKind.value,
           ccy: m.ccy, amount: fAmt.value,
-          note: isRebate ? m.note : (fNote.value.trim() || null),
+          note: fNote.value.trim() || null,
           ack_negative: ack,
         };
         // Switching the row to 出金 makes it a disposal — the cost basis no longer applies.

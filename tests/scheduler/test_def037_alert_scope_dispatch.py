@@ -53,8 +53,10 @@ def conn() -> Iterator[sqlite3.Connection]:
 @pytest.fixture(autouse=True)
 def _clear_runner() -> Iterator[None]:
     jobs.register_insight_runner(None)
+    jobs.register_alert_held_fn(None)
     yield
     jobs.register_insight_runner(None)
+    jobs.register_alert_held_fn(None)
 
 
 class _Recorder:
@@ -74,6 +76,10 @@ def _scan(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
                            enabled=True, now=NOW)
     rec = _Recorder()
     jobs.register_insight_runner(rec)
+    # DEF-041: every symbol these scope tests alert on is HELD — the held-vs-watchlist rule
+    # has its own file (test_def041_alert_cards_only_for_held.py).
+    held = {a.subject for a in alerts if a.scope == "symbol" and a.subject}
+    jobs.register_alert_held_fn(lambda c, *, now: held)
     return rec, jobs.alert_scan(conn, now=NOW)
 
 
@@ -151,7 +157,7 @@ def test_events_recorded_without_a_scope_are_not_guessed_into_symbol_cards(
     ab.record_event(conn, rule_id="calibration_regression", symbol="3", now=NOW)
     ab.record_event(conn, rule_id="signal_trend", symbol="2330", now=NOW)
     rec = _Recorder()
-    result = ab.dispatch_alert_events_ex(conn, rec, now=NOW)
+    result = ab.dispatch_alert_events_ex(conn, rec, now=NOW, held_symbols=lambda: {"2330"})
     assert [(c["rule"], c["symbol"]) for c in rec.calls] == [("signal_trend", "2330")]
     assert [(e.rule_id, e.symbol) for e in result.skipped] == [("calibration_regression", "3")]
 
