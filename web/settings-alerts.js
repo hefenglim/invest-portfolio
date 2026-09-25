@@ -15,42 +15,45 @@
 
   /* ============ E1: 預警規則 ============ */
   /* Display metadata keyed on the BACKEND rule id (strategy/rules_config.py RULE_META).
-     The wire supplies enabled/value/unit/min/max; name/desc/sev are presentation-only.
-     `step` is a UI hint per unit (ratio rules are edited in % for UX continuity). */
+     The wire supplies name/enabled/value/unit/min/max; desc/sev are presentation-only.
+     `step` is a UI hint per unit (ratio rules are edited in % for UX continuity).
+     DEF-062: the rule's NAME is not kept here any more — it is the wire's `name`, from the
+     ONE table (portfolio_dash/shared/alert_rule_names.py) the 新增洞察任務 wizard, the push,
+     the digest and the card chip read too. This page's wording is the one that table kept. */
   const META = {
-    single_weight: { name: '單一標的集中度', sev: 'risk', step: 1,
+    single_weight: { sev: 'risk', step: 1,
       desc: '任一持倉權重（報告幣別市值）超過此比例時警示。' },
-    sector_weight: { name: '產業集中度', sev: 'risk', step: 5,
+    sector_weight: { sev: 'risk', step: 5,
       desc: '任一產業合計權重超過此比例時警示。' },
-    stale_price: { name: '價格過期', sev: 'warn',
+    stale_price: { sev: 'warn',
       desc: '任一標的報價過期即警示（不可調門檻，僅可停用）。' },
-    missing_price: { name: '缺價', sev: 'warn',
+    missing_price: { sev: 'warn',
       desc: '任一標的無任何儲存價格即警示（不可調門檻，僅可停用）。' },
-    fx_drift: { name: '匯率漂移', sev: 'info', step: 0.5,
+    fx_drift: { sev: 'info', step: 0.5,
       desc: '外幣池取得均價與現匯偏離超過此幅度時提示（順風/逆風）。' },
-    exdiv_upcoming: { name: '即將除息提醒', sev: 'info', step: 1,
+    exdiv_upcoming: { sev: 'info', step: 1,
       desc: '持倉標的除息日落在未來 N 天內時提示。' },
-    quota_low: { name: 'AI 額度偏低', sev: 'warn',
+    quota_low: { sev: 'warn',
       desc: '剩餘額度低於閾值時警示（閾值在 AI 額度設定調整，此處僅可停用）。' },
-    calib_gap: { name: 'AI 校準誤差', sev: 'warn', step: 1,
+    calib_gap: { sev: 'warn', step: 1,
       desc: 'AI 預測信心與實際命中率偏差超過此值時警示（資料來源：AI 戰績自我回測）。' },
-    drawdown_from_peak: { name: '高點回撤', sev: 'risk', step: 1,
+    drawdown_from_peak: { sev: 'risk', step: 1,
       desc: '持股／觀察股現價自 52 週高點回撤達此幅度時警示（risk）；達一半幅度先給 warn。' },
-    vol_spike: { name: '波動突升', sev: 'warn', step: 0.1,
+    vol_spike: { sev: 'warn', step: 0.1,
       desc: '持股 30 日年化波動達 90 日基準的此倍數時警示（「最近不對勁」的早期訊號）。' },
-    rebalance_drift: { name: '配置漂移', sev: 'risk', step: 1,
+    rebalance_drift: { sev: 'risk', step: 1,
       desc: '有設目標的持股，現權重偏離目標超過此絕對帶寬或目標的 25%（Swedroe 5/25）時警示。' },
-    consensus_change: { name: '分析師共識轉弱', sev: 'info', step: 0.1,
+    consensus_change: { sev: 'info', step: 0.1,
       desc: '評級分數惡化達此值（1→5 制）或均值目標價下修逾 10%（對比 7 日前）時提示。' },
-    target_cross: { name: '目標價穿越', sev: 'warn',
+    target_cross: { sev: 'warn',
       desc: '個股現價跌破目標下限或突破目標上限時警示。目標價在「觀察清單」逐檔設定，此處僅可停用。' },
     /* R5. ⚠ The name must NOT collapse into 「回撤」: 高點回撤 above is PER-SYMBOL against each
        name's own 52-week high, this one is the whole book against its own peak. Two switches
        reading the same is the AI-D2 two-definitions defect on the settings page. */
-    portfolio_drawdown: { name: '組合整體回撤', sev: 'risk', step: 1,
+    portfolio_drawdown: { sev: 'risk', step: 1,
       desc: '整個投資組合的每日總市值自歷史高點回撤達此幅度時警示（risk）；達一半幅度先給 warn。'
         + '與上面的「高點回撤」不同：那是逐檔比各自的 52 週高點，分散的組合可能整體跌兩成而沒有任何一檔觸發。' },
-    currency_weight: { name: '幣別集中度', sev: 'risk', step: 5,
+    currency_weight: { sev: 'risk', step: 5,
       desc: '任一幣別合計權重（換算報告幣後）超過此比例時警示。三幣別的帳本最大的未分散賭注常常是幣別配置，'
         + '而非任何單一持股。預設比產業集中度寬鬆，因為幣別天然集中。' }
   };
@@ -94,14 +97,17 @@
     wrap.replaceChildren();
     const list = el('div', 'ar-list');
     WIRE.forEach((w) => {
-      const m = META[w.id] || { name: w.id, sev: 'info', desc: '' };
+      const m = META[w.id] || { sev: 'info', desc: '' };
+      /* DEF-062: the name is the wire's; a rule without one reads 「未命名規則」, never its id. */
+      if (!w.name && window.console) console.warn('[DEF-062] alert rule without a name:', w.id);
+      const name = w.name || '未命名規則';
       const fixed = w.value === null || w.value === undefined;  // toggle-only rules
       const row = el('div', 'ar-row');
       const sev = el('span', 'ar-sev sev-' + m.sev);
       sev.title = m.sev === 'risk' ? '紅色警示' : m.sev === 'warn' ? '琥珀警示' : '資訊提示';
       row.appendChild(sev);
       const main = el('div', 'ar-main');
-      main.appendChild(el('div', 'ar-name', m.name));
+      main.appendChild(el('div', 'ar-name', name));
       main.appendChild(el('div', 'ar-desc', m.desc));
       /* 對應的 AI 解讀組合（與洞察類型組合器的「觸發」設定互通） */
       const combos = (window.PD_COMPOSERS || [{ name: '預警解讀', scope: '預警事件觸發時', alert_rules: 'all', enabled: true }])

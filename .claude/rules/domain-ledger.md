@@ -202,7 +202,15 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   replay guards, corporate-action reachability, the date-aware sell guard, the draft preview
   which replays as of the trade date since DEF-048) keep the WHOLE ledger — they check what
   will be stored, not what has happened. A ledger row dated after the SERVER's today carries
-  `counts_from` and reads 「未來日期：YYYY-MM-DD 起計入」. Measured before the rule (golden, day
+  `counts_from` and reads 「未來日期：YYYY-MM-DD 起計入」 on EVERY surface that lists it — the
+  ledger tabs, the cash page's lists, the 現金收支明細 statement (which also draws the printed
+  report's cut line and marks each future running balance 投影, because newest-first puts
+  those rows directly under a 目前餘額 they are not part of), the drawer's 配息史, and the two
+  reconciliation CSVs that mirror those tables (a trailing `counts_from` column). R4 badged a
+  hand-picked list of tables and missed the statement (DEF-056 R5), so the guard is now a
+  sweep: `tests/e2e/test_def056_r5_future_row_sweep_flow.py` fails on ANY visible row that
+  prints a future date without the badge. The drawer's 交易明細 lists no future row at all
+  (owner ruling ③, 2026-09-25). Measured before the rule (golden, day
   2026-06-11): an 18,200 TWD dividend paying in 15 days moved XIRR 0.5677 → 0.6703 and 總報酬
   111,600 → 129,800; a 1,000-share 2330 buy dated 2026-07-01 put 2,000 shares in today's holding
   (market value 639,600 → 1,239,600, XIRR 0.5677 → 0.6577); a 2-for-1 AAPL split dated 2026-07-01

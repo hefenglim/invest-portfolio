@@ -23,11 +23,12 @@ from datetime import date, datetime, time, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history, price_dates
 from portfolio_dash.shared.corporate_actions import ActionIndex
+from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.rules import engine
@@ -173,8 +174,9 @@ def _registered_symbols(conn: sqlite3.Connection) -> list[str]:
 
     Archived symbols (FU-D13) are excluded: a stopped-tracking name is no longer an entry
     candidate, so it drops out of the scan + evaluate_all universe (its money still counts
-    everywhere else — archiving never touches the dashboard)."""
-    return sorted({i.symbol for i in list_instruments(conn) if not i.archived})
+    everywhere else — archiving never touches the dashboard). "Archived" is the one shared
+    predicate (``shared/instrument_scope.py``, DEF-064)."""
+    return tracked_symbols(conn)
 
 
 def _account_ids(conn: sqlite3.Connection) -> list[str]:

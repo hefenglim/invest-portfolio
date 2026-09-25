@@ -980,7 +980,18 @@
     const tbody = el('tbody');
     rows.forEach((d) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'col-text num', d.date));
+      const tdDate = el('td', 'col-text num', d.date);
+      /* DEF-056 R5 (class scan): 配息史 lists every ledger dividend — one paying next month
+         too — while the position above already leaves it out, so it says so: the SERVER's
+         `counts_from` (its clock, the dividend's effective date), the ledger tab's badge. */
+      if (d.counts_from) {
+        const b = el('span', 'badge badge-stale-mini ledger-future', '未來日期：' + d.counts_from + ' 起計入');
+        b.title = '日期晚於今天：到 ' + d.counts_from + ' 才計入持股、成本、總報酬與 XIRR';
+        const line = el('div', 'ledger-future-line');
+        line.appendChild(b);
+        tdDate.appendChild(line);
+      }
+      tr.appendChild(tdDate);
       const tdType = el('td', 'col-text');
       const chipCls = d.type === 'drip' ? 'chip-drip' : d.type === 'stock' ? 'chip-stock' : d.type === 'net' ? 'chip-net' : 'chip-cash';
       tdType.appendChild(el('span', 'type-chip ' + chipCls, typeZh(d)));

@@ -97,8 +97,9 @@ def test_a_watchlist_symbol_alert_produces_no_card_and_the_run_says_so(
     rec, detail = _scan(conn, monkeypatch,
                         [_dd("1234"), _dd("2884"), _dd("SPCX"), _PORTFOLIO])
     assert rec.symbols == ["2884", None]  # the held symbol + the portfolio card, nothing else
-    assert "略過 2 條觀察標的預警（未持有，不產卡）：drawdown_from_peak 1234、" \
-           "drawdown_from_peak SPCX" in detail
+    # DEF-062: the rule by its name, never its id
+    assert "略過 2 條觀察標的預警（未持有，不產卡）：高點回撤 1234、高點回撤 SPCX" in detail
+    assert "drawdown_from_peak" not in detail
     assert reads == [1]  # the book is read ONCE per pass, not once per event
     # the watchlist alerts are still in the alert list — consumed, never deleted
     rows = conn.execute("SELECT symbol, consumed FROM alert_events ORDER BY id").fetchall()

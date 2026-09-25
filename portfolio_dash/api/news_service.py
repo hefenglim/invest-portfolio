@@ -23,6 +23,7 @@ from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing import finmind_datasets
 from portfolio_dash.shared import prompt_versions
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.instrument_scope import tracked_instruments
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +158,11 @@ def resolve_news_scope(
     market taken from the registry — an EXPLICIT single-symbol scope is still honoured even
     when archived (the user asked for that name by name). An unknown symbol (or an otherwise
     invalid scope) → ``None`` so the caller returns a 400. Deterministic ordering.
+    "Archived" is the one shared predicate (``shared/instrument_scope.py``, DEF-064).
     """
-    instruments = list_instruments(conn)
     if scope == "all":
-        return sorted({(i.symbol, i.market.value) for i in instruments if not i.archived})
+        return sorted({(t.symbol, t.market.value) for t in tracked_instruments(conn)})
+    instruments = list_instruments(conn)
     for i in instruments:
         if i.symbol == scope:
             return [(i.symbol, i.market.value)]

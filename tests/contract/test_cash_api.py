@@ -335,7 +335,7 @@ def test_export_cash_statement_csv(api_client: TestClient) -> None:
     reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
     assert reader[0] == [
         "date", "ccy", "kind", "symbol", "name", "qty", "price", "fee", "tax",
-        "note_ref", "delta", "balance",
+        "note_ref", "delta", "balance", "counts_from",
     ]
     data = [row for row in reader[1:] if row and not row[0].startswith("#")]
     buy = next(row for row in data if row[2] == "buy" and row[3] == "2330")

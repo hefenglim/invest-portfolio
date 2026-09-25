@@ -37,7 +37,6 @@ from portfolio_dash.api.routers.prompts import (
     _resolve_fx_rates,
 )
 from portfolio_dash.data_ingestion.holdings import load_action_index
-from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import (
     alerts_bridge,
     assemble,
@@ -66,6 +65,7 @@ from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.scheduler.jobs import insight_job_id
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.llm_config import (
     LLMError,
     LLMRole,
@@ -159,8 +159,10 @@ def _all_registered_symbols(conn: sqlite3.Connection, held: set[str]) -> list[st
     never be narrower than ``all``). This is the only definition: the status card's 「N 檔標
     的」, the dry-run preflight, the draft preflight and the actual run all resolve through
     :func:`_resolve_universe_raw`, and the page's estimate mirrors it (``web/pipeline.js``).
+    DEF-064: "not archived" itself is the shared ``shared/instrument_scope.py`` predicate —
+    the quote worklist and the snapshot-ingest universes read the same one.
     """
-    return sorted(held | {i.symbol for i in list_instruments(conn) if not i.archived})
+    return sorted(held | set(tracked_symbols(conn)))
 
 
 def _custom_symbols(syms: object) -> list[str]:

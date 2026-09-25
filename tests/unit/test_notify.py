@@ -302,8 +302,10 @@ def test_format_event_with_symbol() -> None:
 def test_format_event_global_and_unknown() -> None:
     title, _, sev = notify.format_event("quota_low", None)
     assert "AI 額度偏低" in title and sev == "warn"
-    t2, _, sev2 = notify.format_event("mystery_rule", None)
-    assert "mystery_rule" in t2 and sev2 == "info"  # honest fallback, never crash
+    t2, b2, sev2 = notify.format_event("mystery_rule", None)
+    # DEF-062: the honest fallback is 「未命名規則」 — never the raw id on the phone — never crash
+    assert "未命名規則" in t2 and sev2 == "info"
+    assert "mystery_rule" not in t2 and "mystery_rule" not in b2
 
 
 # --- quiet hours --------------------------------------------------------------

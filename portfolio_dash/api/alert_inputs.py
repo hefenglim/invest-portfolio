@@ -33,6 +33,7 @@ from portfolio_dash.pricing import consensus_source, snapshots_store
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy import target_weights as tw
 from portfolio_dash.strategy.alerts import (
@@ -152,10 +153,12 @@ def assemble(
     exchange_sources = {
         a.from_symbol for a in actions.all if a.kind is CorporateActionKind.EXCHANGE
     }
+    tracked = set(tracked_symbols(conn))  # (1): the ONE shared predicate (DEF-064)
     instruments = sorted(
         (
             i for i in list_instruments(conn)
-            if not i.archived and not (i.symbol in exchange_sources and i.symbol not in held)
+            if i.symbol in tracked
+            and not (i.symbol in exchange_sources and i.symbol not in held)
         ),
         key=lambda i: i.symbol,
     )

@@ -47,7 +47,7 @@ from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
-from portfolio_dash.shared.models.ledger import LedgerBundle
+from portfolio_dash.shared.models.ledger import LedgerBundle, counts_by
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -386,7 +386,7 @@ def daily_value_series(
                 total += convert(price * h.shares, rate)
             net_invested = _ZERO
             for d, amt in converted:
-                if d <= day:
+                if counts_by(d, day):
                     net_invested += amt
             points.append(TrendPoint(date=day, total_value=total,
                                      net_invested=net_invested, incomplete=incomplete))

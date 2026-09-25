@@ -4,8 +4,8 @@ Each function calls a single-source client and appends raw responses to
 ``external_snapshots`` (append-only; spec 20.4). They take injectable client
 callables (defaulting to the real clients) so tests monkeypatch without network.
 
-Layering: the TW symbol universe is read here by **direct SQL** on ``instruments``
-(``SELECT symbol FROM instruments WHERE market='TW'``) — ingest must not depend on
+Layering: the symbol universes are read through ``shared/instrument_scope.py`` — direct SQL
+on ``instruments`` (TRACKED rows only, DEF-064) — so ingest never depends on
 ``data_ingestion``. Nothing is converted to money here; the raw payload is stored
 verbatim (Decimal discipline lives in ``portfolio/external_signals.py``). FinMind
 ``Decimal`` values that arrive from the sentiment/index clients are serialized as
@@ -32,6 +32,7 @@ from portfolio_dash.pricing.finmind_datasets import fetch_dataset
 from portfolio_dash.pricing.providers.yfinance_provider import yf_symbol
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.instrument_scope import tracked_instruments, tracked_symbols
 
 # Default lookback window for FinMind date-range batch fetches.
 _FINMIND_START = "2025-01-01"
@@ -50,26 +51,30 @@ def _resolve_fetch_dataset(override: "FetchDataset | None") -> FetchDataset:
 
 
 def tw_universe(conn: sqlite3.Connection) -> list[str]:
-    """TW symbols (holdings + watchlist) via direct SQL — no data_ingestion import."""
-    rows = conn.execute(
-        "SELECT symbol FROM instruments WHERE market = 'TW' ORDER BY symbol"
-    ).fetchall()
-    return [r["symbol"] for r in rows]
+    """TRACKED TW symbols (holdings + active watchlist) — no data_ingestion import.
+
+    DEF-064 (owner ruling ⑦, 2026-09-25): an ARCHIVED symbol is out. This read took every
+    TW row of ``instruments``, so the three FinMind jobs built on it (chips, valuation,
+    fundamentals) kept fetching for symbols the owner had stopped tracking. The filter is
+    the one shared definition (``shared/instrument_scope.py``) the quote worklist, the
+    insight / signal / news / alert universes read; a held symbol is never archived, so it
+    is never dropped here.
+    """
+    return tracked_symbols(conn, market=Market.TW)
 
 
 def all_universe(conn: sqlite3.Connection) -> list[InstrumentRef]:
-    """Every registered instrument as an InstrumentRef, via direct SQL (all markets).
+    """Every TRACKED instrument as an InstrumentRef (all markets).
 
     Consensus is fetched across US/TW/MY (unlike the TW-only FinMind chips), so this
-    reads the full ``instruments`` table. ``board`` carries the TPEx flag so ``yf_symbol``
-    maps櫃買 counters to ``.TWO``. No ``data_ingestion`` import (layering, spec 20.3).
+    spans every market. ``board`` carries the TPEx flag so ``yf_symbol`` maps櫃買 counters
+    to ``.TWO``. No ``data_ingestion`` import (layering, spec 20.3). DEF-064: archived
+    symbols are out, exactly as in :func:`tw_universe` (consensus + the daily fundamentals
+    union read this).
     """
-    rows = conn.execute(
-        "SELECT symbol, market, board FROM instruments ORDER BY symbol"
-    ).fetchall()
     return [
-        InstrumentRef(symbol=r["symbol"], market=Market(r["market"]), board=r["board"] or "")
-        for r in rows
+        InstrumentRef(symbol=t.symbol, market=t.market, board=t.board)
+        for t in tracked_instruments(conn)
     ]
 
 

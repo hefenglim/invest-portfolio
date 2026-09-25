@@ -26,6 +26,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.shared.alert_rule_names import rule_name
 
 Verdict = Literal["blocked", "degraded", "clean"]
 GateLevel = Literal["info", "warn", "block"]
@@ -175,7 +176,9 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
             blocked = True
             gates.append(GateFinding(
                 id="R7", lv="block",
-                msg=f"觸發規則 {ctx.fired_rule} 不在此組合的訂閱規則內",
+                # DEF-062: the rule by its name (the one table), never its id.
+                msg=(f"觸發規則「{rule_name(ctx.fired_rule) if ctx.fired_rule else '（未記錄）'}」"
+                     "不在此組合的訂閱規則內"),
                 reason="R7_rule_not_matched",
             ))
         else:

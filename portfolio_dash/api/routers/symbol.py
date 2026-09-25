@@ -79,6 +79,7 @@ from portfolio_dash.shared.models.ledger import (
     Transaction,
     counts_by,
     dividend_effective_date,
+    pending_from,
 )
 from portfolio_dash.shared.wire import decimal_str
 
@@ -111,6 +112,11 @@ _DIV_TYPE_WIRE = {
     DividendType.DRIP: "drip",
     DividendType.NET: "net",
 }
+
+
+def _iso_or_none(d: date | None) -> str | None:
+    return d.isoformat() if d is not None else None
+
 
 # DividendTypes that ADD SHARES (reinvest) rather than reduce cost — they contribute a row to
 # the unified activity list and to the reconciliation's reinvest bucket. CASH/NET reduce the
@@ -590,9 +596,15 @@ def symbol_detail(
         }
 
     # dividend_events — all ledger dividends for this symbol; lowercase type, UPPER ccy.
+    # ``counts_from`` (DEF-056 R5, class scan): this list — the drawer's 配息史 — shows EVERY
+    # row, a dividend paying next month included, while the position above already leaves it
+    # out; so it carries the ledger tab's own flag (the same effective date and predicate as
+    # ``/api/ledgers/dividends``), and the drawer badges it like the ledger does.
     dividend_events = [
         {
             "date": d.date.isoformat(),
+            "counts_from": _iso_or_none(
+                pending_from(dividend_effective_date(d.type, d.date, d.ex_date), as_of)),
             "type": _DIV_TYPE_WIRE[DividendType(d.type)],
             "gross": decimal_str(d.gross),
             "net": decimal_str(d.net),

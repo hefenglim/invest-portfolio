@@ -394,15 +394,35 @@
         sub.textContent = acctZh(stmt.account) + '・' + resp.ccy +
           '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
       }
+      /* DEF-056 R5: the printed report's section title says what 目前餘額 leaves out; so does
+         the page. `future_count` is the server's count over the WHOLE scope (a page may hold
+         only some of them). */
+      if (resp.future_count) {
+        sub.textContent += '（截至 ' + resp.as_of + '，不含 ' + resp.future_count + ' 筆未來日期）';
+      }
     }
     const ccyTh = $('#cash-stmt-ccy-th');
     if (ccyTh) ccyTh.hidden = !combined;
     const tbody = $('#cash-stmt-body');
     tbody.replaceChildren();
-    (resp.rows || []).forEach((r) => {
+    /* DEF-056 R5 (verifier bounce): every row is listed (M5-06) while 目前餘額 is as of the
+       server's day, and the newest-first order puts the rows past it at the TOP — directly
+       under a header whose balance they are not. The server flags them (`future`,
+       `counts_from`, cut on its clock); the page draws the printed report's cut line
+       verbatim above them, badges each date like the 出金入金 list (dateCell) and marks each
+       running balance as a projection. */
+    const rows = resp.rows || [];
+    const futureOnPage = rows.filter((r) => r.future).length;
+    let seenFuture = 0;
+    rows.forEach((r) => {
       const rowCcy = r.ccy || resp.ccy;
-      const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(r.date)));
+      if (r.future && seenFuture === 0) {
+        tbody.appendChild(stmtCutRow(futureOnPage, resp.as_of, combined));
+      }
+      if (r.future) seenFuture += 1;
+      const tr = el('tr', r.future
+        ? 'stmt-future' + (seenFuture === futureOnPage ? ' stmt-future-last' : '') : undefined);
+      tr.appendChild(dateCell(r.date, r.counts_from));
       const tdKind = el('td', 'col-text');
       tdKind.appendChild(el('span', 'stmt-chip', KIND_LABEL[r.kind] || r.kind));
       tr.appendChild(tdKind);
@@ -415,12 +435,28 @@
       const tdBal = el('td', 'num');
       tdBal.textContent = f.money(r.balance, rowCcy);
       if (String(r.balance).indexOf('-') === 0) { tdBal.style.color = 'var(--amber)'; }
+      if (r.future) {
+        tdBal.classList.add('stmt-projected');
+        tdBal.appendChild(el('span', 'stmt-proj-tag', '投影'));
+        tdBal.title = '未來日期列的餘額是投影，不是目前餘額';
+      }
       tr.appendChild(tdBal);
       tbody.appendChild(tr);
     });
-    if (!(resp.rows || []).length) {
+    if (!rows.length) {
       tbody.appendChild(stmtEmptyRow('empty', combined));
     }
+  }
+
+  /* The cut line above the first future row — export/cash_statement.py::_pool_section's text,
+     verbatim, so the screen and the printed report say the same sentence. */
+  function stmtCutRow(n, asOf, combined) {
+    const tr = el('tr', 'stmt-cut');
+    const td = el('td', 'col-text',
+      '以下 ' + n + ' 筆為未來日期（' + asOf + ' 之後），不計入目前餘額；其餘額欄為投影');
+    td.colSpan = combined ? 6 : 5;
+    tr.appendChild(td);
+    return tr;
   }
 
   /* FU-D25 statement empty state — window.emptyState() glyph + one-line explanation, plus

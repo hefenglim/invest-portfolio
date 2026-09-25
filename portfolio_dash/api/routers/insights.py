@@ -29,7 +29,6 @@ from portfolio_dash.llm_insight import evaluations_store as es
 from portfolio_dash.llm_insight import figure_check, official_templates, prompt_diff
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
-from portfolio_dash.ops.notify import RULE_CATALOG
 from portfolio_dash.scheduler.jobs import (
     bind_insight_schedule,
     insight_job_id,
@@ -38,6 +37,7 @@ from portfolio_dash.scheduler.jobs import (
     unbind_insight_schedule,
 )
 from portfolio_dash.scheduler.runtime import remove_job, reschedule_job
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
 
@@ -1144,23 +1144,17 @@ def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[st
     return flags.model_dump()
 
 
-# rule id → zh label, from the ONE Python catalog of rule labels (the push surface's).
-_RULE_LABEL: dict[str, str] = {rid: label for rid, label, _sev in RULE_CATALOG}
-
-
 def _trigger_wire(trigger: istore.InsightTrigger | None) -> dict[str, Any] | None:
     """DEF-037: what produced the card — the page renders 「由預警「<規則>」觸發」 from it.
 
-    ``rule_label`` is resolved here (the frontend has no complete rule catalog; the push
-    catalog is the single Python source of rule labels). ``None`` for a legacy card: it
-    claims no trigger rather than a guessed one.
+    ``rule_label`` is resolved here from the ONE rule-name table (``shared.alert_rule_names``,
+    DEF-062). An id nobody named reads 「未命名規則」, never the id itself. ``None`` for a
+    legacy card: it claims no trigger rather than a guessed one.
     """
     if trigger is None:
         return None
     wire = trigger.model_dump()
-    wire["rule_label"] = (
-        _RULE_LABEL.get(trigger.rule, trigger.rule) if trigger.rule is not None else None
-    )
+    wire["rule_label"] = rule_name(trigger.rule) if trigger.rule is not None else None
     return wire
 
 

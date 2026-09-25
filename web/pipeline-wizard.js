@@ -4,7 +4,7 @@
 
    資料來源（全部經 window.pdApi）：
    - 分析模板  ← GET /api/strategy-prompts  ([{id,name,body,enabled,...}])
-   - 預警規則  ← GET /api/alert-rules        ({rules:[{id,...}]})
+   - 預警規則  ← GET /api/alert-rules        ({rules:[{id,name,...}]} — name = zh 顯示名，DEF-062)
    - 標的宇宙  ← GET /api/dashboard + /api/instruments，經 window.ppUniverseSource（pipeline.js，
                  以代號去重 — DEF-032；與「編輯標的」對話框同一個定義）
    - 額度      ← GET /api/insight-tasks/status (health.quota_remaining, Decimal STRING)
@@ -20,13 +20,16 @@
 
   var STEPS = ['觸發', '範圍', '組裝', '確認'];
 
-  /* Stable alert-rule id -> zh label (the /api/alert-rules payload carries ids only). */
-  var RULE_LABELS = {
-    single_weight: '單一標的集中度', sector_weight: '產業集中度',
-    stale_price: '價格過期/缺價', fx_drift: '匯率漂移',
-    exdiv_upcoming: '即將除息', quota_low: 'AI 額度偏低', calib_gap: 'AI 校準誤差'
-  };
-  function ruleLabel(id) { return RULE_LABELS[id] || id; }
+  /* DEF-062: a rule's zh name is the `name` GET /api/alert-rules carries on every rule — the
+     ONE table (portfolio_dash/shared/alert_rule_names.py) the settings › 預警規則 page reads
+     too. This file used to keep its own 7-entry table and fall back to the id, so 8 of the
+     15 checkboxes read `missing_price`, `vol_spike`, `target_cross` … A rule that somehow
+     arrives without a name reads 「未命名規則」 (and says so in the console) — never its id. */
+  function ruleLabel(r) {
+    if (r && r.name) return r.name;
+    if (window.console) console.warn('[DEF-062] alert rule without a name:', r && r.id);
+    return '未命名規則';
+  }
 
   window.ppWizard = function () {
     /* fetched reference data (filled before the wizard renders). */
@@ -220,7 +223,7 @@
                 renderRail();
               });
               lb.appendChild(cb);
-              lb.appendChild(el('span', null, ruleLabel(r.id)));
+              lb.appendChild(el('span', null, ruleLabel(r)));
               grid2.appendChild(lb);
             });
             stage.appendChild(grid2);

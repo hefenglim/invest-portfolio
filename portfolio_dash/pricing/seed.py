@@ -148,7 +148,12 @@ def write_seed_price(
     return SeedWrite(written=True)
 
 
-def _is_seed(source: str, fetched_at: str, on: date) -> bool:
+def has_seed_signature(source: str, fetched_at: str, on: date) -> bool:
+    """Whether a ``prices`` row dated *on* carries the seed SIGNATURE: ``source`` =
+    :data:`SEED_SOURCE` and ``fetched_at`` = *on* at 00:00. It says "a seed", never whose —
+    ownership is ``data_ingestion.store.StoredCorporateAction.owned_seed_slot``'s question
+    (``pricing/`` knows nothing about corporate actions, D17). Public since DEF-063: the
+    orphan-seed cleanup script applies the same signature test the delete does."""
     if source != SEED_SOURCE:
         return False
     try:
@@ -187,7 +192,7 @@ def pending_seed_removal(
     if row is None:
         return None
     source, fetched_at = str(row[0]), str(row[1])
-    if not _is_seed(source, fetched_at, on):
+    if not has_seed_signature(source, fetched_at, on):
         return SeedPriceVerdict(symbol=symbol, as_of=on, removable=False, reason=(
             f"子公司 {symbol} 在 {on.isoformat()} 的價格目前是正式報價（來源 {source}）"
             "— 登錄時的起始價已被覆蓋或未曾填寫，這筆報價保留不刪"))

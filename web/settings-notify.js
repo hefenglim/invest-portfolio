@@ -159,7 +159,9 @@
       cb.checked = subs[r.id] !== false;  // default subscribed
       row.appendChild(cb);
       row.appendChild(el('span', 'nt-sub-sev sev-' + (r.severity || 'info')));
-      row.appendChild(el('span', null, r.label || r.id));
+      /* DEF-062: the label is the server's (the one rule-name table); never the raw id. */
+      if (!r.label && window.console) console.warn('[DEF-062] notify rule without a name:', r.id);
+      row.appendChild(el('span', null, r.label || '未命名規則'));
       wrap.appendChild(row);
     });
   }

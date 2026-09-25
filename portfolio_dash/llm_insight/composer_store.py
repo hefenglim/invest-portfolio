@@ -295,7 +295,21 @@ def _backfill_versions(conn: sqlite3.Connection) -> None:
       generated now can still name the version it used.
 
     Both are INSERTs; nothing already recorded is touched.
+
+    READ FIRST (DEF-065): this runs on every ``ensure_seeded``, and ``ensure_seeded`` sits
+    on ~20 GET routes (``/api/dashboard`` included). Two ``INSERT … SELECT`` + ``commit``
+    that insert nothing still open a WRITE transaction, so every one of those reads took
+    SQLite's write lock — and waited out the 5 s busy timeout, then answered 500, behind any
+    long write. The invariant almost always holds, so it is checked with a read and the
+    INSERTs run only when a strategy actually lacks its current body.
     """
+    if conn.execute(
+        "SELECT 1 FROM strategy_prompts s WHERE NOT EXISTS "
+        "(SELECT 1 FROM strategy_prompt_versions v WHERE v.strategy_id = s.id "
+        " AND v.version = (SELECT MAX(version) FROM strategy_prompt_versions w "
+        "                  WHERE w.strategy_id = s.id) AND v.body = s.body) LIMIT 1"
+    ).fetchone() is None:
+        return
     conn.execute(
         "INSERT INTO strategy_prompt_versions "
         "(strategy_id, version, name, body, source, restored_from, saved_at) "

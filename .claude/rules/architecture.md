@@ -133,7 +133,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 
 - **shared/** — settings (env-driven), DB session/connection, Pydantic models used
   across layers, `Decimal`/currency helpers, FX-conversion helper, the cash-kind and
-  corporate-action vocabularies, the LLM client. Pure, importable everywhere.
+  corporate-action vocabularies, the alert-rule display names (`alert_rule_names.py`,
+  DEF-062 2026-09-25: the ONE zh name per rule id, read by the API wire, push text, digest,
+  gate messages and run details — a renderer never falls back to the id), the LLM client.
+  Pure, importable everywhere.
 - **data_ingestion/** — manual transaction entry + CSV/broker/AI import, dividends, cash
   movements, corporate actions. Validates and normalizes into the canonical ledger models
   before persisting (`store.py` owns the ledger tables and their DDL). Rejects bad input
@@ -161,6 +164,14 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 - **api/** — FastAPI JSON API: routers call the core and serialize (Decimal → string), the
   `*_service` modules orchestrate cross-module flows, `app.py` is the composition root that
   binds the injection seams. No business logic; every mutating route has an action-log label.
+  **A GET never writes** (DEF-065, 2026-09-25): no seed, no `CREATE`/`ALTER`, no write
+  transaction — every table a read path touches is created (and seeded) at boot in
+  `app.py`'s lifespan, and `shared/config_store.ensure_seeded` decides seed-once under the
+  write lock. A read that wrote raced its twin (two first reads of `/api/ui-prefs` collided on
+  `settings_meta` → 500) or queued behind any long write for the 5 s busy timeout.
+  `tests/contract/test_def065_get_never_writes.py` boots a fresh database and calls every GET
+  route with other connections holding the write lock. (`CREATE TABLE IF NOT EXISTS` on a
+  table that exists is resolved at prepare time and takes no lock — the test proves it.)
 - **web/** — the static vanilla-JS frontend (HTML/CSS/JS + vendored `echarts.min.js`), served
   by `api/` via `StaticFiles`. Not a Python package. Single fetch layer `web/api.js`.
 - **scheduler/** — APScheduler job definitions only. Triggers pricing refresh, insight,

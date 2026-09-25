@@ -46,7 +46,7 @@ from portfolio_dash.shared.cash_kinds import is_debit, is_fx_acquisition
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
-from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction
+from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction, counts_by
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -155,13 +155,13 @@ def acquisition_basis(
     """
     with_basis = home_cost = without_basis = _ZERO
     for c in conversions:
-        if as_of is not None and c.date > as_of:
+        if as_of is not None and not counts_by(c.date, as_of):
             continue
         if c.from_ccy == home and c.to_ccy == foreign:
             with_basis += c.to_amount
             home_cost += c.from_amount
     for m in movements:
-        if as_of is not None and m.date > as_of:
+        if as_of is not None and not counts_by(m.date, as_of):
             continue
         if m.ccy != foreign or not is_fx_acquisition(m.kind):
             continue
@@ -226,14 +226,14 @@ def foreign_cash_balance(
     """
     cash = _ZERO
     for c in conversions:
-        if as_of is not None and c.date > as_of:
+        if as_of is not None and not counts_by(c.date, as_of):
             continue
         if c.to_ccy == foreign:
             cash += c.to_amount
         if c.from_ccy == foreign:
             cash -= c.from_amount
     for t in transactions:
-        if as_of is not None and t.trade_date > as_of:
+        if as_of is not None and not counts_by(t.trade_date, as_of):
             continue
         if instruments[t.symbol].quote_ccy != foreign:
             continue
@@ -242,12 +242,12 @@ def foreign_cash_balance(
         else:
             cash += t.quantity * t.price - t.fees - t.tax
     for d in dividends:
-        if as_of is not None and d.date > as_of:
+        if as_of is not None and not counts_by(d.date, as_of):
             continue
         if d.type in CASH_DIVIDEND_TYPES and instruments[d.symbol].quote_ccy == foreign:
             cash += d.net
     for m in movements or []:
-        if as_of is not None and m.date > as_of:
+        if as_of is not None and not counts_by(m.date, as_of):
             continue
         if m.ccy != foreign:
             continue

@@ -2455,15 +2455,11 @@ def _owned_slot(a: StoredCorporateAction) -> tuple[str, date, Decimal | None] | 
     that takes no price — owns nothing, so neither its delete nor its batch undo can take a
     row it never wrote. A row with no record at all (saved before the record existed) falls
     back to R3's rule: its own ``(to_symbol, date)``, signature only.
+
+    The rule itself is :meth:`StoredCorporateAction.owned_seed_slot` (DEF-063): the
+    orphan-seed cleanup script asks the same question, so there is one answer, not two.
     """
-    if a.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
-        return None
-    rec = a.child_seed
-    if rec is None:
-        return a.to_symbol, a.date, None
-    if rec.close is None:
-        return None
-    return rec.symbol or a.to_symbol, rec.as_of or a.date, rec.close
+    return a.owned_seed_slot()
 
 
 def _seed_target(

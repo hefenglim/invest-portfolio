@@ -506,3 +506,57 @@ def shares_on(
         naive_before=before,
         index=index,
     )
+
+
+def _later_event_dates(conn: sqlite3.Connection, symbol: str, *, after: date) -> set[date]:
+    """Every ledger date AFTER *after* on which *symbol*'s share count can change.
+
+    A position only moves on an event that names it — its own trade, opening, share-adding
+    dividend, or a corporate action it is the source or destination of (a chain reaches it
+    through the action that names it) — so the count at these dates plus *after* itself is
+    every value the position takes from *after* on. A superset is harmless (it only costs a
+    query); the dividend date is the column :func:`_shares_until` counts by.
+    """
+    cut = after.isoformat()
+    rows = conn.execute(
+        "SELECT trade_date FROM transactions WHERE symbol=? AND trade_date > ? "
+        "UNION SELECT build_date FROM opening_inventory WHERE symbol=? AND build_date > ? "
+        "UNION SELECT date FROM dividends WHERE symbol=? AND date > ? "
+        "UNION SELECT date FROM corporate_actions "
+        "WHERE (from_symbol=? OR to_symbol=?) AND date > ?",
+        (symbol, cut, symbol, cut, symbol, cut, symbol, symbol, cut),
+    ).fetchall()
+    return {date.fromisoformat(str(r[0])[:10]) for r in rows}
+
+
+def holds_position(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    today: date,
+    index: ActionIndex | None = None,
+) -> bool:
+    """Whether *symbol* carries a position in ANY account at the close of *today* or of any
+    later ledger date — the ONE meaning of "held" behind 「持有 ⇒ 未封存」 (DEF-064).
+
+    Two seams read it and must agree by construction: the archive guard refuses to archive a
+    symbol this answers True for (``api/routers/instruments.py``), and every ledger write that
+    can move shares re-activates an archived symbol this answers True for
+    (``store._reactivate_if_held``). Both sides of the invariant therefore use one predicate.
+
+    Why not ``current_shares > 0``, which the archive guard used until DEF-064: measured on
+    1ee7771, a declared short (−500) archived cleanly, because ``> 0`` does not see a short —
+    and a short is a live, priced position. And ``current_shares`` is the net over ALL dates,
+    so a future-dated full sale (DEF-056 lets a row be entered ahead of its date) reads 0
+    while the position is still held today. "Nonzero today, or on any later date the position
+    moves" closes both. An undeclared oversell (negative, 待釐清) also counts — refusing to
+    archive an unresolved position is the safe side of that data problem.
+    """
+    idx = _resolve_index(conn, index)
+    days = sorted({today} | _later_event_dates(conn, symbol, after=today))
+    accounts = [r[0] for r in conn.execute("SELECT account_id FROM accounts").fetchall()]
+    return any(
+        shares_through(conn, account_id, symbol, on=day, index=idx) != _ZERO
+        for account_id in accounts
+        for day in days
+    )

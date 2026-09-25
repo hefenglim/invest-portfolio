@@ -75,7 +75,7 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import LedgerBundle
+from portfolio_dash.shared.models.ledger import LedgerBundle, counts_by
 from portfolio_dash.shared.money import MINOR_UNITS, from_db, quantize_amount
 from portfolio_dash.shared.wire import decimal_str
 
@@ -856,7 +856,7 @@ def _row_findings(
             )
 
     # --- future trade date (M5, soft) — only when a clock is supplied ---
-    if today is not None and inp.trade_date > today:
+    if today is not None and not counts_by(inp.trade_date, today):
         issues.append(
             Issue(
                 kind="future_trade_date",

@@ -8,7 +8,7 @@ from portfolio_dash.data_ingestion.store import upsert_instrument
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 
-_HEADER = "date,type,gross,withholding,net,reinvest_shares,reinvest_price,ccy"
+_HEADER = "date,type,gross,withholding,net,reinvest_shares,reinvest_price,ccy,counts_from"
 
 
 def test_export_symbol_detail_known_symbol(api_client: TestClient) -> None:
@@ -20,7 +20,7 @@ def test_export_symbol_detail_known_symbol(api_client: TestClient) -> None:
     text = r.content[3:].decode("utf-8")
     assert text.split("\r\n", 1)[0] == _HEADER
     # golden 2330 cash dividend at source precision.
-    assert "2026-03-01,cash,5000,0,5000,,,TWD" in text
+    assert "2026-03-01,cash,5000,0,5000,,,TWD," in text
 
 
 def test_export_symbol_detail_non_ascii_symbol_never_500(

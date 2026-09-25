@@ -9,7 +9,7 @@ from portfolio_dash.forex.results import AccountFXResult, FxRealizedRow, FXSumma
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account, Instrument
-from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction
+from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction, counts_by
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -129,7 +129,7 @@ def _realized_fx(
     total: Decimal = sum(
         (r.realized
          for r in realized_fx_rows_as_of(conversions, movements, home, foreign)
-         if as_of is None or r.date <= as_of), _ZERO
+         if as_of is None or counts_by(r.date, as_of)), _ZERO
     )
     return total
 

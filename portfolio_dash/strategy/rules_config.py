@@ -48,6 +48,10 @@ class AlertRules(BaseModel):
 
 
 # id -> (default_value | None, unit | None, min | None, max | None); all numerics are strings.
+# This is the REGISTRY of alert-rule ids (the parent set). Every id here needs its zh display
+# name in ``shared.alert_rule_names.ALERT_RULE_NAMES`` — the one table the API, the wizard, the
+# settings page, the push and the digest read (DEF-062); a missing one fails
+# ``tests/contract/test_def062_alert_rule_names.py``.
 RULE_META: dict[str, tuple[str | None, str | None, str | None, str | None]] = {
     "single_weight": ("0.30", "ratio", "0.05", "1"),
     "sector_weight": ("0.60", "ratio", "0.10", "1"),

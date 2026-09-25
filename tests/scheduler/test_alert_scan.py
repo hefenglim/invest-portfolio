@@ -73,7 +73,8 @@ def test_alert_scan_records_events_and_dispatches(
     # event recorded + consumed; subscriber dispatched once
     assert calls == [(sub.id, "vol_spike", "2330")]
     assert ab.unconsumed_events(conn) == []
-    assert "vol_spike" in detail
+    # DEF-062: the run detail (排程中心) names the fired rule in words, never by its id
+    assert "波動突升" in detail and "vol_spike" not in detail
 
 
 def test_alert_scan_no_subscribers_records_but_no_dispatch(

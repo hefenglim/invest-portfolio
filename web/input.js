@@ -61,9 +61,15 @@
       if (tab) tab.classList.toggle('active', x === t);
     });
   }
+  /* The owner's own pick wins over the boot default (R5, found as a flaky e2e gate):
+     boot() waits for /api/input/context and then shows 手動交易, so a tab clicked while the
+     page was still loading was taken back the moment the context arrived — 「CSV 匯入」 opened
+     and then closed again under the pointer. boot() now shows its default only if nobody
+     has chosen a tab yet. */
+  let tabPicked = false;
   TABS.forEach((t) => {
     const tab = $('#tab-' + t);
-    if (tab) tab.addEventListener('click', () => showTab(t));
+    if (tab) tab.addEventListener('click', () => { tabPicked = true; showTab(t); });
   });
 
   /* ================= Tab 1 手動交易 ================= */
@@ -3326,7 +3332,7 @@
     initAi();
     initDiv();
     initFxOpen();
-    showTab('manual');
+    if (!tabPicked) showTab('manual');
   }
 
   boot();

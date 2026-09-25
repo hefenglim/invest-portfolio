@@ -53,15 +53,30 @@ def ensure_ui_prefs_seeded(conn: sqlite3.Connection) -> None:
 
 
 def get_ui_prefs(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Return ``{"page_size": N, "auto_ai_resolve": bool}``; defaults when the row is absent."""
-    ensure_ui_prefs_seeded(conn)
+    """Return ``{"page_size": N, "auto_ai_resolve": bool}``; defaults when the row is absent.
+
+    READ-ONLY (DEF-065): no DDL, no seed, no commit. It used to call
+    :func:`ensure_ui_prefs_seeded` first, so the FIRST read of a database — three at once
+    on ``settings.html`` — created the table and seeded the row from a GET, and two of them
+    racing ended in a 500. The table is created and seeded at boot (``api/app.py``'s
+    lifespan) and by the write path (:func:`set_ui_prefs`); a database that has neither
+    (a hermetic test, a legacy file before its first boot) reads the defaults.
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ui_prefs_config'"
+    ).fetchone() is None:
+        return {"page_size": DEFAULT_PAGE_SIZE, "auto_ai_resolve": DEFAULT_AUTO_AI_RESOLVE}
+    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(ui_prefs_config)")}
+    auto_col = "auto_ai_resolve" if "auto_ai_resolve" in cols else "NULL AS auto_ai_resolve"
     row = conn.execute(
-        "SELECT page_size, auto_ai_resolve FROM ui_prefs_config WHERE id = 1"
+        f"SELECT page_size, {auto_col} FROM ui_prefs_config WHERE id = 1"
     ).fetchone()
     page_size = int(row["page_size"]) if row is not None else DEFAULT_PAGE_SIZE
     if page_size not in ALLOWED_PAGE_SIZES:  # defensive: legacy/hand-edited value
         page_size = DEFAULT_PAGE_SIZE
-    auto_ai = bool(row["auto_ai_resolve"]) if row is not None else DEFAULT_AUTO_AI_RESOLVE
+    auto_ai = (bool(row["auto_ai_resolve"])
+               if row is not None and row["auto_ai_resolve"] is not None
+               else DEFAULT_AUTO_AI_RESOLVE)
     return {"page_size": page_size, "auto_ai_resolve": auto_ai}
 
 
@@ -73,6 +88,7 @@ def set_ui_prefs(
     now: datetime,
 ) -> dict[str, Any]:
     """Persist the given fields (subset merge); the caller validates ``page_size``."""
+    ensure_ui_prefs_seeded(conn)  # the WRITE path creates what the read path only reads
     current = get_ui_prefs(conn)
     ps = int(current["page_size"]) if page_size is None else page_size
     auto = bool(current["auto_ai_resolve"]) if auto_ai_resolve is None else auto_ai_resolve

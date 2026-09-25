@@ -76,7 +76,7 @@ from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
-from portfolio_dash.shared.models.ledger import pending_from
+from portfolio_dash.shared.models.ledger import counts_by, pending_from
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -464,11 +464,14 @@ def _stmt_row_wire(
     """One statement row: the existing keys (date/kind/ref/delta/balance) + the per-row
     ``ccy`` (needed by the combined view) + ``future`` (M5-06: the row is dated after
     ``as_of``, so its running ``balance`` is a projection past today's ``current_balance``)
+    + ``counts_from`` (DEF-056 R5: the day it starts to count, the ledger lists' flag — the
+    same :func:`pending_from` answer, so the statement row and the 出金入金 row badge alike)
     + the OPTIONAL structured detail keys (null when the field does not apply to the kind).
     Every Decimal is a wire STRING."""
     def _d(value: Decimal | None) -> str | None:
         return decimal_str(value) if value is not None else None
 
+    counts_from = pending_from(ln.date, as_of)
     return {
         "date": ln.date.isoformat(),
         "ccy": ccy.value,
@@ -476,7 +479,8 @@ def _stmt_row_wire(
         "ref": ln.ref,
         "delta": decimal_str(ln.delta),
         "balance": decimal_str(bal),
-        "future": ln.date > as_of,
+        "future": counts_from is not None,
+        "counts_from": _iso_or_none(counts_from),
         "symbol": ln.symbol,
         "name": ln.name,
         "qty": _d(ln.qty),
@@ -510,7 +514,9 @@ def cash_statement(
     hid it would read as a lost row — but ``current_balance`` / ``balances`` are as of
     ``as_of`` (today, from the injected clock), the same figure ``GET /api/cash`` shows, and
     a row dated after it carries ``future: true`` so the page can draw the line between the
-    balance and the projection past it."""
+    balance and the projection past it. ``future_count`` (DEF-056 R5) counts those rows over
+    the WHOLE scope, not the page, so the header can say what the balance leaves out exactly
+    as the printed report's section title does."""
     accounts = _accounts(conn)
     acct = accounts.get(account)
     if acct is None:
@@ -528,7 +534,7 @@ def cash_statement(
         # statement is chronological, so that is the end-of-day balance of the last day that
         # has happened; 0 for a pool with no such line. Equal by construction to
         # ``cash_balances(..., as_of=as_of)`` for the same pool.
-        return next((bal for ln, bal in reversed(stmt) if ln.date <= as_of), _ZERO)
+        return next((bal for ln, bal in reversed(stmt) if counts_by(ln.date, as_of)), _ZERO)
 
     # Per-ccy balances as of today (0 for an empty pool).
     balances = [
@@ -561,6 +567,7 @@ def cash_statement(
         "balances": balances,
         "rows": [_stmt_row_wire(c, ln, bal, as_of=as_of) for c, ln, bal in page],
         "total_count": len(flat),
+        "future_count": sum(1 for _, ln, _ in flat if not counts_by(ln.date, as_of)),
     }
 
 

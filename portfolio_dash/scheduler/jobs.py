@@ -38,11 +38,13 @@ from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.pricing.store import SplitFactorFn
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_scope import tracked_instruments
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
 
 logger = logging.getLogger(__name__)
@@ -282,7 +284,15 @@ def ensure_job_rows(conn: sqlite3.Connection) -> None:
     Idempotent (``INSERT OR IGNORE``): seeds all jobs on first run and adds rows for
     newly-registered jobs on later runs, while leaving existing (possibly user-edited)
     rows untouched.
+
+    READ FIRST (DEF-065): ``ensure_scheduler_seeded`` runs this on every call, including the
+    GET routes of the 排程 page, and N ``INSERT OR IGNORE`` + ``commit`` that insert nothing
+    still take the write lock. The job ids already present are read first; nothing is
+    written unless a registered job has no row.
     """
+    have = {str(r[0]) for r in conn.execute("SELECT job_id FROM schedule_config")}
+    if all(job.id in have for job in JOBS):
+        return
     for job in JOBS:
         conn.execute(
             "INSERT OR IGNORE INTO schedule_config (job_id, enabled, cron, timezone) "
@@ -944,7 +954,10 @@ _SCOPE_ZH: dict[str | None, str] = {
 
 
 def _skipped_note(skipped: list[alerts_bridge.AlertEvent]) -> str:
-    """「；略過 N 條非個股預警（不產個股卡）：fx_drift 帳戶 {account:moomoo_my}、…」 or ""."""
+    """「；略過 N 條非個股預警（不產個股卡）：匯率漂移 帳戶 {account:moomoo_my}、…」 or "".
+
+    DEF-062: a rule is named by the one name table (``shared.alert_rule_names``), never by
+    its id — this detail is what 排程中心 prints for the run."""
     if not skipped:
         return ""
     items = []
@@ -952,15 +965,17 @@ def _skipped_note(skipped: list[alerts_bridge.AlertEvent]) -> str:
         subject = ev.symbol or ""
         if ev.scope == "account" and subject:
             subject = account_ref(subject)  # the fetch layer renders the display name
-        items.append(f"{ev.rule_id} {_SCOPE_ZH.get(ev.scope, ev.scope or '')} {subject}".strip())
+        items.append(
+            f"{rule_name(ev.rule_id)} {_SCOPE_ZH.get(ev.scope, ev.scope or '')} {subject}".strip()
+        )
     return f"；略過 {len(skipped)} 條非個股預警（不產個股卡）：{'、'.join(items)}"
 
 
 def _not_held_note(not_held: list[alerts_bridge.AlertEvent]) -> str:
-    """「；略過 N 條觀察標的預警（未持有，不產卡）：drawdown_from_peak 1234、…」 or "" (DEF-041)."""
+    """「；略過 N 條觀察標的預警（未持有，不產卡）：高點回撤 1234、…」 or "" (DEF-041, DEF-062)."""
     if not not_held:
         return ""
-    items = [f"{ev.rule_id} {ev.symbol or ''}".strip() for ev in not_held]
+    items = [f"{rule_name(ev.rule_id)} {ev.symbol or ''}".strip() for ev in not_held]
     return f"；略過 {len(not_held)} 條觀察標的預警（未持有，不產卡）：{'、'.join(items)}"
 
 
@@ -1031,8 +1046,10 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     except Exception as exc:  # noqa: BLE001 - the push path must never break the scan
         logger.warning("notify dispatch failed in alert_scan: %s", exc)
         notify_detail = "notify: error"
+    # DEF-062: the fired rules by name (「單一標的集中度、波動突升」), never by id.
     return (
-        f"{len(alerts)} alert(s) [{', '.join(rules_seen)}], {dispatched} dispatched; "
+        f"{len(alerts)} alert(s) [{'、'.join(rule_name(r) for r in rules_seen)}], "
+        f"{dispatched} dispatched; "
         f"{notify_detail}{_skipped_note(skipped)}{_not_held_note(not_held)}"
         f"{_held_unknown_note(held_unknown)}"
     )
@@ -1287,18 +1304,15 @@ def build_worklist(
     Board comes from the stored ``instruments.board`` column when set, else the
     deterministic market default (US ``""`` / MY ``".KL"`` / TW ``"TWSE"``). FX pairs
     are the fixed reporting-currency set. Archived symbols (FU-D13) are excluded — a
-    stopped-tracking symbol should not consume quote/history/dividend fetch budget.
+    stopped-tracking symbol should not consume quote/history/dividend fetch budget. The
+    filter is the ONE shared definition (``shared/instrument_scope.py``, DEF-064) that the
+    snapshot-ingest, insight, signal, news and alert universes read too.
     """
-    sql = "SELECT symbol, market, board FROM instruments WHERE COALESCE(archived,0)=0"
-    params: tuple[str, ...] = ()
-    if market is not None:
-        sql += " AND market = ?"
-        params = (market.value,)
-    refs: list[InstrumentRef] = []
-    for row in conn.execute(sql, params):
-        mkt = Market(row["market"])
-        board = row["board"] or _DEFAULT_BOARD[mkt]
-        refs.append(InstrumentRef(symbol=row["symbol"], market=mkt, board=board))
+    refs = [
+        InstrumentRef(symbol=t.symbol, market=t.market,
+                      board=t.board or _DEFAULT_BOARD[t.market])
+        for t in tracked_instruments(conn, market=market)
+    ]
     return refs, _FX_PAIRS
 
 

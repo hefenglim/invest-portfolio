@@ -646,8 +646,13 @@ def migrate_instrument_sectors(conn: sqlite3.Connection) -> int:
 # routed (see its docstring). Only two API tiers remain:
 #   * currently held -> DELETE refused (422 ``held``); a held symbol is never archived,
 #   * everything else -> SOFT delete (archived=1), fully reversible.
-# Invariant "held => not archived" is enforced at the single booking seam below
-# (``insert_transaction`` / ``upsert_opening`` un-archive on any new booking).
+# Invariant "held => not archived" is enforced on BOTH sides (DEF-064, 2026-09-25): the
+# archive guard refuses a symbol that ``holdings.holds_position`` says is held (today or on a
+# later ledger date — shorts and future-dated rows included), and every write seam that can
+# give a symbol shares re-activates it — ``insert_transaction`` / ``upsert_opening``
+# unconditionally (any new booking), every correction / delete of a trade, share-adding
+# dividend, opening or corporate action through ``_reactivate_if_held`` (same predicate).
+# The fetch universes (``shared/instrument_scope.py``) rely on it to filter on the flag alone.
 
 
 def has_ledger_history(conn: sqlite3.Connection, symbol: str) -> bool:
@@ -759,6 +764,39 @@ def _unarchive_on_booking(conn: sqlite3.Connection, symbol: str) -> None:
     conn.execute(
         "UPDATE instruments SET archived=0 WHERE symbol=? AND archived=1", (symbol,)
     )
+
+
+def _reactivate_if_held(conn: sqlite3.Connection, *symbols: str) -> None:
+    """Un-archive each ARCHIVED symbol among *symbols* that holds a position after this write.
+
+    DEF-064 (2026-09-25): 「持有 ⇒ 未封存」 was upheld only by the two INSERT seams above, so
+    every other write that moves shares could leave a held symbol archived — measured on
+    1ee7771: sell all → 封存 → delete the sell put 1,000 shares back on a symbol that stayed
+    archived and out of every fetch universe (no quote, no snapshot, no signal). Every ledger
+    write seam that can move shares — the corrections and deletes of trades, share-adding
+    dividends, openings and corporate actions — calls this with every symbol it touched,
+    before and after the change.
+
+    The test is ``holdings.holds_position``, the SAME predicate the archive guard refuses on
+    (``api/routers/instruments.py``), so the two sides of the invariant cannot disagree. A
+    symbol that is not archived costs one indexed read; only an archived one is replayed.
+    Imported here, not at module top, because ``holdings`` imports this module. No commit:
+    it joins the caller's transaction. A multi-row undo (``provenance.delete_batch``) checks
+    after each row, so an intermediate state can re-activate a symbol the finished undo
+    leaves flat — the safe direction (a stray 還原 costs a fetch; a stale archive costs a
+    held position its price).
+    """
+    from portfolio_dash.data_ingestion.holdings import holds_position
+
+    today = app_now().date()
+    for symbol in dict.fromkeys(symbols):
+        row = conn.execute(
+            "SELECT archived FROM instruments WHERE symbol=?", (symbol,)
+        ).fetchone()
+        if row is None or not row[0]:
+            continue
+        if holds_position(conn, symbol, today=today):
+            _unarchive_on_booking(conn, symbol)
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[Account]:
@@ -1029,6 +1067,7 @@ def insert_dividend(
             ex_date.isoformat() if ex_date is not None else None,
         ),
     )
+    _reactivate_if_held(conn, symbol)  # a 配股 / DRIP adds shares (DEF-064)
     if commit:
         conn.commit()
     return int(cur.lastrowid or 0)
@@ -1250,6 +1289,12 @@ def list_transactions(
     ]
 
 
+#: ``(child symbol, day, expected close)`` — the seed price slot a SPINOFF row owns
+#: (:meth:`StoredCorporateAction.owned_seed_slot`). The close is ``None`` for a legacy row
+#: with no record: the seed signature alone then decides (R3's rule).
+SeedSlot = tuple[str, date, Decimal | None]
+
+
 class StoredCorporateAction(BaseModel):
     """Pydantic model for a persisted corporate_actions row.
 
@@ -1280,6 +1325,33 @@ class StoredCorporateAction(BaseModel):
     # (``child_seed_json``). ``None`` = unknown (a row saved before the record existed, or a
     # non-SPINOFF row) — the delete then falls back to the seed signature (R3's rule).
     child_seed: ChildSeedRecord | None = None
+
+    def owned_seed_slot(self) -> "SeedSlot | None":
+        """The ``(child, day, expected close)`` seed price slot this row OWNS, or ``None`` —
+        the ONE answer to "who owns a seed" (DEF-040 R4; moved here from
+        ``api/routers/ledgers.py::_owned_slot`` for DEF-063).
+
+        Three readers, one rule: a SPINOFF's delete and batch undo (which seed they may take
+        back), an edit's move (which slot it vacates), and
+        ``scripts/clean_orphan_seed_prices.py`` (a seed-signature row NO row owns is an
+        orphan). They agree by construction because they all call this.
+
+        * not a SPINOFF → owns nothing;
+        * a record that says the save wrote NOTHING (no price typed, the slot was already
+          occupied, or an import door that takes no price) → owns nothing, so neither its
+          delete nor its undo can take a row it never wrote;
+        * a record that says what it wrote → that ``(symbol, day, close)``;
+        * NO record at all (a row saved before the record existed) → R3's rule: its own
+          ``(to_symbol, date)``, and the seed signature alone decides (close ``None``).
+        """
+        if self.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+            return None
+        rec = self.child_seed
+        if rec is None:
+            return self.to_symbol, self.date, None
+        if rec.close is None:
+            return None
+        return rec.symbol or self.to_symbol, rec.as_of or self.date, rec.close
 
 
 def insert_corporate_action(
@@ -1334,6 +1406,7 @@ def insert_corporate_action(
             child_seed_to_json(child_seed) if child_seed is not None else None,
         ),
     )
+    _reactivate_if_held(conn, from_symbol, to_symbol)  # an EXCHANGE / SPINOFF gives shares
     if commit:
         conn.commit()
     return int(cur.lastrowid or 0)
@@ -1449,6 +1522,9 @@ def update_corporate_action(
             action_id,
         ),
     )
+    _reactivate_if_held(
+        conn, str(before["from_symbol"]), str(before["to_symbol"]), from_symbol, to_symbol
+    )
     if commit:
         conn.commit()
     return True
@@ -1485,6 +1561,8 @@ def delete_corporate_action(
                      _capture(conn, "SELECT * FROM cash_movements WHERE id=?", (m.id,)))
         conn.execute("DELETE FROM cash_movements WHERE id=?", (m.id,))
     conn.execute("DELETE FROM corporate_actions WHERE id=?", (action_id,))
+    # Deleting an EXCHANGE hands the shares back to its source (DEF-064).
+    _reactivate_if_held(conn, str(before["from_symbol"]), str(before["to_symbol"]))
     if commit:
         conn.commit()
     return True
@@ -1596,8 +1674,8 @@ def update_transaction(
     stored snapshot untouched (records the rule set in force when first written). The
     pre-mutation row is captured to ``ledger_audit`` first (M9).
     """
-    _write_audit(conn, "transactions", str(txn_id), "update",
-                 _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
+    prior = _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,))
+    _write_audit(conn, "transactions", str(txn_id), "update", prior)
     dt = 1 if daytrade else 0
     if fee_rule_snapshot is None:
         cur = conn.execute(
@@ -1622,6 +1700,8 @@ def update_transaction(
     if short_sale is not None:
         conn.execute("UPDATE transactions SET short_sale=? WHERE id=?",
                      (1 if short_sale else 0, txn_id))
+    # A correction can give shares back to the old symbol and to the new one (DEF-064).
+    _reactivate_if_held(conn, *([str(prior["symbol"])] if prior else []), symbol)
     conn.commit()
     return cur.rowcount > 0
 
@@ -1631,9 +1711,11 @@ def delete_transaction(
 ) -> bool:
     """Delete one trade, auditing its before-image. ``commit=False`` (DEF-049) hands the
     transaction to a caller that deletes many rows as ONE undo (``provenance.delete_batch``)."""
-    _write_audit(conn, "transactions", str(txn_id), "delete",
-                 _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
+    prior = _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,))
+    _write_audit(conn, "transactions", str(txn_id), "delete", prior)
     cur = conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
+    if prior is not None:  # deleting a SELL gives the shares back (DEF-064)
+        _reactivate_if_held(conn, str(prior["symbol"]))
     if commit:
         conn.commit()
     return cur.rowcount > 0
@@ -1662,8 +1744,8 @@ def update_dividend(
     reinvest_price: Decimal | None = None,
 ) -> bool:
     """Full-row dividend correction; returns False when the id does not exist."""
-    _write_audit(conn, "dividends", str(div_id), "update",
-                 _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
+    prior = _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,))
+    _write_audit(conn, "dividends", str(div_id), "update", prior)
     cur = conn.execute(
         """UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
                withholding=?, net=?, reinvest_shares=?, reinvest_price=? WHERE id=?""",
@@ -1675,6 +1757,7 @@ def update_dividend(
             div_id,
         ),
     )
+    _reactivate_if_held(conn, *([str(prior["symbol"])] if prior else []), symbol)  # DEF-064
     conn.commit()
     return cur.rowcount > 0
 
@@ -1683,9 +1766,11 @@ def delete_dividend(
     conn: sqlite3.Connection, div_id: int, *, commit: bool = True
 ) -> bool:
     """Delete one dividend, auditing its before-image (``commit`` as ``delete_transaction``)."""
-    _write_audit(conn, "dividends", str(div_id), "delete",
-                 _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
+    prior = _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,))
+    _write_audit(conn, "dividends", str(div_id), "delete", prior)
     cur = conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
+    if prior is not None:
+        _reactivate_if_held(conn, str(prior["symbol"]))  # DEF-064
     if commit:
         conn.commit()
     return cur.rowcount > 0
@@ -1760,6 +1845,7 @@ def delete_opening(conn: sqlite3.Connection, account_id: str, symbol: str) -> bo
         "DELETE FROM opening_inventory WHERE account_id=? AND symbol=?",
         (account_id, symbol),
     )
+    _reactivate_if_held(conn, symbol)  # DEF-064
     conn.commit()
     return cur.rowcount > 0
 

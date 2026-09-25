@@ -398,8 +398,9 @@
     var t = card.trigger;
     if (!t) return null;
     if (t.source === 'alert') {
+      /* DEF-062: the server's name (the one rule-name table), never the raw rule id. */
       var a = el('a', 'insight-trigger',
-        '由預警「' + (t.rule_label || t.rule || '未記錄規則') + '」觸發');
+        '由預警「' + (t.rule_label || (t.rule ? '未命名規則' : '未記錄規則')) + '」觸發');
       a.href = 'settings.html#alerts';
       var lines = [];
       if (t.title) lines.push(t.title);

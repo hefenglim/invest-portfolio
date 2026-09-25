@@ -41,6 +41,7 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared import llm
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active
 from portfolio_dash.shared.wire import decimal_str
@@ -59,10 +60,15 @@ _MOVERS_N = 3                # top-N up + top-N down
 # imported so all shipped prompt content has one home + a version tag.
 _LLM_PROMPT_VERSION = DIGEST_NOTE_PROMPT_VERSION
 
-# rule_id -> (zh label, severity) from the single push catalog (single source of labels).
-_RULE_META: dict[str, tuple[str, str]] = {
-    rid: (label, sev) for rid, label, sev in notify.RULE_CATALOG
-}
+# rule_id -> severity from the push catalog. The zh LABEL is read from the ONE rule-name table
+# (``shared.alert_rule_names``, DEF-062) by :func:`_rule_label_sev`: the old fallback was the raw
+# id, which is what an uncatalogued ``calibration_regression`` event printed in the digest.
+_RULE_SEVERITY: dict[str, str] = {rid: sev for rid, _label, sev in notify.RULE_CATALOG}
+
+
+def _rule_label_sev(rid: str) -> tuple[str, str]:
+    """``(zh name, severity)`` of an ``alert_events`` rule id — never the id as its name."""
+    return rule_name(rid), _RULE_SEVERITY.get(rid, "info")
 
 
 def _try[T](fn: Callable[[], T], default: T) -> T:
@@ -245,7 +251,7 @@ def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any
     grouped: dict[str, dict[str, Any]] = {}
     for r in rows:
         rid = str(r["rule_id"])
-        label, sev = _RULE_META.get(rid, (rid, "info"))
+        label, sev = _rule_label_sev(rid)
         g = grouped.setdefault(
             rid,
             {"rule_id": rid, "label": label, "severity": sev, "count": 0, "symbols": []},
@@ -534,7 +540,7 @@ def _alert_review_week(conn: sqlite3.Connection, *, now: datetime) -> list[dict[
     out: list[dict[str, Any]] = []
     for r in rows:
         rid = str(r["rule_id"])
-        label, sev = _RULE_META.get(rid, (rid, "info"))
+        label, sev = _rule_label_sev(rid)
         out.append({"rule_id": rid, "label": label, "severity": sev, "count": int(r["n"])})
     return out
 

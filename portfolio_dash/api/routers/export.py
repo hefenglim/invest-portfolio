@@ -190,7 +190,7 @@ def export_symbol_detail(
     now: datetime = Depends(get_now),
 ) -> Response:
     # Symbol drawer 配息史 from the dividend ledger. Unknown symbol -> 400.
-    art = build_symbol_detail_csv(conn, symbol=body.symbol)
+    art = build_symbol_detail_csv(conn, symbol=body.symbol, today=now.date())
     if art is None:
         return JSONResponse(
             status_code=400,

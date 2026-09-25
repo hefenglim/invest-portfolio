@@ -38,6 +38,7 @@ from portfolio_dash.shared.cash_kinds import movement_sign
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
+from portfolio_dash.shared.models.ledger import counts_by
 
 _ZERO = Decimal("0")
 
@@ -119,7 +120,7 @@ def cash_balances(
 
     def add(account_id: str, ccy: Currency, on: date, delta: Decimal) -> None:
         key = (account_id, ccy)
-        bal[key] = bal.get(key, _ZERO) + (delta if as_of is None or on <= as_of else _ZERO)
+        bal[key] = bal.get(key, _ZERO) + (delta if as_of is None or counts_by(on, as_of) else _ZERO)
 
     for m in movements:
         add(m.account_id, m.ccy, m.date, _movement_sign(m.kind) * m.amount)

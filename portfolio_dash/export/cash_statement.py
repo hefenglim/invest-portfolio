@@ -43,15 +43,21 @@ from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.ledger import counts_by
+from portfolio_dash.shared.models.ledger import counts_by, pending_from
 from portfolio_dash.shared.wire import decimal_str
 
 _ZERO = Decimal("0")
 _MINUS = "−"  # U+2212 minus sign (matches web/format.js signed())
 
+# ``counts_from`` (DEF-056 R5, appended LAST so every earlier column keeps its index): the
+# day a row dated after ``as_of`` starts to count — empty for a row that already counts. Its
+# ``balance`` is then a projection past the footer's ``as_of``, exactly what the screen's
+# 「未來日期」 badge and the printed report's cut line say. This CSV is a reconciliation
+# export, not an import format, so the extra column breaks no round trip (the four ledger
+# CSVs, which ARE re-importable, stay unflagged for that reason — DEF-026).
 _CSV_COLUMNS = [
     "date", "ccy", "kind", "symbol", "name", "qty", "price", "fee", "tax",
-    "note_ref", "delta", "balance",
+    "note_ref", "delta", "balance", "counts_from",
 ]
 
 # Statement kind -> zh label (mirrors web/cash.js KIND_LABEL; the report is display-only).
@@ -100,16 +106,19 @@ def build_cash_statement_csv(
         return None
     movements, fx, txs, divs, instruments = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy)
+    today = now.date()
     rows: list[list[str]] = []
     for pool_ccy, stmt in statements:
         for ln, bal in stmt:
+            pending = pending_from(ln.date, today)
             rows.append([
                 ln.date.isoformat(), pool_ccy.value, ln.kind,
                 ln.symbol or "", ln.name or "",
                 _d(ln.qty), _d(ln.price), _d(ln.fee), _d(ln.tax),
                 ln.ref, decimal_str(ln.delta), decimal_str(bal),
+                pending.isoformat() if pending is not None else "",
             ])
-    as_of = now.date().isoformat()
+    as_of = today.isoformat()
     scope = ccy.value if ccy is not None else "all"
     footer = [f"account={account}, ccy={scope}, as_of={as_of}, generated={now.isoformat()}"]
     return csv_artifact(
@@ -212,10 +221,12 @@ def _pool_section(
     row exists — and a number the 資金 page had stopped showing.
 
     Future rows are still printed. The web statement lists every row, bounds the balance to
-    today and flags the rows past it; a static page says the same thing its own way: one cut
-    row drawn between the last row that has happened and the first that has not, 「（未來）」
-    on each row past it (a table may break across pages, and the cut stays on the first),
-    and the title counting what the balance leaves out. Hiding the rows would make the
+    today and flags the rows past it (``web/cash.js::renderStatement`` — this sentence was
+    true of the API only until DEF-056 R5: the page never read ``future``); a static page
+    says the same thing its own way: one cut row drawn between the last row that has
+    happened and the first that has not, 「（未來）」 on each row past it (a table may break
+    across pages, and the cut stays on the first), and the title counting what the balance
+    leaves out. Hiding the rows would make the
     printed ledger look like it lost them; folding them in would print a figure no other
     surface shows. With no future row the section is byte-identical to what it was.
     """

@@ -22,7 +22,11 @@ from portfolio_dash.api.instrument_service import (
     quick_register,
     restore_archived,
 )
-from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
+from portfolio_dash.data_ingestion.holdings import (
+    current_shares,
+    holds_position,
+    load_action_index,
+)
 from portfolio_dash.data_ingestion.store import (
     delete_instrument,
     get_instrument,
@@ -56,6 +60,19 @@ router = APIRouter()
 
 def _held(conn: sqlite3.Connection, account_ids: list[str], symbol: str) -> bool:
     return any(current_shares(conn, aid, symbol) > 0 for aid in account_ids)
+
+
+def _archive_blocked(conn: sqlite3.Connection, symbol: str, now: datetime) -> bool:
+    """The archive / remove guard: the symbol holds a position today or on a later ledger
+    date (``holds_position`` — DEF-064).
+
+    Not :func:`_held`, which stays the watchlist's 「持有」 display flag: its ``> 0`` over the
+    all-dates net let a declared short (−500) and a position closed only by a FUTURE-dated
+    sale be archived — both still priced positions, which then fell out of every fetch
+    universe (quotes included). The write side re-activates with the same predicate
+    (``store._reactivate_if_held``), so 「持有 ⇒ 未封存」 is one rule, not two.
+    """
+    return holds_position(conn, symbol, today=now.date())
 
 
 def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
@@ -653,8 +670,7 @@ def archive(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    if body.archived and _held(conn, account_ids, symbol):
+    if body.archived and _archive_blocked(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, body.archived)
@@ -669,6 +685,7 @@ def archive(
 def remove(
     symbol: str,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """SOFT-delete (archive) any non-held symbol — accumulative watchlist (FU-D18).
 
@@ -682,8 +699,7 @@ def remove(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    if _held(conn, account_ids, symbol):
+    if _archive_blocked(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, True)

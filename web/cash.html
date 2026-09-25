@@ -98,6 +98,12 @@
     background: var(--amber-soft); border: 1px solid rgba(217, 161, 63, 0.35);
   }
   .stmt-chip { font-size: 10px; padding: 0 8px; line-height: 17px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-ui); color: var(--text-2); }
+  /* DEF-056 R5: rows dated after the server's today — the printed report's cut line, and a
+     running balance that is a projection, not 目前餘額. */
+  .stmt-cut td { white-space: normal; font-size: 11px; color: var(--amber); background: var(--amber-soft); padding: 4px 10px; }
+  .stmt-future-last td { border-bottom: 1px dashed var(--amber); }
+  .stmt-projected { font-style: italic; color: var(--text-3); }
+  .stmt-proj-tag { margin-left: 4px; font-size: 10px; font-style: normal; color: var(--amber); }
   @media (max-width: 1100px) { .cash-cards { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>

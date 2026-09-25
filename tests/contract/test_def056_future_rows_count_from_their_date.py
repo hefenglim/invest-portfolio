@@ -20,6 +20,7 @@ Pinned here BEHAVIOURALLY, through the API (never by reading source):
 
 from __future__ import annotations
 
+import csv
 import io
 import sqlite3
 import zipfile
@@ -324,3 +325,45 @@ def test_the_ledger_rows_carry_counts_from_while_and_only_while_they_are_ahead(
     # On its own date it counts, so the flag is gone everywhere — the SERVER's clock decides.
     today = _flags(dashboard_client_factory(_all_future, now=_ON_THE_DAY))
     assert all(cf is None for rows in today.values() for _d, cf in rows), today
+
+
+def test_the_cash_statement_and_its_csv_carry_the_same_flag_as_the_lists(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """DEF-056 R5 (verifier bounce): the 現金收支明細 statement said ``future: true`` on the wire
+    but carried no ``counts_from`` and no count, so the page (which never read ``future``) had
+    nothing to badge, and its CSV had no column at all. Every row of every scope — one pool and
+    the account's all-currency view — now carries the lists' own flag, ``future_count`` counts
+    them over the whole scope, 目前餘額 stays today's pool balance, and the CSV's last column
+    says the same; on the row's own date every flag is gone (the SERVER's clock decides)."""
+    f = _FUTURE.isoformat()
+    scopes: tuple[tuple[str, str | None], ...] = (
+        ("schwab", None), ("schwab", "USD"), ("schwab", "TWD"), ("tw_broker", "TWD"))
+    for now, ahead in ((None, True), (_ON_THE_DAY, False)):
+        client = (dashboard_client_factory(_all_future) if now is None
+                  else dashboard_client_factory(_all_future, now=now))
+        pools = {(b["account_id"], b["ccy"]): b["amount"]
+                 for b in client.get("/api/cash").json()["balances"]}
+        for account, ccy in scopes:
+            params: dict[str, Any] = {"account": account, "limit": 500}
+            if ccy is not None:
+                params["ccy"] = ccy
+            body = client.get("/api/cash/statement", params=params).json()
+            dated = [r for r in body["rows"] if r["date"] == f]
+            assert dated, (account, ccy, "the seed needs a row on the future date here")
+            for r in body["rows"]:
+                want = f if (ahead and r["date"] == f) else None
+                assert (r["counts_from"], r["future"]) == (want, want is not None), (
+                    account, ccy, now, r)
+            assert body["future_count"] == (len(dated) if ahead else 0), (account, ccy, now)
+            if ccy is not None:
+                assert body["current_balance"] == pools[(account, ccy)], (account, ccy, now)
+            csv_body = {"account": account} | ({"ccy": ccy} if ccy is not None else {})
+            r = client.post("/api/export/cash-statement", json=csv_body)
+            assert r.status_code == 200, r.text
+            table = [row for row in csv.reader(io.StringIO(r.content.decode("utf-8-sig")))
+                     if row and not row[0].startswith("#")]
+            assert table[0][-1] == "counts_from"
+            for row in table[1:]:
+                want = f if (ahead and row[0] == f) else ""
+                assert row[-1] == want, (account, ccy, now, row)
