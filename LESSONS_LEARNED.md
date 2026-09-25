@@ -1819,3 +1819,39 @@ name-only allowlist cannot enumerate period-suffixed indicators.
   fields chosen by the author of the fix. (4) A "nothing overflows" guard must also measure
   clipped content (`scrollWidth > clientWidth` on elements that hide overflow), or truncation
   passes as tidy.
+
+## 2026-09-25 — Functional-test manual R4 → R5
+
+**What happened.** The verifier bounced DEF-056 a second time for a surface, not a rule: the
+valuation cut was right everywhere, the API flagged the row, the printed report drew the line —
+and the on-screen 現金收支明細 printed the future row under a header whose 目前餘額 excluded it.
+R4's guard listed the seven tables it knew about. Separately, the verifier's e2e runs went red
+2 of 3 times on a single console line, `500 GET /api/ui-prefs`, which I had reported as 288/288
+green because my one run happened not to hit it.
+
+**Root causes.** (1) A guard that enumerates known surfaces cannot notice an unknown one — the
+same shape as R2's hand-written file list for the account-name scanner. (2) A read path that
+seeds: `config_store.ensure_seeded` checked "seeded?" with a plain SELECT and then INSERTed, so
+two first reads collided on `settings_meta`; and 22 of 81 GET routes wrote on their first call
+(15 on every call), none of which any test could see because TestClient sends one request at a
+time and the hermetic fixture never runs the real boot.
+
+**Rules.**
+1. **Guard the class by sweeping the output, not by listing the inputs.** For "every future row
+   is badged": seed one of every kind, open every view that lists rows, fail on any row that
+   prints the date without the badge. A new table is covered the day it ships.
+2. **A GET never writes.** Every table a read touches is created at boot; seed-once is decided
+   under the write lock. Prove it by booting the real lifespan and tracing every GET's SQL with
+   the write lock held elsewhere — `CREATE TABLE IF NOT EXISTS` on an existing table is a
+   prepare-time no-op and survives that; anything else does not.
+3. **One green e2e run is not a gate verdict for a flaky class.** When a failure is timing-shaped
+   (a console 500, a race), reproduce it deterministically off-browser (interleave the two
+   threads at the window) before claiming the cause, and report the full suite run several times.
+4. **My own earlier fix can be the class.** The every-call write on `/api/dashboard` was the R3
+   DEF-033 version backfill I added; the scan by entry point found it, a grep for the verifier's
+   named line would not have.
+5. **Stopping a background task does not stop what it spawned.** Stopping the old-code e2e loop
+   left its pytest, uvicorn and headless Chromium alive and still iterating; together with the
+   first gate run they exhausted the 8 GB machine and the gate run was reaped. After any
+   background test loop, list python / chromium processes and kill the whole tree; run the heavy
+   gates one at a time in the foreground, in batches that finish inside one call.

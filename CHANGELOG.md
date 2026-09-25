@@ -9,6 +9,83 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R4 → R5 — 1 re-verification failure + 4 new items, all L (2026-09-25).**
+The verifier's R4 pass on `1ee7771` closed 13 of 14, bounced DEF-056 (the cash page's on-screen
+現金收支明細 did not flag future rows while its header's 目前餘額 left them out), and opened
+DEF-062 … 065 with the owner's rulings of 2026-09-25 on the eight R4 decision items and a spec
+file (`docs/audit/2026-09-25-r4-dev-specs.md`). All five are fixed under the manual's §4 contract.
+
+*The bounce*
+
+- **Every surface that lists a future ledger row badges it (DEF-056, re-verification).** The
+  statement API already sent `future: true`; `web/cash.js` rendered the date alone, and the
+  newest-first order put the future rows directly under a header whose balance they are not
+  part of. The statement now draws the printed report's cut line verbatim, badges each date
+  「未來日期：YYYY-MM-DD 起計入」 and marks each projected balance 投影; its rows carry
+  `counts_from` and the envelope `future_count` (the header adds 「截至 …，不含 N 筆未來日期」, as
+  the printed section title does). The class scan went by SURFACE: the drawer's 配息史 listed a
+  dividend paying next month with no flag (owner ruling ③ covered the 交易明細, not this list),
+  and the two reconciliation CSVs that mirror those tables gain a trailing `counts_from` column.
+  R4's guard was a hand-picked list of seven tables; the new one is a sweep that seeds a future
+  row of every kind and fails on ANY visible row printing that date without the badge. Twelve
+  hand-written copies of the date cut (FX pools, realized FX, cash pool, trend, the future-date
+  warning, the statement) now call `counts_by`, behaviour unchanged.
+
+*New items*
+
+- **A GET never writes (DEF-065).** The verifier's intermittent `500 GET /api/ui-prefs` is
+  `IntegrityError: UNIQUE constraint failed: settings_meta.category`:
+  `config_store.ensure_seeded` decided seed-once with a plain read before its INSERT,
+  `get_ui_prefs` seeded on every GET, `ui_prefs` was never seeded at boot, and `settings.html`
+  fires three of them at once. Seed-once is now decided under the write lock (claim first, then
+  seed); `get_ui_prefs` is read-only. Scanned by entry point — the real lifespan on a fresh
+  database, every GET route called twice with every SQL statement traced — 22 of 81 GET routes
+  wrote or created a table on their first call and 15 took the write lock on EVERY call
+  (`/api/dashboard` among them, through the R3 strategy-prompt version backfill). Every table a
+  read touches is now created at boot (ui_prefs, whatsnew, dividend-inbox skips, rebate skips,
+  snapshots, action_log, the news DB, the quota threshold), and the two every-call writers read
+  first. After: 0 / 0. A contract test boots a fresh database and calls every GET with other
+  connections holding the write lock on both database files; the rule is recorded in
+  `architecture.md`.
+- **One name per alert rule (DEF-062).** The 新增洞察任務 wizard showed 8 of its 15 監聽規則
+  as raw ids — it kept a 7-entry table of its own, the settings page a second, `ops/notify.py`
+  a third, with different wording. `shared/alert_rule_names.py` is now the only one; the rules
+  API carries `name` and every renderer reads it (wizard, settings, push text, digest, card
+  chips, the R7 gate message, the alert-scan run detail). An unknown id reads 「未命名規則」,
+  never the id; `calibration_regression`, which had no name anywhere, is 「AI 成績轉差」.
+- **Fetch universes skip archived symbols; a held symbol is never archived (DEF-064, ruling ⑦).**
+  `pricing/ingest.py`'s `tw_universe` / `all_universe` read the whole `instruments` table, so the
+  five chips / valuation / fundamentals / consensus jobs spent provider quota on archived names.
+  One predicate now (`shared/instrument_scope.py`), read by all seven universes — quotes, the
+  DEF-059 insight universe, signals, news and alerts included — so there is no fourth copy.
+  Verifying the ruling's premise 「持有 ⇒ 未封存」 showed it did not hold: a declared short and a
+  position closed only by a FUTURE-dated sale could be archived (the guard read `> 0` over the
+  all-dates net), and deleting the sell of an archived symbol put 1,000 shares back on a name no
+  universe fetched. `holdings.holds_position` (held today or on any later ledger date) is now
+  both the archive guard and the test every share-moving write (`store._reactivate_if_held`)
+  re-activates on.
+- **Orphan SPINOFF seed cleanup (DEF-063, ruling ④).** `scripts/clean_orphan_seed_prices.py`:
+  dry run by default; `--apply --reason` backs up, deletes row by row with a `ledger_audit`
+  before-image and one `action_log` summary; `--backfill` re-fetches the affected history. Who
+  owns a seed is decided ONCE — `StoredCorporateAction.owned_seed_slot()`, moved out of the
+  ledgers router — so the script and the delete / undo / re-date doors cannot disagree.
+- **Gate stability, found while running the e2e suite three times for DEF-065.** `web/input.js`
+  reset the input tab to 手動交易 once `/api/input/context` arrived, taking back a tab picked
+  while the page loaded (one R4 e2e flow failed on it in a pre-run). The owner's pick now wins.
+- **Data (demo).** After a backup, the DEF-063 script's dry run and `--apply` on demo both found
+  0 orphan seed rows (every one of the 35,201 price rows is `yfinance`; no SPINOFF row) —
+  nothing was deleted and the script, by design, took no snapshot and wrote no log row.
+
+*Gates*
+
+- `ruff check portfolio_dash tests scripts` clean; `mypy --strict` 925 files, 0 issues (fresh cache).
+- pytest (e2e excluded, four foreground segments): 6,310 collected, 6,308 passed, 2 skipped, 0 failed.
+- e2e: the full suite (84 files, 295 tests) run THREE times on the final code, as DEF-065 asks —
+  295 / 295 each time; the uvicorn logs kept by `PD_E2E_NETLOG` show 0 server-side 5xx and 0
+  tracebacks in all three (≈ 640 `GET /api/ui-prefs` per run, every one 200). Two pre-runs on the
+  code before the `input.js` fix: 293 / 293, and one failure that exposed the tab race above.
+- stress-audit phase 1: ops = 128, pass = 6,025, fail = 0 (same as R4).
+
 **Functional-test manual R3 → R4 — 1 re-verification failure + 13 new items, 2 M / 12 L (2026-09-25).**
 The verifier's R3 pass on `4655845` closed 18 of 19, bounced DEF-040 (a SPINOFF seed written over an
 existing provider quote was lost for good on delete, while the API answered `restored`), and opened
