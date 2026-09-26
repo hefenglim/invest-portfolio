@@ -101,7 +101,8 @@ def test_run_generates_active_and_shadow(
 
     insight_service.run_for_id(conn, tid, now=NOW)
 
-    cards = istore.list_cards(conn, insight_type_id=tid)
+    # include_shadow: the list reads hide the shadow lane by default (R6 DEF-069).
+    cards = istore.list_cards(conn, insight_type_id=tid, include_shadow=True)
     active_cards = [c for c in cards if not c.is_shadow]
     shadow_cards = [c for c in cards if c.is_shadow]
     assert len(active_cards) == 1
@@ -148,7 +149,7 @@ def test_no_shadow_when_active_is_latest(
     cs.set_active_calibration(conn, it.id, 1)  # active == latest → no shadow
 
     insight_service.run_for_id(conn, it.id, now=NOW)
-    cards = istore.list_cards(conn, insight_type_id=it.id)
+    cards = istore.list_cards(conn, insight_type_id=it.id, include_shadow=True)
     assert all(not c.is_shadow for c in cards)  # no shadow card
 
 
@@ -166,7 +167,7 @@ def test_on_alert_no_shadow_when_disabled(
     cs.set_active_calibration(conn, it.id, 1)
     # shadow_on_alert defaults to False → an on_alert run produces no shadow.
     insight_service.run_for_id(conn, it.id, now=NOW, fired_rule="fx_drift", fired_symbol=None)
-    cards = istore.list_cards(conn, insight_type_id=it.id)
+    cards = istore.list_cards(conn, insight_type_id=it.id, include_shadow=True)
     assert all(not c.is_shadow for c in cards)
 
 
@@ -194,7 +195,7 @@ def test_promote_step_auto_switches_active(conn: sqlite3.Connection) -> None:
 
     promoted = insight_service.promote_and_check(conn, now=NOW)
 
-    assert tid in promoted
+    assert [(p.insight_type_id, p.version, p.switched) for p in promoted] == [(tid, 2, True)]
     it = cs.get_insight_type(conn, tid)
     assert it is not None
     assert it.active_calibration_version == 2  # auto-promoted to the shadow

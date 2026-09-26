@@ -56,11 +56,6 @@ _NO_CALLER_ALLOWED: dict[tuple[str, str], str] = {
     ("GET", "/api/calibrations/{calibration_id}/samples"):
         "spec 4.7 miss-evaluation samples behind a calibration version; the pipeline drawer "
         "shows the version chain, not the samples",
-    ("PUT", "/api/insight-types/{insight_type_id}/active-calibration"):
-        "spec 4.7 explicit re-pin of the active calibration; the drawer only archives versions "
-        "(POST /api/calibrations/{id}/archive) and the newest live one is active by default",
-    ("PUT", "/api/insight-tasks/{insight_type_id}/active-calibration"):
-        "twin of the insight-types route above",
     ("DELETE", "/api/insight-types/{insight_type_id}/schedule"):
         "schedule removal; the drawer's 排程設定 modal only sets a cron (POST .../schedule) and "
         "disables a task through PUT enabled=false instead",

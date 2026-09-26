@@ -3,11 +3,15 @@
 Loop 4 (自升級) semantics:
 - **Shadow detection** — when the user's manually-selected active calibration version is NOT
   the latest non-archived version, the latest automatically becomes the SHADOW. With no
-  manual selection (active None), a shadow only exists once ≥2 versions exist (the latest is
-  the candidate; the implicit active is the prior).
-- **Promotion** — a shadow that has accumulated ≥ ``shadow_batches`` evaluations AND is NOT
-  WORSE than the active wins (spec 4.6). "Not worse" = shadow miss-rate ≤ active miss-rate
-  AND shadow avg narrative ≥ active avg narrative.
+  manual selection (active None) the shown cards carry NO calibration layer, and a shadow
+  only exists once ≥2 versions exist (the latest is the candidate); a lone v1 is adopted by
+  hand (the drawer's 「設為生效」, R6 DEF-071).
+- **Promotion** — a shadow VERSION that has accumulated ≥ ``shadow_batches`` scored
+  evaluations of its OWN AND is NOT WORSE than the active version's own record wins (spec
+  4.6). "Not worse" = shadow miss-rate ≤ active miss-rate AND shadow avg narrative ≥ active
+  avg narrative. Both records are per version (R6 DEF-070).
+- **Shadow period** — :func:`shadow_phase`: ``max_shadows`` caps the TASKS concurrently in
+  their period (owner ruling ⑧ = A), never the shadow cards ever stored.
 - **Regression** — the active version's recent rolling score worsening (n≥8) → an info alert
   (``calibration_regression``).
 
@@ -20,6 +24,16 @@ from decimal import Decimal
 from typing import Any, Literal
 
 PromotionVerdict = Literal["promote", "hold"]
+
+# Where a task's shadow version stands (R6 DEF-070, owner ruling ⑧ = A: ``max_shadows`` caps
+# the TASKS concurrently in their shadow period, not the shadow cards ever stored):
+#   none     — no shadow version (active is the latest, or ≤1 version with none active)
+#   waiting  — has a shadow version, not started yet, a slot is free → starts next batch
+#   queued   — has a shadow version, not started yet, every slot is taken → 排隊
+#   running  — started (≥1 shadow card of THIS version) and not yet decided → holds a slot
+#   won/lost — the version has ``shadow_batches`` scored evaluations: decided. Either way the
+#              period is over and the slot is free; a win waits for 設為生效 (or auto-promote).
+ShadowPhase = Literal["none", "waiting", "queued", "running", "won", "lost"]
 
 # A regression fires only when BOTH the recent and the baseline window have at least this
 # many samples (so a meaningful rolling comparison exists — the active version needs ≥8 total
@@ -77,6 +91,32 @@ def decide_promotion(
     if shadow_n < int(cfg.get("shadow_batches", 0)):
         return "hold"
     return "promote" if _not_worse(active_score, shadow_score) else "hold"
+
+
+def shadow_phase(
+    *,
+    shadow_version: int | None,
+    started: bool,
+    shadow_n: int,
+    shadow_batches: int,
+    verdict: PromotionVerdict,
+    slots_used: int,
+    max_shadows: int,
+) -> ShadowPhase:
+    """Where one task's shadow version stands (see :data:`ShadowPhase`). Pure.
+
+    ``shadow_n`` is the SHADOW VERSION's own scored evaluations (never the task's pooled
+    shadow history); ``slots_used`` counts the OTHER tasks currently ``running``. The period
+    is decided once ``shadow_n`` reaches ``shadow_batches`` (at least one), so a version that
+    lost stops costing shadow calls and frees its slot instead of holding it forever.
+    """
+    if shadow_version is None:
+        return "none"
+    if shadow_n >= max(shadow_batches, 1):
+        return "won" if verdict == "promote" else "lost"
+    if started:
+        return "running"
+    return "waiting" if slots_used < max_shadows else "queued"
 
 
 def is_regressing(

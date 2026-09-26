@@ -182,8 +182,8 @@ def test_the_alert_scan_run_detail_names_every_rule(
     monkeypatch.setattr(jobs, "_compute_alerts_for_scan", lambda c, *, now: alerts)
     jobs.register_insight_runner(_runner)
     jobs.register_alert_held_fn(lambda c, *, now: {"2330"})
-    detail = jobs.alert_scan(conn, now=NOW)
-    assert "[波動突升、高點回撤、匯率漂移]" in detail, detail              # the fired rules
+    detail = jobs.alert_scan(conn, now=NOW).detail  # DEF-067: a JobOutcome
+    assert "（波動突升、高點回撤、匯率漂移）" in detail, detail  # the fired rules (DEF-073: zh)
     assert "略過 1 條非個股預警（不產個股卡）：匯率漂移 帳戶" in detail, detail  # the skipped one
     assert "略過 1 條觀察標的預警（未持有，不產卡）：高點回撤 1234" in detail, detail
     assert not _leaks(detail), f"排程中心 run detail shows rule ids: {detail}"

@@ -81,7 +81,7 @@ def _scan(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(jobs, "_compute_alerts_for_scan", lambda c, *, now: alerts)
     rec = _Recorder()
     jobs.register_insight_runner(rec)
-    return rec, jobs.alert_scan(conn, now=NOW)
+    return rec, jobs.alert_scan(conn, now=NOW).detail  # DEF-067: a JobOutcome
 
 
 def test_a_watchlist_symbol_alert_produces_no_card_and_the_run_says_so(

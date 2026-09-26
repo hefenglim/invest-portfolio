@@ -53,7 +53,10 @@
     edit_universe: { label: '編輯標的', run: function (t) { window.ppUniverseModal(t); } },
     enable_template: { label: '啟用模板', run: function () { go('settings.html#prompts/templates'); } },
     edit_templates: { label: '增減模板', run: function (t) { openDrawer(t, 'assemble'); } },
-    set_active_calibration: { label: '前往校正版本鏈', run: function (t) { openDrawer(t, 'calib'); } },
+    /* DEF-071: lands ON the recommended 「設為生效」 (the winning shadow, else the shadow, else
+       the latest) — it used to open a chain with nothing to press. */
+    set_active_calibration: { label: '前往設為生效',
+      run: function (t) { openDrawer(t, 'calib', { focusAdopt: true }); } },
     fund_quota: { label: '前往額度設定', run: function () { go('settings.html#llm'); } },
     activate_role: { label: '前往 AI 大師設定', run: function () { go('settings.html#llm'); } }
   };
@@ -67,7 +70,7 @@
     R3_no_live_templates: '模板全部停用 — 組裝段為空',
     R4_missing_price: '缺價 — 該檔產確定性「資料異常」卡',
     R5_var_unavailable: '外部變數暫時無法取得',
-    R6_quota: 'LLM 額度耗盡',
+    R6_quota: 'AI 額度耗盡',
     R7_rule_not_matched: '預警規則未命中 / 防抖期內',
     master_missing: '未設定 AI 大師模型 — 校正暫停',
     unknown_insight_type: '未知的洞察任務',
@@ -76,10 +79,10 @@
        them were mapped — the fallback below prints the raw code, so the owner saw
        'budget_exhausted_mid_run' on screen. tests/contract/test_skip_reason_coverage.py
        now fails if the backend gains a code that is missing here. */
-    budget_exhausted_mid_run: 'LLM 額度用罄 — 已產出的卡片保留，其餘中止',
-    llm_unavailable_mid_run: 'LLM 供應商異常或回覆無法解析 — 已產出的卡片保留',
+    budget_exhausted_mid_run: 'AI 額度用罄 — 已產出的卡片保留，其餘中止',
+    llm_unavailable_mid_run: 'AI 供應商異常或回覆無法解析 — 已產出的卡片保留',
     ai_not_activated_mid_run: 'AI 未啟用（該角色沒有可用模型）— 已產出的卡片保留',
-    llm_error_mid_run: 'LLM 呼叫失敗 — 已產出的卡片保留，其餘中止'
+    llm_error_mid_run: 'AI 呼叫失敗 — 已產出的卡片保留，其餘中止'
   };
   window.ppSkipReason = function (code) { return SKIP_REASONS[code] || code || '未知原因'; };
 
@@ -439,7 +442,7 @@
        true both before the first answer and after a failed one. The fetch LATENCY itself is
        a separate, backlogged issue and is deliberately untouched here. */
     if (!STATE.loaded) {
-      ['AI 大師模型', 'LLM 額度', '最近批次', '任務狀態'].forEach(function (label) {
+      ['AI 大師模型', 'AI 額度', '最近批次', '任務狀態'].forEach(function (label) {
         wrap.appendChild(card(label, '—', '狀態未取得', 'idle'));
       });
       return;
@@ -450,7 +453,7 @@
     /* quota — Decimal STRING via f.num (never bare .toFixed). */
     var quota = h.quota_remaining;
     var quotaLow = quota != null && Number(quota) < 1;  /* presentation flag only */
-    wrap.appendChild(card('LLM 額度', '$' + f.num(quota, 2),
+    wrap.appendChild(card('AI 額度', '$' + f.num(quota, 2),
       quotaLow ? '低於 $1.00 預警門檻' : '額度充足', quotaLow ? 'warn' : 'ok'));
     /* last batch */
     var lb = h.last_batch;
@@ -574,7 +577,7 @@
       }
       var pf = el('button', 'btn btn-sm', '乾跑預檢');
       pf.type = 'button';
-      pf.title = '不呼叫 LLM：跑完整守門檢查（R1–R8）＋組裝提示詞預覽＋成本估算';
+      pf.title = '不呼叫 AI：跑完整守門檢查（R1–R8）＋組裝提示詞預覽＋成本估算';
       pf.addEventListener('click', function (e) { e.stopPropagation(); window.ppPreflight(t); });
       head.appendChild(pf);
 
@@ -606,7 +609,7 @@
     return r;
   }
 
-  function openDrawer(t, focusKey) {
+  function openDrawer(t, focusKey, opts) {
     document.querySelectorAll('.pp-drawer-backdrop, .pp-drawer').forEach(function (n) { n.remove(); });
     var back = el('div', 'pp-drawer-backdrop');
     var dr = el('aside', 'pp-drawer');
@@ -738,7 +741,7 @@
     var calBox = el('div', 'pp-d-card');
     calBox.appendChild(el('div', null, '載入校正版本…'));
     sCal.appendChild(calBox);
-    loadCalibrations(t, sCal, calBox);
+    loadCalibrations(t, sCal, calBox, opts);
 
     /* -- 運行記錄（async: GET /api/insight-tasks/{id}/runs）-- */
     var sRun = sec('runs', '⑤ 運行記錄 — 本任務');
@@ -763,10 +766,44 @@
   }
   window.ppOpenDrawer = openDrawer;
 
-  /* 校正版本鏈 — rendered from GET /api/calibrations?insight_type={id}. The status payload
-     (build_status) does NOT carry active_calibration_version / self_correct, so we read the
-     FULL insight-type row (GET /api/insight-tasks) in parallel to flag the active version. */
-  function loadCalibrations(t, sCal, placeholder) {
+  /* 校正版本鏈 — rendered from GET /api/calibrations?insight_type={id}. Each version carries
+     is_active + shadow (the shadow version's phase / scored of needed / queue position / both
+     versions' own records — R6 DEF-070/071); the FULL insight-type row (GET
+     /api/insight-tasks) is still read in parallel for self_correct.
+     R6 DEF-071: every live non-active version has 「設為生效」 and the active one 「取消生效」
+     (PUT /api/insight-tasks/{id}/active-calibration, confirmDialog first — later cards use the
+     version, cards already produced keep theirs). Before this the chain offered only 「封存」,
+     so a lone v1 — and a winning shadow while auto_promote is off, the default — could never
+     be adopted from the page. opts.focusAdopt (G7's fix) lands on the recommended button. */
+  var SHADOW_PILL = {
+    running: function (s) { return ['pill pill-warn', '影子評估中 ' + s.scored + '／' + s.needed]; },
+    waiting: function () { return ['pill pill-warn', '影子：下一批開始評估']; },
+    queued: function (s) {
+      return ['pill pill-off', '影子排隊中（目前 ' + s.slots_used + '／上限 ' + s.max_shadows + '）'];
+    },
+    won: function () { return ['pill pill-ok', '影子勝出・可設為生效']; },
+    lost: function () { return ['pill pill-off', '影子未勝出']; }
+  };
+
+  function shadowStats(v) {
+    var s = v.shadow;
+    var act = s.active_version == null ? '生效中（未附加校正）' : '生效中 v' + s.active_version;
+    return '本版評分 ' + s.shadow_record.n + ' 筆・失誤 ' + s.shadow_record.miss_count
+      + ' 筆｜' + act + ' 評分 ' + s.active_record.n + ' 筆・失誤 '
+      + s.active_record.miss_count + ' 筆（需 ' + s.needed + ' 筆才判定）';
+  }
+
+  function putActive(t, version, okTitle) {
+    return pdApi.put('/api/insight-tasks/' + t.id + '/active-calibration', { version: version })
+      .then(function () {
+        window.toast(okTitle, 'ok', version == null ? '之後的卡片不附加校正層' : 'v' + version);
+        openDrawer(t, 'calib');
+      }).catch(function (err) {
+        window.toast((err && err.message) || '設定失敗', 'fail', err && err.code);
+      });
+  }
+
+  function loadCalibrations(t, sCal, placeholder, opts) {
     if (!pdApi) { placeholder.replaceChildren(el('div', null, '校正版本不可用。')); return; }
     Promise.all([
       pdApi.get('/api/calibrations', { insight_type: t.id }),
@@ -774,7 +811,6 @@
     ]).then(function (res) {
       var vers = res[0];
       var full = (Array.isArray(res[1]) ? res[1] : []).find(function (x) { return x.id === t.id; });
-      var activeVer = full ? full.active_calibration_version : null;
       var selfCorrect = full ? full.self_correct : !!t.self_correct;
       sCal.querySelectorAll('.pp-d-card, .pp-vers, .wz-note').forEach(function (n) { n.remove(); });
       var list = Array.isArray(vers) ? vers : [];
@@ -786,18 +822,56 @@
         sCal.appendChild(c);
         return;
       }
+      var hasActive = list.some(function (v) { return v.is_active; });
+      if (!selfCorrect) {
+        sCal.appendChild(el('div', 'wz-note',
+          '此任務未開啟自我校正 — 生效版不會附加到提示詞，開啟後才生效。'));
+      } else if (!hasActive) {
+        sCal.appendChild(el('div', 'wz-note',
+          '目前未設生效版 — 卡片不附加校正層；按「設為生效」採用某一版。'));
+      }
       var wrap = el('div', 'pp-vers');
       var latest = list[list.length - 1];
+      var focusBtn = null;
+      var focusRank = 0;   /* won shadow 3 > other shadow 2 > latest 1 */
       list.slice().reverse().forEach(function (v) {
-        var isActive = activeVer === v.version;
-        var row = el('div', 'pp-ver' + (v.archived ? ' archived' : '') + (isActive ? ' is-active' : ''));
+        var sh = v.shadow;
+        var row = el('div', 'pp-ver' + (v.archived ? ' archived' : '')
+          + (v.is_active ? ' is-active' : '') + (sh ? ' is-shadow' : ''));
+        row.dataset.version = String(v.version);
         var top = el('div', 'pp-ver-top');
         top.appendChild(el('span', 'vid', 'v' + v.version));
         top.appendChild(el('span', 'date', f.date(v.created_at)));
-        if (isActive) top.appendChild(el('span', 'pill pill-ok', '生效中'));
+        if (v.is_active) top.appendChild(el('span', 'pill pill-ok', '生效中'));
         else if (v.archived) top.appendChild(el('span', 'pill pill-off', '已封存'));
-        else if (v.version === latest.version) top.appendChild(el('span', 'pill pill-warn', '最新版'));
+        else if (sh && SHADOW_PILL[sh.phase]) {
+          var sp = SHADOW_PILL[sh.phase](sh);
+          top.appendChild(el('span', sp[0] + ' pp-ver-shadow', sp[1]));
+        } else if (v.version === latest.version) top.appendChild(el('span', 'pill pill-warn', '最新版'));
         top.appendChild(el('span', 'spacer'));
+        if (!v.archived && v.is_active) {
+          var bc = el('button', 'btn btn-sm pp-ver-cancel', '取消生效');
+          bc.type = 'button';
+          bc.addEventListener('click', function () { window.confirmDialog({
+            title: '取消生效 v' + v.version + ' — ' + t.name,
+            body: '之後產生的卡片不再附加校正層；已產生的卡片不變。版本保留，可再設為生效。',
+            confirmLabel: '取消生效',
+            onConfirm: function () { putActive(t, null, '已取消生效'); }
+          }); });
+          top.appendChild(bc);
+        } else if (!v.archived) {
+          var bs = el('button', 'btn btn-sm btn-primary pp-ver-adopt', '設為生效');
+          bs.type = 'button';
+          bs.addEventListener('click', function () { window.confirmDialog({
+            title: '設為生效 v' + v.version + ' — ' + t.name,
+            body: '之後產生的卡片改用校正 v' + v.version + '；已產生的卡片不變（保留當時的版本）。',
+            confirmLabel: '設為生效',
+            onConfirm: function () { putActive(t, v.version, '已設為生效'); }
+          }); });
+          top.appendChild(bs);
+          var rank = sh && sh.phase === 'won' ? 3 : sh ? 2 : v.version === latest.version ? 1 : 0;
+          if (rank > focusRank) { focusRank = rank; focusBtn = bs; }
+        }
         if (!v.archived) {
           var ba = el('button', 'btn btn-sm', '封存');
           ba.type = 'button';
@@ -817,6 +891,7 @@
           top.appendChild(ba);
         }
         row.appendChild(top);
+        if (sh) row.appendChild(el('div', 'pp-ver-stats', shadowStats(v)));
         if (v.cause) row.appendChild(el('div', 'pp-ver-cause', '產生原因：' + v.cause));
         var det = document.createElement('details');
         det.appendChild(el('summary', null, '查看校正內文'));
@@ -825,6 +900,11 @@
         wrap.appendChild(row);
       });
       sCal.appendChild(wrap);
+      if (opts && opts.focusAdopt && focusBtn) {
+        focusBtn.classList.add('pp-focus');
+        focusBtn.scrollIntoView({ block: 'center' });
+        focusBtn.focus();
+      }
     }).catch(function () {
       placeholder.replaceChildren(el('div', null, '校正版本載入失敗。'));
     });

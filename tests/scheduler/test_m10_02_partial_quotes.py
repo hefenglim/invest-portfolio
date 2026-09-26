@@ -137,9 +137,13 @@ def test_ok_when_nothing_fails(
 def test_unregistered_held_seam_counts_every_instrument(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:
-    """No held-fn wired → conservative: a lost instrument is partial (never hidden)."""
+    """No held-fn wired → conservative: a lost instrument is partial (never hidden).
+
+    A second, updated instrument keeps this a PARTIAL loss: every instrument lost is
+    ``error`` since the owner ruling of 2026-09-26 (DEF-067 ①)."""
     _add(conn, "WATCH", "US")
-    _fake_refresh(monkeypatch, _Summary(ok={}, failed=["WATCH"]))
+    _add(conn, "OTHER", "US")
+    _fake_refresh(monkeypatch, _Summary(ok={"OTHER": "yfinance"}, failed=["WATCH"]))
     out = refresh_quotes_for(conn, Market.US, now=_NOW)
     assert out.status == "partial"
     assert out.results["held_failed"] == ["WATCH"]
@@ -151,9 +155,10 @@ def test_held_failed_comes_from_the_worklist_not_the_detail_string(
     """A refused close lands in ``failed`` as a zh LINE, not a key; the verdict must still
     see the symbol — it is derived from the worklist minus ``ok``, never parsed."""
     _add(conn, "2330", "TW")
+    _add(conn, "2317", "TW")  # updated — so the loss is partial, not every instrument
     register_held_symbols_fn(lambda c: {"2330"})
     _fake_refresh(monkeypatch, _Summary(
-        ok={"USDTWD": "y"}, failed=["2330：收盤價非正數（0），已拒絕寫入"]))
+        ok={"2317": "twse", "USDTWD": "y"}, failed=["2330：收盤價非正數（0），已拒絕寫入"]))
     out = refresh_quotes_for(conn, Market.TW, now=_NOW)
     assert out.status == "partial" and out.results["held_failed"] == ["2330"]
 

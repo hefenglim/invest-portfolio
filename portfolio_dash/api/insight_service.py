@@ -22,9 +22,10 @@ import json
 import logging
 import math
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -67,6 +68,7 @@ from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.llm_config import (
+    LLMBudgetExceeded,
     LLMError,
     LLMRole,
     budget_remaining,
@@ -399,13 +401,146 @@ def run_for_id(
     return result
 
 
-def _shadow_card_count(conn: sqlite3.Connection, insight_type_id: int) -> int:
-    """Current number of stored shadow cards for an insight_type (the max_shadows cap)."""
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM insights WHERE insight_type_id = ? AND is_shadow = 1",
-        (insight_type_id,),
-    ).fetchone()
-    return int(row["c"]) if row is not None else 0
+# --- Loop 4: the shadow period (spec 04 §4.6; R6 DEF-070, owner ruling ⑧ = A) -------------
+# ``max_shadows`` caps the TASKS concurrently in their shadow period. The old cap counted
+# every shadow CARD a task had ever stored: a per_symbol batch of 9 passed a cap of 2, the
+# next batch produced none, and once a task's first promotion was behind it no later version
+# could ever be shadow-evaluated (old shadow cards never go away). One definition here feeds
+# the run (``_maybe_run_shadow``), the promote pass, the diagnosis (G7) and the calibration
+# chain on the page, so the four can never disagree about whether a task is shadowing.
+
+
+@dataclass(frozen=True)
+class ShadowState:
+    """Where one task's shadow version stands (see :data:`promote.ShadowPhase`).
+
+    ``scored``/``needed`` are the shadow VERSION's own scored evaluations vs
+    ``shadow_batches``; ``slots_used`` counts the OTHER tasks holding a slot (running) and
+    ``max_shadows`` is the cap. ``active_score``/``shadow_score`` are the two versions' own
+    records (``es.version_score``) — the evidence the promotion is decided on.
+    """
+
+    insight_type_id: int
+    version: int | None
+    phase: promote.ShadowPhase
+    scored: int
+    needed: int
+    active_version: int | None
+    slots_used: int
+    max_shadows: int
+    active_score: dict[str, Any] = field(default_factory=dict)
+    shadow_score: dict[str, Any] = field(default_factory=dict)
+
+    def wire(self) -> dict[str, Any]:
+        """The JSON block the calibration chain renders (counts only — nothing to compute)."""
+
+        def rec(score: dict[str, Any]) -> dict[str, int]:
+            return {"n": int(score.get("n", 0)), "miss_count": int(score.get("miss_count", 0))}
+
+        return {
+            "phase": self.phase,
+            "scored": self.scored,
+            "needed": self.needed,
+            "active_version": self.active_version,
+            "slots_used": self.slots_used,
+            "max_shadows": self.max_shadows,
+            "active_record": rec(self.active_score),
+            "shadow_record": rec(self.shadow_score),
+        }
+
+
+_ShadowCore = tuple[
+    int | None, bool, dict[str, Any], dict[str, Any], promote.PromotionVerdict
+]
+
+
+def _shadow_eligible(it: cs.InsightType, cfg: dict[str, Any]) -> bool:
+    """Whether a task can shadow at all: self_correct, live, and not an opted-out on_alert."""
+    if not it.self_correct or it.archived:
+        return False
+    return not (it.scope == "on_alert" and not bool(cfg["shadow_on_alert"]))
+
+
+def _shadow_core(
+    conn: sqlite3.Connection, it: cs.InsightType, cfg: dict[str, Any]
+) -> _ShadowCore:
+    """(shadow version, started, active record, shadow record, verdict) — slot-independent."""
+    if not _shadow_eligible(it, cfg):
+        return None, False, {}, {}, "hold"
+    versions = cs.list_calibrations(conn, it.id)
+    latest = versions[-1].version if versions else None
+    shadow_v = promote.shadow_version(
+        active_version=it.active_calibration_version, latest_version=latest
+    )
+    if shadow_v is None:
+        return None, False, {}, {}, "hold"
+    active_score = es.version_score(conn, it.id, version=it.active_calibration_version)
+    shadow_score = es.version_score(conn, it.id, version=shadow_v)
+    verdict = promote.decide_promotion(active_score, shadow_score, cfg)
+    started = istore.has_shadow_cards(conn, it.id, version=shadow_v)
+    return shadow_v, started, active_score, shadow_score, verdict
+
+
+def shadow_states(conn: sqlite3.Connection) -> dict[int, ShadowState]:
+    """Every live task's :class:`ShadowState`, keyed by task id. Read-only.
+
+    A slot is held by a task whose shadow version has started and is not yet decided, and
+    only while the task is ENABLED — a disabled task cannot run, so letting it hold a slot
+    would block the queue for as long as it stays off.
+    """
+    cfg = cs.get_evolution_config(conn)
+    needed = int(cfg["shadow_batches"])
+    cap = int(cfg["max_shadows"])
+    cores: dict[int, tuple[cs.InsightType, _ShadowCore]] = {}
+    holders: set[int] = set()
+    for it in cs.list_insight_types(conn):
+        core = _shadow_core(conn, it, cfg)
+        cores[it.id] = (it, core)
+        shadow_v, started, _active, shadow_score, _verdict = core
+        if (
+            shadow_v is not None and started and it.enabled
+            and int(shadow_score.get("n", 0)) < max(needed, 1)
+        ):
+            holders.add(it.id)
+    states: dict[int, ShadowState] = {}
+    for tid, (it, core) in cores.items():
+        shadow_v, started, active_score, shadow_score, verdict = core
+        used = len(holders - {tid})
+        shadow_n = int(shadow_score.get("n", 0))
+        states[tid] = ShadowState(
+            insight_type_id=tid,
+            version=shadow_v,
+            phase=promote.shadow_phase(
+                shadow_version=shadow_v, started=started, shadow_n=shadow_n,
+                shadow_batches=needed, verdict=verdict, slots_used=used, max_shadows=cap,
+            ),
+            scored=shadow_n,
+            needed=needed,
+            active_version=it.active_calibration_version,
+            slots_used=used,
+            max_shadows=cap,
+            active_score=active_score,
+            shadow_score=shadow_score,
+        )
+    return states
+
+
+def shadow_state(conn: sqlite3.Connection, it: cs.InsightType) -> ShadowState:
+    """One task's :class:`ShadowState` (``phase="none"`` for an archived task)."""
+    found = shadow_states(conn).get(it.id)
+    if found is not None:
+        return found
+    cfg = cs.get_evolution_config(conn)
+    return ShadowState(
+        insight_type_id=it.id, version=None, phase="none", scored=0,
+        needed=int(cfg["shadow_batches"]), active_version=it.active_calibration_version,
+        slots_used=0, max_shadows=int(cfg["max_shadows"]),
+    )
+
+
+def shadow_queue_text(state: ShadowState) -> str:
+    """「影子排隊中（目前 N／上限 M）」 — the one wording of the queue (G7 + the chain)."""
+    return f"影子排隊中（目前 {state.slots_used}／上限 {state.max_shadows}）"
 
 
 def _maybe_run_shadow(
@@ -415,36 +550,33 @@ def _maybe_run_shadow(
     var_contexts: dict[str | None, V.VarContext],
     base_inputs: RunInputs,
     now: datetime,
-) -> None:
-    """Generate the SHADOW cards alongside the active run when a shadow version exists.
+) -> ShadowState:
+    """Generate the SHADOW cards alongside the active run while the task is in its period.
 
-    No shadow when: the active version is the latest (no shadow); the combo is on_alert and
-    ``shadow_on_alert`` is off; or the max_shadows cap is reached (queued — skip this run).
+    ``running`` (this version already holds its slot) and ``waiting`` (a slot is free — the
+    task enters now) shadow the WHOLE batch: a per_symbol batch of N cards is one slot.
+    ``queued`` produces nothing this batch and is retried on the next one; ``none`` /
+    ``won`` / ``lost`` have nothing left to evaluate. A task that started, was disabled and
+    is re-enabled keeps its version's place (it is ``running``) — a cap lowered mid-period
+    likewise never aborts a version half-way; both only bound who may ENTER.
     """
-    if not it.self_correct:
-        return
-    cfg = cs.get_evolution_config(conn)
-    if it.scope == "on_alert" and not bool(cfg["shadow_on_alert"]):
-        return
-    versions = cs.list_calibrations(conn, it.id)
-    latest = versions[-1].version if versions else None
-    shadow_v = promote.shadow_version(
-        active_version=it.active_calibration_version, latest_version=latest
-    )
-    if shadow_v is None:
-        return
-    if _shadow_card_count(conn, it.id) >= int(str(cfg["max_shadows"])):
-        return  # cap reached → queue (skip this batch)
+    state = shadow_state(conn, it)
+    if state.phase == "queued":
+        logger.info("insight_type %s: %s", it.id, shadow_queue_text(state))
+        return state
+    if state.phase not in ("running", "waiting"):
+        return state
     shadow_inputs = base_inputs.model_copy(
         update={
             "is_shadow": True,
-            "calibration_version_override": shadow_v,
+            "calibration_version_override": state.version,
             "budget_remaining": budget_remaining(conn),
         }
     )
     run_insight_type(
         conn, it.id, var_contexts=var_contexts, inputs=shadow_inputs, now=now,
     )
+    return state
 
 
 # --- Loop 2: evaluate due insights (spec 04.4) --------------------------------
@@ -717,15 +849,19 @@ def _measure_actual(
     )
 
 
+_EvalOutcome = Literal["scored", "deferred", "undetermined"]
+
+
 def _score_one(
     conn: sqlite3.Connection, due: es.DueInsight, *, master_configured: bool, now: datetime,
     actions: ActionIndex, reporting: Currency,
-) -> None:
+) -> _EvalOutcome:
     """Evaluate one due insight: quant → (master narrative) → miss → write the row.
 
     A prediction card with an unavailable actual defers as pending_data (or, past the
     defer cap, becomes undetermined — never a miss). Pure-narrative cards (no prediction)
-    are scored on narrative alone when master is configured, else left pending.
+    are scored on narrative alone when master is configured, else left pending. Returns
+    which of the three happened (DEF-073: the job detail counts them).
     """
     prediction = (
         Prediction.model_validate_json(due.prediction) if due.prediction is not None else None
@@ -738,8 +874,7 @@ def _score_one(
         )
         quant_hit = scoring.score_quant(prediction, actual)
         if quant_hit is None:
-            _defer_or_undetermined(conn, due, now=now)
-            return
+            return _defer_or_undetermined(conn, due, now=now)
 
     narrative_score: int | None = None
     note: str | None = None
@@ -758,8 +893,7 @@ def _score_one(
 
     if prediction is None and narrative_score is None:
         # Pure-narrative card with no master signal → cannot judge yet → defer.
-        _defer_or_undetermined(conn, due, now=now)
-        return
+        return _defer_or_undetermined(conn, due, now=now)
 
     miss = scoring.decide_miss(
         quant_hit=quant_hit, narrative_score=narrative_score,
@@ -776,11 +910,12 @@ def _score_one(
         confidence=due.confidence if prediction is not None else None,
         now=now, notes=note,
     )
+    return "scored"
 
 
 def _defer_or_undetermined(
     conn: sqlite3.Connection, due: es.DueInsight, *, now: datetime
-) -> None:
+) -> _EvalOutcome:
     """Bump the defer counter; past ``defer_limit_days`` → terminal undetermined (never miss).
 
     ``now`` is the evaluate pass's injected clock (L7 fix — no wall-clock reads here).
@@ -793,10 +928,11 @@ def _defer_or_undetermined(
         es.mark_undetermined(
             conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
         )
-    else:
-        es.bump_defer(
-            conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
-        )
+        return "undetermined"
+    es.bump_defer(
+        conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
+    )
+    return "deferred"
 
 
 def _card_text(conn: sqlite3.Connection, due: es.DueInsight) -> str:
@@ -837,10 +973,68 @@ def _actual_value(actual: scoring.ActualMeasurement | None) -> Decimal | None:
     return actual.price_change_pct or actual.symbol_return_pct or actual.vol_change_pct
 
 
+@dataclass(frozen=True)
+class PromotionOutcome:
+    """One shadow version the promote pass found WINNING (spec 4.6).
+
+    ``switched`` — ``auto_promote`` was on and the active version was switched; otherwise the
+    win is only surfaced (the calibration chain marks it; 設為生效 is a click).
+    """
+
+    insight_type_id: int
+    name: str
+    version: int
+    switched: bool
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} v{self.version}"
+
+
+@dataclass
+class EvaluateSummary:
+    """What one Loop-2 pass did. ``str()`` is the zh 排程中心 detail (R6 DEF-073).
+
+    The job used to print 「evaluate pass complete」 whatever happened; the owner could not
+    tell a pass that scored nothing from one that promoted a version.
+    """
+
+    scored: int = 0
+    deferred: int = 0
+    undetermined: int = 0
+    failed: int = 0
+    promotions: list[PromotionOutcome] = field(default_factory=list)
+    promote_failed: bool = False
+
+    @property
+    def processed(self) -> int:
+        """Due insights handled this pass (scored + deferred + undetermined)."""
+        return self.scored + self.deferred + self.undetermined
+
+    def __str__(self) -> str:
+        head = f"評分 {self.scored} 張、延後 {self.deferred} 張"
+        if self.undetermined:
+            head += f"、無法判定 {self.undetermined} 張（超過延後上限）"
+        if self.failed:
+            head += f"、失敗 {self.failed} 張（詳見伺服器日誌）"
+        parts = [head]
+        switched = [p.label for p in self.promotions if p.switched]
+        waiting = [p.label for p in self.promotions if not p.switched]
+        if switched:
+            parts.append("晉升：" + "、".join(switched))
+        if waiting:
+            parts.append("勝出待設為生效：" + "、".join(waiting))
+        if self.promote_failed:
+            parts.append("晉升判定失敗（詳見伺服器日誌）")
+        elif not switched and not waiting:
+            parts.append("晉升：無")
+        return "；".join(parts)
+
+
 def evaluate_due(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
-) -> int:
-    """Score every due insight (Loop 2). Returns the count evaluated/deferred.
+) -> EvaluateSummary:
+    """Score every due insight (Loop 2), then run the promote pass. Returns what happened.
 
     The registered Loop-2 runner. Reads prices to build each actual measurement, feeds it
     into the pure quant scorer, runs master narrative scoring (skipped/degraded when the
@@ -850,28 +1044,36 @@ def evaluate_due(
     scoring (incl. master narrative cost) after the task was deleted. ``reporting`` sets
     the currency the portfolio-scope TWR measurement runs in (AI-D35; the cards are
     narrated against the TWD dashboard, so TWD is the default — the `run_for_id`
-    precedent).
+    precedent). The returned :class:`EvaluateSummary` is what the job prints (DEF-073).
     """
     es.ensure_tables(conn)
     istore.ensure_tables(conn)  # runs the price_at_create migration for legacy DBs (M4)
     master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
-    processed = 0
+    summary = EvaluateSummary()
     # ONE index for the whole pass (trap #21) — the loop is per due insight.
     actions = load_action_index(conn)
     for due in es.due_insights(conn, now=now, exclude_type_ids=cs.archived_type_ids(conn)):
         try:
-            _score_one(conn, due, master_configured=master_configured, now=now,
-                       actions=actions, reporting=reporting)
-            processed += 1
+            outcome = _score_one(conn, due, master_configured=master_configured, now=now,
+                                 actions=actions, reporting=reporting)
         except Exception:  # noqa: BLE001 — one insight failing must not abort the pass
             logger.exception("evaluate_due failed for insight %s", due.insight_id)
+            summary.failed += 1
+            continue
+        if outcome == "scored":
+            summary.scored += 1
+        elif outcome == "deferred":
+            summary.deferred += 1
+        else:
+            summary.undetermined += 1
     # After scoring, run the Loop-4 promote + regression pass (spec 4.6) over the fresh
     # accumulated scores. Isolated so an evaluate failure never blocks the promote step.
     try:
-        promote_and_check(conn, now=now)
+        summary.promotions = promote_and_check(conn, now=now)
     except Exception:  # noqa: BLE001 — the promote step must not crash the evaluate job
         logger.exception("promote_and_check failed during evaluate_due")
-    return processed
+        summary.promote_failed = True
+    return summary
 
 
 # --- Loop 3: generate calibration versions (spec 04.5 / 4.8) ------------------
@@ -879,64 +1081,169 @@ def evaluate_due(
 # new body (master.generate_calibration), the validator gates it (master.validate_calibration),
 # and only a valid body is appended (append-only). Master unset → pipeline pauses (no crash).
 
+_CalibKind = Literal["made", "below_min", "no_trigger", "pending", "rejected", "paused"]
+
+
+@dataclass
+class CalibrationSummary:
+    """What one Loop-3 pass did. ``str()`` is the zh 排程中心 detail (R6 DEF-073).
+
+    The job used to print 「calibration pass complete」 for a pass that produced a version,
+    one whose sample was below 門檻 and one whose version the validator rejected alike.
+    """
+
+    tasks: int = 0
+    made: list[str] = field(default_factory=list)       # 「個股健檢 v3・失誤樣本 8 筆」
+    below_min: list[str] = field(default_factory=list)  # 「個股健檢 新樣本 3／門檻 8」
+    no_trigger: int = 0
+    pending: list[str] = field(default_factory=list)    # 「個股健檢 v2 影子評估中」
+    rejected: list[str] = field(default_factory=list)   # 「個股健檢：<validator reasons>」
+    paused: int = 0
+    pause_reason: str = ""
+    failed: int = 0
+
+    def __str__(self) -> str:
+        if self.tasks == 0:
+            return "沒有開啟自我校正的任務，未產生校正版本"
+        head = f"產生 {len(self.made)} 版"
+        if self.made:
+            head += "（" + "、".join(self.made) + "）"
+        parts = [head]
+        if self.below_min:
+            parts.append(
+                f"略過 {len(self.below_min)} 個任務（" + "、".join(self.below_min) + "）"
+            )
+        if self.no_trigger:
+            parts.append(f"{self.no_trigger} 個任務未達觸發條件")
+        if self.pending:
+            parts.append(
+                f"暫不產生 {len(self.pending)} 個任務（" + "、".join(self.pending) + "）"
+            )
+        if self.rejected:
+            parts.append(
+                f"驗證器拒絕 {len(self.rejected)} 版（" + "、".join(self.rejected) + "）"
+            )
+        if self.paused:
+            parts.append(f"{self.pause_reason}，暫停 {self.paused} 個任務")
+        if self.failed:
+            parts.append(f"失敗 {self.failed} 個任務（詳見伺服器日誌）")
+        return "；".join(parts)
+
+
+def _pause_reason(conn: sqlite3.Connection, exc: LLMError) -> str:
+    """Why the master could not write a version, in the job detail's words."""
+    if get_role_model_id(conn, LLMRole.MASTER) is None:
+        return "未設定 AI 大師模型"
+    if isinstance(exc, LLMBudgetExceeded):
+        return "AI 額度用罄"
+    return "AI 大師模型無法使用"
+
 
 def _generate_one(
     conn: sqlite3.Connection, it: cs.InsightType, *, now: datetime, cfg: dict[str, object]
-) -> bool:
+) -> tuple[_CalibKind, str]:
     """Evaluate the triggers + min_samples gate for one combo; generate a version if due.
 
-    Returns True when a new (valid) calibration version was appended. Master unset / over
-    budget / a validator rejection → no version, no crash (the pipeline pauses).
+    Returns ``(kind, text)`` — what happened and the task's piece of the job detail
+    (DEF-073): ``made`` (「name vN・失誤樣本 k 筆」), ``below_min`` (「name 新樣本 k／門檻 m」),
+    ``no_trigger``, ``pending`` (the newest version is still being judged), ``rejected``
+    (「name：reasons」) or ``paused`` (the reason). Master unset / over budget / a validator
+    rejection → no version, no crash (the pipeline pauses).
+
+    R6 DEF-080 — the evidence is the task's :func:`es.calibration_window`: the ACTIVE
+    version's own scored evaluations (no active version = the cards with no calibration
+    layer) made AFTER the newest calibration version was written. It read the whole history,
+    so the misses that produced a version re-triggered the next Sunday and every Sunday
+    after. And nothing is written while the newest version is still shadow-evaluated or has
+    won and waits for 設為生效: a new latest version would take its place as the shadow
+    and the candidate would never be judged.
+
+    R6 DEF-079 — the master is handed the ACTIVE version's body (``""`` with none active)
+    and exactly the window's misses. It was handed ``list_calibrations()[-1]`` — the LATEST
+    version, possibly an unadopted or losing shadow — and the misses recorded under version
+    ``active[-1].version if active else 1``: for a task with no version that is v1, while its
+    cards carry NULL, so the first version was written from zero failure samples.
     """
-    resolved = es.resolved_sample_count(conn, it.id)
-    miss_count = es.combo_score(conn, it.id)["miss_count"]
-    streak = es.consecutive_misses(conn, it.id)
+    shadow = shadow_state(conn, it)
+    if shadow.version is not None and shadow.phase in ("waiting", "queued", "running"):
+        return "pending", f"{it.name} v{shadow.version} 影子評估中"
+    if shadow.version is not None and shadow.phase == "won":
+        return "pending", f"{it.name} v{shadow.version} 勝出待設為生效"
+    chain = cs.list_calibrations(conn, it.id, include_archived=True)
+    since = datetime.fromisoformat(chain[-1].created_at) if chain else None
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=now.tzinfo)
+    window = es.calibration_window(
+        conn, it.id, version=it.active_calibration_version, since=since
+    )
+    min_samples = int(str(cfg["min_samples"]))
+    if window.n < min_samples or window.n == 0:
+        return "below_min", f"{it.name} 新樣本 {window.n}／門檻 {min_samples}"
     gap = Decimal(str(cfg["gap_alert_pp"]))
     if not scoring.should_calibrate(
-        resolved_samples=resolved, min_samples=int(str(cfg["min_samples"])),
-        consecutive_misses=streak, miss_count=miss_count, gap_alert_pp=gap,
+        resolved_samples=window.n, min_samples=min_samples,
+        consecutive_misses=window.streak, miss_count=window.miss_count, gap_alert_pp=gap,
     ):
-        return False
-    active = cs.list_calibrations(conn, it.id)
-    active_body = active[-1].body if active else ""
-    active_version = active[-1].version if active else 1
-    samples = es.miss_samples_for_version(
-        conn, insight_type_id=it.id, version=active_version
+        return "no_trigger", it.name
+    active_body = next(
+        (c.body for c in chain
+         if c.version == it.active_calibration_version and not c.archived),
+        "",
     )
+    samples = es.miss_samples_by_ids(conn, window.miss_ids)
     bins = es.calibration_bins(conn, it.id)
     try:
         out = master.generate_calibration(
             active_body=active_body, miss_samples=samples, bins=bins, conn=conn
         )
-        ok, _reasons = master.validate_calibration(out["body"], conn=conn)
-    except LLMError:
-        return False  # master unset / budget → pause (cards still generate)
+        ok, reasons = master.validate_calibration(out["body"], conn=conn)
+    except LLMError as exc:
+        return "paused", _pause_reason(conn, exc)  # master unset / budget → pause
     if not ok:
         logger.info("calibration for insight_type %s rejected by validator", it.id)
-        return False
-    cs.create_calibration(conn, it.id, body=out["body"], cause=out["cause"], now=now)
-    return True
+        return "rejected", f"{it.name}：" + ("，".join(reasons) or "未說明原因")
+    cal = cs.create_calibration(conn, it.id, body=out["body"], cause=out["cause"], now=now)
+    return "made", f"{it.name} v{cal.version}・失誤樣本 {len(samples)} 筆"
 
 
-def generate_calibrations_for_all(conn: sqlite3.Connection, *, now: datetime) -> int:
-    """Run the Loop-3 calibration pass over every self_correct combo. Returns versions made.
+def generate_calibrations_for_all(
+    conn: sqlite3.Connection, *, now: datetime
+) -> CalibrationSummary:
+    """Run the Loop-3 calibration pass over every self_correct combo. Returns what happened.
 
     The registered Loop-3 runner. Per spec 4.5: only self_correct, non-archived combos with
-    resolved samples ≥ min_samples AND a trigger get a new version. One combo failing never
-    aborts the rest (degrade, never crash the weekly job).
+    ≥ min_samples NEW resolved samples of the active version (``_generate_one``, DEF-080)
+    AND a trigger get a new version. One combo failing never
+    aborts the rest (degrade, never crash the weekly job). The returned
+    :class:`CalibrationSummary` is what the job prints (DEF-073).
     """
     es.ensure_tables(conn)
     cfg = cs.get_evolution_config(conn)
-    made = 0
+    summary = CalibrationSummary()
     for it in cs.list_insight_types(conn):
         if not it.self_correct:
             continue
+        summary.tasks += 1
         try:
-            if _generate_one(conn, it, now=now, cfg=cfg):
-                made += 1
+            kind, text = _generate_one(conn, it, now=now, cfg=cfg)
         except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
             logger.exception("generate_calibrations failed for insight_type %s", it.id)
-    return made
+            summary.failed += 1
+            continue
+        if kind == "made":
+            summary.made.append(text)
+        elif kind == "below_min":
+            summary.below_min.append(text)
+        elif kind == "no_trigger":
+            summary.no_trigger += 1
+        elif kind == "pending":
+            summary.pending.append(text)
+        elif kind == "rejected":
+            summary.rejected.append(text)
+        else:
+            summary.paused += 1
+            summary.pause_reason = summary.pause_reason or text
+    return summary
 
 
 # --- Loop 4: shadow promote + regression check (spec 04.6) --------------------
@@ -977,39 +1284,37 @@ def _check_regression(conn: sqlite3.Connection, it: cs.InsightType, *, now: date
         )
 
 
-def promote_and_check(conn: sqlite3.Connection, *, now: datetime) -> list[int]:
-    """Loop-4 promote + regression pass over self_correct combos. Returns promoted ids.
+def promote_and_check(conn: sqlite3.Connection, *, now: datetime) -> list[PromotionOutcome]:
+    """Loop-4 promote + regression pass over self_correct combos. Returns the winners.
 
-    For each combo with a shadow version: compute active vs shadow scores; on a promotion
-    verdict, switch the active version when ``auto_promote`` else leave it (the win is
-    surfaced via ai-score for a manual switch). Always run the regression check. One combo
-    failing never aborts the rest.
+    For each combo with a shadow version: the shadow VERSION's own record against the
+    ACTIVE version's own record (``es.version_score`` via :func:`shadow_states` — R6
+    DEF-070: the pooled shadow history let a brand-new v3 win on v2's evaluations). On a
+    promotion verdict, switch the active version when ``auto_promote``, else leave it (the
+    win is surfaced on the calibration chain for a manual 設為生效). Always run the regression
+    check. One combo failing never aborts the rest.
     """
     es.ensure_tables(conn)
     cfg = cs.get_evolution_config(conn)
     auto = bool(cfg["auto_promote"])
-    promoted: list[int] = []
+    states = shadow_states(conn)
+    winners: list[PromotionOutcome] = []
     for it in cs.list_insight_types(conn):
         if not it.self_correct:
             continue
         try:
             _check_regression(conn, it, now=now)
-            versions = cs.list_calibrations(conn, it.id)
-            latest = versions[-1].version if versions else None
-            shadow_v = promote.shadow_version(
-                active_version=it.active_calibration_version, latest_version=latest
-            )
-            if shadow_v is None:
+            state = states.get(it.id)
+            if state is None or state.version is None or state.phase != "won":
                 continue
-            active_score = es.combo_score(conn, it.id, is_shadow=False)
-            shadow_score = es.combo_score(conn, it.id, is_shadow=True)
-            if promote.decide_promotion(active_score, shadow_score, cfg) == "promote":
-                if auto:
-                    cs.set_active_calibration(conn, it.id, shadow_v)
-                promoted.append(it.id)
+            if auto:
+                cs.set_active_calibration(conn, it.id, state.version)
+            winners.append(PromotionOutcome(
+                insight_type_id=it.id, name=it.name, version=state.version, switched=auto,
+            ))
         except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
             logger.exception("promote_and_check failed for insight_type %s", it.id)
-    return promoted
+    return winners
 
 
 # --- spec 07 §7.1: pipeline-hub task status (read-only fact gathering) ---------
@@ -1415,7 +1720,7 @@ def _est_tokens(prompt: str) -> int:
 _RULE_SLOTS = ("R1", "R2", "R3", "R4", "R5", "R6")
 _RULE_NAMES: dict[str, str] = {
     "R1": "範圍相容", "R2": "標的宇宙", "R3": "模板啟用",
-    "R4": "價格資料", "R5": "變數可用性", "R6": "LLM 額度",
+    "R4": "價格資料", "R5": "變數可用性", "R6": "AI 額度",
 }
 # The one-key fix per rule slot (§7.2 fix.kind enum). R6 (LLM quota) has NO one-click
 # fix — a budget top-up is not in the §7.2 enum (senior-review fix: it must not emit
@@ -1537,12 +1842,32 @@ def _g0_g1(
     return g0, g1
 
 
+def _g7_unapplied_msg(shadow: ShadowState | None) -> str:
+    """G7's info text for an unapplied version — WHERE its shadow evaluation stands (DEF-070).
+
+    「有未套用的校正版本」 alone sent the owner to a chain with nothing to press (DEF-071) and
+    never said the version was queued behind ``max_shadows``.
+    """
+    if shadow is None or shadow.version is None:
+        return "有未套用的校正版本（不會進行影子評估，需手動設為生效）"
+    v = f"v{shadow.version}"
+    if shadow.phase == "running":
+        return f"影子評估中：{v} 已評分 {shadow.scored}／{shadow.needed}"
+    if shadow.phase == "waiting":
+        return f"有未套用的校正版本 {v}，下一批開始影子評估"
+    if shadow.phase == "queued":
+        return f"有未套用的校正版本 {v}；{shadow_queue_text(shadow)}"
+    if shadow.phase == "won":
+        return f"影子 {v} 勝出（評分 {shadow.scored}／{shadow.needed}），可設為生效"
+    return f"影子 {v} 未勝出（成績不如生效版），可封存或手動設為生效"
+
+
 def _g7(
     conn: sqlite3.Connection, *, self_correct: bool, master_configured: bool,
-    unapplied_calibration: bool,
+    unapplied_calibration: bool, shadow: ShadowState | None = None,
 ) -> dict[str, Any]:
     """G7 (calibration pipeline): master unset (with self_correct) → warn; an unapplied
-    calibration version → info; else ok (§7.2)."""
+    calibration version → info, saying where its shadow evaluation stands; else ok (§7.2)."""
     if self_correct and not master_configured:
         return {
             "id": "G7", "name": "校正管線", "lv": "warn",
@@ -1551,7 +1876,7 @@ def _g7(
         }
     if unapplied_calibration:
         return {
-            "id": "G7", "name": "校正管線", "lv": "info", "msg": "有未套用的校正版本",
+            "id": "G7", "name": "校正管線", "lv": "info", "msg": _g7_unapplied_msg(shadow),
             "fix": {"kind": "set_active_calibration"},
         }
     return {"id": "G7", "name": "校正管線", "lv": "ok", "msg": "校正管線正常", "fix": None}
@@ -1695,7 +2020,7 @@ def _preflight_saved(
         enabled=it.enabled, scope=it.scope, scheduled=_is_scheduled(conn, it.id),
         self_correct=it.self_correct, master_configured=master_configured,
         unapplied_calibration=_unapplied_calibration(conn, it),
-        strategy_ids=strategy_ids, stale_prices=stale,
+        strategy_ids=strategy_ids, stale_prices=stale, shadow=shadow_state(conn, it),
     )
     payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
     if include_preview:
@@ -1765,6 +2090,7 @@ def _compose_gates(
     unapplied_calibration: bool,
     strategy_ids: list[int],
     stale_prices: list[str],
+    shadow: ShadowState | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the fixed §7.2 gate list: G0, G1, R1..R6 (shared gate) [+R4 stale info], G7."""
     g0, g1 = _g0_g1(enabled=enabled, scope=scope, scheduled=scheduled)
@@ -1774,7 +2100,7 @@ def _compose_gates(
     )
     g7 = _g7(
         conn, self_correct=self_correct, master_configured=master_configured,
-        unapplied_calibration=unapplied_calibration,
+        unapplied_calibration=unapplied_calibration, shadow=shadow,
     )
     return [g0, g1, *rule_gates, g7]
 

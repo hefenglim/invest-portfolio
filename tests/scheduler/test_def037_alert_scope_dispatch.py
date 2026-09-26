@@ -80,7 +80,7 @@ def _scan(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
     # has its own file (test_def041_alert_cards_only_for_held.py).
     held = {a.subject for a in alerts if a.scope == "symbol" and a.subject}
     jobs.register_alert_held_fn(lambda c, *, now: held)
-    return rec, jobs.alert_scan(conn, now=NOW)
+    return rec, jobs.alert_scan(conn, now=NOW).detail  # DEF-067: a JobOutcome
 
 
 def test_an_account_level_alert_never_becomes_a_symbol_card(

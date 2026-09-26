@@ -180,7 +180,7 @@ REGISTRY: tuple[VarSpec, ...] = (
         "分解、趨勢濾網／**50/200 均線交叉（ma_cross）**／12-1 動能／RSI 情境四法則各自狀態與關鍵"
         "證據數字、涵蓋度、條件語（evaluation_context）、params_version、held 旗標"
         "（未持倉＝建倉評估視角）。**這個「交叉」是 50/200，不是技術訊號變數的 20/60**——兩者不同，"
-        "引用時請區分。數字由 api 層評估後餵入，LLM 僅詮釋不重算；價格歷史不足時如實降級。",
+        "引用時請區分。數字由 api 層評估後餵入，AI 僅詮釋不重算；價格歷史不足時如實降級。",
         '{"symbol":"2330","held":true,"as_of":"2026-06-11","params_version":"rules-v1",'
         '"composite":{"tech_score":"82.5","coverage":"4/4","evaluation_context":"trend_up",'
         '"context_note":"…","missing":[],"contributions":{"trend_filter":"25.00"},'
@@ -305,7 +305,7 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- ai (AI 自身 / 校正用) — spec 04 evaluations（W6 點亮, AI-D31） ---
     VarSpec(
         "backtest_json", "回測命中分佈", "ai", "portfolio", True,
-        "全體洞察評分的信心校準分桶（本地計分結果，非 LLM 自報）：每個信心桶的樣本數 n、"
+        "全體洞察評分的信心校準分桶（本地計分結果，非 AI 自報）：每個信心桶的樣本數 n、"
         "hit_count、平均宣告信心 claimed_pct、實際命中率 actual_pct、絕對誤差 "
         "calibration_error_pp（皆百分比字串），外加 overall_hit_rate（全域命中率，"
         "分數字串）——校正提示詞錨定信心值用：宣告信心不應長期高於同桶實際命中率。"
@@ -331,7 +331,7 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- price (訊號回測) — W6 事件研究（AI-D31：per-symbol，與 rule_signals_json 同類） ---
     VarSpec(
         "signal_backtest_json", "訊號回測", "price", "per_symbol", True,
-        "該標的的事件研究回測（本地計算，非 LLM 生成）：法則訊號符號轉換（四法則各自 "
+        "該標的的事件研究回測（本地計算，非 AI 生成）：法則訊號符號轉換（四法則各自 "
         "bullish/bearish）與 TechScore 狀態帶（65/35，與 evaluation_context 同一套門檻）"
         "穿越事件發生後，+10/+20/+60/+120 交易日的前向報酬分布（n／mean／median／"
         "pct_positive，分數字串——payload 的 units 欄同樣註明，因為這份 desc 模型看不到）"

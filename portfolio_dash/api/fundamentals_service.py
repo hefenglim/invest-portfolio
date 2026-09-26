@@ -7,37 +7,40 @@ cannot compute for themselves, so the app registers this runner at startup and t
 dispatches into it — the same injection pattern as ``signal_scan`` / ``alert_compute``
 (architecture.md: the binder is the layer already above both).
 
-The held check itself reuses the SAME cheap net-shares predicate as the target-weights
-view (``current_shares`` per account, any-account positive = held) — no second holdings
-definition.
+The held check is the registry's 「持有」 — ``data_ingestion/holdings.py::held_among`` over
+``holds_position``, the predicate the watchlist and target-weights badges read (DEF-075) — no
+second holdings definition.
 """
 
 import sqlite3
-from datetime import datetime
-from decimal import Decimal
+from datetime import date, datetime
 
-from portfolio_dash.data_ingestion.holdings import current_shares
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.holdings import held_among
+from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.pricing import ingest
 from portfolio_dash.pricing.refs import InstrumentRef
 
-_ZERO = Decimal("0")
 
-
-def _held_refs(conn: sqlite3.Connection) -> list[InstrumentRef]:
+def _held_refs(conn: sqlite3.Connection, *, today: date) -> list[InstrumentRef]:
     """Held symbols as InstrumentRefs (``board`` carries the TPEx flag for ``yf_symbol``
-    mapping, mirroring ``ingest.all_universe``)."""
-    account_ids = [a.account_id for a in list_accounts(conn)]
+    mapping, mirroring ``ingest.all_universe``).
+
+    DEF-075: "held" is ``held_among`` (a position today or on any later ledger date). It was
+    ``current_shares > 0``, so a position closed only by a FUTURE-dated sale — still held
+    today — and a declared short got no Alpha Vantage fundamentals.
+    """
+    instruments = list_instruments(conn)
+    held = held_among(conn, [i.symbol for i in instruments], today=today)
     return [
         InstrumentRef(symbol=inst.symbol, market=inst.market, board=inst.board)
-        for inst in list_instruments(conn)
-        if any(current_shares(conn, aid, inst.symbol) > _ZERO for aid in account_ids)
+        for inst in instruments
+        if inst.symbol in held
     ]
 
 
 def run_fundamentals_av(conn: sqlite3.Connection, *, now: datetime) -> int:
     """Alpha Vantage fundamentals for HELD symbols only. Returns snapshots written."""
-    refs = _held_refs(conn)
+    refs = _held_refs(conn, today=now.date())
     if not refs:
         return 0
     return ingest.ingest_fundamentals_union(

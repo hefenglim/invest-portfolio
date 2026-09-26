@@ -373,7 +373,7 @@ def test_run_digest_daily_degrades_without_history(golden_db: sqlite3.Connection
 
 def test_run_digest_weekly_stores_items_list(golden_db: sqlite3.Connection) -> None:
     summary = ds.run_digest_weekly(golden_db, now=GOLDEN_NOW)
-    assert "weekly digest" in summary
+    assert summary.startswith("每週行動清單 ")  # DEF-073: zh (was 「weekly digest」)
     p = digest_store.get_latest(golden_db, "weekly")
     assert p is not None and p["payload"]["kind"] == "weekly"
     assert isinstance(p["payload"]["items"], list)  # empty-week still generates a list

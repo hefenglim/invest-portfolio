@@ -1262,16 +1262,35 @@
        so this is a call, not a fourth implementation of the form. If the script is absent the
        button simply does not render, because a door that opens onto nothing is worse than no
        door: the owner would conclude the repair is unavailable rather than that it is broken. */
+    /* DEF-072 — WHICH account the repair is for. The drawer's filter when one is set (its
+       footer is that account's, and it is the red one, or no door would render); else the
+       ONE account whose own footer is red (`activity_reconcile.by_account[id].balances`, the
+       server's flag — no share arithmetic here); several red → none preselected, the form
+       asks. It passed `filterAcct || ''`, and '' fell on the FIRST account /api/accounts
+       lists — Moomoo MY for a mismatch that lived at 台灣券商, where the owner cannot even
+       switch accounts first (a one-account symbol has no filter chips). */
+    function repairTarget() {
+      if (filterAcct) return { account_id: filterAcct, red: [filterAcct] };
+      const by = (reconcile && reconcile.by_account) || {};
+      const red = Object.keys(by).filter((id) => by[id] && by[id].balances === false);
+      return { account_id: red.length === 1 ? red[0] : '', red: red };
+    }
+
     function renderRepairDoor(mismatched) {
       const form = window.pdCorpActionForm;
       if (!mismatched || !form || typeof form.open !== 'function') return;
       const btn = el('button', 'btn-ghost', '補登公司行動');
       btn.type = 'button';
       btn.style.cssText = 'margin-left:10px;font-size:12px;padding:2px 8px';
+      const target = repairTarget();
       btn.addEventListener('click', () => form.open({
-        account_id: filterAcct || '',
+        account_id: target.account_id,
+        require_account: !target.account_id,
         from_symbol: symbol,
-        reason: '此標的的對帳結果為 ⚠ 對帳不一致',
+        reason: (!target.account_id && target.red.length > 1)
+          ? '此標的在 ' + target.red.map(acctZh).join('、')
+            + ' 的對帳結果都是 ⚠ 對帳不一致，請先選擇要補登的帳戶'
+          : '此標的的對帳結果為 ⚠ 對帳不一致',
         /* Re-open through the shell's own entry point rather than re-rendering in place:
            the saved action changes `corporate_delta`, the position, the flags AND the
            prices, so a partial refresh would leave the drawer showing a mix of before and

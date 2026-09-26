@@ -69,7 +69,10 @@ class RefreshSummary(BaseModel):
     #: keys a source ANSWERED for with no data at all (DEF-047, owner ruling 2026-09-24).
     #: Additive, dividend path only: a symbol that never paid a dividend is the common case,
     #: not a failure, so it is kept OUT of ``failed`` (which drives every warn face) and
-    #: reported on its own — 「1 檔無配息紀錄」. A quote/FX/history refresh never fills it:
-    #: there, a listed symbol with no price IS a failed fetch.
+    #: reported on its own — 「1 檔無配息紀錄」. A quote/FX refresh never fills it (a listed
+    #: symbol with no price IS a failed fetch); a HISTORY refresh fills it with the symbols a
+    #: provider answered for with no bars in the window (DEF-067 ④, owner ruling 2026-09-26)
+    #: — trusted by ``history_daily`` only with evidence from the same run, folded back into
+    #: ``failed`` by the multi-year backfills.
     empty: list[str] = Field(default_factory=list)
     fetched_at: datetime

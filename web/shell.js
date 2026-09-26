@@ -440,7 +440,11 @@
          SAME status the job_runs row carries — and the toast reads it instead of declaring
          完成 unread. A partial run (a HELD symbol's quote was lost) stays on screen with the
          full list and does NOT auto-reload: the reload would wipe the one place the user
-         is told; the updated prices show on the next refresh. */
+         is told; the updated prices show on the next refresh.
+         DEF-068: the partial branch always ended 「其餘已更新」 and read `held_failed` alone —
+         with every provider down it printed that under 「9 檔持倉未更新」 while 0 had been
+         updated, and never named the lost FX pairs. Every number now comes from the door's
+         `summary` (scheduler.jobs.combine_quote_results); this code only formats it. */
       let refreshBusy = false;
       menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率（約 10 秒）', () => {
         if (refreshBusy) return;
@@ -456,17 +460,41 @@
             const jobs = (resp && resp.jobs) ? resp.jobs.join(' / ') : 'quotes';
             const results = (resp && resp.results) || {};
             const byStatus = (s) => Object.keys(results).filter((j) => results[j].status === s);
-            const errored = byStatus('error');
-            if (errored.length) {
-              prog.fail('報價更新失敗', errored.map((j) => j + '：' + (results[j].detail || '')).join('；'));
+            /* An `error` WITH counts is a market that lost every instrument (DEF-067 ①, owner
+               ruling 2026-09-26) — a loss, read through `summary` like any other. Only an
+               `error` WITHOUT counts is a job that crashed (the wrapper's failure sentence). */
+            const crashed = byStatus('error').filter((j) => results[j].instruments == null);
+            if (crashed.length) {
+              prog.fail('報價更新失敗', crashed.map((j) => j + '：' + (results[j].detail || '')).join('；'));
               return;
             }
-            const partial = byStatus('partial');
+            const sum = (resp && resp.summary) || null;
+            const fxLost = (sum && sum.fx_failed) || [];
+            const fxTxt = fxLost.length ? '；匯率未更新：' + fxLost.join('、') : '';
+            const lostTxt = (sum && sum.instruments_failed && sum.instruments_failed.length)
+              ? '：' + sum.instruments_failed.join('、') : '';
+            if (sum && sum.all_failed) {
+              prog.fail('報價更新失敗',
+                sum.instruments_not_updated + ' 檔報價都沒有更新' + lostTxt + fxTxt
+                + '。仍顯示上次取得的價格，請稍後再試或檢查資料來源。');
+              return;
+            }
+            const partial = byStatus('partial').concat(byStatus('error'));
             if (partial.length) {
-              const lost = [];
-              partial.forEach((j) => { (results[j].held_failed || []).forEach((s) => lost.push(s)); });
-              prog.warn('報價更新部分完成',
-                lost.length + ' 檔持倉未更新：' + lost.join('、') + '。其餘已更新，重新整理頁面即可看到新價。');
+              prog.warn('報價更新部分完成', sum
+                ? sum.instruments_updated + ' 檔已更新、' + sum.instruments_not_updated + ' 檔未更新'
+                  + lostTxt + fxTxt + '。重新整理頁面即可看到已更新的價格。'
+                : '部分持倉的報價沒有更新，詳見設定 › 排程中心的執行紀錄。');
+              return;
+            }
+            /* ok by the owner's threshold (no HELD symbol lost), but a watchlist symbol or an
+               FX pair may still be missing: say so, and do not reload over the message. */
+            if (sum && (sum.instruments_not_updated || fxLost.length)) {
+              prog.warn('報價更新完成，部分項目未更新',
+                sum.instruments_updated + ' 檔已更新'
+                + (sum.instruments_not_updated
+                  ? '、' + sum.instruments_not_updated + ' 檔未持有的標的未更新' + lostTxt : '')
+                + fxTxt + '。重新整理頁面即可看到已更新的價格。');
               return;
             }
             /* L24 (demo audit 2026-09-16): 0056 came back from the provider dated 09-11 while

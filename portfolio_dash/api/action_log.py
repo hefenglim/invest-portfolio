@@ -93,8 +93,8 @@ _LABELS: list[tuple[str, str, str]] = [
     ("PUT", "/api/evolution-config", "AI 進化設定變更"),
     ("PUT", "/api/system-prompt", "系統提示詞變更"),
     ("POST", "/api/insight-types", "AI 洞察任務操作"),
-    ("PUT", "/api/llm/", "LLM 設定變更"),
-    ("POST", "/api/llm/", "LLM 操作"),
+    ("PUT", "/api/llm/", "AI 設定變更"),
+    ("POST", "/api/llm/", "AI 操作"),
     # --- 2026-09-02 sweep: the endpoints that had drifted out of the table -------------
     # spec 07 §7.0 makes ``/api/insight-tasks/*`` a FULL alias of ``/api/insight-types/*``
     # (one handler, two paths). The label must therefore be the SAME string for both, or the
@@ -128,7 +128,7 @@ _LABELS: list[tuple[str, str, str]] = [
     # "/api/export/" prefix above never reached it. All 15 exports now read 「匯出報表」.
     ("POST", "/api/llm-fail-log/export", "匯出報表"),
     ("DELETE", "/api/llm-fail-log", "AI 失敗紀錄清除"),
-    ("DELETE", "/api/llm/", "LLM 設定刪除"),
+    ("DELETE", "/api/llm/", "AI 設定刪除"),
     ("POST", "/api/news/run", "新聞抓取"),
     ("PUT", "/api/news-prompt", "新聞提示詞變更"),
     ("POST", "/api/news-prompt/reset", "新聞提示詞重設"),

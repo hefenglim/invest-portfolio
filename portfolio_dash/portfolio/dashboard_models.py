@@ -264,17 +264,33 @@ class FxTriangle(BaseModel):
     ``implied`` / ``direct`` are quantized to 6 dp and ``gap_pct`` to 4 dp **for display**;
     the underlying reads keep full precision. ``ok`` is judged on the QUANTIZED gap so the
     verdict can never disagree with the number printed beside it.
+
+    **DEF-077 (owner ruling ⑥ A, 2026-09-26) — judged on ONE day.** The three legs are
+    compared on their latest COMMON date (not after the valuation day), never latest row
+    against latest row: a refresh that has moved one leg to a new day while another is still
+    on the previous one measured the market's move between two days and reported it as a
+    data inconsistency (verifier J-01 on 3be67db: gap −0.0938%, ``ok: false``, no data
+    error). ``compared_on`` is that day and ``implied`` / ``direct`` / ``gap_pct`` are the
+    values ON it. ``dates_differ`` says the legs' latest dates are not all the same (the
+    page labels it 「日期不同」; ``leg_dates`` names each). With no common date in the lookback
+    the triangle **cannot be compared**: ``ok`` is ``None`` (never ``False`` — nothing was
+    found to disagree), the three figures are ``None`` and ``reason`` says why.
     """
 
     via: str  # the two-leg path, e.g. "USD/MYR × MYR/TWD"
     pair: str  # the directly stored pair the path is compared against, e.g. "USD/TWD"
-    implied: Decimal
-    direct: Decimal
-    gap_pct: Decimal  # (implied / direct - 1) * 100, in PERCENT
-    ok: bool  # |gap_pct| <= 0.05
+    implied: Decimal | None  # None ⇔ ok is None (no common date)
+    direct: Decimal | None
+    gap_pct: Decimal | None  # (implied / direct - 1) * 100, in PERCENT
+    ok: bool | None  # |gap_pct| <= 0.05 on ``compared_on``; None = cannot be compared
     as_of: date | None = None  # the OLDEST of the three reads (the triangle is only as
     # current as its stalest leg)
     stale: bool = False  # any of the three legs is stale
+    # DEF-077 — additive fields (a construction that predates them still validates).
+    compared_on: date | None = None  # the latest common date the verdict is judged on
+    dates_differ: bool = False  # the three legs' latest dates are not all the same
+    leg_dates: dict[str, date] = Field(default_factory=dict)  # "A/B" → that leg's latest
+    reason: str | None = None  # zh, set only when ok is None
 
 
 class BenchmarkMarketLeg(BaseModel):

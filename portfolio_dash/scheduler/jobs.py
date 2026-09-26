@@ -24,6 +24,7 @@ from portfolio_dash.pricing import datasources_store, ingest
 from portfolio_dash.pricing.benchmarks import benchmark_refs
 from portfolio_dash.pricing.cross import fetched_pairs
 from portfolio_dash.pricing.defaults import default_registry
+from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.finmind_datasets import FinMindQuotaError, FinMindTierError
 from portfolio_dash.pricing.refresh import (
     describe_refresh,
@@ -122,7 +123,7 @@ def register_news_runner(fn: NewsRunner | None) -> None:
 # so ``scheduler/`` never imports ``api``/``digest_service``. The runner (api/digest_service
 # .run_digest) reads the computed dashboard + stored prices, stores the digest, and pushes
 # (counts/percentages only — B3-D4). Signature: ``fn(conn, kind, now) -> str``.
-DigestRunner = Callable[..., str]
+DigestRunner = Callable[..., "str | JobOutcome"]
 _DIGEST_RUNNER: DigestRunner | None = None
 
 
@@ -132,30 +133,34 @@ def register_digest_runner(fn: DigestRunner | None) -> None:
     _DIGEST_RUNNER = fn
 
 
-def digest_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def digest_daily(conn: sqlite3.Connection, *, now: datetime) -> "JobOutcome":
     """Daily close digest: assemble + store + push via the registered runner (kind=daily).
 
-    No runner wired (scheduler-only process) → safe no-op summary; the digest resumes once
-    the app registers the runner on the next fire."""
+    No runner wired (scheduler-only process) → a safe no-op that says so; the digest resumes
+    once the app registers the runner on the next fire. The runner's own verdict (DEF-067:
+    a degraded block or a push that missed a channel is ``partial``) passes through."""
     runner = _DIGEST_RUNNER
     if runner is None:
-        return "no digest runner registered"
+        return _no_runner("每日摘要")
     set_progress("digest_daily", "組裝每日收盤摘要")
-    return str(runner(conn, "daily", now=now))
+    return _outcome_of(runner(conn, "daily", now=now))
 
 
-def digest_weekly(conn: sqlite3.Connection, *, now: datetime) -> str:
+def digest_weekly(conn: sqlite3.Connection, *, now: datetime) -> "JobOutcome":
     """Weekly action list: assemble + store + push via the registered runner (kind=weekly)."""
     runner = _DIGEST_RUNNER
     if runner is None:
-        return "no digest runner registered"
+        return _no_runner("每週行動清單")
     set_progress("digest_weekly", "組裝每週行動清單")
-    return str(runner(conn, "weekly", now=now))
+    return _outcome_of(runner(conn, "weekly", now=now))
 
 
 # The Loop-2/3/4 runners (price-bearing evaluate + master-bearing calibrate) live in
 # ``api/insight_service.py`` and are registered at startup, so ``scheduler/`` never imports
 # ``api`` (architecture.md). The static evaluate/calibrate JOBS dispatch through these.
+# A runner RETURNS its pass summary and the job prints ``str(summary)`` as the run detail
+# (R6 DEF-073: the summary's ``__str__`` is the zh sentence, so this layer needs no import
+# of the api type and holds no wording of its own for what the pass did).
 EvolutionRunner = Callable[..., object]
 _EVALUATION_RUNNER: EvolutionRunner | None = None
 _CALIBRATION_RUNNER: EvolutionRunner | None = None
@@ -205,9 +210,38 @@ class JobOutcome:
     results: dict[str, Any] = field(default_factory=dict)
 
 
-def _outcome_of(result: str | JobOutcome) -> JobOutcome:
-    """Normalise a job func's return: a bare string is, as it always was, ``ok``."""
-    return result if isinstance(result, JobOutcome) else JobOutcome("ok", result)
+def _outcome_of(result: object) -> JobOutcome:
+    """Normalise a job func's return: a bare string is, as it always was, ``ok``.
+
+    ⚠ DEF-067: that default is exactly how ``dividends_daily`` reported 「成功」 over
+    「0 檔事件已更新，10 檔失敗」. A job that can lose part of its work without raising
+    returns a :class:`JobOutcome` (see :func:`sweep_outcome`); a bare string is reserved
+    for a job whose only failure mode is an exception. ``tests/scheduler/
+    test_def067_sweep_verdicts.py`` pins each job's verdict.
+    """
+    return result if isinstance(result, JobOutcome) else JobOutcome("ok", str(result))
+
+
+def sweep_outcome(detail: str, *, total: int, failed: int) -> JobOutcome:
+    """The verdict of a per-key sweep (DEF-067, 2026-09-26) — the detail is unchanged.
+
+    Every key lost → ``error``: the word a raised run already writes and the 排程中心 maps
+    to 失敗 (no new state). Some lost → ``partial`` (部分). None → ``ok``. An empty
+    work-list is ``ok``: nothing was asked, so nothing was lost.
+    """
+    if total > 0 and failed >= total:
+        return JobOutcome("error", detail)
+    return JobOutcome("partial" if failed > 0 else "ok", detail)
+
+
+def _no_runner(what: str) -> JobOutcome:
+    """A runner-seam job in a process that registered no runner (a scheduler-only process;
+    the app registers every runner at startup, so this never happens in deployment).
+
+    It read 「no … runner registered」 (DEF-073). The wording matches the evaluate /
+    calibrate jobs' (「…執行器未接線，未執行」), and so does the status: ``ok`` — a safe
+    no-op, as ``tests/scheduler/test_ingest_jobs.py`` pins, not a lost fetch."""
+    return JobOutcome("ok", f"{what}執行器未接線，未執行")
 
 
 # A job does its own trigger+wiring and returns a short run summary for job_runs.detail —
@@ -446,6 +480,9 @@ def _quote_outcome(
     Threshold (owner ruling 2026-09-06): **any HELD instrument failed → ``partial``**. A lost
     FX pair or a watchlist-only symbol is written into ``detail`` but does not change the
     verdict — the status chip answers "is my holdings valuation complete?".
+    **Every instrument of the market lost → ``error``** (owner ruling 2026-09-26, DEF-067 ①):
+    the same verdict as every other sweep (:func:`sweep_outcome`). It read 部分 even when
+    nothing at all had been updated. A market with nothing to quote is not an error.
 
     What failed is derived as ``worklist − summary.ok``, NOT from ``summary.failed``: that list
     mixes bare keys with zh refusal lines (``2330：收盤價非正數…``), and parsing a symbol back
@@ -466,16 +503,58 @@ def _quote_outcome(
     held_failed = [s for s in instruments_failed if held is None or s in held]
     fetched = [ref.symbol for ref in instruments if ref.symbol in ok]
     return JobOutcome(
-        status="partial" if held_failed else "ok",
+        status=(
+            "error" if instruments and not fetched
+            else "partial" if held_failed else "ok"
+        ),
         detail=_summarize(summary),
         results={
             "instruments": len(instruments),
+            # DEF-068: the count the toast prints as 「N 檔已更新」 — served, not derived
+            # in the browser (which only formats).
+            "instruments_updated": len(fetched),
             "instruments_failed": instruments_failed,
             "held_failed": held_failed,
+            "fx_pairs": sorted(f"{p.base.value}{p.quote.value}" for p in fx_pairs),
             "fx_failed": fx_failed,
             "lagging": _lagging_symbols(conn, fetched, held),
         },
     )
+
+
+def combine_quote_results(outcomes: list[JobOutcome]) -> dict[str, Any]:
+    """ONE summary over the quote jobs of a refresh request (DEF-068, 2026-09-26).
+
+    The toast used to read ``held_failed`` alone and always add 「其餘已更新」 — with every
+    provider down, 0 instruments had been updated. Built from each job's structured
+    ``results`` (never from a detail sentence). A market has its own instruments, so their
+    counts add; the FX pairs are the SAME two USD legs in every market job, so a pair failed
+    only if every job that asked for it failed. ``all_failed``: at least one instrument was
+    asked for and none was updated (an empty ledger is not a failed refresh).
+    """
+    total = updated = 0
+    failed: set[str] = set()
+    held_failed: set[str] = set()
+    asked: set[str] = set()
+    fx_ok: set[str] = set()
+    for outcome in outcomes:
+        r = outcome.results
+        total += int(r.get("instruments", 0))
+        updated += int(r.get("instruments_updated", 0))
+        failed.update(r.get("instruments_failed", []))
+        held_failed.update(r.get("held_failed", []))
+        pairs = set(r.get("fx_pairs", []))
+        asked |= pairs
+        fx_ok |= pairs - set(r.get("fx_failed", []))
+    return {
+        "instruments": total,
+        "instruments_updated": updated,
+        "instruments_not_updated": len(failed),
+        "instruments_failed": sorted(failed),
+        "held_failed": sorted(held_failed),
+        "fx_failed": sorted(asked - fx_ok),
+        "all_failed": total > 0 and updated == 0,
+    }
 
 
 def _lagging_symbols(
@@ -579,18 +658,74 @@ def _refresh_benchmark_history(conn: sqlite3.Connection, start: date, *, now: da
     two true indices the factor is the identity by construction, so nothing changes there.
     Bound once per call, never per ref (trap #21).
     """
+    summary = _benchmark_history_summary(conn, start, now=now)
+    return _BENCHMARK_FAILED if summary is None else _summarize(_empty_as_failed(summary))
+
+
+def _benchmark_history_summary(
+    conn: sqlite3.Connection, start: date, *, now: datetime
+) -> RefreshSummary | None:
+    """:func:`_refresh_benchmark_history`'s fetch, as data (``None`` = it raised)."""
     try:
-        summary = refresh_history(
+        return refresh_history(
             conn, default_registry(conn), benchmark_refs(), start, now=now,
             factor_of=split_factor_fn(conn),
         )
-        return _summarize(summary)
     except Exception as exc:  # noqa: BLE001 - benchmark fetch must never block instrument refresh
         logger.warning("benchmark history refresh failed: %s", exc)
-        return _BENCHMARK_FAILED
+        return None
 
 
-def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def _empty_as_failed(summary: RefreshSummary) -> RefreshSummary:
+    """Fold "the provider answered with no bars" back into ``failed`` — the contract every
+    caller of ``refresh_history`` had before DEF-067 ④ (2026-09-26) set it apart. Right for
+    a multi-year backfill, where no series at all means the provider does not have the
+    symbol; only the 7-day sweep (:func:`history_daily`) reads ``empty`` on its own."""
+    if not summary.empty:
+        return summary
+    return summary.model_copy(update={"failed": [*summary.failed, *summary.empty], "empty": []})
+
+
+#: The reason an unproven empty answer is counted as lost (DEF-067 ④, see history_daily).
+_UNPROVEN_EMPTY = "來源回應空白，且本輪沒有任何標的從同一來源取得資料，視為無法連線"
+
+
+def _trust_empty(
+    registry: Registry, summary: RefreshSummary, market_of: dict[str, Market],
+    answered: set[str],
+) -> RefreshSummary:
+    """Keep an ``empty`` symbol as 「區間內無 K 棒」 only when the run PROVES a provider of
+    its market was reachable (it returned bars for something); otherwise it is lost.
+
+    yfinance, first in every history chain, reports a network failure as an empty frame —
+    it does not raise (``YfConfig.debug.hide_exceptions``). Trusting every empty answer would
+    turn an all-providers-down night back into 成功, the defect DEF-067 was opened for.
+    """
+    if not summary.empty:
+        return summary
+    trusted: list[str] = []
+    unproven: list[str] = []
+    for sym in summary.empty:
+        market = market_of.get(sym)
+        chain = set(registry.capable_ids(DataType.QUOTE_HISTORY, market)) if market else set()
+        (trusted if chain & answered else unproven).append(sym)
+    return summary.model_copy(update={
+        "empty": trusted,
+        "failed": [*summary.failed, *unproven],
+        "failed_reasons": {**summary.failed_reasons, **{u: _UNPROVEN_EMPTY for u in unproven}},
+    })
+
+
+def _summarize_history(summary: RefreshSummary) -> str:
+    """:func:`_summarize` + 「N 項區間內無 K 棒（休市或已下市）：…」 (DEF-067 ④)."""
+    text = _summarize(summary)
+    if summary.empty:
+        text += (f"；{len(summary.empty)} 項區間內無 K 棒（休市或已下市）："
+                 f"{'、'.join(sorted(summary.empty))}")
+    return text
+
+
+def history_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Backfill a recent history window for all instruments + benchmarks (FU-D27).
 
     Deep backfill is manual; this is the recent-window sweep. Benchmarks share the same
@@ -605,25 +740,61 @@ def history_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     factor_of = split_factor_fn(conn)  # once for the whole sweep, never per symbol
     ok: dict[str, str] = {}
     failed: list[str] = []
+    empty: list[str] = []
     total = len(instruments)
     for i, ref in enumerate(instruments, start=1):
         set_progress("history_daily", f"回補 {ref.symbol} ({i}/{total})")
         s = refresh_history(conn, registry, [ref], start, now=now, factor_of=factor_of)
         ok.update(s.ok)
         failed.extend(s.failed)
-    summary = RefreshSummary(ok=ok, failed=failed, fetched_at=now)
+        empty.extend(s.empty)
     set_progress("history_daily", "回補基準指數")
-    bench = _refresh_benchmark_history(conn, start, now=now)
-    return f"{_summarize(summary)}・基準指數：{bench}"
+    bench = _benchmark_history_summary(conn, start, now=now)
+    # DEF-067 ④ (owner ruling 2026-09-26): only a PROVIDER failure is lost. An answer with
+    # no bars in the 7-day window (a holiday closure, a delisted watchlist symbol) is
+    # 「區間內無 K 棒」 — once the run proves a provider of that market answered at all
+    # (``_trust_empty``: instruments AND benchmarks count as that evidence).
+    answered = set(ok.values()) | (set(bench.ok.values()) if bench is not None else set())
+    market_of = {ref.symbol: ref.market for ref in [*instruments, *benchmark_refs()]}
+    summary = _trust_empty(
+        registry, RefreshSummary(ok=ok, failed=failed, empty=empty, fetched_at=now),
+        market_of, answered,
+    )
+    bench_text = (
+        _BENCHMARK_FAILED if bench is None
+        else _summarize_history(_trust_empty(registry, bench, market_of, answered))
+    )
+    # DEF-067: the verdict counts INSTRUMENTS only, derived as worklist − ok − trusted empty
+    # (never parsed back out of ``failed``, which mixes keys with zh refusal lines). A
+    # benchmark failure stays in the sentence and out of the verdict (FU-D27).
+    lost = sum(1 for ref in instruments if ref.symbol not in ok and ref.symbol not in summary.empty)
+    return sweep_outcome(
+        f"{_summarize_history(summary)}・基準指數：{bench_text}",
+        total=len(instruments), failed=lost,
+    )
 
 
-def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Sweep dividend/ex-div events for all instruments."""
+def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """Sweep dividend/ex-div events for all instruments.
+
+    DEF-067 (2026-09-26): this returned the bare sentence, so ``_outcome_of`` recorded
+    「成功　0 檔事件已更新，10 檔失敗（…）」 with every provider down. A symbol whose source
+    answered with no dividend records (``summary.empty``, DEF-047) is not a failure.
+    """
     instruments, _ = build_worklist(conn, None)
     set_progress("dividends_daily", f"掃描 {len(instruments)} 檔股利事件")
     summary = refresh_dividends(conn, default_registry(conn), instruments, now=now)
     # DEF-015: the SAME sentence as the 收件匣 scan — which symbol failed, and why.
-    return describe_refresh(summary)
+    return dividend_sweep_outcome(summary, total=len(instruments))
+
+
+def dividend_sweep_outcome(summary: RefreshSummary, *, total: int) -> JobOutcome:
+    """The dividend sweep's verdict + THE sentence (``describe_refresh``) — shared by
+    ``dividends_daily``, the inbox scan's fallback path and ``api/dividend_inbox.scan_job``
+    so the three can never disagree about the same refresh."""
+    return sweep_outcome(
+        describe_refresh(summary), total=total, failed=len(set(summary.failed))
+    )
 
 
 # --- 待確認匯入 daily scan (R5 item 2, 2026-07-03) ------------------------------
@@ -632,7 +803,7 @@ def dividends_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
 # runner seam the insight jobs use, so scheduler/ never imports api/. A
 # scheduler-only process without the runner falls back to the event refresh
 # (the inbox computes on read, so items still appear).
-DividendScanRunner = Callable[..., str]
+DividendScanRunner = Callable[..., "str | JobOutcome"]
 _DIVIDEND_SCAN_RUNNER: DividendScanRunner | None = None
 
 
@@ -644,7 +815,7 @@ def register_dividend_scan_runner(fn: DividendScanRunner | None) -> None:
 
 # 月度快照 runner seam (R6 item 8) — the writer needs build_dashboard (portfolio
 # via the api service), registered at app startup like the other runners.
-SnapshotRunner = Callable[..., str]
+SnapshotRunner = Callable[..., "str | JobOutcome"]
 _SNAPSHOT_RUNNER: SnapshotRunner | None = None
 
 
@@ -654,13 +825,17 @@ def register_snapshot_runner(fn: SnapshotRunner | None) -> None:
     _SNAPSHOT_RUNNER = fn
 
 
-def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Daily: upsert the current month's KPI snapshot (month-rollover = final)."""
+def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """Daily: upsert the current month's KPI snapshot (month-rollover = final).
+
+    DEF-067 class scan: the runner's bare string stays ``ok`` — it writes the row or
+    raises; a KPI it cannot compute is stored NULL (honest degradation), and the price /
+    FX fetch that lost it is reported by its own quote job."""
     runner = _SNAPSHOT_RUNNER
     if runner is None:
-        return "no snapshot runner registered"
+        return _no_runner("月度快照")
     set_progress("snapshot_monthly", "寫入本月 KPI 快照")
-    return str(runner(conn, now=now))
+    return _outcome_of(runner(conn, now=now))
 
 
 # signal_scan runner seam (P2 batch 2): the scan reads pricing/portfolio + the rule engine
@@ -668,7 +843,7 @@ def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
 # (api/signals_service.scan_signals), registered at app startup — so scheduler/ never
 # imports api (architecture.md). A scheduler-only process without the runner is a safe
 # no-op (state resumes seeding once the app wires it on the next scan).
-SignalScanRunner = Callable[..., str]
+SignalScanRunner = Callable[..., "str | JobOutcome"]
 _SIGNAL_SCAN_RUNNER: SignalScanRunner | None = None
 
 
@@ -678,7 +853,7 @@ def register_signal_scan_runner(fn: SignalScanRunner | None) -> None:
     _SIGNAL_SCAN_RUNNER = fn
 
 
-def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
+def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Post-close: evaluate held-symbol rule signals → detect transitions → events.
 
     A separate static job (jobs here are one-purpose; the blueprint allows this or an
@@ -693,7 +868,7 @@ def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     """
     runner = _SIGNAL_SCAN_RUNNER
     if runner is None:
-        return "no signal scan runner registered"
+        return _no_runner("技術訊號掃描")
     set_progress("signal_scan", "掃描技術訊號")
     kwargs: dict[str, Any] = {"now": now}
     if _accepts_progress(runner):
@@ -701,22 +876,24 @@ def signal_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
             set_progress("signal_scan", msg)
 
         kwargs["progress"] = _report
-    return str(runner(conn, **kwargs))
+    return _outcome_of(runner(conn, **kwargs))
 
 
-def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Daily: refresh dividend events for acquired symbols + report pending count."""
+def dividend_inbox_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """Daily: refresh dividend events for acquired symbols + report pending count.
+
+    The runner's verdict passes through (DEF-067 — ``scan_job`` returns a JobOutcome)."""
     set_progress("dividend_inbox_scan", "掃描配息事件")
     runner = _DIVIDEND_SCAN_RUNNER
     if runner is not None:
-        return str(runner(conn, now=now))
+        return _outcome_of(runner(conn, now=now))
     acq = earliest_acquisitions(conn)
     instruments, _ = build_worklist(conn, None)
     refs = [r for r in instruments if r.symbol in acq]
     if not refs:
-        return "no acquired symbols"
+        return JobOutcome("ok", "無持倉可偵測")  # the inbox's own words for this case
     summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
-    return describe_refresh(summary)   # DEF-015: the one dividend-refresh sentence
+    return dividend_sweep_outcome(summary, total=len(refs))  # DEF-015: the one sentence
 
 
 # --- External-snapshot ingest jobs (spec 20.4) --------------------------------
@@ -754,8 +931,13 @@ def _prior_consecutive_failures(conn: sqlite3.Connection, job_id: str) -> int:
 
 
 def _run_ingest(
-    conn: sqlite3.Connection, job_id: str, fn: Callable[[], int], *, now: datetime
-) -> str:
+    conn: sqlite3.Connection,
+    job_id: str,
+    fn: Callable[[], int],
+    *,
+    now: datetime,
+    expected: int | None = None,
+) -> JobOutcome:
     """Run one ingest, escalating source health to ``error`` on failure.
 
     On success returns a short summary (its ``job_runs`` row will log ``ok``, resetting
@@ -764,11 +946,24 @@ def _run_ingest(
     writes no snapshot, then re-raises so ``run_job`` records the error row. Any other
     failure escalates health only when THIS run makes the trailing error streak reach the
     threshold (spec 20.12). Either way the exception re-raises for the ``job_runs`` log.
+
+    ``expected`` (DEF-067, 2026-09-26) is for an ingest whose snapshot count is FIXED —
+    sentiment is always VIX + Fear & Greed, the index job always one close set. There a
+    shortfall can only be a lost fetch (``pricing/ingest.py`` turns each into a ``None`` and
+    writes nothing), so 0 of N is ``error`` and fewer than N is ``partial``. A per-symbol
+    ingest has no such number: its count mixes "the source failed" with "the source has no
+    coverage for this symbol", and only ``pricing/ingest.py`` can tell them apart.
     """
     set_progress(job_id, "擷取外部快照資料")
     try:
         written = fn()
-        return f"{written} snapshot(s) written"
+        detail = f"寫入 {written} 筆外部快照"
+        if expected is None:
+            return JobOutcome("ok", detail)
+        return sweep_outcome(
+            f"{detail}（應有 {expected} 筆）" if written < expected else detail,
+            total=expected, failed=max(0, expected - written),
+        )
     except (FinMindTierError, FinMindQuotaError) as exc:
         source_id = _INGEST_JOB_SOURCE.get(job_id, job_id)
         logger.warning(
@@ -795,14 +990,14 @@ def _run_ingest(
         raise
 
 
-def finmind_chips_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def finmind_chips_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Post-close: institutional + margin chips for the TW universe (FinMind)."""
     return _run_ingest(
         conn, "finmind_chips_daily", lambda: ingest.ingest_chips(conn, now=now), now=now
     )
 
 
-def finmind_valuation_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def finmind_valuation_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Daily: PER/PBR/yield valuation for the TW universe (FinMind)."""
     return _run_ingest(
         conn, "finmind_valuation_daily", lambda: ingest.ingest_valuation(conn, now=now),
@@ -810,7 +1005,7 @@ def finmind_valuation_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     )
 
 
-def finmind_fundamentals_monthly(conn: sqlite3.Connection, *, now: datetime) -> str:
+def finmind_fundamentals_monthly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Monthly: revenue + financial statements for the TW universe (FinMind)."""
     return _run_ingest(
         conn, "finmind_fundamentals_monthly",
@@ -818,21 +1013,23 @@ def finmind_fundamentals_monthly(conn: sqlite3.Connection, *, now: datetime) -> 
     )
 
 
-def sentiment_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Daily: VIX (yfinance ^VIX) + CNN Fear & Greed snapshots."""
+def sentiment_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """Daily: VIX (yfinance ^VIX) + CNN Fear & Greed snapshots — always two (DEF-067)."""
     return _run_ingest(
-        conn, "sentiment_daily", lambda: ingest.ingest_sentiment(conn, now=now), now=now
+        conn, "sentiment_daily", lambda: ingest.ingest_sentiment(conn, now=now), now=now,
+        expected=2,
     )
 
 
-def index_quotes_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Trading-day: TAIEX/SPX/KLCI index closes (yfinance)."""
+def index_quotes_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """Trading-day: TAIEX/SPX/KLCI index closes (yfinance) — one snapshot (DEF-067)."""
     return _run_ingest(
-        conn, "index_quotes_daily", lambda: ingest.ingest_index(conn, now=now), now=now
+        conn, "index_quotes_daily", lambda: ingest.ingest_index(conn, now=now), now=now,
+        expected=1,
     )
 
 
-def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Daily: analyst target-price + rating-distribution snapshots for all instruments.
 
     Slot: 09:10 Asia/Taipei — analyst consensus is a slow-moving, timezone-agnostic
@@ -845,7 +1042,7 @@ def consensus_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     )
 
 
-def fundamentals_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def fundamentals_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Daily: fundamentals blocks from yfinance + Finnhub, UNION semantics (W3, AI-D16).
 
     Every enabled source writes its own snapshot row per symbol (no fallback chain — a
@@ -877,12 +1074,12 @@ def register_fundamentals_runner(fn: FundamentalsRunner | None) -> None:
     _FUNDAMENTALS_RUNNER = fn
 
 
-def fundamentals_av_weekly(conn: sqlite3.Connection, *, now: datetime) -> str:
+def fundamentals_av_weekly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Saturday: Alpha Vantage fundamentals blocks for HELD symbols, via the registered
     runner (``api.fundamentals_service.run_fundamentals_av``)."""
     runner = _FUNDAMENTALS_RUNNER
     if runner is None:
-        return "no fundamentals runner registered"
+        return _no_runner("週六基本面")
     return _run_ingest(
         conn, "fundamentals_av_weekly", lambda: runner(conn, now=now), now=now
     )
@@ -917,8 +1114,10 @@ def register_alert_compute_runner(fn: AlertComputeRunner | None) -> None:
 # Unregistered while an insight runner IS registered, the dispatcher is told "cannot tell"
 # (None): symbol alerts are held back unconsumed and the run detail says so — never carded
 # for a watchlist symbol, never silently dropped. Deliberately NOT the quote job's
-# ``_HELD_SYMBOLS_FN`` above: that one re-derives shares from the ledger rows
-# (``current_shares > 0``), a second definition the owner ruling rules out for this door.
+# ``_HELD_SYMBOLS_FN`` above: that one is the REGISTRY's 「持有」
+# (``holdings.held_among`` — a position today or on any later ledger date, DEF-075), while
+# this door reads the VALUATION book cut at today (DEF-041); they differ only on a symbol
+# whose every row is still ahead.
 AlertHeldFn = Callable[..., Set[str]]
 _ALERT_HELD_FN: AlertHeldFn | None = None
 
@@ -988,7 +1187,7 @@ def _held_unknown_note(held_unknown: list[alerts_bridge.AlertEvent]) -> str:
     )
 
 
-def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
+def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Compute alerts → record events → dispatch subscribing on_alert combos (R7).
 
     The registered insight runner produces one short-horizon card per subscribing combo
@@ -1040,19 +1239,26 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> str:
     # WP 3B: push unnotified events (this scan's + signal_scan's 14:55 events) to the
     # enabled channels. Uses the SEPARATE notified_at marker (independent of `consumed`
     # above). Wrapped so a push-path failure can never fail the alert scan itself.
+    # DEF-067: a crashed push path no longer reads 成功 — the alerts were computed and
+    # recorded, but nobody was told, so the run is ``partial`` (never ``error``: the scan
+    # itself still never fails over the push path, F3.6).
+    status = "ok"
     try:
         set_progress("alert_scan", "推播通知")
         notify_detail = notify_dispatch.dispatch_notifications(conn, now=now)
     except Exception as exc:  # noqa: BLE001 - the push path must never break the scan
         logger.warning("notify dispatch failed in alert_scan: %s", exc)
-        notify_detail = "notify: error"
+        notify_detail = "推播失敗（預警已記錄）"
+        status = "partial"
     # DEF-062: the fired rules by name (「單一標的集中度、波動突升」), never by id.
-    return (
-        f"{len(alerts)} alert(s) [{'、'.join(rule_name(r) for r in rules_seen)}], "
-        f"{dispatched} dispatched; "
+    # DEF-073: the sentence is zh — it read 「18 alert(s) […], 7 dispatched」.
+    names = "、".join(rule_name(r) for r in rules_seen)
+    return JobOutcome(status, (
+        f"預警 {len(alerts)} 條" + (f"（{names}）" if names else "")
+        + f"，派發 AI 預警卡 {dispatched} 張；"
         f"{notify_detail}{_skipped_note(skipped)}{_not_held_note(not_held)}"
         f"{_held_unknown_note(held_unknown)}"
-    )
+    ))
 
 
 # --- Loop-2 evaluate + Loop-3 calibrate jobs (spec 04.4 / 4.5) ----------------
@@ -1067,14 +1273,15 @@ def evaluate_insights(conn: sqlite3.Connection, *, now: datetime) -> str:
     feeds the actual into the pure quant scorer, runs master narrative scoring (skipped when
     master unset), and writes ``insight_evaluations`` rows. Missing actual → pending_data
     (anti-poison). No runner wired → safe no-op summary (cards/evaluation resume once the
-    app wires it).
+    app wires it). The detail is the runner's summary (「評分 N 張、延後 M 張；晉升：…」, R6
+    DEF-073 — it read 「evaluate pass complete」 whatever the pass did).
     """
     runner = _EVALUATION_RUNNER
     if runner is None:
-        return "no evaluate runner registered"
+        return "評分執行器未接線，未執行"
     set_progress("evaluate_insights", "評分到期洞察")
-    runner(conn, now=now)
-    return "evaluate pass complete"
+    summary = runner(conn, now=now)
+    return str(summary) if summary is not None else "評分完成"
 
 
 def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
@@ -1082,14 +1289,16 @@ def generate_calibrations(conn: sqlite3.Connection, *, now: datetime) -> str:
 
     The runner (``insight_service.generate_calibrations_for_all``) applies the §4.5 triggers
     + the min_samples gate + the §4.8 validator. Master unset → the runner pauses (no crash);
-    no runner wired → safe no-op summary.
+    no runner wired → safe no-op summary. The detail is the runner's summary (「產生 N 版；
+    略過 M 個任務（…樣本 k／門檻 8）；驗證器拒絕 J 版（…）」, R6 DEF-073 — it read
+    「calibration pass complete」 for all three).
     """
     runner = _CALIBRATION_RUNNER
     if runner is None:
-        return "no calibration runner registered"
+        return "校正執行器未接線，未執行"
     set_progress("generate_calibrations", "產生校準版本")
-    runner(conn, now=now)
-    return "calibration pass complete"
+    summary = runner(conn, now=now)
+    return str(summary) if summary is not None else "校正完成"
 
 
 def _accepts_progress(fn: Callable[..., object]) -> bool:
@@ -1108,7 +1317,29 @@ def _accepts_progress(fn: Callable[..., object]) -> bool:
     )
 
 
-def news_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
+def news_run_outcome(result: object, *, symbols: int | None = None) -> JobOutcome:
+    """The verdict + zh sentence of one news-pipeline run (DEF-067 / DEF-073).
+
+    「AI 整理 2 則，僅存標題 1 則，已收錄略過 3 則；AI 額度用盡，提前結束」. It read
+    「news: organized 2, headline 1, skipped 3 (budget stop)」 under a 成功 chip even when the
+    budget cut the run short. Shared with the manual ``POST /api/news/run`` worker
+    (``symbols`` = its universe size) so both doors say the same thing.
+    """
+    if not isinstance(result, dict):
+        return JobOutcome("ok", "新聞管線完成")
+    text = (f"AI 整理 {result.get('organized', 0)} 則，"
+            f"僅存標題 {result.get('headline_only', 0)} 則，"
+            f"已收錄略過 {result.get('skipped_existing', 0)} 則")
+    if result.get("refetched"):
+        text += f"，重抓舊文 {result['refetched']} 則"
+    if symbols is not None:
+        text = f"{symbols} 檔標的：{text}"
+    if result.get("stopped_budget"):
+        return JobOutcome("partial", text + "；AI 額度用盡，提前結束")
+    return JobOutcome("ok", text)
+
+
+def news_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Batch ④ nightly: run the news pipeline (discover→fetch→organize→store) via the
     registered runner (``news_service.run_news_daily``). No runner wired → safe no-op.
 
@@ -1119,7 +1350,7 @@ def news_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     """
     runner = _NEWS_RUNNER
     if runner is None:
-        return "no news runner registered"
+        return _no_runner("新聞管線")
     set_progress("news_daily", "執行新聞管線")
     kwargs: dict[str, Any] = {"now": now}
     if _accepts_progress(runner):
@@ -1127,13 +1358,7 @@ def news_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
             set_progress("news_daily", msg)
 
         kwargs["progress"] = _report
-    result = runner(conn, **kwargs)
-    if isinstance(result, dict):
-        return (f"news: organized {result.get('organized', 0)}, "
-                f"headline {result.get('headline_only', 0)}, "
-                f"skipped {result.get('skipped_existing', 0)}"
-                + (" (budget stop)" if result.get("stopped_budget") else ""))
-    return "news pass complete"
+    return news_run_outcome(runner(conn, **kwargs))
 
 
 # --- Ops 保全: daily SQLite backup + integrity check (spec 19.3) --------------
@@ -1157,7 +1382,7 @@ def backup_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
     ok, detail = backup_ops.check_integrity()
     if not ok:
         logger.warning("backup_daily integrity_check failed: %s", detail)
-        raise RuntimeError(f"integrity_check failed: {detail}")
+        raise RuntimeError(f"資料庫完整性檢查未通過：{detail}")
     if _prior_consecutive_failures(conn, "backup_daily") >= _FAIL_STREAK_THRESHOLD:
         logger.warning(
             "backup_daily recovered after %d+ consecutive failed run(s); backup resuming",
@@ -1165,7 +1390,7 @@ def backup_daily(conn: sqlite3.Connection, *, now: datetime) -> str:
         )
     set_progress("backup_daily", "寫入備份檔")
     path = backup_ops.backup_database(now=now)
-    return f"backup ok -> {path.name}"
+    return f"備份完成：{path.name}"
 
 
 JOBS: list[JobSpec] = [
@@ -1391,7 +1616,7 @@ def _backfill_benchmarks(
         summary = refresh_history(
             conn, registry, benchmark_refs(), start, now=now, factor_of=split_factor_fn(conn),
         )
-        return _summarize(summary)
+        return _summarize(_empty_as_failed(summary))  # multi-year window: see the helper
     except Exception as exc:  # noqa: BLE001 - benchmark backfill must never fail the job
         logger.warning("benchmark backfill failed: %s", exc)
         return _BENCHMARK_FAILED
@@ -1430,7 +1655,9 @@ def _backfill_prices_per_symbol(
         for ref in refs:
             done += 1
             set_progress(_BACKFILL_PROGRESS_ID, f"回補 {ref.symbol} ({done}/{total})")
-            s = refresh_history(conn, registry, [ref], start, now=now, factor_of=factor_of)
+            s = _empty_as_failed(  # multi-year window: no series at all IS a failure
+                refresh_history(conn, registry, [ref], start, now=now, factor_of=factor_of)
+            )
             ok.update(s.ok)
             failed.extend(s.failed)
     return RefreshSummary(ok=ok, failed=failed, fetched_at=now)
@@ -1538,7 +1765,7 @@ def unknown_job_message(job_id: str) -> str:
     return f"找不到排程工作「{job_id}」：它不是已登錄的系統工作，也不是 AI 洞察任務的排程"
 
 
-_NO_INSIGHT_RUNNER = "執行失敗：AI 洞察執行器未載入（此程序未註冊 insight runner）"
+_NO_INSIGHT_RUNNER = "執行失敗：AI 洞察執行器未載入（此程序沒有註冊洞察執行器）"
 
 
 # --- In-flight job registry (FU-D36 / FU-D46) ---------------------------------
@@ -1923,7 +2150,7 @@ def _record_skipped_overlap(
         "'already_running', '0', 0)",
         (
             job_id, now.isoformat(), now.isoformat(),
-            "already_running：前一次執行尚未完成，本次排程觸發已略過", str(payload),
+            "前一次執行尚未完成，本次排程觸發已略過", str(payload),
         ),
     )
     conn.commit()

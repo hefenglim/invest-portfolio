@@ -84,11 +84,37 @@ class Registry:
     def fetch_quote_history(
         self, instruments: list[InstrumentRef], start: date,
     ) -> tuple[list[PriceRow], dict[str, str], list[str]]:
+        """Routed daily history; ``failed`` = every symbol no provider returned bars for.
+
+        Unchanged contract: an empty answer and an exception both land in ``failed``. A
+        caller that must tell them apart reads :meth:`fetch_quote_history_explained`.
+        """
+        rows, sources, failed, empty = self.fetch_quote_history_explained(instruments, start)
+        return rows, sources, [r.symbol for r in instruments if r.symbol in {*failed, *empty}]
+
+    def fetch_quote_history_explained(
+        self, instruments: list[InstrumentRef], start: date,
+    ) -> tuple[list[PriceRow], dict[str, str], list[str], list[str]]:
+        """:meth:`fetch_quote_history` with the empty answers set apart (DEF-067, 2026-09-26).
+
+        Returns ``(rows, sources, failed, empty)``. Same rule as
+        :meth:`fetch_dividends_explained` (DEF-047): the chain still falls through on an
+        empty answer, a symbol is ``empty`` only when NO provider returned bars and AT LEAST
+        ONE answered without raising, and ``failed`` keeps the rest (every provider raised,
+        or the market has no history provider at all).
+
+        ⚠ An empty answer is not proof the provider was reached: yfinance logs a network
+        failure and returns an empty frame instead of raising. Whether an ``empty`` symbol
+        may be trusted as "no bars in the window" is therefore the CALLER's question, with
+        the evidence of the whole run (``scheduler.jobs.history_daily``).
+        """
         rows: list[PriceRow] = []
         sources: dict[str, str] = {}
         failed: list[str] = []
+        empty: list[str] = []
         for ref in instruments:
             filled = False
+            answered = False
             for provider in self._chain(DataType.QUOTE_HISTORY, ref.market):
                 try:
                     got = provider.fetch_quote_history(ref, start)
@@ -99,9 +125,11 @@ class Registry:
                     sources[ref.symbol] = provider.name
                     filled = True
                     break
-            if not filled:
-                failed.append(ref.symbol)
-        return rows, sources, failed
+                answered = True
+            if filled:
+                continue
+            (empty if answered else failed).append(ref.symbol)
+        return rows, sources, failed, empty
 
     def fetch_dividends(
         self, instruments: list[InstrumentRef],

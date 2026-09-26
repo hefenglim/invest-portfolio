@@ -25,6 +25,7 @@ from portfolio_dash.scheduler.jobs import (
     failure_detail,
     finish_job_run,
     latest_run_unfinished,
+    news_run_outcome,
     start_job_run,
 )
 from portfolio_dash.shared.db import session
@@ -130,14 +131,10 @@ def _news_run_worker(
                 return
             try:
                 result = news_service.run_news_for(conn, universe, now=now)
-                detail = (
-                    f"manual: organized {result.get('organized', 0)}, "
-                    f"headline {result.get('headline_only', 0)}, "
-                    f"skipped {result.get('skipped_existing', 0)} "
-                    f"over {len(universe)} symbol(s)"
-                    + (" (budget stop)" if result.get("stopped_budget") else "")
-                )
-                status = "ok"
+                # DEF-073 / DEF-067 (R6): the nightly job's sentence AND verdict — it read
+                # 「manual: organized 2, … over 2 symbol(s) (budget stop)」 under a 成功 chip.
+                outcome = news_run_outcome(result, symbols=len(universe))
+                detail, status = outcome.detail, outcome.status
             except Exception as exc:  # noqa: BLE001 — swallow + log via the run row
                 # I-16: the scheduler's one sentence for a failed run (DEF-030) — the bare
                 # ``str(exc)`` (a KeyError's repr, an English provider message) reached the

@@ -15,8 +15,8 @@ from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.serialize import to_wire
 from portfolio_dash.api.wire import alerts_wire
-from portfolio_dash.data_ingestion.holdings import current_shares
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.holdings import held_among
+from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import Side
@@ -176,24 +176,22 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
 
-def _held_set(conn: sqlite3.Connection) -> set[str]:
-    """Symbols carrying a live position in any account (cheap net-shares check)."""
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    return {
-        inst.symbol
-        for inst in list_instruments(conn)
-        if any(current_shares(conn, aid, inst.symbol) > _ZERO for aid in account_ids)
-    }
+def _target_weights_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any]:
+    """The GET/PUT response: one row per REGISTERED symbol + held/watch flag + Σ.
 
-
-def _target_weights_view(conn: sqlite3.Connection) -> dict[str, Any]:
-    """The GET/PUT response: one row per REGISTERED symbol + held/watch flag + Σ."""
+    ``held`` is the registry's 「持有」 — ``holdings.held_among`` (``holds_position``: a
+    position today or on any later ledger date), the predicate behind the watchlist badge
+    and its 封存 / 移除 doors (DEF-075, owner ruling ② B). It was ``current_shares > 0``, so a
+    position closed only by a FUTURE-dated sale and a declared short read 「觀察」 here while
+    the watchlist read 「持有」.
+    """
     tw.ensure_target_weights_seeded(conn)
     stored = tw.load_target_weights(conn)
-    held = _held_set(conn)
+    instruments = sorted(list_instruments(conn), key=lambda i: i.symbol)
+    held = held_among(conn, [i.symbol for i in instruments], today=now.date())
     total = _ZERO
     rows: list[dict[str, Any]] = []
-    for inst in sorted(list_instruments(conn), key=lambda i: i.symbol):
+    for inst in instruments:
         w = stored.get(inst.symbol)
         if w is not None:
             total += w
@@ -206,8 +204,9 @@ def _target_weights_view(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 @router.get("/target-weights")
-def get_target_weights(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-    return _target_weights_view(conn)
+def get_target_weights(conn: sqlite3.Connection = Depends(get_conn),
+                       now: datetime = Depends(get_now)) -> dict[str, Any]:
+    return _target_weights_view(conn, now=now)
 
 
 class TargetWeightsBody(BaseModel):
@@ -241,4 +240,4 @@ def put_target_weights(body: TargetWeightsBody,
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "目標權重合計不可超過 100%", field="weights"))
     tw.save_target_weights(conn, weights, now=now)
-    return _target_weights_view(conn)
+    return _target_weights_view(conn, now=now)

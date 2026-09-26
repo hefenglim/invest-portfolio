@@ -37,6 +37,8 @@ from portfolio_dash.data_ingestion import holdings as holdings_mod
 from portfolio_dash.data_ingestion.holdings import (
     _shares_until,
     current_shares,
+    held_among,
+    holds_position,
     shares_on,
     shares_through,
 )
@@ -85,22 +87,23 @@ EXPECTED_CALL_SITES = {
     # DEF-056: taken at the CLOSE of the valuation day (`shares_through`), because the book
     # the footer reconciles against is cut there — an action dated next week is not a term.
     ("portfolio_dash/api/routers/symbol.py", "shares_through"),
-    ("portfolio_dash/api/routers/instruments.py", "current_shares"),
-    ("portfolio_dash/api/routers/strategy.py", "current_shares"),
-    ("portfolio_dash/api/signals_service.py", "current_shares"),
-    # W3 (AI-D16): the AV-leg runner's held set — the same net-shares-positive predicate
-    # as strategy.py's `_held_set`, via the same action-aware wrapper. Containment holds
-    # the same structural way: an action-free symbol short-circuits inside `_shares_at`,
-    # and a held check against it is byte-identical to the pre-feature answer.
-    ("portfolio_dash/api/fundamentals_service.py", "current_shares"),
-    # M10-02 (2026-09-06): the quote jobs' partial threshold — "did a HELD instrument
-    # fail?" — answered by `actions.py::held_symbols` and injected into `scheduler/jobs.py`,
-    # which may not import `data_ingestion` itself. It is the SAME net-shares-positive
-    # predicate as `strategy.py::_held_set` and `fundamentals_service.py::_held_refs`, via
-    # the same action-aware wrapper, so containment holds the same structural way: an
-    # action-free symbol short-circuits inside `_shares_at`, the walk never runs, and the
-    # held answer is byte-identical to the pre-feature one.
-    ("portfolio_dash/api/routers/actions.py", "current_shares"),
+    # DEF-064 / DEF-075 (2026-09-25/26): the REGISTRY's 「持有」 — `holds_position` (a
+    # position today or on any later ledger date) and its list form `held_among` (one action
+    # index per call). Read by the watchlist badge + 封存 / 移除 / 永久移除
+    # (instruments.py), the write-side re-activation (store.py), the target-weights badge
+    # (strategy.py), the signal flag (signals_service.py), the Alpha Vantage held universe
+    # (fundamentals_service.py) and the quote jobs' partial threshold (actions.py). Those
+    # five used `current_shares > 0` until DEF-075. Both wrappers take `shares_through` per
+    # day, so containment holds the same structural way: an action-free symbol
+    # short-circuits inside `_shares_at` and the walk never runs (proven by the landmine
+    # test above, which calls `holds_position` too). Before DEF-075 this census did not
+    # look for these two names, so DEF-064's two `holds_position` sites were invisible here.
+    ("portfolio_dash/api/routers/instruments.py", "holds_position"),
+    ("portfolio_dash/data_ingestion/store.py", "holds_position"),
+    ("portfolio_dash/api/routers/strategy.py", "held_among"),
+    ("portfolio_dash/api/signals_service.py", "held_among"),
+    ("portfolio_dash/api/fundamentals_service.py", "held_among"),
+    ("portfolio_dash/api/routers/actions.py", "held_among"),
     ("portfolio_dash/data_ingestion/validate.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "shares_through"),
     # E1a (spec §5, 2026-08-11): the ONE accessor that deliberately skips the structural
@@ -233,6 +236,9 @@ def test_the_walker_is_never_constructed_without_a_corporate_action(
                     current_shares(c, acct, sym)
                     shares_through(c, acct, sym, on=date(2026, 7, 1))
                     shares_on(c, acct, sym, before=date(2026, 7, 1))
+            for sym in SYMS:                  # DEF-075: the registry's 「持有」 wrappers
+                holds_position(c, sym, today=date(2026, 7, 1))
+            held_among(c, list(SYMS), today=date(2026, 7, 1))
         finally:
             c.close()
 
@@ -299,7 +305,8 @@ def test_the_call_site_census_is_still_accurate() -> None:
     # It was invisible to this census when it landed (no `\bshares_on` substring inside it),
     # which would have made the tenth accessor the one nobody had to argue for.
     pattern = re.compile(
-        r"\b(shares_before_action_on|current_shares|shares_through|shares_on)\s*\(")
+        r"\b(shares_before_action_on|current_shares|shares_through|shares_on"
+        r"|holds_position|held_among)\s*\(")
     found: set[tuple[str, str]] = set()
     for path in root.rglob("*.py"):
         if path.name == "holdings.py":

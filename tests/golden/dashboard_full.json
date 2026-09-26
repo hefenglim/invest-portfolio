@@ -1729,7 +1729,15 @@
         "gap_pct": "-3.7500",
         "ok": false,
         "as_of": "2026-06-09",
-        "stale": false
+        "stale": false,
+        "compared_on": "2026-06-09",
+        "dates_differ": false,
+        "leg_dates": {
+          "USD/MYR": "2026-06-09",
+          "MYR/TWD": "2026-06-09",
+          "USD/TWD": "2026-06-09"
+        },
+        "reason": null
       }
     ],
     "scheduler_running": false

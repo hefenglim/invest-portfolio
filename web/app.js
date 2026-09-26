@@ -1391,7 +1391,24 @@
        rates themselves are never touched here — which pair should be derived is an owner call. */
     (fr.fx_triangulation || []).forEach((t) => {
       const n = el('div', 'fresh-note');
-      if (!t.ok) n.style.color = 'var(--amber)';
+      /* DEF-077 (owner ruling ⑥ A): the verdict is the server's, judged on the legs' latest
+         COMMON date. Three states, and only a real disagreement ON that date is amber:
+         ok === true → 一致; ok === false → the guard fired; ok === null → no common date in
+         the lookback, 「無法比較」 — neutral, never a red light. `dates_differ` adds 「日期不同」
+         with each leg's own date, so a leg that is a day behind reads as what it is. */
+      if (t.ok === false) n.style.color = 'var(--amber)';
+      const legs = Object.keys(t.leg_dates || {})
+        .map((k) => k + ' ' + t.leg_dates[k]).join('、');
+      const differ = t.dates_differ
+        ? '・日期不同（各組最新：' + legs + '）'
+          + (t.compared_on ? '，以共同日期 ' + t.compared_on + ' 比較' : '')
+        : '';
+      if (t.ok === null || t.ok === undefined) {
+        n.textContent = '匯率三角一致性 ' + t.pair + '：無法比較'
+          + (t.reason ? '（' + t.reason + '）' : '') + differ;
+        notes.appendChild(n);
+        return;
+      }
       /* implied / direct are backend Decimal strings already quantized for display (6 dp);
          printed verbatim — a rate is not money, and app.js keeps `f.rate` as its only rate
          formatter (M3-08 ruling, pinned by test_m3_08_fx_ledger_rate_precision). */
@@ -1399,7 +1416,8 @@
         + t.implied + '，直接報價 ' + t.direct
         + '，落差 ' + t.gap_pct + '%'
         + (t.ok ? '（一致）'
-          : '（超過 0.05% — 三組匯率各自獨立取得，跨幣別換算路徑不同時會出現微小的幻影損益）');
+          : '（超過 0.05% — 三組匯率各自獨立取得，跨幣別換算路徑不同時會出現微小的幻影損益）')
+        + differ;
       notes.appendChild(n);
     });
   }

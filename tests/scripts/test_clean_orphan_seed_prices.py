@@ -248,6 +248,12 @@ class _FakeRegistry:
                          close=Decimal("99"), source="yfinance") for r in instruments]
         return rows, {r.symbol: "yfinance" for r in instruments}, []
 
+    def fetch_quote_history_explained(
+        self, instruments: list[InstrumentRef], start: date
+    ) -> tuple[list[PriceRow], dict[str, str], list[str], list[str]]:
+        # DEF-067 ④: ``refresh_history`` reads the explained variant (empty set apart).
+        return (*self.fetch_quote_history(instruments, start), [])
+
 
 def test_backfill_recovers_the_provider_quote_and_reports_rows_written(
     db: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -275,6 +281,12 @@ class _OfflineRegistry:
         if self.raises:
             raise ConnectionError("network is unreachable")
         return [], {}, [r.symbol for r in instruments]
+
+    def fetch_quote_history_explained(
+        self, instruments: list[InstrumentRef], start: date
+    ) -> tuple[list[PriceRow], dict[str, str], list[str], list[str]]:
+        # DEF-067 ④: ``refresh_history`` reads the explained variant (empty set apart).
+        return (*self.fetch_quote_history(instruments, start), [])
 
 
 @pytest.mark.parametrize("mode", ["fetch-raises", "all-failed", "no-registry"])

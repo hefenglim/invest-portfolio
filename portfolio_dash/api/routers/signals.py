@@ -51,6 +51,7 @@ def signal(
     registered or ad-hoc symbol resolves; the ``held`` flag marks whether it is a position."""
     result, price_as_of = signals_service.evaluate_symbol(conn, symbol, now=now)
     return signals_service.to_wire(
-        symbol, result, now=now, held=signals_service.is_held(conn, symbol),
+        symbol, result, now=now,
+        held=signals_service.is_held(conn, symbol, today=now.date()),
         price_as_of=price_as_of,
     )

@@ -140,6 +140,9 @@ def test_the_inbox_refresh_reports_no_records_as_normal(
         f"1 檔事件已更新，1 檔無配息紀錄（AAPL）・待確認 {body['total_count']} 筆")
     assert "失敗" not in refreshed["text"]
     # …and 排程中心's two dividend jobs say the same, with no 失敗 either.
-    assert inbox.scan_job(golden_db, now=_NOW) == refreshed["text"]
+    # DEF-067: both jobs return their verdict with the sentence — and "no records" is ok.
+    scan = inbox.scan_job(golden_db, now=_NOW)
+    assert (scan.status, scan.detail) == ("ok", refreshed["text"])
     daily = jobs.dividends_daily(golden_db, now=_NOW)
-    assert "無配息紀錄（AAPL）" in daily and "失敗" not in daily
+    assert daily.status == "ok"
+    assert "無配息紀錄（AAPL）" in daily.detail and "失敗" not in daily.detail

@@ -213,7 +213,7 @@ def test_malformed_envelope_degrades_instead_of_escaping_as_a_500(
     instead of the intended 503 degrade.
     """
     monkeypatch.setattr(llm_mod.litellm, "completion", lambda **kw: _EmptyEnvelope())
-    with pytest.raises(LLMUnavailable, match="malformed response"):
+    with pytest.raises(LLMUnavailable, match="供應商回應格式異常"):
         complete_structured("p", Out, agent="t", conn=conn)
     assert fl.list_rows(conn)[0]["outcome"] == "provider_error"
 
@@ -222,7 +222,7 @@ def test_malformed_envelope_degrades_on_the_text_path_too(
     monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
 ) -> None:
     monkeypatch.setattr(llm_mod.litellm, "completion", lambda **kw: _EmptyEnvelope())
-    with pytest.raises(LLMUnavailable, match="malformed response"):
+    with pytest.raises(LLMUnavailable, match="供應商回應格式異常"):
         complete_text("p", agent="t", conn=conn)
 
 

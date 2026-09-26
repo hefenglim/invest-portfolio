@@ -759,7 +759,11 @@ def set_active_calibration(
 ) -> Any:
     """Manually select (or clear with null) the active calibration version.
 
-    A non-null version must exist (non-archived) for this insight_type, else 400.
+    The 校正版本鏈's 「設為生效」 / 「取消生效」 (R6 DEF-071 — the route had no caller, so a
+    lone v1, or a winning shadow with auto_promote off, could never be adopted). ``null``
+    goes back to no calibration layer. A non-null version must exist and be live for this
+    insight_type, else 400 — an archived one says so, since it is still listed under 「顯示
+    已封存」.
     """
     cs.ensure_seeded(conn)
     if cs.get_insight_type(conn, insight_type_id) is None:
@@ -768,17 +772,20 @@ def set_active_calibration(
             content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
         )
     if payload.version is not None:
-        existing = {
-            c.version for c in cs.list_calibrations(conn, insight_type_id)
+        chain = {
+            c.version: c
+            for c in cs.list_calibrations(conn, insight_type_id, include_archived=True)
         }
-        if payload.version not in existing:
+        found = chain.get(payload.version)
+        if found is None or found.archived:
+            msg = (
+                f"校正版本 v{payload.version} 已封存，不能設為生效"
+                if found is not None
+                else f"該洞察組合無校正版本 {payload.version}"
+            )
             return JSONResponse(
                 status_code=400,
-                content=error_body(
-                    "validation_error",
-                    f"該洞察組合無校正版本 {payload.version}",
-                    field="version",
-                ),
+                content=error_body("validation_error", msg, field="version"),
             )
     cs.set_active_calibration(conn, insight_type_id, payload.version)
     return {"id": insight_type_id, "active_calibration_version": payload.version}
@@ -793,9 +800,27 @@ def list_calibrations(
     include_archived: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> list[dict[str, Any]]:
+    """The task's calibration chain, oldest first (spec 4.7), for the drawer's ④.
+
+    Each version also carries ``is_active`` and ``shadow`` — the shadow version's
+    :class:`~portfolio_dash.api.insight_service.ShadowState` wire (phase / scored of needed /
+    queue position / both versions' own records), ``null`` on every other version — so the
+    chain can mark a WINNING shadow and say 「影子排隊中」 without computing anything (R6
+    DEF-070/071). Read-only.
+    """
     cs.ensure_seeded(conn)
     rows = cs.list_calibrations(conn, insight_type, include_archived=include_archived)
-    return [c.model_dump() for c in rows]
+    it = cs.get_insight_type(conn, insight_type)
+    state = insight_service.shadow_state(conn, it) if it is not None else None
+    out: list[dict[str, Any]] = []
+    for c in rows:
+        wire = c.model_dump()
+        wire["is_active"] = it is not None and it.active_calibration_version == c.version
+        wire["shadow"] = (
+            state.wire() if state is not None and state.version == c.version else None
+        )
+        out.append(wire)
+    return out
 
 
 @router.post("/calibrations/{calibration_id}/archive")

@@ -53,7 +53,7 @@ def test_history_daily_includes_benchmarks(
 
     monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
     monkeypatch.setattr(jobs_mod, "refresh_history", fake_history)
-    detail = history_daily(conn, now=_NOW)
+    detail = history_daily(conn, now=_NOW).detail  # DEF-067: a JobOutcome
 
     seen = {s for group in calls for s in group}
     assert _BENCH <= seen  # both benchmark keys were fetched
@@ -74,7 +74,9 @@ def test_history_daily_benchmark_failure_degrades_silently(
 
     monkeypatch.setattr(jobs_mod, "default_registry", lambda conn=None: "REG")
     monkeypatch.setattr(jobs_mod, "refresh_history", fake_history)
-    detail = history_daily(conn, now=_NOW)  # must NOT raise (instrument refresh protected)
+    outcome = history_daily(conn, now=_NOW)  # must NOT raise (instrument refresh protected)
+    detail = outcome.detail
+    assert outcome.status == "ok"  # FU-D27: a benchmark failure never fails the job (DEF-067)
     assert "基準指數：更新失敗，已略過" in detail
 
 

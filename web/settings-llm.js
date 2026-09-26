@@ -233,7 +233,14 @@
     const x = m || createDefaults(
       (D.models.length && D.models[D.models.length - 1].provider) || 'openrouter');
     set('dr-alias', x.alias); set('dr-provider', x.provider); set('dr-model', x.model_name);
-    set('dr-base', x.api_base || ''); set('dr-key', x.api_key_masked || '（尚未設定）');
+    set('dr-base', x.api_base || '');
+    /* DEF-078 (owner ruling ⑦, 2026-09-26): #dr-key is a password field. It stays EMPTY until
+       重設 unlocks it (a mask typed into a password field would read as dots and say nothing);
+       the stored key's server-side mask — first 3 + ••• + last 3, the API never returns the
+       key — is shown as text beside it instead. */
+    set('dr-key', '');
+    $('#dr-key').placeholder = '按「重設」輸入新的 API Key';
+    $('#dr-key-current').textContent = '目前：' + (x.api_key_masked || '尚未設定');
     set('dr-pin', x.price_in); set('dr-pout', x.price_out);
     set('dr-ctx', x.context_window); set('dr-maxout', x.max_output_tokens);
     set('dr-timeout', x.timeout_seconds); set('dr-retries', x.max_retries);
@@ -599,7 +606,7 @@
         usage: (resp && resp.usage) || { by_model: [], by_agent: [], daily: { dates: [], series: [] } },
       };
     } catch (err) {
-      _toast('LLM 設定載入失敗', 'fail', (err && err.message) || undefined);
+      _toast('AI 設定載入失敗', 'fail', (err && err.message) || undefined);
       /* fall through with empty D so the page still renders an (empty) shell */
     }
     renderStatus();

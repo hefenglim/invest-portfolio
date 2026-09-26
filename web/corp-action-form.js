@@ -12,7 +12,9 @@
    Door 2 is a one-liner against the SAME entry point:
 
        window.pdCorpActionForm.open({
-         account_id: <the drawer's account, or '' for the first holder>,
+         account_id: <the mismatched account: the drawer's filter, or the ONE account
+                      whose footer is red>,
+         require_account: <true when several accounts are red — no preselection>,
          from_symbol: <the drawer's symbol>,
          reason: '此標的的對帳結果為 ⚠ 對帳不一致',
          onSaved: function () { <re-render the drawer> }
@@ -791,6 +793,19 @@
     api().get('/api/accounts').then((resp) => {
       const list = (resp && resp.accounts) || [];
       fAcct.replaceChildren();
+      /* DEF-072: a door that cannot tell WHICH account the repair is for says so with
+         `require_account` — the select then opens on an explicit, unselectable 「請選擇帳戶」
+         instead of falling on whichever account /api/accounts lists first (door 2 used to
+         land on Moomoo MY for a mismatch that lived at 台灣券商). `ready()` already refuses
+         an empty account, so nothing is previewed or saved until the owner picks one.
+         A prefilled account always wins; callers that pass neither keep the old default. */
+      if (prefill.require_account && !prefill.account_id) {
+        const ph = el('option', null, '請選擇帳戶');
+        ph.value = '';
+        ph.disabled = true;
+        ph.selected = true;
+        fAcct.appendChild(ph);
+      }
       list.forEach((a) => {
         const o = el('option', null,
           window.pdNames ? window.pdNames.account(a.account_id) : a.account_id);

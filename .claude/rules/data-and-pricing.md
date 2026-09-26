@@ -31,7 +31,13 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   conversion path and the valuation path used different rates. The provider's `MYRTWD=X` is
   itself a USD cross sampled at another moment, so nothing real is lost. Consequences:
   **(1)** `freshness.fx_triangulation` is now a *guard*, not a warning — a non-zero gap means a
-  row reached `fx_rates` by some path other than this module; **(2)** a derived pair must
+  row reached `fx_rates` by some path other than this module. It is judged on the three legs'
+  latest COMMON date not after the valuation day (DEF-077, owner ruling ⑥ A, 2026-09-26) —
+  never latest row against latest row, which reads a day's market move as a data error
+  (J-01 measured −0.0938% with no bad row, USD/TWD a day ahead of USD/MYR). Legs on different
+  latest dates carry `dates_differ` + `leg_dates` and the page says 「日期不同」; no common date
+  within 30 days → `ok: null` + `reason` (「無法比較」), never `false`. The resolver reads each
+  leg's history in the direction it resolved the rate; **(2)** a derived pair must
   never be handed to a provider (`pricing/cross.py::fetched_pairs` filters the worklist, so
   two writers can never own one row); **(3)** the freshness panel labels a derived row
   「推導」 so nobody reads it as a market quote; **(4)** the 6-dp cap applies to the derived

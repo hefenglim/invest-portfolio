@@ -40,8 +40,8 @@ def test_signal_scan_is_a_registered_job() -> None:
 
 
 def test_signal_scan_no_runner_is_safe_noop(conn: sqlite3.Connection) -> None:
-    detail = jobs.signal_scan(conn, now=NOW)
-    assert "no signal scan runner" in detail
+    outcome = jobs.signal_scan(conn, now=NOW)
+    assert outcome == jobs.JobOutcome("ok", "技術訊號掃描執行器未接線，未執行")  # DEF-073
 
 
 def test_signal_scan_dispatches_to_registered_runner(conn: sqlite3.Connection) -> None:
@@ -52,7 +52,7 @@ def test_signal_scan_dispatches_to_registered_runner(conn: sqlite3.Connection) -
         return "1 symbol(s), 1 seeded, 0 transition event(s)"
 
     jobs.register_signal_scan_runner(runner)
-    detail = jobs.signal_scan(conn, now=NOW)
+    detail = jobs.signal_scan(conn, now=NOW).detail  # DEF-067: a JobOutcome
     assert calls == [NOW]
     assert "seeded" in detail
 
@@ -93,7 +93,7 @@ def test_signal_scan_forwards_progress_to_capable_runner(
     finally:
         jobs._clear_running("signal_scan")
     assert seen["during"] == "回填訊號歷史 WATCH（+61 列）（1/1）"
-    assert detail == "ok"
+    assert detail == jobs.JobOutcome("ok", "ok")  # DEF-067: the job returns a JobOutcome
 
 
 def test_signal_scan_legacy_runner_without_progress_still_called(
@@ -101,4 +101,4 @@ def test_signal_scan_legacy_runner_without_progress_still_called(
 ) -> None:
     """A stub/legacy runner without the param is called exactly as before (no TypeError)."""
     jobs.register_signal_scan_runner(lambda c, *, now: "legacy ok")
-    assert jobs.signal_scan(conn, now=NOW) == "legacy ok"
+    assert jobs.signal_scan(conn, now=NOW).detail == "legacy ok"  # DEF-067: a JobOutcome

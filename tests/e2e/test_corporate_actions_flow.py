@@ -38,6 +38,7 @@ in this directory is built without it.
 """
 
 import json
+import re
 import sqlite3
 import urllib.request
 from collections.abc import Iterator
@@ -269,6 +270,43 @@ def _seed_red_footer(conn: sqlite3.Connection) -> None:
                  close=Decimal("300"), source="test"),
         PriceRow(instrument="AAPL", market=Market.US, as_of=PRICE_DAY,
                  close=Decimal("120"), source="test"),
+    ], fetched_at=GOLDEN_NOW)
+    _fx(conn)
+    conn.commit()
+
+
+def _red_position(conn: sqlite3.Connection, account_id: str, symbol: str) -> None:
+    """One account's ⚠ 對帳不一致 — the ``_seed_red_footer`` shape: a STICKY 賣超 carrying a
+    SPLIT the replay refuses (E3), so the share-only path and the replay disagree."""
+    for side, qty, day in ((Side.SELL, "10", date(2026, 1, 5)),
+                           (Side.BUY, "30", date(2026, 2, 5))):
+        insert_transaction(conn, account_id=account_id, symbol=symbol, side=side,
+                           quantity=Decimal(qty), price=Decimal("100"),
+                           fees=Decimal("0"), tax=Decimal("0"), trade_date=day)
+    insert_corporate_action(conn, account_id=account_id, action_date=ACTION_DAY,
+                            kind=CorporateActionKind.SPLIT, from_symbol=symbol,
+                            to_symbol=symbol, ratio_to=Decimal("2"), ratio_from=Decimal("1"))
+
+
+def _seed_red_in_two_accounts(conn: sqlite3.Connection) -> None:
+    """DEF-072's two shapes on one ledger, both spanning 嘉信 AND Moomoo MY.
+
+    MSFT is red at 嘉信 only and clean at Moomoo MY — the account ``/api/accounts`` lists
+    first, i.e. where the old ``filterAcct || ''`` prefill landed. AAPL is red at BOTH, so no
+    single account is "the" one and the form must ask.
+    """
+    seed_accounts(conn)
+    _us(conn, "AAPL", "Apple")
+    _us(conn, "MSFT", "Microsoft")
+    _red_position(conn, "schwab", "AAPL")
+    _red_position(conn, "moomoo_my", "AAPL")
+    _red_position(conn, "schwab", "MSFT")
+    insert_transaction(conn, account_id="moomoo_my", symbol="MSFT", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"),
+                       fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    upsert_prices(conn, [
+        PriceRow(instrument=sym, market=Market.US, as_of=PRICE_DAY,
+                 close=Decimal("120"), source="test") for sym in ("AAPL", "MSFT")
     ], fetched_at=GOLDEN_NOW)
     _fx(conn)
     conn.commit()
@@ -1057,12 +1095,13 @@ def test_door2_offers_the_repair_beside_a_red_footer_and_nowhere_else(
     expect(_symbol_box(modal)).to_have_value("2330")
     expect(_save_button(modal)).to_be_disabled()          # nothing previewed yet
 
-    # Door 2 prefills the drawer's account filter, and an UNFILTERED drawer passes '' — so
-    # the select lands on whichever account /api/accounts returns first, which need not be
-    # the one holding the symbol. Picking the holder is what the owner does here, and it is
-    # also what makes the refusal below a single, attributable finding rather than one per
-    # account (E13 always includes the submitting account, so a non-holder adds its own E1a).
-    modal.locator(".ca-grid select").select_option("tw_broker")
+    # DEF-072: the account is the one whose footer is RED. It used to be the drawer's filter
+    # or '' — and an unfiltered drawer's '' landed on whichever account /api/accounts lists
+    # first (Moomoo MY), while 2330 lives at 台灣券商 and, held in one account only, has no
+    # filter chip to switch to first. The prefill is what makes the refusal below a single,
+    # attributable finding (E13 always includes the submitting account, so a non-holder would
+    # add its own E1a) — and the owner no longer has to correct it by hand.
+    expect(modal.locator(".ca-grid select")).to_have_value("tw_broker")
     _date_box(modal).fill("2026-04-01")
     _ratio_from(modal).fill("1")
     with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev:
@@ -1115,6 +1154,86 @@ def test_door2_offers_the_repair_beside_a_red_footer_and_nowhere_else(
     assert not unexpected and not page_errors, (
         f"door 2: unexpected 5xx={unexpected!r} page={page_errors!r}"
     )
+
+
+@pytest.mark.e2e
+def test_door2_prefills_the_account_whose_footer_is_red(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """DEF-072 (D-00): door 2's account is the mismatched one — never "the first listed".
+
+    Three cases, one drawer each: ONE red account among two → that account (MSFT: red at
+    嘉信, clean at Moomoo MY, which /api/accounts lists first and the old prefill picked);
+    TWO red accounts → no preselection, an explicit 「請選擇帳戶」 that previews and saves
+    nothing until the owner picks (AAPL); a FILTERED drawer → the filter's account.
+    """
+    base = flow_server(_seed_red_in_two_accounts)
+    page = fresh_page
+    _, page_errors = _sink(page)
+    bad: list[str] = []
+    page.on("response", lambda r: bad.append(r.url) if r.status >= 500 else None)
+    modal = page.locator(".ca-modal")
+    account = modal.locator(".ca-grid select")
+
+    # (1) one red account of two → that one.
+    foot = _open_drawer(page, base, "MSFT")
+    expect(foot).to_contain_text("⚠ 對帳不一致")
+    foot.locator("button", has_text="補登公司行動").click()
+    expect(modal).to_be_visible()
+    expect(account).to_have_value("schwab")
+    page.keyboard.press("Escape")
+    expect(modal).to_have_count(0)
+
+    # (2) two red accounts → the owner chooses; nothing is previewed or saved before that.
+    foot = _open_drawer(page, base, "AAPL")
+    expect(foot).to_contain_text("⚠ 對帳不一致")
+    foot.locator("button", has_text="補登公司行動").click()
+    expect(modal).to_be_visible()
+    expect(account).to_have_value("")
+    expect(account.locator("option:checked")).to_have_text("請選擇帳戶")
+    reason = modal.locator(".ca-reason")
+    expect(reason).to_contain_text("嘉信 Schwab")
+    expect(reason).to_contain_text("Moomoo MY")
+    _date_box(modal).fill("2026-04-01")
+    _ratio_from(modal).fill("1")
+    _ratio_to(modal).fill("3")
+    expect(_save_button(modal)).to_be_disabled()
+    with page.expect_response("**/api/ledgers/corporate-actions/preview") as prev:
+        account.select_option("moomoo_my")
+    assert prev.value.status == 200
+    assert json.loads(prev.value.request.post_data or "{}")["account_id"] == "moomoo_my"
+    page.keyboard.press("Escape")
+    expect(modal).to_have_count(0)
+
+    # (3) a filtered drawer keeps the filter's account.
+    page.locator(".sd-tx-filter .sd-tx-filter-btn", has_text="Moomoo MY").click()
+    expect(foot).to_contain_text("⚠ 對帳不一致")
+    foot.locator("button", has_text="補登公司行動").click()
+    expect(account).to_have_value("moomoo_my")
+
+    unexpected = [u for u in bad if not u.endswith("/api/whatif")]
+    assert not unexpected and not page_errors, (
+        f"door 2 prefill: unexpected 5xx={unexpected!r} page={page_errors!r}")
+
+
+@pytest.mark.e2e
+def test_door3_prefills_the_ledger_account_chip(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """DEF-072 class: the 5th ledger tab with an account chip active opens the form on THAT
+    account (it fell on the first /api/accounts entry, like door 2); 全部 keeps the default."""
+    base = flow_server(_seed_two_account_position)
+    page = fresh_page
+    _, page_errors = _sink(page)
+    _open_ledger_tab(page, base)
+    chip = page.locator('#ledger-filters .chip[data-account-id="schwab"]')
+    chip.click()
+    expect(chip).to_have_class(re.compile(r"(^|\s)active(\s|$)"))
+    page.click("#action-add")
+    modal = page.locator(".ca-modal")
+    expect(modal).to_be_visible()
+    expect(modal.locator(".ca-grid select")).to_have_value("schwab")
+    assert not page_errors, page_errors
 
 
 # ============================================== E23 — the one-click convert-to-SPLIT (D22)

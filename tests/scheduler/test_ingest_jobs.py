@@ -310,4 +310,4 @@ def test_fundamentals_av_weekly_dispatches_the_registered_runner(
     assert called["n"] == 1
     row = conn.execute("SELECT status, detail FROM job_runs WHERE id=?", (rid,)).fetchone()
     assert row["status"] == "ok"
-    assert "5 snapshot" in (row["detail"] or "")
+    assert "寫入 5 筆外部快照" in (row["detail"] or "")  # DEF-073: zh

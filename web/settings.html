@@ -399,7 +399,7 @@
       </tr></thead><tbody id="jobs-body"></tbody></table></div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">新→舊・可依工作篩選・LLM 類執行可跳查 AI 請求</span><span class="spacer"></span></div>
+      <div class="panel-head"><h2 class="panel-title">執行歷史</h2><span class="panel-sub">新→舊・可依工作篩選・AI 類執行可跳查對應的 AI 請求</span><span class="spacer"></span></div>
       <div class="filter-bar" id="hist-filter"></div>
       <div class="table-wrap"><table class="data"><thead><tr>
         <th>時間</th><th class="col-text">工作</th><th>狀態</th><th class="col-text">摘要</th><th>耗時</th><th>費用</th>
@@ -530,7 +530,7 @@
           <div class="form-grid">
             <div class="field span-2"><label for="nt-ntfy-server">伺服器</label><input class="input" id="nt-ntfy-server" spellcheck="false" placeholder="https://ntfy.sh"></input></div>
             <div class="field span-2"><label for="nt-ntfy-topic">主題（＝密碼）</label><div class="input-row"><input class="input" id="nt-ntfy-topic" spellcheck="false" readonly="readonly"></input><button class="btn" id="nt-ntfy-topic-copy" type="button">複製</button></div><span class="hint">主題名即密碼，請勿外流；手機 ntfy app 訂閱此主題即可收到推播。</span></div>
-            <div class="field span-2"><label for="nt-ntfy-token">存取權杖（選填）</label><input class="input" id="nt-ntfy-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">僅受保護主題需要；以遮罩顯示。</span></div>
+            <div class="field span-2"><label for="nt-ntfy-token">存取權杖（選填）</label><input class="input" id="nt-ntfy-token" type="password" autocomplete="new-password" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint secret-current" id="nt-ntfy-token-current"></span><span class="hint">僅受保護主題需要；以遮罩顯示。</span></div>
           </div>
           <details class="nt-sop"><summary>📖 設定步驟（約 1 分鐘）</summary>
             <ol>
@@ -547,7 +547,7 @@
         <div class="nt-card">
           <div class="nt-card-head"><span class="nt-card-title">Telegram</span><button class="toggle" id="nt-tg-enabled" type="button" role="switch" title="啟用 / 停用 Telegram"></button></div>
           <div class="form-grid">
-            <div class="field span-2"><label for="nt-tg-token">Bot Token</label><input class="input" id="nt-tg-token" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">向 @BotFather 建立 bot 取得；以遮罩顯示。</span></div>
+            <div class="field span-2"><label for="nt-tg-token">Bot Token</label><input class="input" id="nt-tg-token" type="password" autocomplete="new-password" spellcheck="false" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint secret-current" id="nt-tg-token-current"></span><span class="hint">向 @BotFather 建立 bot 取得；以遮罩顯示。</span></div>
             <div class="field span-2"><label for="nt-tg-chat">Chat ID</label><input class="input" id="nt-tg-chat" spellcheck="false" placeholder="例如 123456789"></input><span class="hint">需先在 Telegram 對你的 bot 傳送 /start（bot 不能主動發起對話）；chat_id 為數字，私訊 @userinfobot 可查，群組 id 為負數。「chat not found」= 尚未 /start 或 chat_id 錯誤。</span></div>
           </div>
           <details class="nt-sop"><summary>📖 設定步驟（約 3 分鐘）</summary>
@@ -569,7 +569,7 @@
             <div class="field"><label for="nt-em-port">連接埠</label><input class="input" id="nt-em-port" type="number" min="1" max="65535" placeholder="587"></input></div>
             <div class="field"><label for="nt-em-tls">加密</label><select class="select" id="nt-em-tls"><option value="starttls">STARTTLS</option><option value="ssl">SSL</option><option value="none">無</option></select></div>
             <div class="field"><label for="nt-em-user">帳號</label><input class="input" id="nt-em-user" spellcheck="false" autocomplete="off"></input></div>
-            <div class="field span-2"><label for="nt-em-pass">密碼</label><input class="input" id="nt-em-pass" type="password" autocomplete="new-password" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint">以遮罩顯示；建議使用應用程式密碼。</span></div>
+            <div class="field span-2"><label for="nt-em-pass">密碼</label><input class="input" id="nt-em-pass" type="password" autocomplete="new-password" placeholder="留空移除，遮罩不變則沿用"></input><span class="hint secret-current" id="nt-em-pass-current"></span><span class="hint">以遮罩顯示；建議使用應用程式密碼。</span></div>
             <div class="field"><label for="nt-em-from">寄件者</label><input class="input" id="nt-em-from" spellcheck="false" placeholder="alerts@example.com"></input></div>
             <div class="field"><label for="nt-em-to">收件者</label><input class="input" id="nt-em-to" spellcheck="false" placeholder="me@example.com"></input></div>
           </div>
@@ -628,7 +628,7 @@
         <div class="field"><label for="dr-provider">供應商</label><select class="select" id="dr-provider"><option value="anthropic">anthropic</option><option value="openai-compatible">openai-compatible</option><option value="openrouter">openrouter</option></select></div>
         <div class="field span-2"><label for="dr-model">模型名</label><input class="input" id="dr-model" spellcheck="false"></input></div>
         <div class="field span-2"><label for="dr-base">API Base</label><input class="input" id="dr-base" spellcheck="false"></input></div>
-        <div class="field span-2"><label for="dr-key">API Key（遮罩）</label><div class="input-row"><input class="input" id="dr-key" readonly="readonly" spellcheck="false"></input><button class="btn" id="dr-key-reset" type="button">重設</button></div><span class="hint">永不顯示既存金鑰；重設後輸入新值覆蓋</span></div>
+        <div class="field span-2"><label for="dr-key">API Key（遮罩）</label><div class="input-row"><input class="input" id="dr-key" type="password" autocomplete="new-password" readonly="readonly" spellcheck="false"></input><button class="btn" id="dr-key-reset" type="button">重設</button></div><span class="hint secret-current" id="dr-key-current"></span><span class="hint">永不顯示既存金鑰；重設後輸入新值覆蓋</span></div>
         <div class="field"><label>Vision</label><button class="toggle" id="dr-vision" type="button" role="switch"></button></div><div class="field"></div>
         <div class="field"><label for="dr-pin">輸入價 $/Mtok</label><input class="input" id="dr-pin" type="number" step="0.01"></input></div>
         <div class="field"><label for="dr-pout">輸出價 $/Mtok</label><input class="input" id="dr-pout" type="number" step="0.01"></input></div>

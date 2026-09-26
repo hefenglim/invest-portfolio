@@ -1314,7 +1314,7 @@ CATALOG: list[Feature] = [
         version="0.1.19",
         id="quota-gate-when-ai-off",
         title="未啟用 AI 不再誤報額度",
-        desc="尚未設定任何 AI 模型時，額度標籤顯示「AI 未啟用」，不再誤報 LLM 額度偏低預警",
+        desc="尚未設定任何 AI 模型時，額度標籤顯示「AI 未啟用」，不再誤報 AI 額度偏低預警",
         href=None,
         area="全站 → AI 額度標籤",
     ),

@@ -77,7 +77,7 @@ def test_unmarked_sent_then_marked_and_not_resent(conn: sqlite3.Connection) -> N
     ev = _add_event(conn, "single_weight", "2330")
     sender = _Sender()
     detail = notify_dispatch.dispatch_notifications(conn, now=NOON, sender=sender)
-    assert "1 送出" in detail
+    assert "送出 1 則" in detail  # DEF-073 (R6): zh
     assert _notified(conn, ev) is not None
     assert sender.messages and "2330" in sender.messages[0][1]
     # re-scan: already marked -> never resent
@@ -137,13 +137,13 @@ def test_cap_limits_events_per_run(conn: sqlite3.Connection) -> None:
     for i in range(15):
         _add_event(conn, "single_weight", f"S{i}")
     d1 = notify_dispatch.dispatch_notifications(conn, now=NOON, sender=_Sender())
-    assert "10 送出" in d1
+    assert "送出 10 則" in d1
     remaining = conn.execute(
         "SELECT COUNT(*) AS n FROM alert_events WHERE notified_at IS NULL"
     ).fetchone()["n"]
     assert remaining == 5
     d2 = notify_dispatch.dispatch_notifications(conn, now=NOON, sender=_Sender())
-    assert "5 送出" in d2
+    assert "送出 5 則" in d2
 
 
 # --- FU-D17: push deep links --------------------------------------------------
@@ -234,16 +234,17 @@ def test_starvation_gives_up_after_three_attempts_and_queue_advances(
         notify_dispatch.dispatch_notifications(conn, now=NOON, sender=_Sender(ok=False))
         for _ in range(3)
     ]
-    assert all("0 送出 / 10 待送" in d for d in details)  # oldest 10 selected every scan
-    assert "gave up" not in details[0] and "gave up" not in details[1]
-    assert "gave up on 10 event(s)" in details[2]  # the attempt that reaches 3 gives up
+    # DEF-073 (R6): zh, full-width (it read 「0 送出 / 10 待送」 / 「gave up on 10 event(s)」).
+    assert all("送出 0 則／待送 10 則" in d for d in details)  # oldest 10 selected every scan
+    assert "放棄重送" not in details[0] and "放棄重送" not in details[1]
+    assert "10 則已放棄重送" in details[2]  # the attempt that reaches 3 gives up
     assert [_attempts(conn, i) for i in old_ids] == [3] * 10
     assert all(_notified(conn, i) is None for i in old_ids)  # unclaimed-but-excluded
 
     # scan 4: channel recovered -> the queue has ADVANCED past the poisoned head
     sender = _Sender()
     d4 = notify_dispatch.dispatch_notifications(conn, now=NOON, sender=sender)
-    assert "2 送出 / 2 待送" in d4
+    assert "送出 2 則／待送 2 則" in d4
     assert len(sender.messages) == 2
     assert "NEW0" in sender.messages[0][1] and "NEW1" in sender.messages[1][1]
     assert all(_notified(conn, i) is not None for i in new_ids)
@@ -279,13 +280,14 @@ def test_claim_race_second_runner_skips_no_double_send(conn: sqlite3.Connection)
     assert len(sender.messages) == 1  # only A sent; B's claim was lost -> skipped
     assert "AAA" in sender.messages[0][1]
     assert _notified(conn, b) == "other-runner"  # the other runner's stamp stands
-    assert "1 送出 / 2 待送" in detail
+    assert "送出 1 則／待送 2 則" in detail  # DEF-073 (R6): zh
 
 
 def test_alert_scan_survives_dispatch_failure(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F3.6: a notify-dispatch crash degrades to ``notify: error`` — the scan stays ok."""
+    """F3.6: a notify-dispatch crash never FAILS the scan — DEF-067 (2026-09-26): it is
+    ``partial`` (the alerts were recorded, nobody was told), no longer a green 成功."""
     jobs.create_scheduler_tables(conn)
     monkeypatch.setattr(jobs, "_INSIGHT_RUNNER", None)
     monkeypatch.setattr(jobs, "_compute_alerts_for_scan", lambda conn, *, now: [])
@@ -298,6 +300,6 @@ def test_alert_scan_survives_dispatch_failure(
     row = conn.execute(
         "SELECT status, detail FROM job_runs WHERE id = ?", (run_id,)
     ).fetchone()
-    assert row["status"] == "ok"  # the scan itself never fails over the push path
-    assert "notify: error" in row["detail"]
+    assert row["status"] == "partial"  # never "error": the scan itself did not fail
+    assert "推播失敗" in row["detail"]  # DEF-073: zh (was 「notify: error」)
     assert "push path exploded" not in row["detail"]  # wrapped, not propagated

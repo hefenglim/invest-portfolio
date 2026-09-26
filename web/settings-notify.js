@@ -35,8 +35,16 @@
   const getToggle = (id) => { const n = $(id); return !!(n && n.classList.contains('on')); };
 
   /* A secret input shows the mask when set, empty otherwise. On save we send its raw
-     value: the mask (contains •••) => keep; '' => clear; anything else => new secret. */
-  function setSecret(id, masked, isSet) { setVal(id, isSet ? (masked || '•••') : ''); }
+     value: the mask (contains •••) => keep; '' => clear; anything else => new secret.
+     DEF-078 (owner ruling ⑦, 2026-09-26): the inputs are password fields, so the mask the
+     field carries reads as dots — the server's mask (first 3 + ••• + last 3, never the key)
+     is ALSO written as text beside it (`#<id>-current`), so the owner still sees which
+     secret is stored. The round trip is unchanged: the field's value is still the mask. */
+  function setSecret(id, masked, isSet) {
+    setVal(id, isSet ? (masked || '•••') : '');
+    const cur = $(id + '-current');
+    if (cur) cur.textContent = '目前：' + (isSet ? (masked || '•••') : '尚未設定');
+  }
 
   let CATALOG = [];  // [{id,label,severity}] from the backend (subscription checkboxes)
   let GUEST = false; // demo lockdown: backend sent topic_masked instead of topic (F1)

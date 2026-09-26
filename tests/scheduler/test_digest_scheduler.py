@@ -51,12 +51,16 @@ def test_runner_seam_routes_by_kind(conn: sqlite3.Connection) -> None:
         return f"ran {kind}"
 
     jobs.register_digest_runner(fake)
-    assert jobs.digest_daily(conn, now=NOW) == "ran daily"
-    assert jobs.digest_weekly(conn, now=NOW) == "ran weekly"
+    # DEF-067: the job hands back a JobOutcome; a runner's bare string is still ``ok``.
+    assert jobs.digest_daily(conn, now=NOW) == jobs.JobOutcome("ok", "ran daily")
+    assert jobs.digest_weekly(conn, now=NOW) == jobs.JobOutcome("ok", "ran weekly")
     assert calls == ["daily", "weekly"]
 
 
 def test_no_runner_is_safe_noop(conn: sqlite3.Connection) -> None:
     jobs.register_digest_runner(None)
-    assert jobs.digest_daily(conn, now=NOW) == "no digest runner registered"
-    assert jobs.digest_weekly(conn, now=NOW) == "no digest runner registered"
+    # DEF-073: zh (was 「no digest runner registered」); still a safe no-op (ok).
+    assert jobs.digest_daily(conn, now=NOW) == jobs.JobOutcome(
+        "ok", "每日摘要執行器未接線，未執行")
+    assert jobs.digest_weekly(conn, now=NOW) == jobs.JobOutcome(
+        "ok", "每週行動清單執行器未接線，未執行")

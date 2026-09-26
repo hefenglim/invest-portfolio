@@ -66,7 +66,7 @@ def test_first_scan_backfills_exactly_the_computable_dates(
     assert rows[0].as_of == seeded[_FLOOR - 1] == _END - timedelta(days=60)
     assert rows[-1].as_of == _END
     assert all(r.params_version == "rules-v1" for r in rows)
-    assert "61 history row(s) replayed" in detail
+    assert "回填訊號歷史 61 列" in detail
     # The floor held for the golden one-price symbols: no history, but seeded states.
     assert sh.list_rows(golden_db, "2330") == []
     assert ss.get_state(golden_db, "2330") is not None
@@ -79,7 +79,7 @@ def test_rescan_is_a_full_row_noop(golden_db: sqlite3.Connection) -> None:
     before = sh.list_rows(golden_db, "WATCH")
     detail = scan_signals(golden_db, now=GOLDEN_NOW)
     after = sh.list_rows(golden_db, "WATCH")
-    assert "0 history row(s) replayed, 0 head refresh(es)" in detail
+    assert "回填訊號歷史 0 列，更新最新一列 0 列" in detail  # DEF-073: zh
     assert after == before  # dataclass equality covers updated_at — compare-then-skip
 
 
@@ -113,7 +113,7 @@ def test_a_deleted_middle_row_is_refilled(golden_db: sqlite3.Connection) -> None
     )
     detail = scan_signals(golden_db, now=GOLDEN_NOW)
     refilled = sh.list_rows(golden_db, "WATCH")
-    assert "1 history row(s) replayed" in detail
+    assert "回填訊號歷史 1 列" in detail
     assert [r.as_of for r in refilled] == [r.as_of for r in rows]
     restored = refilled[10]
     assert restored.params_version == "rules-v1"
@@ -138,7 +138,7 @@ def test_a_later_left_edge_price_backfill_extends_the_history(
                start_price=str(Decimal("100") - 60))
     detail = scan_signals(golden_db, now=GOLDEN_NOW)
     rows = sh.list_rows(golden_db, "WATCH")
-    assert "60 history row(s) replayed" in detail
+    assert "回填訊號歷史 60 列" in detail
     assert len(rows) == 81
     assert rows[0].as_of == older_start + timedelta(days=_FLOOR - 1)
     # Rows already stored are untouched (a max-as_of watermark would have written ZERO).
@@ -165,4 +165,4 @@ def test_thin_series_writes_no_history_but_still_seeds_state(
     detail = scan_signals(golden_db, now=GOLDEN_NOW)
     assert sh.list_rows(golden_db, "WATCH") == []  # below the full-coverage floor
     assert ss.get_state(golden_db, "WATCH") is not None  # current-state cache unaffected
-    assert "0 history row(s) replayed" in detail
+    assert "回填訊號歷史 0 列" in detail

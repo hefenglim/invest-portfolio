@@ -157,8 +157,10 @@ def test_the_inbox_refresh_names_the_failed_symbol_and_its_reason(
     assert refreshed["failed"] == [{"symbol": "AAPL", "reason": "yfinance 逾時"}]
     assert refreshed["text"] == (
         f"1 檔事件已更新，1 檔失敗（AAPL：yfinance 逾時）・待確認 {body['total_count']} 筆")
-    # …and it is the SAME sentence the scheduled scan writes into job_runs.
-    assert inbox.scan_job(golden_db, now=_NOW) == refreshed["text"]
+    # …and it is the SAME sentence the scheduled scan writes into job_runs (DEF-067: the
+    # runner now returns the verdict WITH the sentence — one of two symbols lost → partial).
+    scan = inbox.scan_job(golden_db, now=_NOW)
+    assert (scan.status, scan.detail) == ("partial", refreshed["text"])
 
 
 def test_a_read_without_refresh_carries_no_refresh_block(api_client: TestClient) -> None:
@@ -173,8 +175,10 @@ def test_both_scheduler_jobs_use_the_one_formatter(golden_db: sqlite3.Connection
         fallback = jobs.dividend_inbox_scan(golden_db, now=_NOW)
     finally:
         jobs.register_dividend_scan_runner(previous)
-    assert fallback == "1 檔事件已更新，1 檔失敗（AAPL：yfinance 逾時）"
-    assert "AAPL：yfinance 逾時" in jobs.dividends_daily(golden_db, now=_NOW)
+    # DEF-067: both jobs return the verdict WITH the one sentence (1 of 2 lost → partial).
+    assert (fallback.status, fallback.detail) == (
+        "partial", "1 檔事件已更新，1 檔失敗（AAPL：yfinance 逾時）")
+    assert "AAPL：yfinance 逾時" in jobs.dividends_daily(golden_db, now=_NOW).detail
 
 
 def test_the_inbox_page_renders_the_structured_refresh() -> None:

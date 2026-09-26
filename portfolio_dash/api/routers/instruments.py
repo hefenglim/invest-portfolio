@@ -22,16 +22,11 @@ from portfolio_dash.api.instrument_service import (
     quick_register,
     restore_archived,
 )
-from portfolio_dash.data_ingestion.holdings import (
-    current_shares,
-    holds_position,
-    load_action_index,
-)
+from portfolio_dash.data_ingestion.holdings import holds_position, load_action_index
 from portfolio_dash.data_ingestion.store import (
     delete_instrument,
     get_instrument,
     has_ledger_history,
-    list_accounts,
     list_instruments,
     set_instrument_archived,
     upsert_instrument,
@@ -58,21 +53,24 @@ from portfolio_dash.shared.wire import decimal_str
 router = APIRouter()
 
 
-def _held(conn: sqlite3.Connection, account_ids: list[str], symbol: str) -> bool:
-    return any(current_shares(conn, aid, symbol) > 0 for aid in account_ids)
+def _held(conn: sqlite3.Connection, symbol: str, now: datetime,
+          *, actions: ActionIndex | None = None) -> bool:
+    """THE 「持有」 of this router: the symbol holds a position today or on a later ledger date
+    (``holds_position`` — DEF-064). ONE predicate behind all four doors that answer it: the
+    watchlist badge (``held``), 封存, 移除 and 永久移除.
 
-
-def _archive_blocked(conn: sqlite3.Connection, symbol: str, now: datetime) -> bool:
-    """The archive / remove guard: the symbol holds a position today or on a later ledger
-    date (``holds_position`` — DEF-064).
-
-    Not :func:`_held`, which stays the watchlist's 「持有」 display flag: its ``> 0`` over the
-    all-dates net let a declared short (−500) and a position closed only by a FUTURE-dated
-    sale be archived — both still priced positions, which then fell out of every fetch
-    universe (quotes included). The write side re-activates with the same predicate
+    DEF-075 (owner ruling ② B, 2026-09-26): the badge and 永久移除 used to read
+    ``current_shares > 0`` — the net over ALL dates, long only — while 封存 / 移除 read
+    ``holds_position`` (DEF-064). A position closed only by a FUTURE-dated sale therefore
+    showed 「觀察」 and then refused 移除 as 「持倉中」 (measured on 3be67db: 0056, 5,000 shares
+    + a 2026-10-15 sale of 5,000). Owner's reason: a sale that has not happened yet leaves the
+    position held. A declared short is held by the same predicate (it is a live, priced
+    position — the drawer / dashboard carry its ``short_open`` flag; the badge only answers
+    "is there a position"), and so is a position whose only rows are still ahead: 移除 refuses
+    it, so the badge must not invite it. The write side re-activates with the same predicate
     (``store._reactivate_if_held``), so 「持有 ⇒ 未封存」 is one rule, not two.
     """
-    return holds_position(conn, symbol, today=now.date())
+    return holds_position(conn, symbol, today=now.date(), index=actions)
 
 
 def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
@@ -85,7 +83,7 @@ def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
     return inst.board
 
 
-def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
+def _element(conn: sqlite3.Connection, inst: Instrument,
              now: datetime, *, actions: ActionIndex) -> dict[str, Any]:
     """One watchlist/registry row. ``actions`` is built ONCE by the caller (trap #21).
 
@@ -115,7 +113,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
         "symbol": inst.symbol, "name": inst.name, "market": inst.market.value,
         "board": _board_wire(conn, inst), "sector": inst.sector,
         "industry": inst.industry,  # R6: GICS industry passthrough (null until next-wave fill)
-        "ccy": inst.quote_ccy.value, "held": _held(conn, account_ids, inst.symbol),
+        "ccy": inst.quote_ccy.value, "held": _held(conn, inst.symbol, now, actions=actions),
         "last": last, "chg_pct": chg_pct,
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
         "target_high": decimal_str(inst.target_high) if inst.target_high is not None else None,
@@ -135,9 +133,8 @@ def list_all(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    account_ids = [a.account_id for a in list_accounts(conn)]
     actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
-    items = [_element(conn, inst, account_ids, now, actions=actions)
+    items = [_element(conn, inst, now, actions=actions)
              for inst in list_instruments(conn)]
     return {"as_of": now.isoformat(), "list": items}
 
@@ -535,8 +532,7 @@ def register(
         saved = _apply_extras(conn, saved, target_high=body.target_high, industry=industry)
         last_date = last_price_date(conn, sym)  # read BEFORE the backfill runs
         background_tasks.add_task(gap_backfill, sym, now=now)
-        account_ids = [a.account_id for a in list_accounts(conn)]
-        elem = _element(conn, saved, account_ids, now, actions=load_action_index(conn))
+        elem = _element(conn, saved, now, actions=load_action_index(conn))
         elem["restored"] = True
         elem["last_price_date"] = last_date
         return elem
@@ -558,8 +554,7 @@ def register(
     saved = _apply_extras(  # FU-D28 (target_high) + R6 (industry)
         conn, outcome.instrument, target_high=body.target_high, industry=industry
     )
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now, actions=load_action_index(conn))
+    return _element(conn, saved, now, actions=load_action_index(conn))
 
 
 class QuickBody(BaseModel):
@@ -591,8 +586,7 @@ def quick(
     except QuickRegisterError as exc:
         return JSONResponse(status_code=exc.status,
                             content=error_body(exc.code, exc.message))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    elem = _element(conn, outcome.instrument, account_ids, now,
+    elem = _element(conn, outcome.instrument, now,
                     actions=load_action_index(conn))
     elem["board_label"] = (
         _QUICK_BOARD_LABEL.get(outcome.board or "", "板別未解析（暫以 TWSE 抓報價）")
@@ -642,8 +636,7 @@ def update(
         conn.commit()
     saved = get_instrument(conn, symbol)
     assert saved is not None
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now, actions=load_action_index(conn))
+    return _element(conn, saved, now, actions=load_action_index(conn))
 
 
 class ArchiveBody(BaseModel):
@@ -670,7 +663,7 @@ def archive(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    if body.archived and _archive_blocked(conn, symbol, now):
+    if body.archived and _held(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, body.archived)
@@ -699,7 +692,7 @@ def remove(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    if _archive_blocked(conn, symbol, now):
+    if _held(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, True)
@@ -725,6 +718,7 @@ _HAS_HISTORY_MSG = (
 def purge(
     symbol: str,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """HARD-delete (永久移除) a never-traded watch symbol + all its personal artifacts (FU-D32).
 
@@ -741,8 +735,7 @@ def purge(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    if _held(conn, account_ids, symbol):
+    if _held(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可永久移除，請先清空持倉", field="symbol"))
     if has_ledger_history(conn, symbol):

@@ -1291,7 +1291,13 @@
     if (!btn) return;
     btn.addEventListener('click', () => {
       if (!window.pdCorpActionForm) return;
-      window.pdCorpActionForm.open({ onSaved: () => boot() });
+      /* DEF-072 class: with an account chip active the owner is reading THAT account's
+         actions, so the new one prefills it — it fell on the first /api/accounts entry, the
+         same wrong-account landing door 2 had. 全部 keeps the form's own default. */
+      window.pdCorpActionForm.open({
+        account_id: state.account !== 'all' ? state.account : undefined,
+        onSaved: () => boot(),
+      });
     });
   })();
 

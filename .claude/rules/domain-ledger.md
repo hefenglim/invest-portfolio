@@ -216,6 +216,20 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   (market value 639,600 → 1,239,600, XIRR 0.5677 → 0.6577); a 2-for-1 AAPL split dated 2026-07-01
   doubled the position at the unsplit price (XIRR → 0.8024, 總報酬 → 151,200) — each while the
   cash pool did not move.
+- **「持有」 has two readings, each with ONE owner** (DEF-075, owner ruling ② B, 2026-09-26:
+  "a future-dated sale has not happened yet, so the position is still held"). The REGISTRY
+  question — does the watchlist badge read 持有, may the symbol be archived / removed / purged,
+  is it held for the target-weights badge, the signal `held` flag, the quote jobs' 部分
+  threshold and the Alpha Vantage held universe — is `data_ingestion/holdings.py::
+  holds_position` / `held_among`: a position in any account today or on any later ledger date
+  (a declared short is a position; so is a symbol whose only rows are still ahead). The
+  VALUATION question — which symbols today's book holds (insight / alert producers, the
+  digest, the sell form's sellable shares) — is the book cut at the valuation day
+  (`api/insight_service.py::held_in_book`, `valued_as_of`). The two differ only on a symbol
+  whose every row is still ahead. `current_shares > 0` (all dates netted, long only) answers
+  neither, and four readers used it until R6: the badge said 觀察 while 移除 answered 422
+  「持倉中的標的不可移除」. `tests/contract/test_def075_registry_held_readers_agree.py` drives
+  every registry reader through its public door against `holds_position`.
 - **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —

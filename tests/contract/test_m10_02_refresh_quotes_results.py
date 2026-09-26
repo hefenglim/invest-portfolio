@@ -45,7 +45,9 @@ def test_results_block_is_additive_and_partial_when_holdings_fail(
     # … and the new block says what happened, per job, from structured counts.
     res = b["results"]["quotes_us"]
     assert res["run_id"] == b["run_ids"][0]
-    assert res["status"] == "partial"
+    # AAPL is the only US instrument and it was lost: every instrument lost is ``error``
+    # (失敗) since the owner ruling of 2026-09-26 (DEF-067 ①) — still HTTP 200, counts intact.
+    assert res["status"] == "error"
     assert "AAPL" in res["held_failed"]
     assert res["held_failed"] == sorted(res["held_failed"])
     # MYR/TWD is DERIVED, never fetched (owner ruling 2026-09-16, pricing/cross.py), so it
@@ -55,7 +57,7 @@ def test_results_block_is_additive_and_partial_when_holdings_fail(
     row = golden_db.execute(
         "SELECT status, detail FROM job_runs WHERE id = ?", (res["run_id"],)
     ).fetchone()
-    assert row["status"] == "partial"
+    assert row["status"] == "error"
     assert row["detail"] == res["detail"]
     assert "AAPL" in row["detail"] and "…" not in row["detail"]
 

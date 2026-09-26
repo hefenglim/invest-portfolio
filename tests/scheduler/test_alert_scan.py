@@ -69,7 +69,7 @@ def test_alert_scan_records_events_and_dispatches(
     jobs.register_insight_runner(runner)
     # DEF-041: the 持倉提點 card is for HELD symbols — 2330 is held in this scenario.
     jobs.register_alert_held_fn(lambda c, *, now: {"2330"})
-    detail = jobs.alert_scan(conn, now=NOW)
+    detail = jobs.alert_scan(conn, now=NOW).detail  # DEF-067: a JobOutcome
     # event recorded + consumed; subscriber dispatched once
     assert calls == [(sub.id, "vol_spike", "2330")]
     assert ab.unconsumed_events(conn) == []

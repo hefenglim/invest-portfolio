@@ -19,7 +19,7 @@ from datetime import date
 from decimal import Decimal
 
 from portfolio_dash.portfolio.dashboard import _fx_triangulation
-from portfolio_dash.portfolio.dashboard_models import FreshnessReport
+from portfolio_dash.portfolio.dashboard_models import FreshnessReport, FxTriangle
 from portfolio_dash.pricing.results import FxRead
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import to_wire
@@ -29,6 +29,20 @@ _AS_OF = date(2026, 9, 15)
 
 def _read(rate: str, *, as_of: date = _AS_OF, stale: bool = False) -> FxRead:
     return FxRead(rate=Decimal(rate), as_of=as_of, source="test", stale=stale)
+
+
+def _tri(reads: dict[tuple[Currency, Currency], FxRead | None]) -> list[FxTriangle]:
+    """``_fx_triangulation`` over *reads* whose stored history is exactly those reads.
+
+    DEF-077 made the history and the valuation day required: the verdict is judged on the
+    latest common date of the three legs, and these fixtures put every leg on ``_AS_OF``
+    (or state a different date on purpose), so the reads ARE the history.
+    """
+    def history(base: Currency, quote: Currency, start: date, end: date) -> list[FxRead]:
+        r = reads.get((base, quote))
+        return [r] if r is not None and start <= r.as_of <= end else []
+
+    return _fx_triangulation(reads, history=history, valued_on=_AS_OF)
 
 
 def _demo_reads(
@@ -46,7 +60,7 @@ def _demo_reads(
 
 def test_the_measured_demo_triple_is_reported_inconsistent() -> None:
     """The exact figures from the audit, to the digit."""
-    tris = _fx_triangulation(_demo_reads())
+    tris = _tri(_demo_reads())
     assert len(tris) == 1, f"expected exactly one closable triangle, got {tris}"
     t = tris[0]
     assert t.via == "USD/MYR × MYR/TWD"
@@ -61,7 +75,7 @@ def test_the_measured_demo_triple_is_reported_inconsistent() -> None:
 
 def test_a_consistent_triple_is_ok() -> None:
     """Exact by construction: 4.0 × 8.0 == 32.0, so the gap is zero and ok is True."""
-    tris = _fx_triangulation(
+    tris = _tri(
         _demo_reads(usd_twd="32.000000", myr_twd="8.000000", usd_myr="4.000000")
     )
     assert len(tris) == 1
@@ -74,7 +88,7 @@ def test_a_consistent_triple_is_ok() -> None:
 
 def test_a_gap_inside_the_tolerance_is_ok() -> None:
     """0.04% apart — within a retail spread, so it is measured but not flagged."""
-    tris = _fx_triangulation(
+    tris = _tri(
         _demo_reads(usd_twd="32.000000", myr_twd="8.000000", usd_myr="4.001600")
     )
     assert tris[0].gap_pct == Decimal("0.0400") and tris[0].ok is True
@@ -84,19 +98,19 @@ def test_a_missing_leg_yields_no_triangle() -> None:
     """Two pairs close nothing; the list is EMPTY, never a partially-guessed triangle."""
     reads = _demo_reads()
     del reads[(Currency.USD, Currency.MYR)]
-    assert _fx_triangulation(reads) == []
+    assert _tri(reads) == []
 
 
 def test_an_unresolved_pair_is_not_a_leg() -> None:
     """A read recorded as None (pair never stored) cannot stand in for a rate."""
     reads: dict[tuple[Currency, Currency], FxRead | None] = dict(_demo_reads())
     reads[(Currency.USD, Currency.MYR)] = None
-    assert _fx_triangulation(reads) == []
+    assert _tri(reads) == []
 
 
 def test_single_currency_ledger_is_unaffected() -> None:
     """The overwhelmingly common case: nothing read, nothing reported."""
-    assert _fx_triangulation({}) == []
+    assert _tri({}) == []
 
 
 def test_a_stale_leg_still_produces_a_flagged_triangle() -> None:
@@ -106,21 +120,25 @@ def test_a_stale_leg_still_produces_a_flagged_triangle() -> None:
     reads[(Currency.MYR, Currency.TWD)] = _read(
         "7.803300", as_of=date(2026, 9, 1), stale=True
     )
-    t = _fx_triangulation(reads)[0]
+    t = _tri(reads)[0]
     assert t.stale is True
     assert t.as_of == date(2026, 9, 1), "as_of is the OLDEST leg, not the newest"
+    # DEF-077: the stale leg's only day is not a day the other two legs have, so the
+    # triangle is still REPORTED (flagged stale, dates differ) — but as 「無法比較」, never
+    # as a disagreement measured across two different days.
+    assert t.dates_differ is True and t.ok is None and t.reason is not None
 
 
 def test_a_zero_direct_rate_never_divides() -> None:
     """A rate of 0 is not a rate; it yields no triangle rather than a ZeroDivisionError."""
-    assert _fx_triangulation(_demo_reads(usd_twd="0")) == []
+    assert _tri(_demo_reads(usd_twd="0")) == []
 
 
 def test_wire_shape_is_decimal_strings() -> None:
     """Serialization goes through the existing to_wire path (Decimal → canonical string)."""
     report = FreshnessReport(
         prices=[], fx=[], any_stale=False, missing_prices=[], missing_fx=[],
-        fx_triangulation=_fx_triangulation(_demo_reads()),
+        fx_triangulation=_tri(_demo_reads()),
     )
     wire = to_wire(report.model_dump())
     assert wire["fx_triangulation"] == [
@@ -133,6 +151,12 @@ def test_wire_shape_is_decimal_strings() -> None:
             "ok": False,
             "as_of": "2026-09-15",
             "stale": False,
+            # DEF-077: the day the verdict is judged on, and each leg's latest date.
+            "compared_on": "2026-09-15",
+            "dates_differ": False,
+            "leg_dates": {"USD/MYR": "2026-09-15", "MYR/TWD": "2026-09-15",
+                          "USD/TWD": "2026-09-15"},
+            "reason": None,
         }
     ]
 

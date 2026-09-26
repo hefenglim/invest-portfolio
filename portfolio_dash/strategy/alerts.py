@@ -354,7 +354,11 @@ def compute_alerts_from(
     if rules.quota_low.enabled and ai_active and quota_remaining < quota_threshold:
         sev: Severity = "risk" if quota_remaining == _ZERO else "warn"
         alerts.append(Alert(
-            id="quota_low", sev=sev, rule="quota_low", title="LLM 額度偏低",
+            # DEF-076 (owner ruling ⑤ b, 2026-09-26): the rule's own name, 「AI」 not 「LLM」 —
+            # the bell listed the title in the 「LLM」 wording under a rule every other surface
+            # names 「AI 額度偏低」
+            # (tests/contract/test_def076_alert_titles_use_rule_vocabulary.py).
+            id="quota_low", sev=sev, rule="quota_low", title="AI 額度偏低",
             scope="portfolio",
             detail=f"剩餘額度 {_usd(quota_remaining)}＜警戒值 {_usd(quota_threshold)}",
             # I-15: straight to 設定 › AI 模型 (the quota lives there). A bare "/settings" landed

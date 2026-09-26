@@ -193,13 +193,18 @@ def refresh_history(
     matters most here. Pass-through only (D17), and required — never defaulted — for the
     reason :func:`refresh_quotes` states.
     """
-    rows, sources, failed = registry.fetch_quote_history(instruments, start)
+    rows, sources, failed, empty = registry.fetch_quote_history_explained(instruments, start)
     rows, unusable, refusals = _refuse_nonpositive_closes(rows)
     if rows:
         upsert_prices(conn, rows, fetched_at=now, factor_of=factor_of)
+    # DEF-067 (owner ruling 2026-09-26): a provider that ANSWERED with no bars is reported
+    # in ``empty``, not ``failed`` — the 7-day sweep must not call a holiday closure a
+    # failure. A caller for which "no series at all" IS a failure (the multi-year backfill)
+    # folds ``empty`` back into its own failed list; see scheduler.jobs.
     return RefreshSummary(
         ok={k: v for k, v in sources.items() if k not in unusable},
         failed=[*failed, *refusals],
+        empty=empty,
         fetched_at=now,
     )
 

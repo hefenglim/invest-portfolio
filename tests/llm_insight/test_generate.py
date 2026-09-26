@@ -363,9 +363,11 @@ def test_multi_block_skip_reason_is_single_enum(
     # reason is exactly ONE enum value (no "; " join), the first blocking gate.
     assert row["reason"] == "R3_no_live_templates"
     assert ";" not in row["reason"]
-    # the human detail keeps the full multi-block text (both R3 and R2 messages).
-    assert "R3_no_live_templates" in row["detail"]
-    assert "R2_universe_empty" in row["detail"]
+    # the human detail keeps the full multi-block text (both R3 and R2 messages) — as the
+    # gates' zh sentences, not their enums (DEF-073, 2026-09-26).
+    assert "組合的策略段全空" in row["detail"]
+    assert "標的宇宙為空" in row["detail"]
+    assert "R3_no_live_templates" not in row["detail"]
     # RunResult.reason mirrors the single enum.
     assert result.reason == "R3_no_live_templates"
 
@@ -420,7 +422,9 @@ def test_llm_unavailable_mid_run_reason_not_budget(
         "SELECT reason, detail FROM job_runs WHERE job_id = ?", (f"insight:{it_id}",)
     ).fetchone()
     assert row["reason"] == "llm_unavailable_mid_run"
-    assert "provider down" in row["detail"]  # diagnosable from the runs list
+    # Diagnosable from the runs list, in the owner's words (DEF-066): the model and the
+    # failure class; the provider's raw text ("provider down") goes to the fail log.
+    assert "主模型 m：呼叫失敗（RuntimeError）" in row["detail"]
 
 
 def test_budget_exception_mid_run_keeps_budget_reason(
@@ -728,7 +732,8 @@ def test_shadow_and_active_fingerprints_are_separate_lanes(
         inputs=RunInputs(budget_remaining=Decimal("100"), is_shadow=True), now=NOW,
     )
     assert calls["n"] == 2  # generated its own shadow card
-    cards = istore.list_cards(conn, insight_type_id=it_id)
+    # include_shadow: the list reads hide the shadow lane by default (R6 DEF-069).
+    cards = istore.list_cards(conn, insight_type_id=it_id, include_shadow=True)
     assert sorted(c.is_shadow for c in cards) == [False, True]
     # and a REPEAT of each lane is a cache hit within that lane (no third call).
     generate.run_insight_type(

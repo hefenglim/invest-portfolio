@@ -119,6 +119,9 @@ class RateResolver:
         self._conn = conn
         self._now = now
         self.reads: dict[tuple[Currency, Currency], FxRead | None] = {}
+        # Pairs `_read` answered from the INVERSE stored pair — so `history` reads the series
+        # in the same direction the rate was resolved (one owner of the direction rule).
+        self._inverted: set[tuple[Currency, Currency]] = set()
 
     def _read(self, base: Currency, quote: Currency) -> FxRead | None:
         direct = get_fx(self._conn, base, quote, now=self._now)
@@ -126,9 +129,28 @@ class RateResolver:
             return direct
         inverse = get_fx(self._conn, quote, base, now=self._now)
         if inverse is not None:
+            self._inverted.add((base, quote))
             return FxRead(rate=_ONE / inverse.rate, as_of=inverse.as_of,
                           source=inverse.source, stale=inverse.stale)
         return None
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        """The stored series of *base*/*quote* in ``[start, end]``, ascending, read in the
+        SAME direction :meth:`rate` resolved the pair (direct, else the inverted inverse).
+
+        DEF-077: the triangulation compares its three legs on a common DATE, so it needs
+        each leg's rows, not only the latest one — and a leg answered from the inverse pair
+        must be inverted exactly as `_read` inverts it (``1 / rate``, full precision). A
+        zero stored rate is skipped (a rate of 0 is not a rate).
+        """
+        if (base, quote) not in self._inverted:
+            return get_fx_history(self._conn, base, quote, start, end)
+        return [
+            FxRead(rate=_ONE / r.rate, as_of=r.as_of, source=r.source, stale=False)
+            for r in get_fx_history(self._conn, quote, base, start, end)
+            if r.rate != _ZERO
+        ]
 
     def rate(self, base: Currency, quote: Currency) -> Decimal:
         if base == quote:
@@ -158,10 +180,20 @@ _TRI_GAP_DP = Decimal("0.0001")
 # indistinguishable from two providers quoting a moment apart, above it the reporting total
 # visibly depends on which conversion path was used (the measured demo gap is 0.0690%).
 _TRI_TOLERANCE_PCT = Decimal("0.05")
+# DEF-077: how far before the oldest leg's latest date the common-date search looks. FX legs
+# are written on every weekday a provider answers and MYR/TWD is derived on every day both USD
+# legs exist (`pricing/cross.py`), so a gap of more than a few days means a leg stopped
+# updating — a month is far past any holiday run, and past it there is nothing honest to
+# compare (the triangle reads 「無法比較」 and the freshness list already flags the stale leg).
+_TRI_LOOKBACK_DAYS = 30
+_FxHistory = Callable[[Currency, Currency, date, date], list[FxRead]]
 
 
 def _fx_triangulation(
     reads: dict[tuple[Currency, Currency], FxRead | None],
+    *,
+    history: _FxHistory,
+    valued_on: date,
 ) -> list[FxTriangle]:
     """Every triangle closable from the pairs actually READ this request.
 
@@ -177,7 +209,21 @@ def _fx_triangulation(
     the resolver's inverse fallback already means a read exists for either direction, so an
     absent key means the pair was genuinely never asked for, not that it is unknown.
 
-    Pure: it reads the resolver's recorded rates and mutates nothing.
+    **Judged on ONE day (DEF-077, owner ruling ⑥ A, 2026-09-26).** The verdict compares the
+    three legs on their latest COMMON date not after *valued_on* — when every leg's latest
+    read is that day, the reads themselves; otherwise the rows *history* returns (the
+    resolver's :meth:`RateResolver.history`, same direction as the read) within
+    ``_TRI_LOOKBACK_DAYS`` before the oldest leg's latest date. It used to compare latest row
+    against latest row, so a refresh that had moved one leg to a new day measured the day's
+    market move and reported it as ``ok: false`` (verifier J-01, 3be67db: −0.0938%).
+    Legs whose latest dates differ carry ``dates_differ`` + ``leg_dates``; no common date in
+    the window → ``ok: None`` with a reason, never ``False``. The tolerance is unchanged:
+    MYR/TWD is derived from the two USD legs (`pricing/cross.py`), so on a common date the
+    gap is ~0 within the 6-dp cap and anything past 0.05% is still a row that reached
+    ``fx_rates`` by another path — the guard semantics of ``data-and-pricing.md``.
+
+    Reads the resolver's recorded rates (and, when the legs' dates differ, their stored
+    history) and mutates nothing.
     """
     have = {k: v for k, v in reads.items() if v is not None}
     # Every currency that appears on either side of a read — the candidate pivots.
@@ -193,25 +239,68 @@ def _fx_triangulation(
             leg1, leg2 = have.get((a, b)), have.get((b, c))
             if leg1 is None or leg2 is None:
                 continue
-            implied = leg1.rate * leg2.rate
-            direct = direct_read.rate
-            if direct == _ZERO:  # never divide by a zero rate — a rate of 0 is not a rate
+            if direct_read.rate == _ZERO:  # never divide by a zero rate — 0 is not a rate
                 continue
-            gap_pct = ((implied / direct) - _ONE) * Decimal("100")
-            gap_q = gap_pct.quantize(_TRI_GAP_DP, rounding=ROUND_HALF_UP)
-            out.append(FxTriangle(
+            legs = (((a, b), leg1), ((b, c), leg2), ((a, c), direct_read))
+            latest = {r.as_of for _, r in legs}
+            base = FxTriangle(
                 via=f"{a.value}/{b.value} × {b.value}/{c.value}",
                 pair=f"{a.value}/{c.value}",
-                implied=implied.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
-                direct=direct.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
-                gap_pct=gap_q,
+                implied=None, direct=None, gap_pct=None, ok=None,
+                as_of=min(latest),
+                stale=leg1.stale or leg2.stale or direct_read.stale,
+                dates_differ=len(latest) > 1,
+                leg_dates={f"{x.value}/{y.value}": r.as_of for (x, y), r in legs},
+            )
+            common = _common_rates(legs, history=history, valued_on=valued_on)
+            if common is None:
+                out.append(base.model_copy(update={"reason": (
+                    f"最近 {_TRI_LOOKBACK_DAYS} 天內三組匯率沒有共同日期，無法比較")}))
+                continue
+            on, (r1, r2, r3) = common
+            if r3 == _ZERO:
+                continue
+            implied = r1 * r2
+            gap_pct = ((implied / r3) - _ONE) * Decimal("100")
+            gap_q = gap_pct.quantize(_TRI_GAP_DP, rounding=ROUND_HALF_UP)
+            out.append(base.model_copy(update={
+                "implied": implied.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
+                "direct": r3.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
+                "gap_pct": gap_q,
                 # Judged on the QUANTIZED gap: the badge and the number printed beside it
                 # must never disagree, which they can if ok reads full precision.
-                ok=abs(gap_q) <= _TRI_TOLERANCE_PCT,
-                as_of=min(leg1.as_of, leg2.as_of, direct_read.as_of),
-                stale=leg1.stale or leg2.stale or direct_read.stale,
-            ))
+                "ok": abs(gap_q) <= _TRI_TOLERANCE_PCT,
+                "compared_on": on,
+            }))
     return out
+
+
+def _common_rates(
+    legs: tuple[tuple[tuple[Currency, Currency], FxRead], ...],
+    *,
+    history: _FxHistory,
+    valued_on: date,
+) -> tuple[date, tuple[Decimal, Decimal, Decimal]] | None:
+    """The latest date not after *valued_on* on which all three legs have a stored rate,
+    with that day's three rates (leg1, leg2, direct) — or None (DEF-077).
+
+    When every leg's latest read already falls on one such day, the reads are the answer
+    (the common case: no extra query). Otherwise each leg's series is read back over
+    ``_TRI_LOOKBACK_DAYS`` before the oldest latest date — a common date cannot be later
+    than that — in the direction the rate was resolved.
+    """
+    latest = {r.as_of for _, r in legs}
+    first = next(iter(latest))
+    if len(latest) == 1 and first <= valued_on:
+        return first, (legs[0][1].rate, legs[1][1].rate, legs[2][1].rate)
+    end = min(min(latest), valued_on)
+    start = end - timedelta(days=_TRI_LOOKBACK_DAYS)
+    series = [{row.as_of: row.rate for row in history(x, y, start, end)} for (x, y), _ in legs]
+    days = set(series[0]) & set(series[1]) & set(series[2])
+    if not days:
+        return None
+    day = max(days)
+    return day, (series[0][day], series[1][day], series[2][day])
 
 
 # Fixed market order for the per-market subtotal rows (deterministic wire order).
@@ -979,7 +1068,8 @@ def build_dashboard(
         unregistered_symbols=unregistered,
         # M1: a CHECK over the same reads the list above reports on — no extra query, no
         # rate mutated. Empty unless three read pairs close a triangle.
-        fx_triangulation=_fx_triangulation(resolver.reads),
+        fx_triangulation=_fx_triangulation(resolver.reads, history=resolver.history,
+                                           valued_on=as_of),
     )
 
     return DashboardData(

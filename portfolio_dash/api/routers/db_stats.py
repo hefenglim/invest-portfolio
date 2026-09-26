@@ -81,9 +81,9 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("auth_users", "授權用戶", "系統記錄", None),
     _TableSpec("auth_sessions", "登入工作階段", "系統記錄", None),
     # 設定 — small config stores (registered so they don't read as "unknown")
-    _TableSpec("llm_models", "LLM 模型註冊表", "設定", None),
-    _TableSpec("llm_defaults", "LLM 角色預設", "設定", None),
-    _TableSpec("llm_quota_config", "LLM 額度設定", "設定", None),
+    _TableSpec("llm_models", "AI 模型註冊表", "設定", None),
+    _TableSpec("llm_defaults", "AI 角色預設", "設定", None),
+    _TableSpec("llm_quota_config", "AI 額度設定", "設定", None),
     _TableSpec("schedule_config", "排程設定", "設定", None),
     _TableSpec("data_sources", "資料來源", "設定", None),
     _TableSpec("data_source_fallbacks", "資料源帳戶順位", "設定", None),

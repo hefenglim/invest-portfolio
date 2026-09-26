@@ -234,11 +234,11 @@ def test_news_daily_forwards_progress_to_capable_runner(
     monkeypatch.setattr(J, "_NEWS_RUNNER", runner)
     J._mark_running("news_daily")  # simulate the run wrapper owning the job
     try:
-        detail = J.news_daily(conn, now=NOW)
+        outcome = J.news_daily(conn, now=NOW)
     finally:
         J._clear_running("news_daily")
     assert seen["during"] == "蒐集 2330 新聞（1/3）"
-    assert detail.startswith("news: organized 1")
+    assert outcome.detail.startswith("AI 整理 1 則")  # DEF-073: zh (was 「news: organized 1」)
 
 
 def test_news_daily_legacy_runner_without_progress_still_called(
@@ -249,4 +249,4 @@ def test_news_daily_legacy_runner_without_progress_still_called(
         return "not a dict"
 
     monkeypatch.setattr(J, "_NEWS_RUNNER", runner)
-    assert J.news_daily(_conn(), now=NOW) == "news pass complete"
+    assert J.news_daily(_conn(), now=NOW).detail == "新聞管線完成"  # DEF-073: zh

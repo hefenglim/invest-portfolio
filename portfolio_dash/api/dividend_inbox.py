@@ -42,10 +42,16 @@ from portfolio_dash.pricing.refresh import describe_refresh, refresh_dividends, 
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import DividendEvent
 from portfolio_dash.pricing.store import get_dividend_events, get_price_history
-from portfolio_dash.scheduler.jobs import DEFAULT_BOARD, earliest_acquisitions
+from portfolio_dash.scheduler.jobs import (
+    DEFAULT_BOARD,
+    JobOutcome,
+    earliest_acquisitions,
+    sweep_outcome,
+)
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.instrument_scope import tracked_instruments
 from portfolio_dash.shared.models.assets import Instrument
 
 _ZERO = Decimal("0")
@@ -207,18 +213,27 @@ class RefreshOutcome(BaseModel):
 
 
 def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> RefreshOutcome:
-    """Targeted event fetch for every symbol (any market) with an acquisition history.
+    """Targeted event fetch for every TRACKED symbol (any market) with an acquisition history.
 
     TW routes to FinMind (fetches since 2015); US/MY route to yfinance (full
     dividend series). It used to return 「14 檔事件已更新，1 檔失敗」 and nothing else —
     which symbol, and why, was dropped here (DEF-015); both now travel.
+
+    DEF-074 (owner ruling ① B, 2026-09-26): the universe is the shared "not archived"
+    predicate (``shared/instrument_scope.py``), the one the same job's fallback path
+    (``scheduler/jobs.py::dividend_inbox_scan`` → ``build_worklist``) already reads. It was
+    ``list_instruments`` filtered only by "has an acquisition", so an archived symbol with a
+    buy history kept spending a dividend fetch every weekday while the fallback skipped it —
+    one job, two universes. A held symbol is never archived (the DEF-064 guard), so no
+    held position's dividend is missed. Events already stored for an archived symbol are
+    still read by :func:`detect` — archiving stops fetching, it does not hide the ledger.
     """
     acq = earliest_acquisitions(conn)
     refs = [
-        InstrumentRef(symbol=i.symbol, market=i.market,
-                      board=i.board or DEFAULT_BOARD[i.market])
-        for i in list_instruments(conn)
-        if i.symbol in acq
+        InstrumentRef(symbol=t.symbol, market=t.market,
+                      board=t.board or DEFAULT_BOARD[t.market])
+        for t in tracked_instruments(conn)
+        if t.symbol in acq
     ]
     if not refs:
         return RefreshOutcome(updated=0, failed=[], text="無持倉可偵測")
@@ -426,12 +441,21 @@ def confirm(
     return written
 
 
-def scan_job(conn: sqlite3.Connection, *, now: datetime) -> str:
+def scan_job(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Scheduler-dispatched daily scan: refresh events + report the pending count.
 
     Registered into ``scheduler.jobs`` at app startup (runner seam — scheduler
     never imports api), so the inbox grows by itself and the run history shows
     how many items await the user.
+
+    DEF-067 (2026-09-26): returns the job's VERDICT with the sentence — it returned the
+    sentence alone, so the run read 成功 over 「0 檔事件已更新，10 檔失敗」. Same rule as
+    ``dividends_daily`` (``scheduler.jobs.sweep_outcome``); a symbol whose source answered
+    with no dividend records is not a failure (DEF-047). The sentence is unchanged.
     """
     outcome = refresh_events_for_acquired(conn, now=now)
-    return scan_sentence(outcome, len(detect(conn, now=now)))
+    return sweep_outcome(
+        scan_sentence(outcome, len(detect(conn, now=now))),
+        total=outcome.updated + len(outcome.failed) + len(outcome.empty),
+        failed=len(outcome.failed),
+    )

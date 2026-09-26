@@ -43,7 +43,7 @@ from portfolio_dash.llm_insight.official_templates import ON_ALERT_NOTE as _ON_A
 from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.account_ref import resolve_account_refs
-from portfolio_dash.shared.llm_config import LLMBudgetExceeded, LLMError
+from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded, LLMError
 
 # The agent tag recorded in llm_usage for an insight generation call.
 _AGENT = "insight_generate"
@@ -224,6 +224,11 @@ def _anomaly_card(symbol: str) -> InsightCard:
     )
 
 
+#: The last-resort ``job_runs.detail`` for a caller that passes none (every caller in this
+#: module now passes its own sentence; ``api/insight_service.py``'s skip does too).
+_STATUS_ZH = {"ok": "完成", "partial": "部分完成", "skipped": "未執行", "error": "執行失敗"}
+
+
 def _write_job_run(
     conn: sqlite3.Connection,
     insight_type_id: int,
@@ -247,7 +252,8 @@ def _write_job_run(
     the user-facing /runs lists can exclude it (spec 04 fix #3).
     """
     job_id = f"insight:{insight_type_id}"
-    detail_text = detail if detail is not None else (reason or f"{status}")
+    # DEF-073: never the enum or the status word — the 排程中心 prints this field as it is.
+    detail_text = detail if detail is not None else _STATUS_ZH.get(status, "已結束")
     shadow_flag = 1 if is_shadow else 0
     # finished_at shares started_at's timezone (get_now feeds +08:00); a UTC finish next
     # to a +08:00 start renders as an 8-hour-negative run in any naive display.
@@ -282,8 +288,40 @@ def _write_job_run(
 
 
 def _block_reason_text(result: GateResult) -> str:
-    """The full human text of every block reason, joined (goes into ``job_runs.detail``)."""
-    return "; ".join(r["reason"] for r in skip_reasons(result) if r["reason"])
+    """「未執行：<每一個阻擋原因>」 — the human text of every block, joined (``job_runs.detail``).
+
+    DEF-073 (2026-09-26): this joined the ENUMS (「R3_no_live_templates; R2_universe_empty」)
+    under a docstring promising human text, and ``web/pipeline.js`` prints ``r.detail ||
+    ppSkipReason(r.reason)`` — a non-empty enum detail bypassed the zh label map. The gate's
+    own ``msg`` is the zh sentence; the enum stays in ``job_runs.reason``.
+    """
+    msgs = [str(r["msg"]) for r in skip_reasons(result) if r["msg"]]
+    return "未執行：" + "；".join(msgs) if msgs else "未執行"
+
+
+def _kept_text(created: int) -> str:
+    return f"已產出 {created} 張卡保留" if created else "尚未產出卡片"
+
+
+def _stop_detail(exc: LLMError, created: int) -> str:
+    """The zh sentence for a run an LLM refusal stopped part-way (DEF-066 / DEF-073).
+
+    ``LLMUnavailable``'s own text is already the owner's sentence — every candidate model
+    tried and why it failed (``shared/llm.py``) — so it follows the stop verbatim. The other
+    two refusals are named by their kind: their texts are written for other surfaces.
+    """
+    kept = _kept_text(created)
+    if isinstance(exc, LLMBudgetExceeded):
+        return f"AI 額度用盡，本次停止（{kept}）"
+    if isinstance(exc, AINotActivated):
+        return f"AI 未啟用（此角色沒有可用的模型），本次停止（{kept}）"
+    return f"AI 呼叫失敗，本次停止（{kept}）：{str(exc)[:300]}"
+
+
+def _ok_detail(created: int, cache_hits: int) -> str:
+    """「產生 N 張卡（M 張沿用當日快取）」 — a clean run's detail (it read 「ok」 until DEF-073)."""
+    text = f"產生 {created} 張卡"
+    return text + (f"（{cache_hits} 張沿用當日快取）" if cache_hits else "")
 
 
 def _first_block_reason(result: GateResult) -> str:
@@ -320,6 +358,7 @@ def run_insight_type(
     if it is None:
         _write_job_run(
             conn, insight_type_id, status="skipped", reason="unknown_insight_type",
+            detail=f"找不到洞察任務 #{insight_type_id}，未執行",
             cost=Decimal("0"), now=now, run_id=run_id, is_shadow=inputs.is_shadow,
         )
         return RunResult(
@@ -344,6 +383,7 @@ def run_insight_type(
     remaining = inputs.budget_remaining
     total_cost = Decimal("0")
     created = 0
+    cache_hits = 0
     stopped_early = False
     stop_reason = ""
     stop_detail: str | None = None
@@ -390,6 +430,7 @@ def run_insight_type(
         if remaining <= 0:
             stopped_early = True
             stop_reason = "budget_exhausted_mid_run"
+            stop_detail = f"AI 額度用盡，本次停止（{_kept_text(created)}）"
             break
 
         ctx = var_contexts.get(target)
@@ -413,6 +454,7 @@ def run_insight_type(
             istore.snapshot_digest(snapshot), inputs.prompt_version,
         )
         if istore.find_by_fingerprint(conn, fp, is_shadow=inputs.is_shadow) is not None:
+            cache_hits += 1
             continue  # cache hit — same-day identical inputs, no LLM, no duplicate row
 
         before = remaining
@@ -431,7 +473,7 @@ def run_insight_type(
                 if isinstance(exc, LLMBudgetExceeded)
                 else f"{exc.kind}_mid_run"
             )
-            stop_detail = f"{stop_reason}: {str(exc)[:300]}"
+            stop_detail = _stop_detail(exc, created)
             break
         card = completion.value
         # The model that produced this card (its registry alias) and this call's cost,
@@ -484,8 +526,12 @@ def run_insight_type(
 
     status = "partial" if stopped_early else "ok"
     reason = stop_reason if stopped_early else ""
+    run_detail = (
+        (stop_detail or _STATUS_ZH["partial"]) if stopped_early
+        else _ok_detail(created, cache_hits)
+    )
     _write_job_run(
-        conn, insight_type_id, status=status, reason=reason, detail=stop_detail,
+        conn, insight_type_id, status=status, reason=reason, detail=run_detail,
         cost=total_cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow,
     )
     return RunResult(

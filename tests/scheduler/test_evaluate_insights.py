@@ -269,9 +269,9 @@ def test_evaluate_skips_archived_tasks_cards(
                            ((NOW - timedelta(days=1)).date(), "105")])
     cs.delete_insight_type(conn, it.id, now=NOW)  # archive
 
-    processed = insight_service.evaluate_due(conn, now=NOW)
+    summary = insight_service.evaluate_due(conn, now=NOW)
 
-    assert processed == 0
+    assert summary.processed == 0
     assert es.latest_for_insight(conn, rec.id) is None  # no evaluation row at all
 
 
@@ -510,6 +510,6 @@ def test_full_degrade_no_master_no_data(conn: sqlite3.Connection) -> None:
     # evaluate processes nothing; calibrate generates nothing; promote finds nothing.
     from portfolio_dash.api import insight_service
 
-    assert insight_service.evaluate_due(conn, now=NOW) == 0
-    assert insight_service.generate_calibrations_for_all(conn, now=NOW) == 0
+    assert insight_service.evaluate_due(conn, now=NOW).processed == 0
+    assert insight_service.generate_calibrations_for_all(conn, now=NOW).made == []
     assert insight_service.promote_and_check(conn, now=NOW) == []

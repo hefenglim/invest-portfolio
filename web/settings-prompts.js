@@ -184,7 +184,7 @@
   function previewPrompt(t, ta) {
     openModal('預覽提示詞 — ' + t.name, (body) => {
       body.appendChild(el('div', 'pv-note',
-        '變數已代入目前快照的真實計算值（不呼叫 LLM，零成本）。實際送出 = 系統提示詞 ＋ 本策略；組合器執行時再附加組合的生效校正提示詞。'));
+        '變數已代入目前快照的真實計算值（不呼叫 AI，零成本）。實際送出 = 系統提示詞 ＋ 本策略；組合器執行時再附加組合的生效校正提示詞。'));
       const out = el('div'); /* re-rendered on each fetch (symbol change) */
       let sym = hasPerSymbolVars(ta.value) ? HELD_SYMBOLS[0] : null;
 
@@ -262,7 +262,7 @@
           out.replaceChildren();
           const res = el('div', 'pv-section');
           res.appendChild(el('div', 'pv-sec-label',
-            '回傳洞察（' + ((resp && resp.model) || 'LLM') + (sym ? '・' + sym : '') + '）'));
+            '回傳洞察（' + ((resp && resp.model) || 'AI 模型') + (sym ? '・' + sym : '') + '）'));
           res.appendChild(el('pre', 'pv-pre', (resp && resp.reply) || ''));
           out.appendChild(res);
           /* tokens are plain numbers; cost_usd / quota_remaining are Decimal STRINGS. */
@@ -1062,7 +1062,7 @@
       wrap.appendChild(sec);
     });
     wrap.appendChild(el('div', 'cmp-note',
-      '所有變數由計算核心即時組裝注入（LLM 不自行計算）；「單一標的」範圍變數僅能用於範圍為「單一標的」的洞察任務。外部資料（FinMind 籌碼基本面、市場情緒）抓取後以快照存入資料庫，供回測重現當時輸入。'));
+      '所有變數由計算核心即時組裝注入（AI 不自行計算）；「單一標的」範圍變數僅能用於範圍為「單一標的」的洞察任務。外部資料（FinMind 籌碼基本面、市場情緒）抓取後以快照存入資料庫，供回測重現當時輸入。'));
     panel.appendChild(wrap);
     mount(panel);
   })();
@@ -1097,13 +1097,13 @@
 
     const FIELDS = [
       { id: 'auto_promote', name: '影子評估勝出後自動切換生效版', kind: 'toggle',
-        desc: '關閉時需人工按「設為生效」；建議觀察兩輪後再開啟。' },
+        desc: '關閉時需到「洞察管線 › 任務抽屜 › ④ 校正版本鏈」按「設為生效」；建議觀察兩輪後再開啟。' },
       { id: 'shadow_batches', name: '影子評估批次數', kind: 'num', min: 3, max: 20, step: 1, unit: '次',
-        desc: '最新版需並行評估 N 次且成績不劣於生效版，才視為勝出。' },
+        desc: '最新版（影子）需累積 N 筆自己的評分，且成績不劣於生效版本身的成績，才視為勝出；單一標的任務一批多張卡，每張各算一筆。' },
       { id: 'min_samples', name: '校正產生最低樣本數', kind: 'num', min: 3, max: 50, step: 1, unit: '筆',
-        desc: '組合的到期評估未達此數，AI 大師模型不產生新版本（避免小樣本過擬合）。' },
+        desc: '生效版在上一次產生校正版本之後新累積的評分未達此數，AI 大師模型不產生新版本（避免小樣本過擬合，也避免同一批失誤每週重複產生新版）。' },
       { id: 'max_shadows', name: '同時影子評估上限', kind: 'num', min: 1, max: 5, step: 1, unit: '個',
-        desc: '影子期 LLM 呼叫 ×2 — 控制 AI 大師模型額外成本，超過時排隊。' },
+        desc: '同時處於影子期的任務數上限（一批多張卡仍算一個任務）；影子期 AI 呼叫 ×2，超過時排隊到下一批。' },
       { id: 'gap_alert_pp', name: '校準誤差預警門檻', kind: 'num', min: 5, max: 50, step: 1, unit: 'pp',
         desc: '與「設定›預警規則」的 AI 校準誤差規則同步（F4）。' }
     ];

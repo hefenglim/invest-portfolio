@@ -65,9 +65,9 @@ def dispatch_notifications(
     cfg = notify.load_config(conn)
     channels = notify.build_enabled_channels(cfg)
     if not channels:
-        return "notify：無啟用通道"
+        return "推播：無啟用通道"
     if notify.in_quiet_hours(cfg.quiet_hours, now):
-        return "notify：靜音時段"
+        return "推播：靜音時段"
     base = cfg.public_base_url  # FU-D17: empty ⇒ frontend_url returns None ⇒ legacy text
 
     rows = conn.execute(
@@ -111,12 +111,20 @@ def dispatch_notifications(
             if result != "ok":
                 failed_channels.add(name)
 
-    detail = f"notify：{sent} 送出 / {len(rows)} 待送"
+    # DEF-073 (R6, 2026-09-26): this line is embedded in alert_scan's ``job_runs.detail``,
+    # which the 排程中心 prints — zh with full-width marks (it read 「notify：1 送出 / 2 待送
+    # （通道異常：ntfy, telegram）; gave up on 10 event(s)」).
+    detail = f"推播：送出 {sent} 則／待送 {len(rows)} 則"
     if failed_channels:
-        detail += f"（通道異常：{', '.join(sorted(failed_channels))}）"
+        names = "、".join(_CHANNEL_ZH.get(c, c) for c in sorted(failed_channels))
+        detail += f"（通道異常：{names}）"
     if gave_up:
-        detail += f"; gave up on {gave_up} event(s)"
+        detail += f"；{gave_up} 則已放棄重送（連續失敗 {_MAX_ATTEMPTS} 次）"
     return detail
+
+
+#: A channel id -> the name the 通知 settings page shows (product names stay as they are).
+_CHANNEL_ZH = {"ntfy": "ntfy", "telegram": "Telegram", "email": "電子郵件"}
 
 
 def _claim(conn: sqlite3.Connection, event_id: int, *, now: datetime) -> bool:

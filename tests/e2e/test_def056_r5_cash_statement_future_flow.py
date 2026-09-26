@@ -103,6 +103,9 @@ def _assert_statement_flags_future_rows(page: Page, body: dict[str, Any]) -> Non
     #    (newest-first puts the future rows at the top).
     cut = rows.nth(0)
     expect(cut).to_have_class("stmt-cut")
+    # to_have_text reads textContent, which a hidden row still has (R5 verifier's note):
+    # every mark below is asserted VISIBLE as well, or a `display:none` rule passes it.
+    expect(cut).to_be_visible()
     expect(cut).to_have_text(
         f"以下 {len(future)} 筆為未來日期（{body['as_of']} 之後），不計入目前餘額；其餘額欄為投影")
     # 2. every future row carries its own server-decided badge; no other row carries one.
@@ -112,10 +115,13 @@ def _assert_statement_flags_future_rows(page: Page, body: dict[str, Any]) -> Non
         row = rows.nth(1 + i)
         expect(row).to_have_class("stmt-future" if i < len(future) - 1
                                   else "stmt-future stmt-future-last")
+        expect(row).to_be_visible()
         expect(row.locator(".ledger-future")).to_have_text(
             f"未來日期：{r['counts_from']} 起計入")
+        expect(row.locator(".ledger-future")).to_be_visible()
         # 3. its running balance is marked as a projection.
         expect(row.locator("td").last.locator(".stmt-proj-tag")).to_have_text("投影")
+        expect(row.locator("td").last.locator(".stmt-proj-tag")).to_be_visible()
     expect(page.locator("#cash-stmt-body .stmt-proj-tag")).to_have_count(len(future))
     # The rows that have happened carry neither mark.
     past = rows.nth(1 + len(future))
@@ -202,6 +208,7 @@ def test_the_drawer_dividend_history_marks_the_dividend_that_does_not_count_yet(
     rows = history.locator("tbody tr")
     expect(rows.filter(has_text="2099-01-02")).to_have_count(1)
     expect(rows.filter(has_text="2099-01-02").locator(".ledger-future")).to_have_text(_BADGE)
+    expect(rows.filter(has_text="2099-01-02").locator(".ledger-future")).to_be_visible()
     expect(history.locator(".ledger-future")).to_have_count(1)
     assert rows.count() >= 2, "the golden 2330 dividend must be listed beside the future one"
     assert not errors, errors

@@ -22,8 +22,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
-from portfolio_dash.data_ingestion.holdings import current_shares, load_action_index
-from portfolio_dash.data_ingestion.store import list_accounts
+from portfolio_dash.data_ingestion.holdings import held_among, load_action_index
 from portfolio_dash.llm_insight import alerts_bridge
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history, price_dates
@@ -179,19 +178,16 @@ def _registered_symbols(conn: sqlite3.Connection) -> list[str]:
     return tracked_symbols(conn)
 
 
-def _account_ids(conn: sqlite3.Connection) -> list[str]:
-    return [a.account_id for a in list_accounts(conn)]
+def is_held(conn: sqlite3.Connection, symbol: str, *, today: date) -> bool:
+    """Public single-symbol ``held`` check (drawer + rule_signals_json variable feed).
 
-
-def _is_held(conn: sqlite3.Connection, symbol: str, *, account_ids: list[str]) -> bool:
-    """Whether *symbol* carries a live position in any account (cheap holdings check —
-    same precedent as ``instruments._held``: net current_shares > 0, no dashboard build)."""
-    return any(current_shares(conn, aid, symbol) > 0 for aid in account_ids)
-
-
-def is_held(conn: sqlite3.Connection, symbol: str) -> bool:
-    """Public single-symbol ``held`` check (drawer + rule_signals_json variable feed)."""
-    return _is_held(conn, symbol, account_ids=_account_ids(conn))
+    The registry's 「持有」 (``holdings.held_among`` → ``holds_position``: a position today or
+    on any later ledger date) — the watchlist badge's predicate (DEF-075, owner ruling ② B).
+    It was ``current_shares > 0``, which read a position closed only by a FUTURE-dated sale
+    and a declared short as a watch symbol, so the signal fed the LLM ``held: false`` for a
+    position the watchlist called 持有. No dashboard build.
+    """
+    return symbol in held_among(conn, [symbol], today=today)
 
 
 def evaluate_all(
@@ -203,14 +199,16 @@ def evaluate_all(
     3). The fourth element is that symbol's own DATA date (⑬): symbols do not share one, so
     a market that has not delivered yet cannot borrow a fresher market's basis date."""
     params = default_params()
-    account_ids = _account_ids(conn)
     actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
+    symbols = _registered_symbols(conn)
+    # DEF-075: the registry's 「持有」, one index for the whole universe.
+    held = held_among(conn, symbols, today=now.date(), index=actions)
     out: list[tuple[str, SymbolSignals | None, bool, date | None]] = []
-    for symbol in _registered_symbols(conn):
+    for symbol in symbols:
         read = _read_series(conn, symbol, now=now, params=params, actions=actions)
         signals = engine.evaluate_symbol(read.closes, read.volumes, params)
         out.append((
-            symbol, signals, _is_held(conn, symbol, account_ids=account_ids),
+            symbol, signals, symbol in held,
             read.last_date,
         ))
     return out
@@ -481,8 +479,9 @@ def scan_signals(
         if written and progress is not None:
             progress(f"回填訊號歷史 {symbol}（+{written} 列）（{pos}/{len(symbols)}）")
 
-    detail = (f"{len(symbols)} symbol(s), {seeded} seeded, {recorded} transition event(s), "
-              f"{replayed} history row(s) replayed, {refreshed} head refresh(es)")
+    # DEF-073: zh — it read 「9 symbol(s), 0 seeded, 1 transition event(s), …」.
+    detail = (f"掃描 {len(symbols)} 檔：首次建立狀態 {seeded} 檔，訊號轉折事件 {recorded} 筆，"
+              f"回填訊號歷史 {replayed} 列，更新最新一列 {refreshed} 列")
     if pruned:
-        detail += f", pruned {pruned} stale-vintage row(s)"
+        detail += f"，清除舊參數版本 {pruned} 列"
     return detail

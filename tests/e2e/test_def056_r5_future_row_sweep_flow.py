@@ -40,7 +40,11 @@ _UNBADGED = """(ahead) => {
   for (const tr of document.querySelectorAll('tr')) {
     if (!tr.getClientRects().length) continue;            // hidden tab / closed panel
     if (!tr.textContent.includes(ahead)) continue;
-    if (tr.querySelector('.ledger-future')) continue;
+    // A badge counts only when it is SEEN: a `display:none` / `visibility:hidden` badge is
+    // still in the DOM, and presence alone let a hidden mark pass (R5 verifier's note).
+    const badge = tr.querySelector('.ledger-future');
+    if (badge && badge.getClientRects().length
+        && getComputedStyle(badge).visibility !== 'hidden') continue;
     if (tr.classList.contains('stmt-cut')) continue;       // the cut line names the day, not a row
     const host = tr.closest('[id]');
     out.push((host ? '#' + host.id : '?') + ' :: ' + tr.textContent.trim().slice(0, 90));

@@ -230,7 +230,7 @@ def test_daily_summary_percentage_is_quantized(golden_db: sqlite3.Connection) ->
     # full-width, like the weekly line — the run history showed 「組合 +2.53%, 警示 0, 訊號
     # 0; …」 beside 「14 檔事件已更新，1 檔失敗」.
     assert re.fullmatch(
-        r"daily digest \d{4}-\d{2}-\d{2}：組合 \S+，警示 \d+，訊號 \d+；.+", summary
+        r"每日摘要 \d{4}-\d{2}-\d{2}：組合 \S+，警示 \d+，訊號 \d+；.+", summary  # DEF-073
     ), summary
 
     # …while the stored payload keeps FULL precision (the quantization is display-only).

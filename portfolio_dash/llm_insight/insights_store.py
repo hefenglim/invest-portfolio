@@ -548,9 +548,17 @@ def _filters(
     symbol: str | None,
     exclude_type_ids: set[int] | None,
     scope: str | None = None,
+    include_shadow: bool = False,
 ) -> tuple[str, list[Any]]:
-    """Shared WHERE builder for the list/count reads (one filter definition)."""
-    clauses: list[str] = []
+    """Shared WHERE builder for the list/count reads (one filter definition).
+
+    Shadow cards (``is_shadow = 1``) are EXCLUDED unless ``include_shadow`` — R6 DEF-069:
+    spec 04 §4.6 produces them alongside a batch but never shows them, and these three reads
+    feed 洞察卡, 持倉健診 and the drawer's AI 建議. Without the clause 持倉健診 headed every
+    symbol with its shadow card. The default is the safe side: a caller that wants the
+    hidden trial lane has to say so.
+    """
+    clauses: list[str] = [] if include_shadow else ["is_shadow = 0"]
     params: list[Any] = []
     if insight_type_id is not None:
         clauses.append("insight_type_id = ?")
@@ -578,6 +586,7 @@ def list_cards(
     scope: str | None = None,
     limit: int | None = None,
     offset: int = 0,
+    include_shadow: bool = False,
 ) -> list[InsightRecord]:
     """List stored cards (newest first), optionally filtered by type and/or symbol.
 
@@ -586,10 +595,11 @@ def list_cards(
     (spec 4.1 archive semantics — never physically removed). ``scope``/``limit``/
     ``offset`` (WPE): 'portfolio' keeps portfolio + per-market cards, 'symbol' keeps
     per-symbol health cards; ``limit=None`` returns everything (legacy callers).
+    Shadow cards are hidden unless ``include_shadow`` (DEF-069 — see :func:`_filters`).
     """
     where, params = _filters(
         insight_type_id=insight_type_id, symbol=symbol,
-        exclude_type_ids=exclude_type_ids, scope=scope,
+        exclude_type_ids=exclude_type_ids, scope=scope, include_shadow=include_shadow,
     )
     page = ""
     if limit is not None:
@@ -608,11 +618,12 @@ def count_cards(
     symbol: str | None = None,
     exclude_type_ids: set[int] | None = None,
     scope: str | None = None,
+    include_shadow: bool = False,
 ) -> int:
     """COUNT over the same filter set as :func:`list_cards` (honest pager totals)."""
     where, params = _filters(
         insight_type_id=insight_type_id, symbol=symbol,
-        exclude_type_ids=exclude_type_ids, scope=scope,
+        exclude_type_ids=exclude_type_ids, scope=scope, include_shadow=include_shadow,
     )
     row = conn.execute(
         f"SELECT COUNT(*) AS n FROM insights{where}", tuple(params)
@@ -634,6 +645,8 @@ def list_symbol_groups(
     Symbols are ordered by their LATEST card (id desc) so the most recently diagnosed
     holding leads. Grouping lives server-side because pagination is over symbols —
     a client slice of a flat card feed cannot know symbol boundaries honestly.
+    Shadow cards never head, count toward or appear in a group (DEF-069): the grouping,
+    the per-symbol total and the history all read the same shown-only filter.
     """
     where, params = _filters(
         insight_type_id=None, symbol=None,
@@ -656,6 +669,26 @@ def list_symbol_groups(
         )
         groups.append((str(sr["symbol"]), int(sr["total"]), cards))
     return groups, total_symbols
+
+
+def has_shadow_cards(conn: sqlite3.Connection, insight_type_id: int, *, version: int) -> bool:
+    """Whether a task has stored any shadow card for calibration ``version`` (DEF-070).
+
+    The "has this version entered its shadow period" fact: a version starts holding one of
+    the ``max_shadows`` slots with its first shadow batch. Scoped to the VERSION — a task's
+    older versions' shadow cards stay in the table (append-only) and must never hold a slot.
+    No ``insights`` table yet → no card (a read path never creates it — DEF-065).
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insights'"
+    ).fetchone() is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM insights WHERE insight_type_id = ? AND is_shadow = 1 "
+        "AND calibration_version = ? LIMIT 1",
+        (insight_type_id, version),
+    ).fetchone()
+    return row is not None
 
 
 def latest_cards(

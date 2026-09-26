@@ -667,7 +667,8 @@ def _rule_signals_var(
     """
     signals, price_as_of = signals_service.evaluate_symbol(conn, symbol, now=now)
     wire = signals_service.to_wire(
-        symbol, signals, now=now, held=signals_service.is_held(conn, symbol),
+        symbol, signals, now=now,
+        held=signals_service.is_held(conn, symbol, today=now.date()),
         price_as_of=price_as_of,
     )
     rules = wire.get("rules")

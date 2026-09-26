@@ -560,3 +560,29 @@ def holds_position(
         for account_id in accounts
         for day in days
     )
+
+
+def held_among(
+    conn: sqlite3.Connection,
+    symbols: Sequence[str],
+    *,
+    today: date,
+    index: ActionIndex | None = None,
+) -> set[str]:
+    """The subset of *symbols* that :func:`holds_position` answers True for — the REGISTRY
+    reading of 「持有」 for a whole list, with the action index loaded ONCE (trap #21).
+
+    DEF-075 (owner ruling ② B, 2026-09-26): every reader that asks "does this registered
+    symbol carry a position?" — the watchlist badge and its four doors, the target-weights
+    badge, the signal ``held`` flag, the quote jobs' partial threshold and the Alpha Vantage
+    held universe — reads this one predicate. They used ``current_shares > 0``, the net over
+    ALL dates and long-only, so a position closed only by a FUTURE-dated sale (still held
+    today: the sale has not happened yet) and a declared short (a live, priced position) read
+    as not held on some screens and held on others.
+
+    The VALUATION reading — which symbols today's book holds — is the dashboard's, cut at the
+    valuation day (``api/insight_service.py::held_in_book``); the two differ only on a symbol
+    whose every row is still ahead.
+    """
+    idx = _resolve_index(conn, index)
+    return {s for s in symbols if holds_position(conn, s, today=today, index=idx)}

@@ -135,7 +135,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   across layers, `Decimal`/currency helpers, FX-conversion helper, the cash-kind and
   corporate-action vocabularies, the alert-rule display names (`alert_rule_names.py`,
   DEF-062 2026-09-25: the ONE zh name per rule id, read by the API wire, push text, digest,
-  gate messages and run details — a renderer never falls back to the id), the LLM client.
+  gate messages and run details — a renderer never falls back to the id; and every alert
+  TITLE names its rule in the rule's own words, DEF-076 2026-09-26: `tests/contract/
+  test_def076_alert_titles_use_rule_vocabulary.py` derives the (rule, title) pairs from the
+  code, and a different wording must be a reviewed entry with its reason), the LLM client.
   Pure, importable everywhere.
 - **data_ingestion/** — manual transaction entry + CSV/broker/AI import, dividends, cash
   movements, corporate actions. Validates and normalizes into the canonical ledger models
@@ -174,8 +177,31 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   table that exists is resolved at prepare time and takes no lock — the test proves it.)
 - **web/** — the static vanilla-JS frontend (HTML/CSS/JS + vendored `echarts.min.js`), served
   by `api/` via `StaticFiles`. Not a Python package. Single fetch layer `web/api.js`.
+  **Every secret input is `type="password"` + `autocomplete="new-password"`** (DEF-078,
+  2026-09-26), and a stored secret is shown only as the server's `mask_secret` — first 3 +
+  ••• + last 3 for EVERY kind of secret, API keys included (owner ruling 2026-09-26) — as
+  text beside the field, never pre-filled as a readable value. The secret-input set is
+  derived by scan in `tests/contract/test_def078_secret_inputs_and_masks.py`.
 - **scheduler/** — APScheduler job definitions only. Triggers pricing refresh, insight,
-  alert, digest and backup runs. Holds no business logic itself.
+  alert, digest and backup runs. Holds no business logic itself. **A job that can finish
+  without raising yet lose part of its work returns a `JobOutcome`** (DEF-067, 2026-09-26):
+  every key lost → `error` (失敗), some → `partial` (部分), none → `ok`
+  (`scheduler.jobs.sweep_outcome`) — the quote jobs included (owner, 2026-09-26: all lost is
+  失敗; a held symbol lost is 部分). A bare string is reserved for a job whose only failure
+  mode is an exception, because `_outcome_of` records it as `ok`: `dividends_daily` returned
+  「0 檔事件已更新，10 檔失敗」 as 成功. A provider that ANSWERED with nothing (no dividend
+  records, no bars in a holiday window) is not a lost key — but `history_daily` trusts an
+  empty answer (`Registry.fetch_quote_history_explained`) only when the same run proves a
+  provider of that market answered, because yfinance reports a network failure as an empty
+  frame, not an exception; the multi-year backfills keep empty as failed. Quote jobs: every
+  instrument of the market lost → `error`; a held one lost → `partial`; a watchlist-only or
+  FX-only loss → `ok`. **`job_runs.detail` is always a
+  zh sentence with full-width punctuation** (DEF-073): the only ASCII words allowed are
+  identifiers (tickers / pairs, provider ids, exception class names, file names), and the
+  machine enum belongs in `job_runs.reason`. `tests/contract/
+  test_def073_job_details_speak_chinese.py` runs every job on its success and failure branch
+  and scans what it wrote — the full-width punctuation guard could not see an all-English
+  sentence, because there was no Chinese for a half-width mark to touch.
 - **bootstrap.py** — first-run composition root: creates the ledger schema and seeds config.
 
 ## "Strategy logic self-defined" — current form

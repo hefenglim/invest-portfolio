@@ -373,6 +373,43 @@ def combo_score(
         "WHERE insight_type_id = ? AND is_shadow = ? AND status = 'scored'",
         (insight_type_id, 1 if is_shadow else 0),
     ).fetchall()
+    return _score_from_rows(insight_type_id, is_shadow, rows)
+
+
+def version_score(
+    conn: sqlite3.Connection, insight_type_id: int, *, version: int | None
+) -> dict[str, Any]:
+    """Accumulated score of ONE calibration version of a combo (Loop 4 promotion, DEF-070).
+
+    A version is judged on its OWN record: every scored evaluation stamped with that
+    ``calibration_version``, in either lane — a version's shadow-period cards and its
+    active-period cards were generated with the same calibration layer. ``version=None`` is
+    "no calibration layer" (the shown cards of a task with no active version; a shadow card
+    always carries its version, so that record is active-lane only).
+
+    :func:`combo_score` with ``is_shadow=True`` is NOT a version's score: it pools every
+    shadow card the task has ever produced, so after v2's promotion a brand-new v3 inherited
+    v2's shadow evaluations and could be promoted on evidence it never produced (R6 DEF-070).
+    Same row shape as :func:`combo_score` (``is_shadow`` is reported as ``False`` — the
+    record spans both lanes). Reads as an empty record when the table does not exist yet (a
+    read path must never create it — architecture.md, DEF-065).
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insight_evaluations'"
+    ).fetchone() is None:
+        return _score_from_rows(insight_type_id, False, [])
+    rows = conn.execute(
+        "SELECT quant_hit, narrative_score, miss FROM insight_evaluations "
+        "WHERE insight_type_id = ? AND calibration_version IS ? AND status = 'scored'",
+        (insight_type_id, version),
+    ).fetchall()
+    return _score_from_rows(insight_type_id, False, rows)
+
+
+def _score_from_rows(
+    insight_type_id: int, is_shadow: bool, rows: list[sqlite3.Row]
+) -> dict[str, Any]:
+    """The one rollup shape over a set of scored evaluation rows (Decimal-string rates)."""
     n = len(rows)
     miss_count = sum(1 for r in rows if r["miss"])
     quant_rows = [r for r in rows if r["quant_hit"] is not None]
@@ -630,14 +667,97 @@ def gap_wire(gap: Decimal) -> str:
     return ("+" if rounded >= 0 else "") + decimal_str(rounded)
 
 
+class CalibrationWindow(BaseModel):
+    """The evidence Loop 3 may act on for one task (R6 DEF-080). See :func:`calibration_window`."""
+
+    n: int
+    miss_count: int
+    streak: int
+    miss_ids: list[int]
+
+
+def _aware(stamp: str) -> datetime:
+    """An ISO timestamp as an aware datetime (a legacy naive stamp is read as UTC)."""
+    at = datetime.fromisoformat(stamp)
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def calibration_window(
+    conn: sqlite3.Connection, insight_type_id: int, *, version: int | None,
+    since: datetime | None,
+) -> CalibrationWindow:
+    """The scored evaluations Loop 3 is allowed to act on (spec 4.5; R6 DEF-079 / DEF-080).
+
+    * ``version`` — the task's ACTIVE calibration version: only the cards generated with it
+      measure it (``calibration_version IS version``, either lane — its shadow period is its
+      record too). ``None`` = the cards with no calibration layer.
+    * ``since`` — when the task's newest calibration version was written (archived
+      included): the evaluations that existed then are the evidence that version was built
+      from, so only those scored AFTER it count. Without this the same old misses satisfied
+      the trigger again every week and a task grew a version per week for ever (DEF-080).
+      ``None`` (no version yet) = the whole record.
+
+    ``streak`` is the run of trailing misses (newest first, by evaluation id); ``miss_ids``
+    are the misses in the window, oldest first — exactly the samples the master is handed
+    (:func:`miss_samples_by_ids`), so the evidence that triggers a version and the evidence
+    it is written from are one set (DEF-079).
+    """
+    rows = conn.execute(
+        "SELECT id, miss, evaluated_at FROM insight_evaluations "
+        "WHERE insight_type_id = ? AND calibration_version IS ? AND status = 'scored' "
+        "ORDER BY id DESC",
+        (insight_type_id, version),
+    ).fetchall()
+    kept = [r for r in rows if since is None or _aware(str(r["evaluated_at"])) > since]
+    streak = 0
+    for r in kept:
+        if not r["miss"]:
+            break
+        streak += 1
+    misses = [int(r["id"]) for r in kept if r["miss"]]
+    return CalibrationWindow(
+        n=len(kept), miss_count=len(misses), streak=streak, miss_ids=sorted(misses),
+    )
+
+
+def miss_samples_by_ids(
+    conn: sqlite3.Connection, evaluation_ids: list[int]
+) -> list[dict[str, Any]]:
+    """The miss samples for exactly these evaluation rows (oldest first) — Loop 3's input.
+
+    Same sample shape as :func:`miss_samples_for_version` (the card's own claim rides along).
+    """
+    if not evaluation_ids:
+        return []
+    placeholders = ",".join("?" * len(evaluation_ids))
+    return _miss_samples(
+        conn, f"e.id IN ({placeholders}) AND e.miss = 1", list(evaluation_ids),
+    )
+
+
 def miss_samples_for_version(
     conn: sqlite3.Connection, *, insight_type_id: int, version: int
 ) -> list[dict[str, Any]]:
-    """The miss-evaluation samples recorded under a calibration version (spec 4.5 / 4.7).
+    """The miss-evaluation samples recorded UNDER a calibration version (spec 4.7 route).
 
-    These are the failures that drive (or drove) a calibration version. Returns the raw
-    sample dicts the master uses for the next version + the frontend's version manager.
+    I.e. the failures of the cards generated with that version (either lane). Loop 3 no
+    longer reads this: it writes a version from its trigger window's misses
+    (:func:`calibration_window` + :func:`miss_samples_by_ids`), which for a task with no
+    active version are cards stamped NULL — a ``version`` this function cannot even name
+    (R6 DEF-079: the first version was written from zero samples).
     """
+    return _miss_samples(
+        conn,
+        "e.insight_type_id = ? AND e.calibration_version = ? AND e.status = 'scored' "
+        "AND e.miss = 1",
+        [insight_type_id, version],
+    )
+
+
+def _miss_samples(
+    conn: sqlite3.Connection, where: str, params: list[Any]
+) -> list[dict[str, Any]]:
+    """The one miss-sample read + wire shape behind the two public readers above."""
     from portfolio_dash.llm_insight import insights_store as istore  # no cycle: one-way
 
     istore.ensure_tables(conn)  # the LEFT JOIN needs the insights table to exist
@@ -647,9 +767,8 @@ def miss_samples_for_version(
         "i.symbol AS card_symbol, i.title AS card_title, i.summary AS card_summary, "
         "i.prediction AS card_prediction "
         "FROM insight_evaluations e LEFT JOIN insights i ON i.id = e.insight_id "
-        "WHERE e.insight_type_id = ? AND e.calibration_version = ? "
-        "AND e.status = 'scored' AND e.miss = 1 ORDER BY e.id",
-        (insight_type_id, version),
+        f"WHERE {where} ORDER BY e.id",
+        params,
     ).fetchall()
     # Card context (symbol/title/summary/prediction) rides along so the Loop-3 master
     # rewrites rules from the ACTUAL failed claims, not just second-hand notes
