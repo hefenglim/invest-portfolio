@@ -1357,7 +1357,9 @@
       /* A cross rate computed from the two USD legs (pricing/cross.py, owner ruling
          2026-09-16 M1) is labelled so nobody reads it as a market quote. */
       if (p.source && String(p.source).indexOf('derived:') === 0) {
-        const d = el('span', 'badge badge-stale-mini', '推導');
+        /* Neutral, not .badge-stale-mini: 推導 is provenance, not staleness (owner 2026-09-26,
+           DEF-077 R7) — the amber badge one column over already means 過期. */
+        const d = el('span', 'badge badge-info-mini', '推導');
         d.title = '由 ' + p.source.slice(8) + ' 兩組匯率推導（' + p.base + '/' + p.quote
           + ' 無直接市場報價），三組匯率永遠三角一致';
         d.style.marginLeft = '4px';
@@ -1390,13 +1392,15 @@
        change. The backend measures the gap (`fx_triangulation`); this line discloses it. The
        rates themselves are never touched here — which pair should be derived is an owner call. */
     (fr.fx_triangulation || []).forEach((t) => {
-      const n = el('div', 'fresh-note');
       /* DEF-077 (owner ruling ⑥ A): the verdict is the server's, judged on the legs' latest
          COMMON date. Three states, and only a real disagreement ON that date is amber:
          ok === true → 一致; ok === false → the guard fired; ok === null → no common date in
          the lookback, 「無法比較」 — neutral, never a red light. `dates_differ` adds 「日期不同」
-         with each leg's own date, so a leg that is a day behind reads as what it is. */
-      if (t.ok === false) n.style.color = 'var(--amber)';
+         with each leg's own date, so a leg that is a day behind reads as what it is.
+         R7: the state is a CLASS. .fresh-note is amber by DEFAULT, so R6's inline amber
+         colour on ok === false changed nothing and the two neutral states stayed amber
+         too — .fresh-note-info (styles.css) is what makes them neutral. */
+      const n = el('div', t.ok === false ? 'fresh-note' : 'fresh-note fresh-note-info');
       const legs = Object.keys(t.leg_dates || {})
         .map((k) => k + ' ' + t.leg_dates[k]).join('、');
       const differ = t.dates_differ

@@ -589,6 +589,15 @@ button.is-busy {
   line-height: 15px;
   padding: 0 5px;
 }
+/* Provenance, not a warning (owner 2026-09-26, DEF-077 R7 scan): the 資料新鮮度 panel's
+   「推導」 tag on a derived cross rate. It used .badge-stale-mini — the same amber as 過期 one
+   column over — so a rate that is exactly as fresh as its legs read like a stale one. The
+   .badge default is already neutral; this only takes the mini size. */
+.badge-info-mini {
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+}
 .badge-missing {
   color: var(--up);
   border-color: rgba(240, 84, 79, 0.4);
@@ -1245,6 +1254,17 @@ table.fresh td:last-child { text-align: right; }
   border: 1px solid rgba(217, 161, 63, 0.3);
   border-radius: var(--radius-sm);
   padding: 6px 10px;
+}
+/* DEF-077 R7: a note that states a fact, not a problem — the FX triangle when it closes
+   (ok === true) or cannot be compared (ok === null). Neutral text on the panel colour; only
+   the guard firing (ok === false) keeps the amber box above. The state is a CLASS, never an
+   inline colour: an inline colour can only ADD a state to the amber default, so the neutral
+   branches silently kept it (R6 shipped exactly that, and an e2e reading `n.style.color`
+   could not see it — tests/e2e/test_def077_fx_triangle_note_flow.py reads computed styles). */
+.fresh-note.fresh-note-info {
+  color: var(--text-2);
+  background: var(--panel-2);
+  border-color: var(--border-soft);
 }
 
 /* ==================== KPI band v3 — 7 cards, one grammar (2026-09-01) ====================

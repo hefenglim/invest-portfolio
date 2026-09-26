@@ -673,6 +673,16 @@
     drawCalib(score.calibration_bins || []);
   }
 
+  /* DEF-081 (owner 2026-09-26): a task is named by its NAME — 「任務 #2」 is a number the
+     owner cannot map to anything on this page. The label is the server's
+     (insight_type_label: name / 「名稱（已刪除）」 / 「任務 #N（已刪除）」); the id stays in
+     the tooltip, and a payload without the label keeps the old text. */
+  function taskName(tag, cls, x) {
+    var node = el(tag, cls, x.insight_type_label || ('任務 #' + x.insight_type_id));
+    node.title = '任務 #' + x.insight_type_id;
+    return node;
+  }
+
   function renderCombos(combos) {
     var wrap = document.getElementById('combo-rows');
     wrap.replaceChildren();
@@ -685,7 +695,7 @@
          concern; Number() the ratio purely for the CSS width %, never for a number of record. */
       var ratio = c.quant_hit_rate == null ? 0 : Number(c.quant_hit_rate);
       var row = el('div', 'strat-row');
-      row.appendChild(el('span', 'name', '任務 #' + c.insight_type_id));
+      row.appendChild(taskName('span', 'name', c));
       var track = el('span', 'track');
       var fill = el('span', 'fill');
       fill.style.width = Math.max(0, Math.min(100, ratio * 100)) + '%';
@@ -722,7 +732,7 @@
     }
     rows.forEach(function (r) {
       var tr = el('tr');
-      tr.appendChild(el('td', 'col-text', '任務 #' + r.insight_type_id));
+      tr.appendChild(taskName('td', 'col-text', r));
       tr.appendChild(el('td', 'num', r.calibration_version == null ? EM : 'v' + r.calibration_version));
       tr.appendChild(el('td', 'col-text', r.is_shadow ? '影子' : '生效'));
       var quant = r.quant_hit == null ? EM : (r.quant_hit ? '✓' : '✗');

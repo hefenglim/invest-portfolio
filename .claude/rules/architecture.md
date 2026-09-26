@@ -182,6 +182,13 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   ••• + last 3 for EVERY kind of secret, API keys included (owner ruling 2026-09-26) — as
   text beside the field, never pre-filled as a readable value. The secret-input set is
   derived by scan in `tests/contract/test_def078_secret_inputs_and_masks.py`.
+  **A state colour is a class with a stylesheet rule, never an inline style** (M10-02,
+  generalised by DEF-077 R7, 2026-09-26): an inline colour cannot remove what the element's
+  class paints by default (`.fresh-note` is amber, so 「（一致）」 stayed amber), and a branch
+  that sets one without every other branch clearing it hands its colour to the next render.
+  The few safe inline sites are reviewed entries in
+  `tests/contract/test_def077_state_colour_is_a_class.py`; a colour a user sees is tested with
+  `getComputedStyle`, never `element.style`.
 - **scheduler/** — APScheduler job definitions only. Triggers pricing refresh, insight,
   alert, digest and backup runs. Holds no business logic itself. **A job that can finish
   without raising yet lose part of its work returns a `JobOutcome`** (DEF-067, 2026-09-26):

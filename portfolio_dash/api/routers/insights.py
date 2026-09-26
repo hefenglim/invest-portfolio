@@ -895,6 +895,10 @@ def get_ai_score(
     Purely ADDITIVE: ``n``/``miss_rate``/``quant_hit_rate``/``avg_narrative`` keep their
     existing names and types (Decimal strings — the wire contract), and the numbers
     themselves come from ``evaluations_store`` unchanged.
+
+    DEF-081 (owner ruling 2026-09-26): every ``by_combo`` entry and every ``rows`` item also
+    carries ``insight_type_label`` — the task's NAME, which the 戰績 page prints instead of
+    「任務 #2」 (a number the owner cannot map to anything on the page). Additive as well.
     """
     es.ensure_tables(conn)
     cs.ensure_seeded(conn)
@@ -911,7 +915,26 @@ def get_ai_score(
     # The same expression ``ai_score`` sums its own ``total_quant_n`` from, over the same
     # already-returned per-combo counts — a re-read of one definition, not a second one.
     totals["quant_n"] = sum(int(c["quant_n"]) for c in payload["by_combo"])
+    tasks = {it.id: it for it in cs.list_insight_types(conn, include_archived=True)}
+    for item in [*payload["by_combo"], *payload["rows"]]:
+        item["insight_type_label"] = _task_label(int(item["insight_type_id"]), tasks)
     return payload
+
+
+def _task_label(task_id: int, tasks: dict[int, cs.InsightType]) -> str:
+    """How the 戰績 page names a task (DEF-081): its name; a deleted task says so.
+
+    The same three cases as the 排程中心's ``insight:<id>`` rows
+    (``api/routers/scheduler.py::_insight_label``) without that page's 「AI 洞察任務」 prefix —
+    every row here is one. An archived task's rows leave the displayed aggregate but stay in
+    the table (spec 4.1), so it keeps its name; a task whose row is gone has only its id.
+    """
+    task = tasks.get(task_id)
+    if task is None:
+        return f"任務 #{task_id}（已刪除）"
+    if task.archived:
+        return f"{task.name}（已刪除）"
+    return task.name
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------

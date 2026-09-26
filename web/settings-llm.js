@@ -63,24 +63,23 @@
     if (!anyRole) {
       chip.className = 'pill pill-off';
       chip.replaceChildren(el('span', 'dot'), document.createTextNode('AI：已關閉'));
+      chip.title = '';
     } else if (remNum !== null && remNum <= 0) {
       chip.className = 'pill pill-fail';
       chip.replaceChildren(el('span', 'dot'), document.createTextNode('AI：額度歸零'));
       chip.title = '剩餘額度已歸零，請添加額度';
     } else if (remNum !== null && remNum < thrNum) {
-      chip.className = 'pill';
-      chip.style.color = 'var(--amber)';
-      chip.style.borderColor = 'rgba(217,161,63,0.4)';
-      chip.style.background = 'var(--amber-soft)';
+      /* A class, never inline colour (DEF-077 R7 scan): boot() re-renders this chip after
+         every threshold / model / role / top-up save, and the inline amber this branch used
+         to set was cleared only by the 啟用中 branch — so 偏低 → 已關閉 (all role defaults
+         emptied) kept the amber, and 偏低 → 歸零 painted .pill-fail's red over with it. */
+      chip.className = 'pill pill-warn';
       chip.replaceChildren(el('span', 'dot'),
         document.createTextNode('AI：額度偏低 ' + usd(remaining)));
       chip.title = '剩餘額度 ' + usd(remaining) + '，低於警示閾值 '
         + usd(D.quota.alert_threshold_usd);
     } else {
       chip.className = 'pill pill-ok';
-      chip.style.color = '';
-      chip.style.borderColor = '';
-      chip.style.background = '';
       chip.replaceChildren(el('span', 'dot'), document.createTextNode('AI：啟用中'));
       chip.title = '';
     }
