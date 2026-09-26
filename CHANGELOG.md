@@ -9,6 +9,41 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R6 → R7 — one re-verification failure (L) + one owner ruling (L)
+(2026-09-26).** The verifier closed 14 of R6's 15 items on `696934e`; DEF-077 passed on its
+verdict and failed on its colour (`docs/audit/2026-09-26-r6-dev-specs.md` §1). The owner ruled
+the verifier's long-open observation on the AI 戰績 task ids into this round (DEF-081) and, from
+the class scan, the 「推導」 tag's colour.
+
+- **The FX-triangle note is amber only when the guard fires (DEF-077, R7).** `.fresh-note` is
+  amber by DEFAULT (`web/styles.css`); R6 set `n.style.color = amber` on `ok === false` and
+  nothing on `true` / `null`, so 「（一致）」 and 「無法比較」 sat in the same amber box as
+  「排程器未啟動」 (demo, computed `rgb(217, 161, 63)`). The state is now a class,
+  `.fresh-note-info` (neutral text on the panel colour) for `true` / `null`; `false` keeps the
+  default. R6's e2e read `n.style.color` — the inline value — and asserted it empty, which the
+  CSS default never touches; it now reads `getComputedStyle` colour AND background against the
+  page's own `--amber` / `--amber-soft`, and covers the amber case too.
+  **Class scan** (inline colour deciding a state): 71 inline style assignments in 13 files
+  (vendored ECharts excluded); 12 named a state colour; on a warning-default container: 1 (this
+  one). One more was live: the AI 與額度 status chip set amber INLINE on 額度偏低 and only 啟用中
+  cleared it, so a save that re-rendered it as 已關閉 kept the amber and 額度歸零's red was
+  painted over — now `.pill-warn`. The remaining 8 are reviewed sites (an element built for one
+  state, or every branch assigns). M10-02 stated "a warn face is a class" but guarded two
+  functions by name; `tests/contract/test_def077_state_colour_is_a_class.py` holds the rule over
+  every file, with the reviewed sites and their reasons.
+- **「推導」 is provenance, not staleness (owner 2026-09-26).** The derived-rate tag in 資料新鮮度
+  used `.badge-stale-mini` — the 過期 badge's amber, one column over. Now the neutral
+  `.badge-info-mini`.
+- **The AI 戰績 tab names tasks (DEF-081, owner 2026-09-26).** 「各洞察任務命中率」 and 預測明細
+  printed 「任務 #2」. `GET /api/ai-score` adds `insight_type_label` to every `by_combo` entry and
+  `rows` item (additive) — the name; 「名稱（已刪除）」 archived; 「任務 #N（已刪除）」 when the row is
+  gone, the 排程中心's three cases — and the id moves to the tooltip. Scan: 2 frontend sites
+  printed a task by id, both fixed; the 2 backend 「任務 #N」 strings speak only of a task that
+  no longer exists; the reconciliation CSV `ai_predictions` keeps `insight_type_id` as its key.
+
+Gates: ruff clean · mypy --strict 953 files 0 (fresh cache) · pytest 6,494 (6,492 passed, 2
+skipped) · e2e 89 files 309/309, server-side 5xx 0 · stress-audit ops=128 pass=6,025 fail=0.
+
 **Functional-test manual R5 → R6 — 13 items (5 M, 8 L) + 2 found on the way (1 M, 1 L) (2026-09-26).**
 The verifier closed all five R5 items on `3be67db`, ran the eight previously BLOCKED cases in a
 dedicated local environment (scheduler on, a fake LLM, a frozen clock), opened DEF-066 … 073,

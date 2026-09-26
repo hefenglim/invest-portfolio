@@ -1901,3 +1901,29 @@ NOT flag: an all-English sentence has no Chinese for a half-width mark to touch.
 6. **When the spec leaves a choice or my reading differs, ask the owner in chat the same
    round** (owner directive 2026-09-26) — the workbook records the answer for the verifier, it
    does not carry the question for another round trip.
+
+## 2026-09-26 — Functional-test manual R6 → R7
+
+**What happened.** DEF-077 passed on its verdict and failed on its colour. The FX-triangle note
+said 「（一致）」 inside the same amber box as 「排程器未啟動」: `.fresh-note` is amber by DEFAULT,
+and the fix set an inline amber on `ok === false` and nothing on the other two states. The R6 e2e
+read `n.style.color` and asserted it was empty — which is true of any element whose colour comes
+from a stylesheet. R6's own lesson 5, written the same day, was "guard the property, not a proxy
+for it", and the test that shipped beside it asserted a proxy.
+
+**Root causes.** (1) **An inline colour can only ADD a state.** It cannot remove what the
+element's class already paints, and a branch that sets it without every other branch clearing
+it hands its colour to the next render (the AI status chip: 偏低 → 已關閉 stayed amber).
+(2) **A rule guarded by name is a rule for two functions.** M10-02 wrote "the warn face is a
+class, not inline" and pinned the toast and the partial dot; nothing looked at the other 13
+files.
+
+**Rules.**
+1. **Colour is a computed property.** A test of what the user sees reads `getComputedStyle`
+   (colour AND background) and compares it with the page's own tokens resolved in the page —
+   never `element.style`, never the class list.
+2. **Test every state of a tri-state display, including the one you did not change** — R6
+   pinned the two neutral states and skipped `ok === false`, so "all neutral" would have passed.
+3. **A state colour is a class with a stylesheet rule.** An inline colour is allowed only where
+   no state can inherit another's (built fresh for one state, or every branch assigns), and
+   `tests/contract/test_def077_state_colour_is_a_class.py` makes each such site a reviewed entry.
