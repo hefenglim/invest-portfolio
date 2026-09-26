@@ -1855,3 +1855,49 @@ time and the hermetic fixture never runs the real boot.
    first gate run they exhausted the 8 GB machine and the gate run was reaped. After any
    background test loop, list python / chromium processes and kill the whole tree; run the heavy
    gates one at a time in the foreground, in batches that finish inside one call.
+
+## 2026-09-26 — Functional-test manual R5 → R6
+
+**What happened.** The verifier ran the eight cases that had been BLOCKED on the demo (no
+scheduler, no LLM key, no way to move the clock) in a local environment with the scheduler on,
+a fake LLM and a frozen clock, and four of them failed: a missing dependency that only an error
+path imports, a job that recorded 成功 while every symbol failed, shadow cards in user lists, and
+a shadow cap that stopped the self-correction loop after its first batch. None of these could be
+seen by a suite that mocks the provider, runs one batch, or checks only a return type.
+
+**Root causes.** (1) **A dependency missing on an error-only path.** LiteLLM imports `tenacity`
+only when a provider call fails and retries are on; every LLM test replaced
+`litellm.completion` wholesale, so the library's own exception branch never ran in-process.
+(2) **A permissive default nobody pinned.** `_outcome_of` turns a bare string into `ok`; one job
+family had been taught to return a status and the rest kept the default. (3) **Tests that
+encoded the defect as a step or as a fixture.** The door-2 e2e selected the right account by hand
+after a comment noting it opened on the wrong one; the calibration fixture labelled misses
+`calibration_version=1` where real data writes NULL, so sampling "v1" happened to work; the only
+two-run calibration test asserted that the same misses produce v2. (4) **An allowlist reason
+that was never true** ("the newest live version is active by default") excused a route with no
+caller — and hid a missing button for two rounds. (5) **A guard that checks form, not content.**
+The full-width punctuation guard listed 「3 alert(s) [a, b], 2 dispatched」 as a string it must
+NOT flag: an all-English sentence has no Chinese for a half-width mark to touch.
+
+**Rules.**
+1. **Drive the real library through its failure path at least once.** For every external client
+   we wrap (LiteLLM here), one test calls the REAL entry point with an injected failure
+   (`mock_response=<Exception>`), no network — that is the only place a lazily imported
+   dependency or a global side effect shows up. Better still, own retries ourselves and pass
+   the library `num_retries=0`.
+2. **A permissive default is a decision; pin it or remove it.** If a job can finish without
+   raising yet lose part of its work, it returns an explicit outcome; a test runs every job on
+   both branches and asserts the status AND the sentence.
+3. **A fixture must look like production data.** Before trusting a fixture, write down what the
+   real writer stores for the same state (NULL vs 1, one batch vs two, same instant vs a day
+   later) — a fixture that is "convenient" is where a defect hides.
+4. **An allowlist reason is a claim about the product; verify it when you read it.** Re-read each
+   remaining entry's reason whenever the guarded thing changes, and delete the entry if the
+   reason is false.
+5. **Guard the property, not a proxy for it.** "Chinese detail" is a language property —
+   scan for English words, not for half-width marks next to Chinese. "The badge is shown" is a
+   visibility property — assert `to_be_visible`, not `to_have_text` (R6 measured: the old
+   DEF-056 tests passed 4/4 with the cut line and badges hidden by CSS).
+6. **When the spec leaves a choice or my reading differs, ask the owner in chat the same
+   round** (owner directive 2026-09-26) — the workbook records the answer for the verifier, it
+   does not carry the question for another round trip.

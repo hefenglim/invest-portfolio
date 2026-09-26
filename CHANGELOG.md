@@ -9,6 +9,118 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R5 → R6 — 13 items (5 M, 8 L) + 2 found on the way (1 M, 1 L) (2026-09-26).**
+The verifier closed all five R5 items on `3be67db`, ran the eight previously BLOCKED cases in a
+dedicated local environment (scheduler on, a fake LLM, a frozen clock), opened DEF-066 … 073,
+and the owner's rulings of 2026-09-26 on the eight decision items opened DEF-074 … 078
+(`docs/audit/2026-09-25-r5-dev-specs.md`). Two more (DEF-079 / 080) were found while fixing
+DEF-070 and ruled into this round by the owner in chat, as were several readings where the
+spec left a choice. All fifteen are fixed under the manual's §4 contract.
+
+*The LLM layer*
+
+- **Retries and the fallback model work again (DEF-066).** Every `litellm.completion` call
+  passed `num_retries=model.max_retries`; on any provider error LiteLLM's wrapper handed the
+  call to `completion_with_retries`, which imports `tenacity` at that moment — not a
+  dependency — so it raised 「tenacity import failed」, the provider's real error was lost,
+  and the fallback model failed the same way (demo, alert_scan #195 → insight runs #196…202).
+  Retries are now owned by `shared/llm.py::_call_provider` (LiteLLM always gets
+  `num_retries=0`): transient failures only (timeout, connection, 408/425/429, 5xx), at most
+  `max_retries`, capped backoff; a 401/400 is never retried. When every candidate fails the
+  message names each one in Chinese (「主模型 X：回應不是完整 JSON（2 次）；備援 Y：供應商服務異常
+  （HTTP 500，已重試 2 次）」); the provider's raw text goes only to the redacting fail log
+  (owner, 2026-09-26). Every earlier LLM test replaced `litellm.completion` wholesale, so a
+  dependency missing on a path that only runs on error could not be seen: the new guard drives
+  the REAL LiteLLM wrapper through its exception path with `mock_response=<Exception>`.
+  Rejected: adding `tenacity` (stack rule "default answer no"; it would also retry 4xx).
+
+*Self-correction (spec 04 §4.6)*
+
+- **Shadow cards no longer reach user-facing lists (DEF-069).** `insights_store._filters`
+  had no `is_shadow = 0`, so 持倉健診 headed each symbol with its shadow card and the drawer's
+  AI 建議 could get one. It now excludes shadows unless a caller asks; the battle record keeps
+  them, labelled 影子.
+- **`max_shadows` caps tasks in their shadow period (DEF-070, owner ruling ⑧ A).** It counted
+  every shadow card the task had ever stored: the first per_symbol batch of 9 ignored the cap
+  of 2 and no later version was ever shadowed again. A task holds one slot from its first
+  shadow batch until its shadow version is decided (won / lost), promoted, archived or caught
+  up; a full cap queues with 「影子排隊中（目前 N／上限 M）」. Promotion now compares each
+  version's OWN record — pooled history let v3 be promoted on v2's shadow evidence.
+- **「設為生效」 / 「取消生效」 exist (DEF-071).** The task drawer's ④ 校正版本鏈 had only 封存,
+  the active-calibration route had no caller, and the settings text promised the button. The
+  route-caller guard's allowlist had excused it with a reason that was never true
+  (「the newest live one is active by default」) — removed. G7's fix lands on the recommended
+  version; the winning shadow is marked.
+- **Calibration versions are written from the right evidence (DEF-079, DEF-080 — found while
+  fixing DEF-070).** With no active version the cards and evaluations carry
+  `calibration_version` NULL, but Loop 3 sampled misses under v1, so the first version was
+  written from 0 samples; later versions were based on the newest body instead of the active
+  one; and the trigger read the whole history, so the same misses produced a new version
+  every week. The trigger window is now the active version's own evaluations scored after
+  the newest version (archived included) was written, those exact misses are the master
+  model's input, and no version is written while the newest is still being shadow-evaluated
+  or has won and awaits 設為生效 (owner, 2026-09-26).
+
+*The scheduler*
+
+- **A run that lost work does not say 成功 (DEF-067).** `_outcome_of` records a bare string
+  as `ok`, so `dividends_daily` wrote 「成功　0 檔事件已更新，10 檔失敗」. Nine jobs now return a
+  `JobOutcome` through `sweep_outcome` (all lost → 失敗, some → 部分): dividend and inbox
+  sweeps, history, sentiment and index ingests, the news budget stop, a crashed alert push, a
+  degraded or undelivered digest. Owner, 2026-09-26: the quote jobs record 失敗 when a
+  market loses every instrument (was 部分), and the history sweep counts only a provider
+  failure — a window with no bars (a holiday closure, a delisted symbol) is not a loss. An
+  empty answer is trusted only when the same run proves the market's provider answered,
+  because yfinance reports a network failure as an empty frame, not an exception.
+- **Every run detail is Chinese (DEF-073).** 「18 alert(s) […], 7 dispatched」,
+  「daily digest …」, 「news pass complete」, 「backup ok -> …」, 「notify：…」, 「manual:
+  organized …」, 「evaluate pass complete」 and 「calibration pass complete」 — the last two
+  identical whether 0 versions were made, the validator refused one, or one was written. The
+  evaluate / calibrate runners now return summaries (「評分 N 張、延後 M 張；晉升：…」,
+  「產生 1 版（個股健檢 v1・失誤樣本 8 筆）；略過 …」). The full-width punctuation guard had
+  certified 「3 alert(s) [a, b], 2 dispatched」 as clean — an all-English sentence has no
+  Chinese for a half-width mark to touch; a new guard runs every job on both branches and
+  scans what it wrote.
+- **The 更新報價 toast says what happened (DEF-068).** It always ended 「其餘已更新」 and never
+  named failed FX pairs. `/api/actions/refresh-quotes` gains an additive `summary`
+  (updated / not updated / failed / FX failed / all failed); the toast only formats it.
+
+*The ledger surfaces*
+
+- **One 「持有」 for the registry (DEF-075, owner ruling ② B).** The watchlist badge and 永久移除
+  used `current_shares > 0` (all dates netted, long only) while 封存 / 移除 used
+  `holds_position`, so a position closed only by a future-dated sale read 觀察 and then
+  refused removal. The same predicate now answers the badge, the four removal doors, the
+  target-weights badge, the signal `held` flag, the quote jobs' 部分 threshold and the Alpha
+  Vantage universe (`holdings.held_among`); the valuation-day readers (alert and insight
+  producers, the digest) keep the book cut at today, which already counts a future-sold
+  position as held.
+- **The dividend-inbox scan skips archived symbols (DEF-074, ruling ① B)** — the same shared
+  predicate its fallback path already used.
+- **Door 2 prefills the account whose reconciliation is red (DEF-072).** It passed an empty
+  string and the form fell on the first account; several red accounts now ask 「請選擇帳戶」.
+  The ledger tab's 新增 prefills the active account chip.
+- **Future-row guards assert visibility (DEF-056 follow-up, verifier's note).** A hidden cut
+  line or badge passed `to_have_text`; the statement test and the sweep now require them to
+  be seen (measured: the old tests pass 4/4 with both hidden by CSS, the new ones fail 3).
+
+*Wording, FX, secrets*
+
+- **「AI 額度偏低」 (DEF-076, ruling ⑤ b)** — the alert title now uses its rule's name, and every
+  other user-visible 「LLM」 says 「AI」 (owner, 2026-09-26; 「LiteLLM」 is a product name).
+  Alert titles are tied to rule names by a guard derived from the code.
+- **The FX triangle is judged on the legs' latest common date (DEF-077, ruling ⑥ A).**
+  Latest-row-against-latest-row read a day's market move as a data error (J-01: −0.0938%,
+  ok:false, no bad row). Different dates now read 「日期不同」 with the common date; no common
+  date within 30 days is 「無法比較」 (`ok: null`). Wire: additive `compared_on`,
+  `dates_differ`, `leg_dates`, `reason`.
+- **Secret inputs are password fields (DEF-078, ruling ⑦).** The model key, data-source key,
+  ntfy token and Telegram bot token echoed what was typed. Every stored secret keeps the
+  first-3 + last-3 mask (owner, 2026-09-26 — the verifier's 6 + 6 reading is superseded),
+  shown as text beside the field.
+
+Gates (run one at a time, in the foreground): ruff clean · mypy --strict 950 files 0 issues · pytest 6,488 (6,486 passed, 2 skipped, 0 failed) · e2e 88 files 304/304, server-side 5xx 0 · stress-audit ops=128 pass=6,025 fail=0.
+
 **Functional-test manual R4 → R5 — 1 re-verification failure + 4 new items, all L (2026-09-25).**
 The verifier's R4 pass on `1ee7771` closed 13 of 14, bounced DEF-056 (the cash page's on-screen
 現金收支明細 did not flag future rows while its header's 目前餘額 left them out), and opened
