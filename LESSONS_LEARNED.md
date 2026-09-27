@@ -1927,3 +1927,27 @@ files.
 3. **A state colour is a class with a stylesheet rule.** An inline colour is allowed only where
    no state can inherit another's (built fresh for one state, or every branch assigns), and
    `tests/contract/test_def077_state_colour_is_a_class.py` makes each such site a reviewed entry.
+
+## 2026-09-27 — Functional-test manual R8 → R9
+
+**What happened.** The verifier's full re-run on the final commit found the M9 symbol check
+telling the owner that 「3008 (LARGAN)」 was 「可能是模型幻覺」. LARGAN is 3008's registered name. The
+check asked "is this token a registered symbol?" and never "is it the registered NAME of one?".
+Its allowlist had been tuned on the 48 hits measured on 2026-09-17 (indicators, ratios, ratings),
+all correct then; the first card to write a company by its English name arrived after R1.
+
+**Root causes.** (1) **A "does this exist?" check knew one of the entity's two identifiers.**
+The registry names an instrument by `symbol` AND `name`; a card may cite either. (2) **An
+allowlist built from observed hits covers the observations.** New data brings new shapes; the
+known forms should come from the registry's columns, not from the false positives seen so far.
+
+**Rules.**
+1. **Check existence against every identifier the registry holds**, derived from its columns
+   (symbol, name, their normalised forms), not from a list of hits.
+2. **When a rule says "X is never a Y", apply it at the ONE place every path goes through.** The
+   first draft filtered digits and one-letter tokens from name WORDS but added the whole name
+   unfiltered — the docstring promised more than the code did, and only a self-review read the
+   two side by side. One filter over all forms made a whole-name 「6883」 as safe as a word.
+3. **A mutation that stops failing after a refactor may be equivalent, not a hole** — widening
+   the word regex to digits survived once the digit filter covered every form; confirm by the
+   neighbouring mutation (dropping the digit filter) before adding a test.

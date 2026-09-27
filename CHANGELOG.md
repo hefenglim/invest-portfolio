@@ -9,6 +9,37 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R8 → R9 — one finding of the full re-run (L) (2026-09-27).** On the
+owner's instruction the verifier re-ran, on the final `a16210a`, the 73 cases not black-box
+executed since R1: 71 PASS, G-10 N/A, G-04 FAIL. The R7 verifier sign-off was withdrawn. The owner
+ruled DEF-082 a fix, and in chat how far a name match reaches.
+
+- **A registered name in parentheses is not an unknown code (DEF-082).** Card #209 wrote
+  「3008 (LARGAN)」 and wore 「未知代碼」 with the tooltip 「…可能是模型幻覺」: LARGAN is 3008's
+  registered name, and the M9 symbol check (`llm_insight/figure_check.py`) compared a
+  parenthesised ticker-shaped token against registered SYMBOLS only. The router now passes the
+  registered names too, and a token is cleared by a name in any case, whole or word by word
+  (owner 2026-09-27: 「5225 (IHH)」 for `IHH Healthcare`). All digits and one letter are never a
+  name form, whole or word, so #82's 「LRDIM (6883)」 stays flagged. Not a regression: the rule
+  is unchanged since `755c88a`; R1 had no card of this shape.
+  **Class scan** (demo, 208 visible cards, 26 registered instruments): 5,491 parenthesised
+  segments; 746 ticker-shaped (44 distinct) — 17 registered codes, 25 abbreviations /
+  indicators / currencies, 2 unknown: 6883 (true) and LARGAN (this defect). Registered names
+  written in parentheses: 7 forms / 9 occurrences, and only the all-capitals single word
+  (LARGAN ×1) has the ticker shape; mixed case (Maybank ×3, Tesla ×1), a multi-word name
+  (IHH Healthcare ×1), a list (2) and a Chinese name (元大高股息 ×1) do not. In the registry,
+  15 of 26 names are Chinese and never ticker-shaped; of the 11 Latin names, 2 are
+  ticker-shaped as stored (LARGAN, NVIDIA), 2 once upper-cased (APPLE, TESLA), 3 are too long
+  (≥ 7 letters), and 4 multi-word names hold 6 ticker-shaped words (IHH, YANG, MING, SPACE,
+  MICRO, INC) — 10 forms in all, each now known. Re-run of the fixed check over the 208 cards:
+  unknown codes 1 (#82 6883). Tests: 3 unit (the demo registry's 26 names) + 3 contract through
+  the real route (flat and grouped lists); mutations — name comparison dropped, router not
+  passing names, case-sensitive, whole name only, one-letter forms, all-digit forms — 6/6 caught.
+
+Gates: ruff clean · mypy --strict 954 files 0 (fresh cache) · pytest 6,500 (6,498 passed, 2
+skipped) · e2e 89 files 309/309, server-side 5xx 0 · stress-audit ops=128 pass=6,025 fail=0 ·
+demo on `3a35454`, verify_live ALL PASS.
+
 **Functional-test manual R6 → R7 — one re-verification failure (L) + one owner ruling (L)
 (2026-09-26).** The verifier closed 14 of R6's 15 items on `696934e`; DEF-077 passed on its
 verdict and failed on its colour (`docs/audit/2026-09-26-r6-dev-specs.md` §1). The owner ruled
