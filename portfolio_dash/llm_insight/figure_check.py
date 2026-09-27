@@ -82,6 +82,13 @@ trust in the flag, so every rule below errs towards NOT flagging:
   period-suffixed indicator (MA20 / MA200 / RSI14 …) are never read as tickers — measured
   2026-09-17: 47 of 48 ``unknown_symbols`` hits on the demo were PBR / MA20 / MA60 / MA120 /
   MA200 / MA50 / RSI14 / BUY / HOLD / KLCI / TAIEX, and one was the real 6883;
+* a registered instrument's NAME in parentheses is not a code (DEF-082, functional-test
+  R8, 2026-09-27): card #209 wrote 「3008 (LARGAN)」 — 3008's registered name — and was told
+  「未知代碼：LARGAN…可能是模型幻覺」, because the check compared the token against symbols
+  only. Names are compared case-insensitively, whole and word by word (owner ruling
+  2026-09-27: 「5225 (IHH)」 for ``IHH Healthcare`` is the same writing) — see
+  :func:`_name_forms`. An all-digit token is never a name form, so 「LRDIM (6883)」 stays
+  flagged;
 * a population with NO number at all yields NO figure flags — it yields the ``"none"``
   state instead, because an empty population is not evidence of a wrong number, and a
   silent ``[]`` is not evidence of a right one.
@@ -186,6 +193,10 @@ _INDICATOR_RE = re.compile(
     r"^(?:MA|EMA|SMA|WMA|DMA|RSI|KD|KDJ|ATR|ADX|CCI|OBV|DMI|SAR|MFI|ROC|MACD|BOLL|BB)\d+$"
 )
 
+#: A word of an upper-cased registered name, in the letter-first shape :data:`_CODE_RE`
+#: reads as a ticker (DEF-082) — see :func:`_name_forms`.
+_NAME_WORD_RE = re.compile(r"[A-Z][A-Z0-9]*")
+
 #: A number, optionally grouped with thousands separators, plus an optional unit suffix.
 #: The lookbehind keeps the scan off the tail of a longer token (a version string, an id).
 #: Alternation order matters: 萬億 before the prefixed base (else it stops at 萬), and the
@@ -215,7 +226,8 @@ class FigureFlags(BaseModel):
 
     #: Figures printed by the card that match no fed number at any plausible scale.
     unverified_figures: list[str] = Field(default_factory=list)
-    #: Parenthesised ticker-shaped codes in the card text that are not registered symbols.
+    #: Parenthesised ticker-shaped codes in the card text that are neither registered
+    #: symbols nor forms of a registered instrument's name.
     unknown_symbols: list[str] = Field(default_factory=list)
     #: Whether the figure comparison could run at all (see the class docstring).
     snapshot: SnapshotState = "checked"
@@ -457,14 +469,43 @@ def _known_forms(known_symbols: set[str]) -> set[str]:
     return forms
 
 
-def _unknown_symbols(card_text: str, known_symbols: set[str]) -> list[str]:
-    """Parenthesised ticker-shaped codes in the text that are not registered symbols."""
+def _name_forms(known_names: Iterable[str]) -> set[str]:
+    """Registered instrument names in the forms a card writes them in parentheses: the
+    whole name and every word of it that starts with a letter, all upper-cased.
+
+    A card names a company the way the registry does, but not in the registry's case
+    (「(TESLA)」 for ``Tesla``) and often by one word of a longer name (「5225 (IHH)」 for
+    ``IHH Healthcare``, 「(MICRO)」 for ``Advanced Micro Devices, Inc.``). Measured on the
+    demo (R8, 26 registered instruments): 4 whole names and 6 words of 4 longer names have
+    the shape :data:`_CODE_RE` reads as a ticker. Two shapes are never a name form, whole or
+    word, because each would hide a real flag: all digits (a name like 「Fund 6883」 must not
+    clear 「LRDIM (6883)」, and TW/MY codes are digits) and one letter (F / T / X are US
+    tickers; no card names a company by one letter). The cost of a form is the cost of an
+    entry in :data:`_NOT_A_TICKER`: a missed flag on an unregistered code of that spelling.
+    """
+    forms: set[str] = set()
+    for name in known_names:
+        upper = name.strip().upper()
+        for form in (upper, *_NAME_WORD_RE.findall(upper)):
+            if len(form) > 1 and not form.isdigit():
+                forms.add(form)
+    return forms
+
+
+def _unknown_symbols(
+    card_text: str, known_symbols: set[str], known_names: Iterable[str] = ()
+) -> list[str]:
+    """Parenthesised ticker-shaped codes in the text that are neither registered symbols
+    nor forms of a registered instrument's name."""
     forms = _known_forms(known_symbols)
+    names = _name_forms(known_names)
     flagged: list[str] = []
     for match in _CODE_RE.finditer(card_text):
         code = match.group(1).upper()
         if code in forms or code.split(".")[0] in forms:
             continue  # registered — never a hallucination, whatever it looks like
+        if code in names:
+            continue  # a registered NAME, not a code: 「3008 (LARGAN)」 (DEF-082)
         if code in _NOT_A_TICKER or _INDICATOR_RE.match(code):
             continue  # an abbreviation / indicator the card wrote in parentheses
         if code not in flagged:
@@ -502,6 +543,7 @@ def check_figures(
     snapshot_json: str,
     known_symbols: set[str],
     *,
+    known_names: Iterable[str] = (),
     own_figures: Iterable[Decimal] = (),
 ) -> FigureFlags:
     """Post-check ONE card's text against the numbers it was fed (pure; see module docstring).
@@ -509,7 +551,8 @@ def check_figures(
     *card_text* is the card as the owner reads it (``title + summary + body_md``),
     *snapshot_json* the stored population — ``insights.prompt_figures`` (a JSON list from
     :func:`prompt_figures_json`) or any JSON whose numeric leaves are the fed values —
-    *known_symbols* the registered instrument symbols, *own_figures* the card's own
+    *known_symbols* the registered instrument symbols, *known_names* their registered
+    names (DEF-082: a name in parentheses is not an unknown code), *own_figures* the card's own
     declared numbers (:func:`card_own_figures`) — they join the population only when
     there IS one, so a legacy card stays ``"none"``. Returns the two capped lists and the
     ``snapshot`` state: ``"none"`` when the card prints a figure and the population holds
@@ -517,14 +560,14 @@ def check_figures(
     ``"2026-07-05|US"`` fingerprint tag is all three at once).
     """
     figures = _card_figures(card_text, _known_forms(known_symbols))
+    unknown = _unknown_symbols(card_text, known_symbols, known_names)
     population = snapshot_numbers(snapshot_json)
     if not population:
         return FigureFlags(
-            unknown_symbols=_unknown_symbols(card_text, known_symbols),
-            snapshot="none" if figures else "checked",
+            unknown_symbols=unknown, snapshot="none" if figures else "checked",
         )
     population = list(dict.fromkeys([*population, *own_figures]))
     return FigureFlags(
         unverified_figures=_unverified_figures(figures, population),
-        unknown_symbols=_unknown_symbols(card_text, known_symbols),
+        unknown_symbols=unknown,
     )

@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, Query, Request
@@ -1147,17 +1147,31 @@ def insight_task_diagnose(
 # --- stored cards list (spec 4.10) --------------------------------------------
 
 
-def _known_symbols(conn: sqlite3.Connection) -> set[str]:
-    """Every registered instrument symbol — the M9 figure check's "is this a real ticker?".
+class _KnownInstruments(NamedTuple):
+    """The registry as the M9 symbol check reads it: every symbol and every name."""
 
+    symbols: set[str]
+    names: set[str]
+
+
+def _known_instruments(conn: sqlite3.Connection) -> _KnownInstruments:
+    """Every registered instrument symbol and name — the M9 figure check's "is this a real
+    instrument?".
+
+    Names since DEF-082 (functional-test R8, 2026-09-27): card #209 wrote 「3008 (LARGAN)」,
+    3008's registered name, and the symbols-only check called it 「未知代碼…可能是模型幻覺」.
     Computed ONCE per request and threaded into :func:`_card_wire` (trap #21): the list
     endpoint serializes up to 500 cards, and re-reading ``instruments`` per card would pay
     for the same table 500 times.
     """
-    return {i.symbol for i in list_instruments(conn)}
+    instruments = list_instruments(conn)
+    return _KnownInstruments(
+        symbols={i.symbol for i in instruments},
+        names={i.name for i in instruments if i.name.strip()},
+    )
 
 
-def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
+def _figure_flags(rec: istore.InsightRecord, known: _KnownInstruments) -> dict[str, Any]:
     """The M9 read-time figure check for one card (never blocks, never hides).
 
     Compares what the card PRINTS against the numbers it was FED. Measured on cached cards
@@ -1182,7 +1196,8 @@ def _figure_flags(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[st
     flags = figure_check.check_figures(
         f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}",
         rec.prompt_figures if rec.prompt_figures else rec.input_snapshot,
-        known_symbols,
+        known.symbols,
+        known_names=known.names,
         own_figures=figure_check.card_own_figures(
             target_pct=pred.target_pct if pred is not None else None,
             horizon_days=pred.horizon_days if pred is not None else None,
@@ -1229,7 +1244,7 @@ def _system_prompt_wire(rec: istore.InsightRecord) -> dict[str, Any] | None:
     return rec.system_prompt_ref.model_dump()
 
 
-def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, Any]:
+def _card_wire(rec: istore.InsightRecord, known: _KnownInstruments) -> dict[str, Any]:
     pred = rec.card.prediction
     return {
         "id": rec.id,
@@ -1261,7 +1276,7 @@ def _card_wire(rec: istore.InsightRecord, known_symbols: set[str]) -> dict[str, 
         # present; the page renders 「數值待核」 / 「未知代碼」 by which list is filled, and a
         # muted 「無快照可核」 when `snapshot == "none"` (a pre-2026-09-17 card that prints
         # figures nothing was recorded to check against).
-        "figure_flags": _figure_flags(rec, known_symbols),
+        "figure_flags": _figure_flags(rec, known),
         "horizon_days": rec.horizon_days,
         "due_at": rec.due_at,
         "model": rec.model,
@@ -1310,7 +1325,7 @@ def list_insights(
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"group 非有效值：{group}", field="group"))
     excluded = cs.archived_type_ids(conn)
-    known = _known_symbols(conn)  # once per request, not once per card
+    known = _known_instruments(conn)  # once per request, not once per card
     if group == "symbol":
         groups, total_symbols = istore.list_symbol_groups(
             conn, history_limit=history_limit, limit=limit, offset=offset,

@@ -1,9 +1,9 @@
 """Unit tests for the read-time card figure check (M9, audit 2026-09-16).
 
 ``check_figures`` is PURE: card text + the stored input snapshot + the registered symbols
-→ two capped lists. It never blocks and never rewrites a card, so the only thing to pin is
-what it flags — and, just as load-bearing, what it must NOT flag. The first two tests are
-the audit's own measured examples, verbatim.
+(and, since DEF-082, their names) → two capped lists. It never blocks and never rewrites a
+card, so the only thing to pin is what it flags — and, just as load-bearing, what it must
+NOT flag. The first two tests are the audit's own measured examples, verbatim.
 """
 
 import json
@@ -364,3 +364,53 @@ def test_the_prompt_side_reads_the_same_scale_grammar() -> None:
         Decimal("3820000000000"), Decimal("3660000"), Decimal("1130000000000"),
         Decimal("4510000000000"),
     }
+
+
+#: The demo registry as the R8 re-run measured it (2026-09-27): 26 instruments, names as
+#: stored — the population DEF-082 was found on.
+_DEMO_SYMBOLS = {
+    "2330", "0056", "AAPL", "NVDA", "1155", "8299", "2603", "2412", "2882", "2884", "2454",
+    "2317", "MSFT", "TSLA", "3008", "5225", "2323", "2331", "1234", "2608", "SPCX", "1235",
+    "2449", "2308", "AMD", "2609",
+}
+_DEMO_NAMES = {
+    "台積電", "元大高股息", "Apple", "NVIDIA", "Maybank", "群聯電子", "Evergreen", "中華電信",
+    "國泰金", "玉山金控", "聯發科", "鴻海", "Microsoft", "Tesla", "LARGAN", "IHH Healthcare",
+    "中環", "精英", "黑松", "嘉里大榮", "Space Exploration Technologies", "興泰", "京元電子",
+    "台達電", "Advanced Micro Devices, Inc.", "Yang Ming",
+}
+
+
+def test_a_registered_name_in_parentheses_is_not_an_unknown_code() -> None:
+    """DEF-082 (functional-test R8): card #209 wrote 「3008 (LARGAN)」 — 3008's registered
+    name — and was told 「未知代碼：LARGAN…可能是模型幻覺」. The symbols-only reading is
+    kept here as the witness: the name is what clears it."""
+    text = "台股部位週報：3008 (LARGAN) 權重偏高。"
+    assert check_figures(text, _SNAPSHOT, {"3008"}).unknown_symbols == ["LARGAN"]
+    fixed = check_figures(text, _SNAPSHOT, {"3008"}, known_names={"LARGAN"})
+    assert fixed.unknown_symbols == []
+
+
+def test_a_name_matches_in_any_case_whole_or_word_by_word() -> None:
+    """Owner ruling 2026-09-27: every code-shaped form of a demo name — 4 whole names (two
+    only once upper-cased) and 6 words of 4 longer names — is a name, not a code."""
+    text = (
+        "(LARGAN)、(NVIDIA)、(APPLE)、(TESLA)、5225 (IHH)、(YANG)、(MING)、(SPACE)、(MICRO)、"
+        "（INC）"
+    )
+    named = check_figures(text, _SNAPSHOT, _DEMO_SYMBOLS, known_names=_DEMO_NAMES)
+    assert named.unknown_symbols == []
+    unnamed = check_figures(text, _SNAPSHOT, _DEMO_SYMBOLS)
+    assert unnamed.unknown_symbols == ["LARGAN", "NVIDIA", "APPLE", "TESLA", "IHH"]  # capped
+
+
+def test_a_name_never_clears_a_real_unknown_code() -> None:
+    """#82's 「LRDIM (6883)」 stays flagged under the whole demo registry. Digits — a whole
+    name 「6883」 or a word of 「Fund 6883」 — and one letter (「Global X Uranium」 → X, a US
+    ticker shape) are not name forms, and a code-shaped word no name contains is still
+    unknown."""
+    names = _DEMO_NAMES | {"6883", "Fund 6883", "Global X Uranium"}
+    flags = check_figures(
+        "留意 LRDIM (6883)、(X) 與 (LRDIM)。", _SNAPSHOT, _DEMO_SYMBOLS, known_names=names
+    )
+    assert flags.unknown_symbols == ["6883", "X", "LRDIM"]
