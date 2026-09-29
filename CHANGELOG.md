@@ -9,6 +9,61 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R10 → R11 — three findings of the full re-run (M, L, L)
+(2026-09-29).** On the owner's instruction the verifier re-ran all 120 cases on `3a35454`:
+PASS 116, FAIL 2 (F-08, G-09), OBSERVE 1 (H-05), N/A 1 (G-10); the R9 sign-off was withdrawn.
+The owner ruled all three into this round, DEF-085 as option A.
+
+- **A structured call sends only the schema every provider compiles (DEF-083).** The fallback of
+  all three roles (haiku-4.5 via OpenRouter) was refused on every structured request:
+  `shared/llm.py` sent `model_json_schema()` verbatim as `response_format`, pydantic writes a
+  lookahead `pattern` on every `Decimal` (Anthropic: 「Invalid regex in pattern field」) and the
+  AI door's union as `oneOf` (Bedrock: 「Schema type 'oneOf' is not supported」). A primary that
+  failed could never be rescued (G-09, run #221), and a model picked by hand on the AI door was
+  skipped in silence (#520). New `shared/llm_schema.py`: `portable_schema` reduces a schema to
+  Anthropic's documented subset — the strictest route — (no pattern / numeric / length
+  constraints, no `oneOf` / `not` / `maxItems` / type arrays, `additionalProperties: false`
+  everywhere, references inlined; `oneOf` → `anyOf` with the discriminator tag required per
+  branch); `schema_violations` is that subset as a checker. The prompt still carries the full
+  schema and the reply is still validated against the full model. The failover itself is now
+  visible: `StructuredCompletion` carries `model_name`, `usage_id` and `failed_before`, and the
+  AI door shows 「指定模型 X 失敗：<reason>。本次改由 Y 產出。」 above the drafts with a warning
+  toast. **Class scan:** 7 structured call sites (AST scan) → 7 schemas, all through the one
+  `response_format` exit; 151 constructs outside the subset before the fix — pattern 11
+  (card 1, drafts 10), `oneOf` + `discriminator` 1 each, numeric constraints 3, objects without
+  `additionalProperties: false` 9 (all 7 schemas), plus 80 `title` / 36 `default` / 10
+  reference keywords — 0 after. One user-picked-model surface (the AI door) → reported.
+- **A confession row names its model and usage row (DEF-084).** The AI door's `unparsed_rows`
+  capture passed neither `model` nor `usage_id` (demo #499–#518: 6 rows with model ""); it now
+  takes both from the completion. **Class scan:** 9 fail-log captures — 3 describe a billed
+  reply (1 missing both → fixed), 4 a provider failure (model set; no usage row exists), 2 a
+  pre-call refusal (no model chosen). The 6 old demo rows are history and are not rewritten.
+- **The dry run's red and amber rows say what to do (DEF-085, owner ruling A).** R6
+  (「額度耗盡」) had no fix by design, R1 by omission, and G7's master-unset warning sent
+  `fix: None` — while `web/pipeline.js` held 「前往額度設定」 (`fund_quota`) and 「前往 AI 大師
+  設定」 (`activate_role`) that no backend path ever sent. R6 → `fund_quota` (設定 › AI 與額度),
+  R1 → `edit_templates`, G7 → `activate_role`; both dialogs (乾跑預檢, 為什麼沒跑？) get the
+  button. The balance is printed one way: `shared/money.usd_display` (the twin of the
+  frontend's `'$' + fmt.num(v, 2)`, half-up) serves the R6 message, the AI door's budget refusal
+  and the pipeline node — 「剩餘 $-0.01000」 beside 「餘 $-0.01」 before. **Class scan:** 11
+  non-passing gate states, 3 without a fix → 0; frontend fix kinds 9, emitted 6 → 8 (the
+  `enable_schedule` alias stays frontend-only, listed with its reason); server sentences with a
+  quota amount 5 → one formatter.
+
+Guards: `tests/shared/test_def083_portable_schema.py`, `tests/data_ingestion/
+test_def084_confessions_name_their_model.py`, `tests/contract/
+test_def085_preflight_fix_guidance.py`, `tests/e2e/test_def083_ai_failover_note_flow.py`,
+`tests/e2e/test_def085_preflight_quota_fix_flow.py`; 14 mutations (the old forms put back) all
+caught. One mutation exposed a blind judge: the checker's keyword list had been derived from the
+transform's own constant, so copying `pattern` through blinded both — the list is now spelled
+out on its own.
+
+Gates: ruff clean · mypy --strict 961 files 0 (fresh cache) · pytest 6,555 (6,553 passed, 2
+skipped) · e2e 91 files 311/311, server-side 5xx 0 · demo on `91ec1b0`, verify_live ALL PASS.
+Live on the demo (real providers, parse only): haiku-4.5 picked on the AI door with #520's text
+answered itself, no fail-log row; the other six schemas each answered by haiku-4.5 with nothing
+failed first; a confession row (#521) carries its model and usage row. Probe spend $0.0154.
+
 **Functional-test manual R8 → R9 — one finding of the full re-run (L) (2026-09-27).** On the
 owner's instruction the verifier re-ran, on the final `a16210a`, the 73 cases not black-box
 executed since R1: 71 PASS, G-10 N/A, G-04 FAIL. The R7 verifier sign-off was withdrawn. The owner

@@ -1951,3 +1951,36 @@ known forms should come from the registry's columns, not from the false positive
 3. **A mutation that stops failing after a refactor may be equivalent, not a hole** — widening
    the word regex to digits survived once the digit filter covered every form; confirm by the
    neighbouring mutation (dropping the digit filter) before adding a test.
+
+## 2026-09-29 — Functional-test manual R10 → R11
+
+**What happened.** The verifier's full re-run found that the fallback model of all three AI
+roles had never answered a structured request on a real provider. `shared/llm.py` sent
+pydantic's `model_json_schema()` as `response_format`; every `Decimal` field carries a
+lookahead `pattern` Anthropic's regex compiler refuses, and the AI door's union is a `oneOf`
+Bedrock refuses. DEF-066 (R5) had fixed the fallback's retry path, and its re-verification ran
+against a fake endpoint — which, like every fake in the suite, accepts any schema. The failover
+then hid the failure: the AI door showed the answering model's name under 「✓ 解析完成」.
+
+**Root causes.** (1) **The only validator of an outbound contract was the real counterparty.**
+Every LLM test replaced `litellm.completion`, so what a provider would REFUSE was untestable by
+construction; the one test about `response_format` asserted a property name was present.
+(2) **A seam that returns only the value hides everything else it knows** — which model
+answered, which failed first, which usage row it billed. The AI door reconstructed the model
+from "the newest usage row" and could not know a failover had happened; its confession capture
+could not name a model at all (DEF-084).
+
+**Rules.**
+1. **Encode the counterparty's documented limits as a checker, and run it over everything you
+   send** — found by scan, not by list. A fake that accepts anything proves nothing about a
+   contract the real peer enforces.
+2. **A judge may not be built from the defendant's constants.** The first `schema_violations`
+   derived its allowed keywords from the transform's own copy-list, so the mutation "copy
+   `pattern` through" blinded the transform and the checker at once and the per-schema test
+   stayed green. Spell the judge's rule out on its own.
+3. **A silent fallback is a reporting obligation.** When a chain answers with a candidate other
+   than the first, the caller gets the failures with the answer; a page that names the model
+   must also say why it is not the one asked for.
+4. **A frontend action no backend path sends is a dead fix** — check both directions. The
+   dry run's red 「AI 額度」 row had no button while 「前往額度設定」 had been defined for it all
+   along; the existing guard checked only backend → frontend.
