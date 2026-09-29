@@ -26,6 +26,7 @@ from portfolio_dash.data_ingestion.validate import CashPool
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 
 def _pool(account_id: str, ccy: Currency, **kw: object) -> CashPool:
@@ -100,7 +101,8 @@ def test_revalidation_calls_no_model_and_matches_a_first_parse(
            model_override: str | None = None) -> AiDraftList:
         return AiDraftList(rows=list(drafts))
 
-    first = ai_agents_input(conn, "x", pool=_pool, completer=_c, today=date(2026, 9, 23))
+    first = ai_agents_input(conn, "x", pool=_pool, completer=completing(_c),
+                            today=date(2026, 9, 23))
     again = revalidate_ai_drafts(conn, AiDraftList(rows=list(drafts)), pool=_pool)
     assert first.csv_texts == again.csv_texts
     a = first.previews["transactions"].rows[0]

@@ -88,6 +88,24 @@ narrator, not a calculator.
   approach already proven in prior work.)
 - Version the prompt; include the prompt version in the cache fingerprint so a prompt
   change invalidates stale cards.
+- **`response_format` carries the PORTABLE schema, never `model_json_schema()` verbatim**
+  (DEF-083, 2026-09-29). `shared/llm_schema.portable_schema` reduces a model's schema to the
+  subset every route compiles — Anthropic's documented structured-output limits, the
+  strictest reached: no `pattern` or other string/number constraint, no `oneOf` / `not` /
+  `maxItems` / type arrays, `additionalProperties: false` on every object, references
+  inlined; `oneOf` becomes `anyOf` and a discriminator tag becomes required in each branch.
+  Pydantic's `Decimal` pattern is a lookahead Anthropic refused with 400, and Bedrock refused
+  the AI door's `oneOf` — so the haiku fallback of all three roles never saw a structured
+  request (G-09, #520). The PROMPT keeps the full schema (the model reads every constraint)
+  and the reply is still validated against the full model. `schema_violations` is the
+  executable subset: `tests/shared/test_def083_portable_schema.py` finds every structured
+  call site by AST and checks each schema, because no fake provider validates a schema — the
+  only thing that ever did was the real one.
+- **A failover is reported, not swallowed.** `StructuredCompletion` carries `model_name`,
+  `usage_id` and `failed_before` (every candidate that failed first, with its zh reason). The
+  AI door turns it into `meta.fallback_note` — an owner who picked a model by hand is told it
+  failed, why, and who answered instead — and a capture about a reply names the reply's
+  model and usage row (DEF-084).
 
 ## Inputs to a generation run
 

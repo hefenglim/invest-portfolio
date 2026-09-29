@@ -268,6 +268,9 @@
             <button class="btn btn-primary" id="ai-parse" type="button">解析</button>
           </div>
           <div class="ai-result-head"><span>解析來源：<b class="num" id="ai-source"></b></span><span>模型：<b class="num" id="ai-model"></b></span></div>
+          <!-- DEF-083: the chain fails over silently — when the model that answered is not the
+               one tried first (a picked model, or the role primary), say which failed and why. -->
+          <div class="result-banner warn" id="ai-failover" hidden="hidden"></div>
           <!-- W4 (AI-D17): rows the model saw but could NOT classify (換匯／公司行動／
                選擇權) are confessed here — surfaced, never silently dropped. -->
           <div class="result-banner" id="ai-unparsed" hidden="hidden"></div>

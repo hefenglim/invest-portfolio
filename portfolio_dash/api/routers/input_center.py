@@ -1964,6 +1964,9 @@ def _ai_wire(result: AiInputResult) -> dict[str, Any]:
         "unparsed": [u.model_dump() for u in result.unparsed],
         "meta": {"model": result.meta.model, "via": result.meta.via,
                  "cost_usd": None if result.meta.cost_usd is None
-                 else decimal_str(result.meta.cost_usd)},
+                 else decimal_str(result.meta.cost_usd),
+                 # DEF-083: set when the model that answered was not the first one tried
+                 # (a picked model that failed, or the role primary) — the page says so.
+                 "fallback_note": result.meta.fallback_note},
     }
     return wire

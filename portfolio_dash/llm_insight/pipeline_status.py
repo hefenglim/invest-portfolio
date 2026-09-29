@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from portfolio_dash.shared.money import usd_display
+
 # Node/aggregate severity. ``idle`` is "not applicable / off" and sits below ``ok`` for
 # the aggregate (a disabled task is wholly idle; a never-run output is idle).
 NodeLevel = Literal["ok", "info", "warn", "fail", "idle"]
@@ -164,9 +166,10 @@ def _assemble(f: PipelineFacts) -> NodeState:
 
 def _usd_display(x: Decimal) -> str:
     """USD for NodeState display text: 2 dp（FM5 fix — the task card printed the raw
-    full-precision Decimal「$3.8014615」）. Display-only quantize; the comparisons
-    above it stay full precision."""
-    return f"${x.quantize(Decimal('0.01'))}"
+    full-precision Decimal「$3.8014615」）. Display-only; the comparisons above it stay full
+    precision. Delegates to the one server-side formatter since DEF-085, so the node and the
+    R6 gate message print one balance one way."""
+    return usd_display(x)
 
 
 def _exec(f: PipelineFacts) -> NodeState:

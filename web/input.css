@@ -113,6 +113,12 @@
   padding: 9px 12px;
   font-size: 12px;
 }
+/* DEF-083: the AI door's failover note — a state colour is a class (DEF-077), never inline. */
+.result-banner.warn {
+  border-color: rgba(217, 161, 63, 0.45);
+  background: var(--amber-soft);
+  color: var(--amber);
+}
 .result-banner details { color: var(--text-2); font-size: 11px; margin-top: 4px; }
 .result-banner summary { cursor: pointer; color: var(--ok); }
 

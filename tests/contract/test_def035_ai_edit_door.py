@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from portfolio_dash.data_ingestion import agents as agents_mod
 from portfolio_dash.data_ingestion.agents import AiDraftList, CashDraft, TxnDraft
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 
 def _parse(*_a: object, **_k: object) -> AiDraftList:
@@ -35,7 +36,7 @@ def _no_llm(*_a: object, **_k: object) -> AiDraftList:
 def test_a_first_parse_returns_row_aligned_drafts_and_the_cash_vocabulary(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(agents_mod, "complete_structured", _parse)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_parse))
     r = api_client.post("/api/input/ai/preview", json={"text": "買 2330 100 股 @600；入金"})
     assert r.status_code == 200, r.text
     b = r.json()
@@ -59,7 +60,7 @@ def test_a_first_parse_returns_row_aligned_drafts_and_the_cash_vocabulary(
 def test_edited_drafts_are_revalidated_without_the_model(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(agents_mod, "complete_structured", _no_llm)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_no_llm))
     edited = {"rows": [{
         "kind": "txn", "account_id": "tw_broker", "symbol": "2330", "side": "BUY",
         "date": "2026-06-02", "shares": "10", "price": "600", "stated_amount": "6000",
@@ -77,7 +78,7 @@ def test_edited_drafts_are_revalidated_without_the_model(
 def test_a_malformed_edit_is_a_400_in_chinese_never_a_500(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(agents_mod, "complete_structured", _no_llm)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_no_llm))
     bad = {"rows": [{"kind": "txn", "account_id": "tw_broker", "symbol": "2330",
                      "side": "BUY", "date": "2026-06-02", "shares": "1,200",
                      "price": "600"}]}

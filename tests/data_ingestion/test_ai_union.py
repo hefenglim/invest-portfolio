@@ -47,6 +47,7 @@ from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 
 def _RICH_POOL(account_id: str, ccy: Currency, **kw: object) -> CashPool:
@@ -82,7 +83,7 @@ def _union_completer(
     ) -> AiDraftList:
         return AiDraftList.model_validate({"rows": rows, "unparsed": unparsed or []})
 
-    return _c
+    return completing(_c)
 
 
 # ------------------------------------------------------------------ round-trip guard

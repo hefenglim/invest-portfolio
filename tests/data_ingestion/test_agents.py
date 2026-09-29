@@ -25,6 +25,7 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.llm import AINotActivated, LLMBudgetExceeded, LLMUnavailable
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 
 def _RICH_POOL(account_id: str, ccy: Currency, **kw: object) -> CashPool:
@@ -77,7 +78,7 @@ def _good_completer(
 def test_ai_input_builds_preview_with_fee_no_write(conn: sqlite3.Connection) -> None:
     _setup(conn)
     result = ai_agents_input(conn, "buy 1000 2330 @600",
-                             pool=_RICH_POOL, completer=_good_completer)
+                             pool=_RICH_POOL, completer=completing(_good_completer))
     p = result.previews["transactions"]
     assert len(p.rows) == 1 and p.rows[0].fee == Decimal("855")
     assert list_transactions(conn, account_id="tw_broker") == []  # not written
@@ -86,7 +87,7 @@ def test_ai_input_builds_preview_with_fee_no_write(conn: sqlite3.Connection) -> 
 def test_ai_input_commit_writes(conn: sqlite3.Connection) -> None:
     _setup(conn)
     result = ai_agents_input(conn, "buy 1000 2330 @600",
-                             pool=_RICH_POOL, completer=_good_completer)
+                             pool=_RICH_POOL, completer=completing(_good_completer))
     commit_preview(conn, result.previews["transactions"], accept={0},
                    writer=write_transaction_row)
     assert len(list_transactions(conn, account_id="tw_broker")) == 1
@@ -111,7 +112,7 @@ def test_ai_input_degrades_with_kind(
     ) -> AiDraftList:
         raise exc
 
-    result = ai_agents_input(conn, "buy ...", pool=_RICH_POOL, completer=boom)
+    result = ai_agents_input(conn, "buy ...", pool=_RICH_POOL, completer=completing(boom))
     # W4: the degrade is one explicit field, not a synthetic row inside a preview bucket.
     assert result.error is not None and result.error.kind == kind
     assert result.previews == {} and result.csv_texts == {}
@@ -133,7 +134,7 @@ def test_ai_input_prompt_carries_live_account_catalog(conn: sqlite3.Connection) 
         return AiDraftList(rows=[])
 
     ai_agents_input(conn, "在嘉信買 10 股 AAPL @211.40",
-                    pool=_RICH_POOL, completer=spy_completer)
+                    pool=_RICH_POOL, completer=completing(spy_completer))
     prompt = seen["prompt"]
     assert "<accounts>" in prompt
     for account_id in ("tw_broker", "schwab", "moomoo_my"):
@@ -154,7 +155,7 @@ def test_ai_input_prompt_carries_today_anchor(conn: sqlite3.Connection) -> None:
         return AiDraftList(rows=[])
 
     ai_agents_input(conn, "7/3 買 2330", pool=_RICH_POOL,
-                    completer=spy_completer, today=date(2026, 7, 5))
+                    completer=completing(spy_completer), today=date(2026, 7, 5))
     assert "<today>2026-07-05</today>" in seen["prompt"]
     assert "recent PAST occurrence" in seen["prompt"]  # rule text wraps across a newline
 
@@ -185,7 +186,7 @@ def test_ai_input_forwards_images_and_model_alias_to_completer(
         return AiDraftList(rows=[])
 
     ai_agents_input(
-        conn, "", pool=_RICH_POOL, completer=spy,
+        conn, "", pool=_RICH_POOL, completer=completing(spy),
         images=[b"\x89PNG\r\n\x1a\nDATA"], model_alias="my-vision",
     )
     assert seen["images"] == [b"\x89PNG\r\n\x1a\nDATA"]
@@ -207,7 +208,7 @@ def _one_draft_completer(account_id: str, symbol: str) -> Completer:
             date=date(2026, 6, 1), shares=Decimal("10"), price=Decimal("76"),
         )])
 
-    return _f
+    return completing(_f)
 
 
 def test_ai_input_flags_us_ticker_on_tw_account_as_format_warning(
@@ -255,7 +256,7 @@ def test_ai_input_registered_clean_row_has_no_format_warning(
     # The happy path (registered 2330 on tw_broker) stays byte-identical: zero issues.
     _setup(conn)
     result = ai_agents_input(conn, "buy 1000 2330 @600",
-                             pool=_RICH_POOL, completer=_good_completer)
+                             pool=_RICH_POOL, completer=completing(_good_completer))
     assert result.previews["transactions"].rows[0].issues == []
 
 
@@ -296,7 +297,7 @@ def _draft_completer_market(account_id: str, symbol: str, market: str) -> Comple
             market=market,
         )])
 
-    return _f
+    return completing(_f)
 
 
 def test_accounts_catalog_renders_merged_account_per_market(
@@ -384,7 +385,7 @@ def test_ai_draft_without_market_omits_payload_key(conn: sqlite3.Connection) -> 
     # accounts and the committed CSV are untouched).
     _setup(conn)
     result = ai_agents_input(conn, "buy 1000 2330 @600",
-                             pool=_RICH_POOL, completer=_good_completer)
+                             pool=_RICH_POOL, completer=completing(_good_completer))
     assert "market" not in result.previews["transactions"].rows[0].payload
 
 
@@ -443,7 +444,7 @@ def _sell_completer(*, daytrade: bool = False, note: str | None = None) -> Compl
             shares=Decimal("1000"), price=Decimal("600"), daytrade=daytrade, note=note,
         )])
 
-    return _c
+    return completing(_c)
 
 
 def _recommit(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:

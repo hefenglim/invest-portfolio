@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.shared.alert_rule_names import rule_name
+from portfolio_dash.shared.money import usd_display
 
 Verdict = Literal["blocked", "degraded", "clean"]
 GateLevel = Literal["info", "warn", "block"]
@@ -165,7 +166,9 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
     if ctx.budget_remaining <= 0:
         blocked = True
         gates.append(GateFinding(
-            id="R6", lv="block", msg=f"額度耗盡（剩餘 ${ctx.budget_remaining}）",
+            # DEF-085: 2 dp via the shared formatter — it printed the raw Decimal
+            # (「$-0.01000」) beside the pipeline node's 「餘 $-0.01」 for the same balance.
+            id="R6", lv="block", msg=f"額度耗盡（剩餘 {usd_display(ctx.budget_remaining)}）",
             reason="R6_quota",
         ))
 

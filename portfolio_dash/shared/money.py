@@ -60,6 +60,22 @@ def cap_dp(value: Decimal, places: int) -> Decimal:
     return value
 
 
+def usd_display(value: Decimal) -> str:
+    """「$-0.01」 — a USD amount the way every page prints one: ``$`` + 2 dp, half-up.
+
+    The exact twin of the frontend's ``'$' + fmt.num(v, 2)`` (``web/format.js``: digit-string
+    half-up, thousands separators, a rounded-away negative reads as zero), for the few
+    sentences the SERVER writes with an amount in them — the R6 gate message, the budget
+    refusal, the pipeline exec node. They printed the raw Decimal until DEF-085
+    (「剩餘 $-0.01000」 beside the node's 「餘 $-0.01」 for the same balance). Display only;
+    every comparison keeps full precision.
+    """
+    q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if q == 0:
+        q = abs(q)  # "-0.00" is noise, not information
+    return f"${q:,.2f}"
+
+
 def quantize_amount(
     value: Decimal, currency: Currency, rounding: str = ROUND_HALF_UP
 ) -> Decimal:

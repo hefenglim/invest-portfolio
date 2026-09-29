@@ -13,6 +13,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.money import usd_display
 
 
 class LLMError(Exception):
@@ -309,7 +310,9 @@ def check_budget(conn: sqlite3.Connection) -> None:
         # degrade panel that already said 「AI 額度用盡」 (G-02, 2026-09-02). One raise site,
         # one sentence, every consumer — and `_prefer_zh` forwards a Chinese text unchanged,
         # so the remaining balance survives instead of collapsing to the generic default.
-        raise LLMBudgetExceeded(f"AI 額度用盡（剩餘 ${remaining}）— 補充額度後即可繼續使用")
+        raise LLMBudgetExceeded(
+            f"AI 額度用盡（剩餘 {usd_display(remaining)}）— 補充額度後即可繼續使用"
+        )
 
 
 _PROVIDER_PREFIX = {

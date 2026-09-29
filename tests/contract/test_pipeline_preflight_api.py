@@ -99,9 +99,12 @@ def test_preflight_quota_zero_r6_fail(api_client: TestClient) -> None:
     r6 = next(g for g in body["gates"] if g["id"] == "R6")
     assert r6["lv"] == "fail"
     assert body["verdict"] == "blocked"
-    # Senior-review fix: the quota gate has NO one-click fix (a top-up is not in the
-    # §7.2 fix.kind enum); R6 must never emit create_schedule (that belongs to G1).
-    assert r6.get("fix") is None
+    # DEF-085 (owner ruling A, 2026-09-29): the quota gate says WHERE to fix it — the page
+    # that tops up the quota. It pinned `fix is None` until then ("a top-up is not a one-click
+    # action"), which left a red row with nothing to press. It must still never emit
+    # create_schedule (that belongs to G1 — the senior-review fix this line used to guard).
+    assert r6["fix"] == {"kind": "fund_quota"}
+    assert r6["msg"] == "額度耗盡（剩餘 $0.00）"
 
 
 def test_preflight_template_disabled_r3_fail_with_enable_fix(

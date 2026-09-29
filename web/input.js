@@ -1820,6 +1820,7 @@
       : code === 'ai_not_activated' ? 'off'
         : 'down';
     $('#ai-normal').hidden = false;  // keep the result region; just clear the table
+    const fo = $('#ai-failover'); if (fo) fo.hidden = true;  // DEF-083: not this parse's note
     $('#ai-degrade-off').hidden = id !== 'off';
     $('#ai-degrade-quota').hidden = id !== 'quota';
     $('#ai-degrade-down').hidden = id !== 'down';
@@ -1956,6 +1957,13 @@
       $('#ai-source').textContent = (meta.via || 'litellm') + cost;
     }
     if ($('#ai-model')) $('#ai-model').textContent = meta.model || '';
+    /* DEF-083: the server's sentence, verbatim — which model failed first, why, and who
+       answered instead. Hidden when the first model answered. */
+    const fo = $('#ai-failover');
+    if (fo) {
+      fo.textContent = meta.fallback_note || '';
+      fo.hidden = !meta.fallback_note;
+    }
     /* AI-D17: the confessed unparsed rows (換匯／公司行動／選擇權…) are surfaced verbatim —
        the whole point is that they are SEEN, not silently dropped. */
     const unparsed = preview.unparsed || [];
@@ -1984,7 +1992,15 @@
       renderAiRows(kind, rows);
     });
     refreshAiWriteBtn();
-    if (window.toast) window.toast('解析完成', 'ok', '共 ' + total + ' 筆草稿');
+    if (window.toast) {
+      /* DEF-083: a failover is not a plain success — the model that answered is not the one
+         asked for (or the primary), so the toast says so and points at the note above. */
+      if (meta.fallback_note) {
+        window.toast('解析完成（已改用其他模型）', 'warn', '共 ' + total + ' 筆草稿・原因見結果上方說明');
+      } else {
+        window.toast('解析完成', 'ok', '共 ' + total + ' 筆草稿');
+      }
+    }
   }
 
   /* ===== DEF-035 (2026-09-23): the AI draft table is EDITABLE, per row =====
@@ -2498,6 +2514,7 @@
     const ub = $('#ai-unparsed'); if (ub) { ub.hidden = true; ub.replaceChildren(); }
     if ($('#ai-source')) $('#ai-source').textContent = '';
     if ($('#ai-model')) $('#ai-model').textContent = '';
+    const fo = $('#ai-failover'); if (fo) { fo.hidden = true; fo.textContent = ''; }
     refreshAiWriteBtn();
   }
 

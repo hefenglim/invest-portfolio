@@ -31,6 +31,7 @@ from portfolio_dash.data_ingestion.validate import CashPool
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 
 def _pool(account_id: str, ccy: Currency, **kw: object) -> CashPool:
@@ -48,7 +49,7 @@ def _completer(*drafts: TxnDraft) -> Completer:
     def _c(prompt: str, schema: type, *, agent: str, conn: object = None,
            images: list[bytes] | None = None, model_override: str | None = None) -> AiDraftList:
         return AiDraftList(rows=list(drafts))
-    return _c
+    return completing(_c)
 
 
 def _draft(shares: str, price: str, stated: str | None, side: Side = Side.BUY) -> TxnDraft:

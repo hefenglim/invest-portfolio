@@ -1722,12 +1722,18 @@ _RULE_NAMES: dict[str, str] = {
     "R1": "範圍相容", "R2": "標的宇宙", "R3": "模板啟用",
     "R4": "價格資料", "R5": "變數可用性", "R6": "AI 額度",
 }
-# The one-key fix per rule slot (§7.2 fix.kind enum). R6 (LLM quota) has NO one-click
-# fix — a budget top-up is not in the §7.2 enum (senior-review fix: it must not emit
-# create_schedule, which belongs to G1 only).
+# The one-key fix per rule slot (§7.2 fix.kind enum). EVERY slot that can fail or warn has
+# one (DEF-085, owner ruling A 2026-09-29: the dry run must say what to do, not only what is
+# wrong). R6 had none by design — "a top-up is not a one-click action" — and R1 had none by
+# omission, so the modal printed a red row with nothing to press while the frontend already
+# held 「前往額度設定」 (`fund_quota`) for exactly this and no backend path ever sent it. A
+# fix need not perform the repair: `fund_quota` takes the owner to the page that does
+# (設定 › AI 與額度), the same entry the AI door's quota panel links. R6 still never emits
+# create_schedule, which belongs to G1 only (senior-review fix). R1 (a 「單一標的」 variable in
+# a non-per_symbol task) is repaired by changing the templates → the assemble tab.
 _RULE_FIX: dict[str, str] = {
-    "R2": "edit_universe", "R3": "enable_template", "R4": "edit_universe",
-    "R5": "edit_templates",
+    "R1": "edit_templates", "R2": "edit_universe", "R3": "enable_template",
+    "R4": "edit_universe", "R5": "edit_templates", "R6": "fund_quota",
 }
 # The display name of the R4-adjacent stale-price info row (M8). Distinct from R4's own
 # 「價格資料」 so the two rows are not read as one duplicated line.
@@ -1869,10 +1875,12 @@ def _g7(
     """G7 (calibration pipeline): master unset (with self_correct) → warn; an unapplied
     calibration version → info, saying where its shadow evaluation stands; else ok (§7.2)."""
     if self_correct and not master_configured:
+        # DEF-085 class: this warning had no fix while the frontend's 「前往 AI 大師設定」
+        # (`activate_role`) was defined for it and never sent.
         return {
             "id": "G7", "name": "校正管線", "lv": "warn",
             "msg": "已開啟自我校正但未設定 AI 大師模型；校正管線暫停",
-            "fix": None,
+            "fix": {"kind": "activate_role"},
         }
     if unapplied_calibration:
         return {

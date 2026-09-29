@@ -29,6 +29,7 @@ from portfolio_dash.shared.llm_config import (
     select_models,
     select_role_models,
 )
+from portfolio_dash.shared.llm_schema import portable_schema
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ def _select_for(
 
 __all__ = [
     "AINotActivated",
+    "CandidateFailure",
     "LLMBudgetExceeded",
     "LLMError",
     "LLMRole",
@@ -176,13 +178,17 @@ def _response_format_for(schema: type[BaseModel]) -> dict[str, object]:
     """Build an OpenAI-style ``json_schema`` response_format from a Pydantic model.
 
     Used to FORCE structured output on providers that support it (spec 04.10). The schema
-    name is the model's class name; the JSON schema is its ``model_json_schema()``.
+    name is the model's class name; the JSON schema is the PORTABLE subset of its
+    ``model_json_schema()`` (:func:`shared.llm_schema.portable_schema`, DEF-083). It was the
+    raw pydantic schema until 2026-09-29, and the raw schema carries a lookahead ``pattern``
+    on every Decimal and ``oneOf`` on the AI door's union — Anthropic and Bedrock answered 400
+    to both, so every call that fell to the haiku fallback was refused unread.
     """
     return {
         "type": "json_schema",
         "json_schema": {
             "name": schema.__name__,
-            "schema": schema.model_json_schema(),
+            "schema": portable_schema(schema),
         },
     }
 
@@ -203,10 +209,18 @@ def _supports_response_format(model: ModelConfig) -> bool:
 def _json_instruction(schema: type[BaseModel]) -> str:
     """The provider-agnostic structured-output contract appended to every structured call.
 
-    ``response_format`` is only sent when LiteLLM's capability map says the model supports
-    it — which is ``False`` for every ``openrouter/*`` id — so the prompt itself must always
-    carry the JSON-only contract (llm-insight.md: "return JSON only, no fences"). Redundant
-    when response_format IS honoured; decisive when it is not.
+    ``response_format`` is only sent when LiteLLM's capability map says the model supports it,
+    so the prompt itself must always carry the JSON-only contract (llm-insight.md: "return
+    JSON only, no fences"). Redundant when response_format IS honoured; decisive when it is
+    not. (This docstring said the map answers ``False`` for every ``openrouter/*`` id; the
+    installed LiteLLM answers ``True`` for ``openrouter/anthropic/*`` and
+    ``openrouter/google/*`` — which is how the raw schema reached Anthropic at all, DEF-083.)
+
+    The text carries the FULL pydantic schema on purpose, not the portable one sent as
+    ``response_format``: it is read by the model, not compiled by the provider, so the
+    constraints the provider cannot enforce (a Decimal's numeric form, ``confidence`` 0–100,
+    ``horizon_days > 0``) still reach the model — and the reply is validated against the full
+    model either way.
     """
     return (
         "\n\n<output_format>\n"
@@ -397,12 +411,26 @@ def _chain_failure_zh(failures: list[tuple[str, str]]) -> str:
     return "；".join(parts)
 
 
+class CandidateFailure(BaseModel):
+    """One candidate model that failed before the chain found one that answered."""
+
+    alias: str
+    reason: str  # the owner-facing zh reason (the same text ``_chain_failure_zh`` joins)
+
+
 class StructuredCompletion[T: BaseModel](BaseModel):
     """A parsed structured reply plus the metadata of the model that produced it.
 
     ``model`` is the model ALIAS (the user-facing registry name, e.g. ``claude-sonnet``),
     the value callers persist as the record's model column (spec 04 fix: the insights row's
     ``model`` is the model used, never a card field). ``cost`` is this single call's USD cost.
+
+    ``model_name`` (the provider id, the value ``llm_usage.model`` and the fail log carry) and
+    ``usage_id`` (the ``llm_usage`` row this reply was billed on) let a caller that records
+    something ABOUT the reply attribute it (DEF-084: the AI door's ``unparsed_rows`` capture
+    had neither). ``failed_before`` names every candidate that failed first, in chain order —
+    a failover is otherwise invisible to the caller, and an owner who picked a model by hand
+    was shown another model's name with no word about why (DEF-083, #520).
     """
 
     model_config = {"protected_namespaces": (), "arbitrary_types_allowed": True}
@@ -412,6 +440,9 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     cost: Decimal
     tokens_in: int = 0
     tokens_out: int = 0
+    model_name: str = ""
+    usage_id: int | None = None
+    failed_before: list[CandidateFailure] = []
 
 
 def _parse_outcome(exc: Exception) -> str:
@@ -537,6 +568,7 @@ def _complete_with_meta[T: BaseModel](
         return StructuredCompletion(
             value=parsed, model=model.model_alias, cost=cost,
             tokens_in=tokens_in, tokens_out=tokens_out,
+            model_name=model.model_name, usage_id=usage_id,
         )
     raise LLMUnavailable(_parse_failures_zh(parse_failures))
 
@@ -593,12 +625,15 @@ def complete_structured_meta[T: BaseModel](
     last: LLMUnavailable | None = None
     for model in candidates:
         try:
-            return _complete_with_meta(
+            done = _complete_with_meta(
                 model, messages, schema, agent=agent, conn=conn, temperature=temperature
             )
         except LLMUnavailable as exc:
             last = exc
             failures.append((model.model_alias, str(exc)))
+            continue
+        done.failed_before = [CandidateFailure(alias=a, reason=r) for a, r in failures]
+        return done
     if last is None:
         raise LLMUnavailable("沒有可用的模型")
     # Every candidate's reason, not only the last one's (DEF-066); ``kind`` is unchanged.

@@ -32,6 +32,7 @@ from portfolio_dash.shared.cash_kinds import CASH_KIND_VALUES
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 CORPUS = Path(__file__).resolve().parents[1] / "golden" / "ai_extraction" / "cases.json"
 
@@ -308,7 +309,7 @@ def test_every_amount_case_reaches_its_verdict_at_the_real_door(
         return AiDraftList(rows=list(drafts))
 
     today = date.fromisoformat(case.get("today", "2026-08-18"))
-    res = ai_agents_input(conn, case["input"], pool=_rich_pool, completer=_completer,
+    res = ai_agents_input(conn, case["input"], pool=_rich_pool, completer=completing(_completer),
                           today=today)
     for row, expect_row in zip(res.previews["transactions"].rows, case["expect"]["rows"],
                                strict=True):

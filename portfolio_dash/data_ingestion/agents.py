@@ -52,7 +52,11 @@ from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
-from portfolio_dash.shared.llm import LLMError, complete_structured
+from portfolio_dash.shared.llm import (
+    LLMError,
+    StructuredCompletion,
+    complete_structured_meta,
+)
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.symbol_format import matches_market_format
 
@@ -191,11 +195,18 @@ class AiDraftList(BaseModel):
 
 
 class AiMeta(BaseModel):
-    """Provenance of the LLM run that produced a preview (latest usage row)."""
+    """Provenance of the LLM run that produced a preview — read off the completion itself.
+
+    ``fallback_note`` is set when the model that answered is NOT the first one tried: the
+    chain fails over silently, so without it an owner who picked haiku-4.5 by hand read
+    「模型：google/gemini-2.5-flash-lite」 under 「✓ 解析完成」 and no word about why (DEF-083,
+    #520). Built here, in Chinese, from the completion layer's own per-candidate reasons.
+    """
 
     model: str | None = None
     via: str = "litellm"
     cost_usd: Decimal | None = None
+    fallback_note: str | None = None
 
 
 class AiInputResult(BaseModel):
@@ -218,15 +229,40 @@ class AiInputResult(BaseModel):
     error: Issue | None = None
 
 
-def _latest_meta(conn: sqlite3.Connection) -> AiMeta:
-    """Read the most recent ``llm_usage`` row for the AI-input agent into meta."""
-    row = conn.execute(
-        "SELECT model, cost FROM llm_usage WHERE agent='ai_agents_input' "
-        "ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return AiMeta()
-    return AiMeta(model=row["model"], cost_usd=Decimal(row["cost"]))
+def _fallback_note(
+    completion: "StructuredCompletion[AiDraftList]", requested: str | None
+) -> str | None:
+    """「指定模型 haiku-4.5 失敗：請求內容被拒（HTTP 400）。本次改由 gemini-2.5-flash-lite 產出。」
+
+    ``None`` when the first candidate answered. The chain is [picked model, role primary,
+    role fallback] when the owner picked one (``shared.llm._select_for``), else [primary,
+    fallback]; each failed candidate is named by that position and its own reason.
+    """
+    if not completion.failed_before:
+        return None
+    # The pick heads the chain only when it resolved to an enabled model (the API rejects
+    # any other pick up front); compare the alias rather than trust the position alone.
+    picked = bool(requested) and completion.failed_before[0].alias == requested
+    primary_at = 1 if picked else 0
+    parts = []
+    for i, failed in enumerate(completion.failed_before):
+        role = ("指定模型" if picked and i == 0
+                else "主模型" if i == primary_at else "備援")
+        parts.append(f"{role} {failed.alias} 失敗：{failed.reason}")
+    return f"{'；'.join(parts)}。本次改由 {completion.model} 產出。"
+
+
+def _meta_of(completion: "StructuredCompletion[AiDraftList]", requested: str | None) -> AiMeta:
+    """The preview's provenance, from the completion that produced it.
+
+    It was read back as 「the newest ``llm_usage`` row of this agent」 — a reconstruction that
+    could name another request's model, and could never know a failover had happened.
+    """
+    return AiMeta(
+        model=completion.model_name or completion.model,
+        cost_usd=completion.cost,
+        fallback_note=_fallback_note(completion, requested),
+    )
 
 
 #: The columns the transaction renderer emits, a deliberate SUBSET of
@@ -390,7 +426,10 @@ def _label_cash_rows(preview: ImportPreview) -> None:
         row.payload["sign"] = str(movement_sign(kind))
 
 
-Completer = Callable[..., AiDraftList]
+#: The injectable completion seam: the ``complete_structured_meta`` shape, so the door reads
+#: WHICH model answered (and which failed first) off the reply instead of guessing it back
+#: from the usage table (DEF-083 / DEF-084).
+Completer = Callable[..., StructuredCompletion[AiDraftList]]
 
 # The AI-parse prompt is code-owned but centralized in ``llm_insight/official_templates``
 # (FU-D20, 2026-07-17): all shipped prompt content has one home. ``{accounts}`` / ``{today}``
@@ -514,7 +553,7 @@ def ai_agents_input(
                      same rule as the cash CSV door (see ``cash_import.py``). The router
                      binds :func:`api.routers.cash.cash_pool_fn`; tests bind a stub.
         completer:   Injectable LLM callable. Defaults to ``None``, resolved at call
-                     time to :func:`~shared.llm.complete_structured` via module lookup
+                     time to :func:`~shared.llm.complete_structured_meta` via module lookup
                      (so ``monkeypatch.setattr`` on the module attribute takes effect).
                      Replaced with a mock in tests.
         today:       Anchors relative/yearless dates (audit §2.7: "7/3" must resolve to
@@ -530,13 +569,13 @@ def ai_agents_input(
         :class:`AiMeta`. On LLM failure the bundle is empty and ``error`` carries the
         degradation issue.
     """
-    completer = completer or complete_structured
+    completer = completer or complete_structured_meta
     anchor = today if today is not None else app_now().date()
     rendered = _PROMPT.format(
         text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
     )
     try:
-        result = completer(
+        completion = completer(
             rendered,
             AiDraftList,
             agent="ai_agents_input",
@@ -546,6 +585,7 @@ def ai_agents_input(
         )
     except LLMError as exc:
         return AiInputResult(error=Issue(kind=exc.kind, message=str(exc)))
+    result = completion.value
 
     if result.unparsed:
         # AI-D65: a SUCCESSFUL call whose model confessed it could not classify some rows.
@@ -567,10 +607,16 @@ def ai_agents_input(
             prompt=rendered,
             raw_output="\n".join(f"{u.text}\t{u.reason}" for u in result.unparsed),
             error_reason=f"{len(result.unparsed)} row(s) could not be classified",
+            # DEF-084: the reply described here has a model and a billed usage row, and
+            # every other capture of a reply (shared.llm's parse failures) names both.
+            # Without them the confession rows — the richest in the log — could not say
+            # whose they were (demo #499–#518: model "", usage_id null).
+            model=completion.model_name,
+            usage_id=completion.usage_id,
         )
 
     built = _build_result(conn, text, result, pool=pool)
-    built.meta = _latest_meta(conn)
+    built.meta = _meta_of(completion, model_alias)
     return built
 
 

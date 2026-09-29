@@ -22,6 +22,7 @@ from portfolio_dash.shared.llm_config import (
     upsert_model,
 )
 from portfolio_dash.shared.models.enums import Side
+from tests.ai_completion import completing
 
 # A minimal valid PNG payload (8-byte magic + a little body) — the server sniffs magic bytes.
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
@@ -44,7 +45,7 @@ def _seed_model(conn: sqlite3.Connection, alias: str, *, vision: bool,
 
 
 def test_ai_preview_ok(api_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agents_mod, "complete_structured", _fake_ok)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_fake_ok))
     r = api_client.post("/api/input/ai/preview", json={"text": "在元大買 10 股 2330 @ 600"})
     assert r.status_code == 200
     b = r.json()
@@ -59,7 +60,7 @@ def test_ai_preview_ok(api_client: TestClient, monkeypatch: pytest.MonkeyPatch) 
 def test_ai_preview_budget_402(api_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*_a: object, **_k: object) -> AiDraftList:
         raise LLMBudgetExceeded("AI 額度用盡")
-    monkeypatch.setattr(agents_mod, "complete_structured", _boom)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_boom))
     r = api_client.post("/api/input/ai/preview", json={"text": "x"})
     assert r.status_code == 402 and r.json()["error"]["code"] == "budget_exceeded"
 
@@ -69,7 +70,7 @@ def test_ai_preview_not_activated_409(
 ) -> None:
     def _boom(*_a: object, **_k: object) -> AiDraftList:
         raise AINotActivated("AI 未啟用")
-    monkeypatch.setattr(agents_mod, "complete_structured", _boom)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_boom))
     r = api_client.post("/api/input/ai/preview", json={"text": "x"})
     assert r.status_code == 409 and r.json()["error"]["code"] == "ai_not_activated"
 
@@ -79,7 +80,7 @@ def test_ai_preview_unavailable_503(
 ) -> None:
     def _boom(*_a: object, **_k: object) -> AiDraftList:
         raise LLMUnavailable("provider down")
-    monkeypatch.setattr(agents_mod, "complete_structured", _boom)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_boom))
     r = api_client.post("/api/input/ai/preview", json={"text": "x"})
     assert r.status_code == 503 and r.json()["error"]["code"] == "llm_unavailable"
 
@@ -106,7 +107,7 @@ def test_ai_preview_mixed_union_three_buckets(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One prompt, three kinds: each lands in its own preview + CSV, keyed by import kind."""
-    monkeypatch.setattr(agents_mod, "complete_structured", _fake_mixed)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_fake_mixed))
     r = api_client.post("/api/input/ai/preview", json={"text": "mixed"})
     assert r.status_code == 200
     b = r.json()
@@ -138,7 +139,7 @@ def test_ai_preview_cash_withdraw_guard_is_wired(
             ccy="TWD", amount=Decimal("999999"),
         )])
 
-    monkeypatch.setattr(agents_mod, "complete_structured", _withdraw)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_withdraw))
     r = api_client.post("/api/input/ai/preview", json={"text": "提領 999999"})
     assert r.status_code == 200
     row = r.json()["previews"]["cash"]["rows"][0]
@@ -163,7 +164,7 @@ def test_ai_preview_accepts_base64_and_data_uri_images(
         captured["model_override"] = model_override
         return _fake_ok()
 
-    monkeypatch.setattr(agents_mod, "complete_structured", spy)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(spy))
     # raw base64 (no prefix) AND a full data-URI in the same request.
     r = api_client.post("/api/input/ai/preview",
                         json={"text": "", "images": [_PNG_B64, _PNG_DATA_URI]})
@@ -238,7 +239,7 @@ def test_ai_preview_model_alias_reaches_completer(
         captured["model_override"] = model_override
         return _fake_ok()
 
-    monkeypatch.setattr(agents_mod, "complete_structured", spy)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(spy))
     r = api_client.post("/api/input/ai/preview",
                         json={"text": "buy 2330", "model_alias": "picked-m"})
     assert r.status_code == 200
@@ -261,7 +262,7 @@ def test_ai_preview_unregistered_symbol_carries_code(
 ) -> None:
     """FU-D33: an unregistered-symbol row carries the STABLE ``code`` + its symbol so the AI pane
     can render an inline 立即註冊 action; the human ``reason`` text is unchanged (additive)."""
-    monkeypatch.setattr(agents_mod, "complete_structured", _fake_unregistered)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_fake_unregistered))
     r = api_client.post("/api/input/ai/preview", json={"text": "buy ZZZZ9"})
     assert r.status_code == 200
     row = r.json()["previews"]["transactions"]["rows"][0]
@@ -275,7 +276,7 @@ def test_ai_preview_registered_symbol_code_is_null(
     api_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A registered-symbol row carries ``code: null`` — the field is purely additive."""
-    monkeypatch.setattr(agents_mod, "complete_structured", _fake_ok)
+    monkeypatch.setattr(agents_mod, "complete_structured_meta", completing(_fake_ok))
     r = api_client.post("/api/input/ai/preview", json={"text": "buy 2330"})
     assert r.status_code == 200
     assert r.json()["previews"]["transactions"]["rows"][0]["code"] is None
