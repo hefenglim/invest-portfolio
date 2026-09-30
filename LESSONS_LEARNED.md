@@ -2016,3 +2016,25 @@ fourth USD formatter sat in a module the list did not name.
 4. **An export is a surface.** The class scan for both findings reached the CSVs only on the
    second pass (the usage export printed an estimate as measured; the job_runs export dropped the
    spend) — list a finding's surfaces by doors and downloads, not by pages.
+
+## 2026-09-30 — the owner's 18 rulings after closure (three parallel agents + the lead)
+
+**What happened.** Ten fixes went through three subagents and the lead at once. Twice the
+parallelism nearly cost work: the lead's mutation runner rewrote `api/routers/insights.py` for
+20 seconds while an agent owned that file (nothing was lost — the agent had not edited it yet),
+and an agent's full-tree test run hit the lead's half-finished `cost_basis.py` edit, where a new
+local `gross` shadowed the function's existing `gross` dict. The full suite then found a pinned
+census (`_EXPECTED_HTML_TABLES`) no agent had run, because each ran only its targeted tests.
+
+**Rules.**
+1. **Never mutate a file another live agent may own.** A mutation runner restores what it READ,
+   so an edit made inside its window is silently reverted. Run mutations on your own files, or
+   after the other agents report.
+2. **Before introducing a local in a long function, grep the name.** `gross` meant "gross
+   invested per currency" 200 lines up; the new `gross` made it a Decimal and every
+   dashboard-building test failed with `'Decimal' object is not subscriptable`.
+3. **Tell every agent to run the repo's census and guard tests, not only the tests near its
+   change.** A new page element changes a pinned count far from the code that added it.
+4. **Settle before you sum.** A value of record that is a product (quantity × price) needs the
+   same quantization at every reader, or the cash pool, the cost basis and the preview disagree
+   by fractions of a cent; one helper plus an AST scan of every product makes that a rule.

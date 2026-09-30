@@ -9,6 +9,67 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual closed; the owner's 18 rulings on its open items (2026-09-30).** The
+manual closed on `d2e5e08` (PASS 119 / N/A 1, 86 defects closed or not-a-defect); the verifier
+fills the owner's sign-off per ruling 3 and black-box checks the news popup's prompt version
+(ruling 18). The improvements below were ruled to follow the normal development flow after
+closure, outside the manual. Rulings 9 and 17 keep the current behaviour.
+
+- **A trade moves its settled 價金 (ruling 15).** Every site that turned a trade into money
+  used the raw quantity × price, so 0.5 AAPL at 191.23 took 95.615 USD from the pool.
+  `shared/money.settled_notional`: TWD 元以下捨去 (TWSE odd-lot 交割價金, 2024-04-01), USD / MYR
+  cent / sen half up; an exact product is returned as is, so whole-lot ledgers are
+  byte-identical (demo: 0 of 56 trades change; prod's ledger is empty). **Class scan:** 29
+  quantity × price products — 22 settlements now read the helper (cash pool, cost basis,
+  realized proceeds, XIRR, net invested, FX pool, fee base, drawer 試算, manual preview /
+  commit / overdraft, ledger list, symbol drawer, ledger report), 7 listed with reasons
+  (valuations, a rebalance projection, tolerance checks). The stress oracle transcribes the
+  rule on its own.
+- **No export prints scientific notation (ruling 4).** The three AI-cost writers stored
+  `str(cost)` (`5E-7` for a 1-token estimate) and the usage CSV passed it through; the tax
+  package printed every amount with `str()`. Writers store `to_db`, exports use `decimal_str` /
+  `stored_decimal_str`; a test builds every export over legacy scientific rows and lists every
+  bare `str()` left in `export/` (6 sites, each non-Decimal).
+- **alert_scan says what the 24h debounce skipped (ruling 5):** 「派發 AI 預警卡 0 張；另有 3 條 24
+  小時內已派發，略過」.
+- **Three snapshot jobs tell a failed fetch from no coverage (ruling 12).** `pricing/ingest.py`
+  returns `SnapshotSweep(written, empty, failed, unproven)`; `consensus_daily`,
+  `fundamentals_daily` and `fundamentals_av_weekly` are judged by `sweep_outcome` and say all
+  three counts. Finnhub and Alpha Vantage requests now raise on failure (an Alpha Vantage quota
+  body is a lost fetch, reversing the pinned "throttle = no data" test); a yfinance empty counts
+  as no coverage only when yfinance wrote something in the same run (the DEF-067 ④ rule).
+- **資料中心 › 帳本操作稽核 (ruling 10).** `ledger_audit` had a writer and no reader. A read-only,
+  paged list (`GET /api/ledger-audit`: time, ledger, row, 編輯／刪除, the before-image as
+  labelled fields, accounts by display name) and a CSV in the export centre.
+- **Account names, not ids, in zh sentences (ruling 13).** The multi-account corporate-action
+  delete / edit refusal named the other account as 「schwab」; a deeper scan found the dashboard
+  FX note and the holdings report's filter line printing ids too — all three now tokens.
+- **An insight task's universe must be a known shape (ruling 11).** A plain list was stored and
+  run as "follow holdings" (R10: 13 cards instead of 1). Five doors now answer 422 naming the
+  accepted shapes; stored rows still load (demo: one archived test task holds a list).
+- **Prompt preview and AI-eval gaps (ruling 14).** The preview's 代入標的 picker reads the real
+  held + watchlist symbols instead of seven hard-coded ones; `scripts/ai_extraction_eval.py`
+  scores `stated_amount`.
+- **A Chinese name never waits for a quote lookup (ruling 16).** CJK input skips the provider
+  lookup in the quick-add page and in both backend seams (25–30 s before 「查無報價」).
+- **R9's four figure-check boundaries are pinned (ruling 7):** archived names, two-letter words,
+  letter + digit words, whole-name match.
+- **Diagnosed, not changed (ruling 6):** the demo's slow first `/api/dashboard` (8–24 s after
+  idle, 0.6–0.9 s warm on-host) is memory pressure on the 1 GB VM — 660 MB of swap in use, the
+  two app processes 172 MB (demo) and 197 MB (prod) swapped out.
+- **Spec for the owner (ruling 8):** `docs/spec/2026-09-30-code-name-consistency-check.md` —
+  on 224 demo cards, 5 「name (code)」 pairs name another registered instrument; a flag-every-
+  mismatch rule would raise ~110 false alarms.
+
+Mutations: 46 (the old forms put back, three of them whole files) all caught.
+
+Gates: ruff clean · mypy --strict 977 files 0 (fresh cache) · pytest 6,762 (6,760 passed, 2
+skipped) · e2e 95 files 320/320, server-side 5xx 0 · stress-audit phase 1 ops 128, 6,025 pass /
+0 fail · demo on `2fe60ce`, verify_live ALL PASS. Live on the demo: 帳本操作稽核 lists 432 rows
+by ledger and account name (no raw id on the page); a Chinese-name lookup answers in 0.19 s; a
+list-shaped universe gets 422; the llm-usage, job-runs and ledger-audit CSVs hold no scientific
+cell.
+
 **Functional-test manual R11 → R12 — three follow-ups ruled after the sign-offs (2026-09-30).**
 The verifier closed R11 on `91ec1b0` (PASS 119 / N/A 1) and noted three things without opening
 tickets; the owner ruled all three into a new round and removed the six pre-DEF-084 fail-log
