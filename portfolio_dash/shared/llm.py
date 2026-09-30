@@ -33,6 +33,7 @@ from portfolio_dash.shared.llm_config import (
     select_role_models,
 )
 from portfolio_dash.shared.llm_schema import portable_schema
+from portfolio_dash.shared.money import to_db
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,9 @@ def log_usage(
     cur = conn.execute(
         "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost, "
         "cache_tokens, usage_estimated) VALUES (?,?,?,?,?,?,?,?)",
-        (app_now().isoformat(), model, agent, input_tokens, output_tokens, str(cost),
+        # to_db, never str(): a cost under $0.000001 (a 1-token estimate) is ``5E-7`` in
+        # str()'s form, and the usage CSV passed the stored text through (owner 2026-09-30).
+        (app_now().isoformat(), model, agent, input_tokens, output_tokens, to_db(cost),
          cache_tokens, 1 if estimated else 0),
     )
     conn.commit()

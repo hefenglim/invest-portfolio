@@ -38,11 +38,12 @@ def _held_refs(conn: sqlite3.Connection, *, today: date) -> list[InstrumentRef]:
     ]
 
 
-def run_fundamentals_av(conn: sqlite3.Connection, *, now: datetime) -> int:
-    """Alpha Vantage fundamentals for HELD symbols only. Returns snapshots written."""
+def run_fundamentals_av(conn: sqlite3.Connection, *, now: datetime) -> ingest.SnapshotSweep:
+    """Alpha Vantage fundamentals for HELD symbols only — written / empty / failed per key
+    (owner 2026-09-30, item 12: a bare count read an all-refused pass as 成功)."""
     refs = _held_refs(conn, today=now.date())
     if not refs:
-        return 0
+        return ingest.SnapshotSweep()  # nothing held, nothing asked
     return ingest.ingest_fundamentals_union(
         conn, now=now, sources=("alphavantage",), universe=refs
     )

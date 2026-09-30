@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.money import to_db
 
 
 def news_db_path() -> Path:
@@ -217,7 +218,7 @@ def upsert_news(
         (
             item.link, item.title, item.news_date, item.body_summary,
             json.dumps(item.related_stocks, ensure_ascii=False), item.source, item.lang,
-            str(item.cost_usd), item.tokens_in, item.tokens_out, item.model,
+            to_db(item.cost_usd), item.tokens_in, item.tokens_out, item.model,
             item.prompt_version, item.fetched_at, item.organized_at,
         ),
     )

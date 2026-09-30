@@ -20,7 +20,7 @@ not the last consumer of ledger quantities outside ``build_book``. The same dire
 still escapes, unrefused, from three siblings — ``forex/pools.py::foreign_cash_balance``
 (reached from ``build_dashboard``'s FX summary, so a FOREIGN-currency account still answers
 500 where a TWD one now answers 422), ``portfolio/cash.py::cash_balances`` (``GET /api/cash``,
-both sides), and ``api/routers/ledgers.py::transactions`` (its own ``t.quantity * t.price``).
+both sides), and ``api/routers/ledgers.py::transactions`` (its own trade total).
 They are named here because a guard that stops at a module boundary is exactly the shape of
 defect this one was: fixed once, believed general.
 """
@@ -48,6 +48,7 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle, counts_by
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -179,7 +180,7 @@ def build_reporting_flows(
             raw.append((o.build_date, o.symbol, o.original_cost_total, o))
         for t in bundle.transactions:
             booking = t
-            gross = t.quantity * t.price
+            gross = settled_notional(t.quantity, t.price, quote_ccy(t.symbol))  # 價金
             if t.side is Side.BUY:
                 raw.append((t.trade_date, t.symbol, gross + t.fees + t.tax, t))
             else:

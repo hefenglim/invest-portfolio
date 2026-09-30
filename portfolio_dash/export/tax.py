@@ -119,12 +119,16 @@ def build_tax_package_zip(
         # A short cover has no dividend history, so original == adjusted and the two realized
         # columns coincide — the split only separates them on a long that took dividends.
         realized_original = r.proceeds_net - r.original_cost_removed
-        reporting_realized = "" if rate is None else str(realized_original * rate)
+        # decimal_str, never str() (owner 2026-09-30): a cost removed through an average is
+        # a quotient, and an exact zero from one is ``0E-24`` in str()'s form. Value-
+        # preserving — the two forms differ only where str() would print an exponent.
+        reporting_realized = "" if rate is None else decimal_str(realized_original * rate)
         realized_rows.append([
             r.sell_date.isoformat(), r.account_id, r.symbol, r.quote_ccy.value,
-            str(r.shares_sold), str(r.proceeds_net), str(r.original_cost_removed),
-            str(r.adjusted_cost_removed), str(realized_original), str(r.realized),
-            "" if rate is None else str(rate), reporting_realized,
+            decimal_str(r.shares_sold), decimal_str(r.proceeds_net),
+            decimal_str(r.original_cost_removed), decimal_str(r.adjusted_cost_removed),
+            decimal_str(realized_original), decimal_str(r.realized),
+            "" if rate is None else decimal_str(rate), reporting_realized,
         ])
         realized_subtotal[r.quote_ccy] += realized_original
         adjusted_subtotal[r.quote_ccy] += r.realized
@@ -137,7 +141,7 @@ def build_tax_package_zip(
         ccy = instruments[d.symbol].quote_ccy
         div_rows.append([
             d.date.isoformat(), d.account_id, d.symbol, d.type.value.lower(),
-            str(d.gross), str(d.withholding), str(d.net), ccy.value,
+            decimal_str(d.gross), decimal_str(d.withholding), decimal_str(d.net), ccy.value,
         ])
         div_subtotal[ccy] += d.net
 
@@ -163,8 +167,9 @@ def build_tax_package_zip(
             if fr.date.year != year:
                 continue
             fx_rows.append([fr.date.isoformat(), acct.account_id, fr.home_ccy.value,
-                            fr.foreign_ccy.value, str(fr.foreign_sold),
-                            str(fr.home_received), str(fr.rate_used), str(fr.realized)])
+                            fr.foreign_ccy.value, decimal_str(fr.foreign_sold),
+                            decimal_str(fr.home_received), decimal_str(fr.rate_used),
+                            decimal_str(fr.realized)])
             fx_subtotal[fr.home_ccy] += fr.realized
 
     files: dict[str, bytes] = {

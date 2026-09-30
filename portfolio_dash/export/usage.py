@@ -38,7 +38,10 @@ def build_llm_usage_csv(
         if not _in_range(str(r["ts"])[:10], frm, to):
             continue
         rows.append([str(r["ts"]), str(r["model"]), str(r["agent"]),
-                     str(r["input_tokens"]), str(r["output_tokens"]), str(r["cost"]),
+                     str(r["input_tokens"]), str(r["output_tokens"]),
+                     # canonical form: rows written before 2026-09-30 stored str(cost),
+                     # which is ``5E-7`` for a sub-micro-dollar call
+                     stored_decimal_str(r["cost"]) or "",
                      "1" if r["usage_estimated"] else "0"])
     return csv_artifact(f"llm_usage_{_tag(frm, to)}.csv", header=_USAGE_COLS, rows=rows)
 

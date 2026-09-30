@@ -30,6 +30,7 @@ from portfolio_dash.export.cash_statement import (
 )
 from portfolio_dash.export.holdings import build_holdings_csv
 from portfolio_dash.export.holdings_report import build_holdings_report_html
+from portfolio_dash.export.ledger_audit import build_ledger_audit_csv
 from portfolio_dash.export.ledgers import LEDGER_KINDS, build_ledger_csv, build_ledgers_zip
 from portfolio_dash.export.ledgers_report import build_ledgers_report_html
 from portfolio_dash.export.realized import build_realized_csv
@@ -250,6 +251,19 @@ def export_job_runs(
     if bad is not None:
         return bad
     return _respond(build_job_runs_csv(conn, frm=body.frm, to=body.to))
+
+
+@router.post("/export/ledger-audit")
+def export_ledger_audit(
+    body: RangeBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Response:
+    """The ledger audit trail (post-closure item 10, owner 2026-09-30) — the 資料中心 list's
+    CSV, built by the same presenter so the two cannot label a column differently."""
+    bad = _bad_range(body)
+    if bad is not None:
+        return bad
+    return _respond(build_ledger_audit_csv(conn, frm=body.frm, to=body.to))
 
 
 @router.post("/export/tax-package")

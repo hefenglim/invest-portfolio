@@ -13,6 +13,7 @@ import pytest
 from portfolio_dash.pricing import (
     consensus_source,
     datasources_store,
+    ingest,
     sentiment_source,
     snapshots_store,
 )
@@ -273,9 +274,11 @@ def test_fundamentals_daily_runs_yfinance_and_finnhub_only(
     """The daily leg is yfinance + finnhub across the whole universe (AV is the weekly)."""
     seen: dict[str, object] = {}
 
-    def fake_union(conn: sqlite3.Connection, *, now: datetime, **kwargs: object) -> int:
+    def fake_union(
+        conn: sqlite3.Connection, *, now: datetime, **kwargs: object
+    ) -> ingest.SnapshotSweep:
         seen.update(kwargs)
-        return 2
+        return ingest.SnapshotSweep(written=2)
 
     monkeypatch.setattr(jobs_mod.ingest, "ingest_fundamentals_union", fake_union)
     rid = run_job(conn, "fundamentals_daily", now=_NOW)
@@ -298,9 +301,9 @@ def test_fundamentals_av_weekly_dispatches_the_registered_runner(
 ) -> None:
     called = {"n": 0}
 
-    def stub_runner(conn: sqlite3.Connection, *, now: datetime) -> int:
+    def stub_runner(conn: sqlite3.Connection, *, now: datetime) -> ingest.SnapshotSweep:
         called["n"] += 1
-        return 5
+        return ingest.SnapshotSweep(written=5)
 
     jobs_mod.register_fundamentals_runner(stub_runner)
     try:

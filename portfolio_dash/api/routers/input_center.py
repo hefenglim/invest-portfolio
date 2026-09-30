@@ -123,12 +123,14 @@ from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Market
 from portfolio_dash.shared.image_types import is_supported_image
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.llm_config import get_model
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
+from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.target_weights import move_target_weight
 
@@ -424,6 +426,19 @@ def _txn_input(body: ManualBody) -> TxnInput:
     )
 
 
+def _settled_gross(
+    shares: Decimal, price: Decimal, instrument: Instrument | None, rule: FeeRuleSet | None
+) -> Decimal:
+    """The trade's settled 價金 (``shared.money.settled_notional``) in the currency it will
+    settle in: the instrument's, else the fee rule's market currency (what auto-registration
+    assigns). With neither there is no row to book; the raw product is that edge's answer."""
+    if instrument is not None:
+        return settled_notional(shares, price, instrument.quote_ccy)
+    if rule is not None:
+        return settled_notional(shares, price, MARKET_QUOTE_CCY[rule.market])
+    return shares * price
+
+
 def _rule_for(
     conn: sqlite3.Connection, account_id: str, market: Market | None
 ) -> FeeRuleSet | None:
@@ -526,7 +541,8 @@ def _cash_overdraft_issue(
         as_of=as_of,
     )
     current = bal.get((body.account_id, inst.quote_ccy), _ZERO)
-    cost = body.shares * body.price + draft_fee + draft_tax
+    # The settled 價金, as the pool will book it (owner 2026-09-30).
+    cost = settled_notional(body.shares, body.price, inst.quote_ccy) + draft_fee + draft_tax
     if current - cost < _ZERO:
         return Issue(
             kind="cash_overdraft",
@@ -976,18 +992,21 @@ def manual_preview(
                 "not_found", f"交易 #{body.replaces_txn_id} 不存在"))
     draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date(),
                               replacing=replacing)
-    gross = body.shares * body.price
-    total = (
-        -(gross + draft.fee + draft.tax)
-        if draft.inp.side.value == "BUY"
-        else (gross - draft.fee - draft.tax)
-    )
     # Market-aware per-trade rule (Batch B): the resolved instrument's market picks the rule
     # set; an unregistered symbol (draft.instrument None) keeps the account scalar (whatif
     # None-fallback). The preview never fails on the lookup — degrades to None.
     rule = _rule_for(
         conn, body.account_id,
         draft.instrument.market if draft.instrument is not None else None,
+    )
+    # The settled 價金 the replay will book (owner 2026-09-30) — a preview mirrors the replay.
+    # An unregistered symbol settles in its rule's market currency, which is the currency
+    # auto-registration will give it.
+    gross = _settled_gross(body.shares, body.price, draft.instrument, rule)
+    total = (
+        -(gross + draft.fee + draft.tax)
+        if draft.inp.side.value == "BUY"
+        else (gross - draft.fee - draft.tax)
     )
     issues = list(draft.issues)
     # The overdraft warning and the two cash lines describe an ADDED row; for an edit they
@@ -1124,7 +1143,7 @@ def manual_commit(
             "oversell_unacknowledged", "需確認賣超",
             issues=[issue_wire(i) for i in draft.issues]))
     written = enter_transaction(conn, inp, confirm=True, today=today)
-    gross = body.shares * body.price
+    gross = _settled_gross(body.shares, body.price, written.instrument, None)
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))
     return {"txn_id": written.transaction_id, "total": decimal_str(total),

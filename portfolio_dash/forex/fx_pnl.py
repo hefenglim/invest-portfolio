@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from portfolio_dash.forex.pools import MovementRow, acquisition_basis, foreign_cash_balance
 from portfolio_dash.forex.results import AccountFXResult, FxRealizedRow, FXSummary
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account, Instrument
@@ -264,7 +265,10 @@ def _rollup_reason(
                in (("已實現", realized_partial), ("未實現", unrealized_partial)) if partial]
     if not missing or not figures:
         return None
-    accounts = "、".join(f"{aid}（{'、'.join(missing[aid])}）" for aid in sorted(missing))
+    # The account as a token (post-closure item 13, owner 2026-09-30): the dashboard's FX
+    # card printed 「部分帳戶缺匯率已略過：moomoo_my（USD/MYR）」. api.js resolves the token.
+    accounts = "、".join(f"{account_ref(aid)}（{'、'.join(missing[aid])}）"
+                        for aid in sorted(missing))
     return f"部分帳戶缺匯率已略過：{accounts} — {'與'.join(figures)}匯損益為部分合計"
 
 

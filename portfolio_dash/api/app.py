@@ -50,6 +50,7 @@ from portfolio_dash.api.routers import (
     input_center,
     insights,
     instruments,
+    ledger_audit,
     ledgers,
     llm_fail_log,
     llm_settings,
@@ -321,6 +322,7 @@ def create_app() -> FastAPI:
     app.include_router(llm_fail_log.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
     app.include_router(db_stats.router, prefix="/api")
+    app.include_router(ledger_audit.router, prefix="/api")
     app.include_router(ui_prefs.router, prefix="/api")
     app.include_router(snapshots_router.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")

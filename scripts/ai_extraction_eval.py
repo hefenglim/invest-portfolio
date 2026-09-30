@@ -18,10 +18,11 @@ the network. Two modes:
 
 Report: per-case verdicts, per-field hit rates overall and per kind, and — listed
 SEPARATELY, per AI-D20 — the cash-``kind`` / ``daytrade`` / ``short_sale`` mislabel rates
-(the only fields that move money with no error raised), plus missing/spurious rows and the
-unparsed confession recall. Thresholds (``--min-field-hit`` etc.) default to OFF: pin them
-to the first baseline run's numbers, not to a guess — an unmeasured threshold is the same
-blindness with a number attached.
+(the only fields that move money with no error raised), the DEF-036 stated total (did the
+model COPY the statement's 成交金額, and what did the door conclude — scored since
+2026-09-30), plus missing/spurious rows and the unparsed confession recall. Thresholds
+(``--min-field-hit`` etc.) default to OFF: pin them to the first baseline run's numbers, not
+to a guess — an unmeasured threshold is the same blindness with a number attached.
 """
 # mypy: ignore-errors
 
@@ -32,6 +33,7 @@ import json
 import os
 import sqlite3
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -70,6 +72,129 @@ def _field_eq(name: str, expected: str, actual: str) -> bool:
         except InvalidOperation:
             return False
     return expected.strip() == actual.strip()
+
+
+@dataclass
+class Tally:
+    """The run's accumulators — one per report section, filled case by case by
+    :func:`score_case`."""
+
+    stats: dict[str, int] = field(default_factory=lambda: {
+        "hit": 0, "miss": 0, "missing_rows": 0, "spurious_rows": 0,
+        "unparsed_hit": 0, "unparsed_miss": 0})
+    per_kind: dict[str, dict[str, int]] = field(default_factory=lambda: {
+        k: {"hit": 0, "miss": 0} for k in ("txn", "div", "cash")})
+    separate: dict[str, dict[str, int]] = field(default_factory=lambda: {
+        "cash kind": {"hit": 0, "miss": 0},
+        "daytrade": {"hit": 0, "miss": 0},
+        "short_sale": {"hit": 0, "miss": 0}})
+    #: DEF-036, scored since owner 2026-09-30 (item 14b): whether the model COPIED the
+    #: statement's own total, and the verdict the door reached on what it copied. Kept out of
+    #: the CSV field hit rate — ``stated_amount`` is evidence the door checks, not a column.
+    amount: dict[str, dict[str, int]] = field(default_factory=lambda: {
+        "stated_amount": {"hit": 0, "miss": 0},
+        "amount_check": {"hit": 0, "miss": 0}})
+
+
+def _amount_verdict(row: object | None) -> str:
+    """The door's DEF-036 verdict on one transaction preview row (``agents.py::
+    _append_amount_check``): no transcribed total → absent; a flagged one → mismatch."""
+    payload = getattr(row, "payload", None) or {}
+    if "stated_amount" not in payload:
+        return "absent"
+    return "mismatch" if payload.get("amount_mismatch") == "1" else "consistent"
+
+
+def _amount_eq(expected: str | None, actual: Decimal | None) -> bool:
+    if expected is None or actual is None:
+        return expected is None and actual is None
+    try:
+        return Decimal(expected) == actual
+    except InvalidOperation:
+        return False
+
+
+def score_case(case: dict, result: object, tally: Tally) -> list[str]:
+    """Score one case's extraction against its ground truth; return the case's misses.
+
+    Fields are compared at the commit-CSV level (``result.csv_texts``), as they always were.
+    A txn row that asserts ``amount_check`` is also scored on ``stated_amount`` (the model's
+    transcription, read from the row-aligned draft — Decimal-equal, absent ≡ None) and on the
+    door's verdict for it. Owner 2026-09-30 (item 14b): without this a model that COMPUTED
+    100 × 46 = 4,600 instead of copying the stated 50,000 scored a clean pass — the very
+    failure DEF-036 exists to catch, and the one half the deterministic replay cannot see.
+    """
+    stats, per_kind, separate = tally.stats, tally.per_kind, tally.separate
+    actual: dict[str, list[dict[str, str]]] = {}
+    for kind, text in result.csv_texts.items():
+        actual[kind] = [dict(r) for r in csv.DictReader(io.StringIO(text))]
+    txn_drafts = result.drafts.get("transactions", [])
+    txn_preview = result.previews.get("transactions")
+    txn_rows = txn_preview.rows if txn_preview is not None else []
+
+    case_misses: list[str] = []
+    expected = case["expect"]["rows"]
+    by_kind: dict[str, list[dict[str, object]]] = {}
+    for row in expected:
+        by_kind.setdefault(row["kind"], []).append(row)
+    for ukind, rows in by_kind.items():
+        got = actual.get(_KIND_TO_IMPORT[ukind], [])
+        if len(got) > len(rows):
+            extra = len(got) - len(rows)
+            stats["spurious_rows"] += extra
+            case_misses.append(f"{ukind}: {extra} SPURIOUS row(s)")
+        for pos, row in enumerate(rows):
+            fields = row["fields"]
+            if pos >= len(got):
+                stats["missing_rows"] += 1
+                stats["miss"] += len(fields)
+                per_kind[ukind]["miss"] += len(fields)
+                case_misses.append(f"{ukind}[{pos}]: row MISSING entirely")
+            else:
+                for name, want in fields.items():
+                    bucket = (separate["cash kind"] if ukind == "cash" and name == "kind"
+                              else separate.get(name))
+                    ok = _field_eq(name, want, got[pos].get(name, ""))
+                    stats["hit" if ok else "miss"] += 1
+                    per_kind[ukind]["hit" if ok else "miss"] += 1
+                    if bucket is not None:
+                        bucket["hit" if ok else "miss"] += 1
+                    if not ok:
+                        case_misses.append(
+                            f"{ukind}[{pos}].{name}: want {want!r} got "
+                            f"{got[pos].get(name, '')!r}")
+            if ukind == "txn" and "amount_check" in row:
+                draft = txn_drafts[pos] if pos < len(txn_drafts) else None
+                stated = getattr(draft, "stated_amount", None)
+                want_amount = row.get("stated_amount")
+                ok = draft is not None and _amount_eq(want_amount, stated)
+                tally.amount["stated_amount"]["hit" if ok else "miss"] += 1
+                if not ok:
+                    shown = None if stated is None else str(stated)
+                    case_misses.append(
+                        f"txn[{pos}].stated_amount: want {want_amount!r} got {shown!r}")
+                verdict = _amount_verdict(txn_rows[pos] if pos < len(txn_rows) else None)
+                ok = draft is not None and verdict == row["amount_check"]
+                tally.amount["amount_check"]["hit" if ok else "miss"] += 1
+                if not ok:
+                    case_misses.append(
+                        f"txn[{pos}].amount_check: want {row['amount_check']!r} "
+                        f"got {verdict!r}")
+    for kind, rows in actual.items():
+        # rows of a kind the case did not expect at all are spurious too
+        ukind = {v: k for k, v in _KIND_TO_IMPORT.items()}[kind]
+        if ukind not in by_kind and rows:
+            stats["spurious_rows"] += len(rows)
+            case_misses.append(f"{ukind}: {len(rows)} SPURIOUS row(s)")
+
+    confessed = " ".join(u.text + " " + u.reason for u in result.unparsed)
+    for sub in case["expect"]["unparsed_contains"]:
+        if sub in confessed:
+            stats["unparsed_hit"] += 1
+        else:
+            stats["unparsed_miss"] += 1
+            case_misses.append(f"unparsed: never confessed {sub!r}")
+    return case_misses
 
 
 def _drain_capture(
@@ -174,12 +299,8 @@ def main() -> int:
     # and that is precisely the case whose raw reply has to be read.
     fail_log.set_capture_mode(True)
     captured: list[dict[str, object]] = []
-    stats = {"hit": 0, "miss": 0, "missing_rows": 0, "spurious_rows": 0,
-             "unparsed_hit": 0, "unparsed_miss": 0}
-    per_kind = {k: {"hit": 0, "miss": 0} for k in ("txn", "div", "cash")}
-    separate = {"cash kind": {"hit": 0, "miss": 0},
-                "daytrade": {"hit": 0, "miss": 0},
-                "short_sale": {"hit": 0, "miss": 0}}
+    tally = Tally()
+    stats, per_kind, separate = tally.stats, tally.per_kind, tally.separate
     passed = 0
     failures: list[str] = []
 
@@ -202,55 +323,7 @@ def main() -> int:
                 conn, before_id, case["id"], "DEGRADE", [degrade])
             continue
 
-        actual: dict[str, list[dict[str, str]]] = {}
-        for kind, text in result.csv_texts.items():
-            actual[kind] = [dict(r) for r in csv.DictReader(io.StringIO(text))]
-
-        case_misses: list[str] = []
-        expected = case["expect"]["rows"]
-        by_kind: dict[str, list[dict[str, object]]] = {}
-        for row in expected:
-            by_kind.setdefault(row["kind"], []).append(row["fields"])
-        for ukind, rows in by_kind.items():
-            got = actual.get(_KIND_TO_IMPORT[ukind], [])
-            if len(got) > len(rows):
-                extra = len(got) - len(rows)
-                stats["spurious_rows"] += extra
-                case_misses.append(f"{ukind}: {extra} SPURIOUS row(s)")
-            for pos, fields in enumerate(rows):
-                if pos >= len(got):
-                    stats["missing_rows"] += 1
-                    stats["miss"] += len(fields)
-                    per_kind[ukind]["miss"] += len(fields)
-                    case_misses.append(f"{ukind}[{pos}]: row MISSING entirely")
-                    continue
-                for name, want in fields.items():
-                    bucket = (separate["cash kind"] if ukind == "cash" and name == "kind"
-                              else separate.get(name))
-                    ok = _field_eq(name, want, got[pos].get(name, ""))
-                    stats["hit" if ok else "miss"] += 1
-                    per_kind[ukind]["hit" if ok else "miss"] += 1
-                    if bucket is not None:
-                        bucket["hit" if ok else "miss"] += 1
-                    if not ok:
-                        case_misses.append(
-                            f"{ukind}[{pos}].{name}: want {want!r} got "
-                            f"{got[pos].get(name, '')!r}")
-        for kind, rows in actual.items():
-            # rows of a kind the case did not expect at all are spurious too
-            ukind = {v: k for k, v in _KIND_TO_IMPORT.items()}[kind]
-            if ukind not in by_kind and rows:
-                stats["spurious_rows"] += len(rows)
-                case_misses.append(f"{ukind}: {len(rows)} SPURIOUS row(s)")
-
-        confessed = " ".join(u.text + " " + u.reason for u in result.unparsed)
-        for sub in case["expect"]["unparsed_contains"]:
-            if sub in confessed:
-                stats["unparsed_hit"] += 1
-            else:
-                stats["unparsed_miss"] += 1
-                case_misses.append(f"unparsed: never confessed {sub!r}")
-
+        case_misses = score_case(case, result, tally)
         if case_misses:
             failures.append(f"{case['id']}: FAIL — " + "; ".join(case_misses))
         else:
@@ -272,6 +345,10 @@ def main() -> int:
     for name, b in separate.items():
         t = b["hit"] + b["miss"]
         print(f"  {name}: {b['hit']}/{t} hits, {b['miss']} misses")
+    print("— the stated total, copied not computed (DEF-036) —")
+    for name, b in tally.amount.items():
+        t = b["hit"] + b["miss"]
+        print(f"  {name}: {b['hit']}/{t} hits, {b['miss']} misses")
     print(f"missing rows: {stats['missing_rows']} · spurious rows: {stats['spurious_rows']}")
     up_total = stats["unparsed_hit"] + stats["unparsed_miss"]
     print(f"unparsed confession recall: {stats['unparsed_hit']}/{up_total}")
@@ -289,7 +366,8 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps({
             "cases": len(cases), "passed": passed, "stats": stats,
-            "per_kind": per_kind, "separate": separate, "failures": failures,
+            "per_kind": per_kind, "separate": separate, "amount": tally.amount,
+            "failures": failures,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     breached = []

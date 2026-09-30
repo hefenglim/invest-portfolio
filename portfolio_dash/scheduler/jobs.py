@@ -938,10 +938,25 @@ def _prior_consecutive_failures(conn: sqlite3.Connection, job_id: str) -> int:
     return streak
 
 
+def _snapshot_sweep_detail(sweep: ingest.SnapshotSweep) -> str:
+    """「寫入 W 筆外部快照，E 筆來源無資料，F 筆擷取失敗」 — all three counts, always.
+
+    Owner 2026-09-30 (item 12): 「寫入 0 筆外部快照」 alone could mean every fetch failed or
+    no symbol had coverage. ``unproven`` (part of F) says why an empty answer was counted
+    lost, in the words ``history_daily`` uses for the same rule (``_UNPROVEN_EMPTY``)."""
+    text = (
+        f"寫入 {sweep.written} 筆外部快照，{sweep.empty} 筆來源無資料，"
+        f"{sweep.failed} 筆擷取失敗"
+    )
+    if sweep.unproven:
+        text += f"（其中 {sweep.unproven} 筆{_UNPROVEN_EMPTY}）"
+    return text
+
+
 def _run_ingest(
     conn: sqlite3.Connection,
     job_id: str,
-    fn: Callable[[], int],
+    fn: Callable[[], int | ingest.SnapshotSweep],
     *,
     now: datetime,
     expected: int | None = None,
@@ -959,12 +974,18 @@ def _run_ingest(
     sentiment is always VIX + Fear & Greed, the index job always one close set. There a
     shortfall can only be a lost fetch (``pricing/ingest.py`` turns each into a ``None`` and
     writes nothing), so 0 of N is ``error`` and fewer than N is ``partial``. A per-symbol
-    ingest has no such number: its count mixes "the source failed" with "the source has no
-    coverage for this symbol", and only ``pricing/ingest.py`` can tell them apart.
+    ingest has no such number — its keys are the universe — so it tells its lost fetches
+    from its "no coverage" answers itself and returns an ``ingest.SnapshotSweep`` (owner
+    2026-09-30, item 12: consensus + both fundamentals legs), judged by :func:`sweep_outcome`.
     """
     set_progress(job_id, "擷取外部快照資料")
     try:
-        written = fn()
+        result = fn()
+        if isinstance(result, ingest.SnapshotSweep):
+            return sweep_outcome(
+                _snapshot_sweep_detail(result), total=result.total, failed=result.failed
+            )
+        written = result
         detail = f"寫入 {written} 筆外部快照"
         if expected is None:
             return JobOutcome("ok", detail)
@@ -1072,7 +1093,7 @@ def fundamentals_daily(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome
 # the held set is a portfolio/ replay result that scheduler/ + pricing/ cannot compute.
 # The app registers the api-side runner at startup — the same injection pattern as
 # signal_scan / alert_compute (architecture.md); no runner registered -> safe no-op.
-FundamentalsRunner = Callable[..., int]
+FundamentalsRunner = Callable[..., ingest.SnapshotSweep]
 _FUNDAMENTALS_RUNNER: FundamentalsRunner | None = None
 
 
@@ -1195,6 +1216,17 @@ def _held_unknown_note(held_unknown: list[alerts_bridge.AlertEvent]) -> str:
     )
 
 
+def _debounced_note(debounced: int) -> str:
+    """「；另有 N 條 24 小時內已派發，略過」 or "" (owner 2026-09-30, item 5).
+
+    Without it a same-day re-scan whose every key was carded within 24h read only
+    「派發 AI 預警卡 0 張」, which says nothing about why. Nothing debounced → nothing added
+    (no 「略過 0 條」)."""
+    if not debounced:
+        return ""
+    return f"；另有 {debounced} 條 24 小時內已派發，略過"
+
+
 def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Compute alerts → record events → dispatch subscribing on_alert combos (R7).
 
@@ -1221,7 +1253,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
         if alert.rule not in rules_seen:
             rules_seen.append(alert.rule)
     runner = _INSIGHT_RUNNER
-    dispatched = 0
+    dispatched = debounced = 0
     skipped: list[alerts_bridge.AlertEvent] = []
     not_held: list[alerts_bridge.AlertEvent] = []
     held_unknown: list[alerts_bridge.AlertEvent] = []
@@ -1238,6 +1270,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
             conn, runner, now=now, held_symbols=_held
         )
         dispatched, skipped = result.dispatched, result.skipped
+        debounced = result.debounced
         not_held, held_unknown = result.not_held, result.held_unknown
     else:
         # No runner wired (scheduler-only process): still consume events so they do not
@@ -1263,7 +1296,7 @@ def alert_scan(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     names = "、".join(rule_name(r) for r in rules_seen)
     return JobOutcome(status, (
         f"預警 {len(alerts)} 條" + (f"（{names}）" if names else "")
-        + f"，派發 AI 預警卡 {dispatched} 張；"
+        + f"，派發 AI 預警卡 {dispatched} 張{_debounced_note(debounced)}；"
         f"{notify_detail}{_skipped_note(skipped)}{_not_held_note(not_held)}"
         f"{_held_unknown_note(held_unknown)}"
     ))

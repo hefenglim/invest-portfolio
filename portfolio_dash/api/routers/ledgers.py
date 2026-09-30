@@ -162,6 +162,7 @@ from portfolio_dash.shared.models.ledger import (
     dividend_effective_date,
     pending_from,
 )
+from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.target_weights import (
@@ -232,7 +233,12 @@ def transactions(
     for t in list_transactions(conn, account_id=account_id, symbol=symbol):
         if not _in_range(t.trade_date, frm, to):
             continue
-        gross = t.quantity * t.price
+        # The settled 價金 the cash pool books (owner 2026-09-30); a row whose symbol has no
+        # registry currency cannot exist (every write door registers first) — the raw
+        # product is the unreachable fallback, not a second definition.
+        ccy = ccys.get(t.symbol, "")
+        gross = (settled_notional(t.quantity, t.price, Currency(ccy)) if ccy
+                 else t.quantity * t.price)
         total = -(gross + t.fees + t.tax) if t.side.value == "BUY" else (gross - t.fees - t.tax)
         out.append({
             "id": t.id, "date": t.trade_date.isoformat(), "account_id": t.account_id,

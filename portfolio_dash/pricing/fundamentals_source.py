@@ -25,8 +25,13 @@ and fragile). It uses ``fast_info`` + the quarterly income statement + the balan
 the dividends series, and derives what the keyed providers report directly.
 
 All network I/O is isolated in the private ``_fetch_*`` seams so tests monkeypatch them
-(the repo bans sockets in tests). Any failure/empty/garbage result degrades to ``None``
-(no snapshot row), never an exception into the ingest loop and never a fabricated value.
+(the repo bans sockets in tests). An empty/garbage answer degrades to ``None`` (no snapshot
+row), never a fabricated value. A FAILED fetch is not an empty answer (owner 2026-09-30,
+item 12): the keyed legs let a failed request — and Alpha Vantage's HTTP-200 refusal body —
+raise into the ingest loop, which isolates it per key and counts it as lost. The yfinance
+leg still degrades every endpoint error to ``None``: yfinance raises for plain "no data"
+too, and hides HTTP failures as empty results, so an exception there says nothing; the
+ingest judges its empty answers by whether the run stored any yfinance snapshot at all.
 """
 
 import os
@@ -358,14 +363,15 @@ def build_finnhub_block(metric: dict[str, Any] | None, *, as_of: date) -> dict[s
 
 
 def fetch_finnhub(ref: InstrumentRef, *, as_of: date, token: str | None) -> dict[str, Any] | None:
-    """Fetch + assemble one US symbol's finnhub block; None without a key or on failure."""
+    """Fetch + assemble one US symbol's finnhub block; None without a key or with no metrics.
+
+    A failed request (connection, timeout, 401/429/5xx) RAISES: it used to return ``None``,
+    the value "finnhub has no metrics for this symbol" returns, so a run that lost every
+    fetch read 成功 (owner 2026-09-30, item 12). The ingest loop isolates it per key."""
     resolved = token or os.environ.get("FINNHUB_KEY")
     if not resolved:
         return None
-    try:
-        metric = _fetch_finnhub_metric(ref.symbol, resolved)
-    except Exception:  # noqa: BLE001 — any source failure degrades to None
-        return None
+    metric = _fetch_finnhub_metric(ref.symbol, resolved)
     return build_finnhub_block(metric, as_of=as_of)
 
 
@@ -376,6 +382,10 @@ def fetch_finnhub(ref: InstrumentRef, *, as_of: date, token: str | None) -> dict
 # (0.31 = 31%) — converted to percents here so ``*_pct`` means the same across blocks.
 
 
+class AlphaVantageRefused(RuntimeError):
+    """Alpha Vantage answered HTTP 200 with a refusal body instead of an OVERVIEW."""
+
+
 def _fetch_av_overview(symbol: str, token: str) -> dict[str, Any] | None:
     resp = requests.get(
         _AV_URL,
@@ -384,10 +394,16 @@ def _fetch_av_overview(symbol: str, token: str) -> dict[str, Any] | None:
     )
     resp.raise_for_status()
     data = resp.json()
-    # AV throttles with a 200 + {"Note"/"Information": ...} body instead of an error.
-    if not isinstance(data, dict) or "Symbol" not in data:
-        return None
-    return data
+    if isinstance(data, dict) and "Symbol" in data:
+        return data
+    if data == {}:
+        return None  # an ETF or an unknown symbol: AV answered, with nothing
+    # AV throttles / refuses with a 200 + {"Note" | "Information" | "Error Message": ...}
+    # body instead of an error status. That is a LOST fetch, not "no data for this symbol"
+    # — read as ``None`` it let a Saturday pass over its quota write 成功 (owner
+    # 2026-09-30, item 12).
+    keys = ", ".join(sorted(data)) if isinstance(data, dict) else type(data).__name__
+    raise AlphaVantageRefused(f"Alpha Vantage refused OVERVIEW {symbol}: {keys}")
 
 
 def build_alphavantage_block(raw: dict[str, Any] | None, *, as_of: date) -> dict[str, Any] | None:
@@ -410,14 +426,14 @@ def build_alphavantage_block(raw: dict[str, Any] | None, *, as_of: date) -> dict
 def fetch_alphavantage(
     ref: InstrumentRef, *, as_of: date, token: str | None
 ) -> dict[str, Any] | None:
-    """Fetch + assemble one US symbol's AV block; None without a key or on failure."""
+    """Fetch + assemble one US symbol's AV block; None without a key or with no OVERVIEW.
+
+    A failed request or a refusal body RAISES (see :func:`fetch_finnhub` — owner 2026-09-30,
+    item 12)."""
     resolved = token or os.environ.get("ALPHAVANTAGE_KEY")
     if not resolved:
         return None
-    try:
-        raw = _fetch_av_overview(ref.symbol, resolved)
-    except Exception:  # noqa: BLE001 — any source failure degrades to None
-        return None
+    raw = _fetch_av_overview(ref.symbol, resolved)
     return build_alphavantage_block(raw, as_of=as_of)
 
 

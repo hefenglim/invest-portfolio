@@ -54,6 +54,7 @@ _EXPORTS: list[_Export] = [
     ("/api/export/ledgers-report", {}),
     ("/api/export/llm-usage", {}),
     ("/api/export/job-runs", {}),
+    ("/api/export/ledger-audit", {}),
     ("/api/export/tax-package", {"year": 2026}),
     *_PER_ACCOUNT,
     ("/api/export/rebalance-report", {"targets": {"2330": "0.6", "AAPL": "0.4"}}),

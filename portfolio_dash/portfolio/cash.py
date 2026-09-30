@@ -39,6 +39,7 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import counts_by
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 
@@ -133,12 +134,13 @@ def cash_balances(
         inst = instruments.get(t.symbol)
         if inst is None:
             continue
+        # The settled 價金 (owner 2026-09-30), never the raw product: a sub-cent amount is
+        # not money any account can hold.
+        gross = settled_notional(t.quantity, t.price, inst.quote_ccy)
         if t.side is Side.BUY:
-            add(t.account_id, inst.quote_ccy, t.trade_date,
-                -(t.quantity * t.price + t.fees + t.tax))
+            add(t.account_id, inst.quote_ccy, t.trade_date, -(gross + t.fees + t.tax))
         else:
-            add(t.account_id, inst.quote_ccy, t.trade_date,
-                t.quantity * t.price - t.fees - t.tax)
+            add(t.account_id, inst.quote_ccy, t.trade_date, gross - t.fees - t.tax)
 
     for d in dividends:
         inst = instruments.get(d.symbol)
@@ -228,8 +230,9 @@ def pool_lines(
         if inst is None or t.account_id != account_id or inst.quote_ccy != ccy:
             continue
         kind = "buy" if t.side is Side.BUY else "sell"
-        delta = (-(t.quantity * t.price + t.fees + t.tax) if t.side is Side.BUY
-                 else t.quantity * t.price - t.fees - t.tax)
+        gross = settled_notional(t.quantity, t.price, ccy)
+        delta = (-(gross + t.fees + t.tax) if t.side is Side.BUY
+                 else gross - t.fees - t.tax)
         lines.append(CashLine(t.trade_date, kind, t.symbol, delta, symbol=t.symbol,
                               name=inst.name, qty=t.quantity, price=t.price,
                               fee=t.fees, tax=t.tax))

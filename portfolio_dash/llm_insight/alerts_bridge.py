@@ -346,6 +346,10 @@ class DispatchResult(BaseModel):
     """What one dispatch pass did: cards run, and events kept OFF the cards (DEF-037/041)."""
 
     dispatched: int = 0
+    # Owner 2026-09-30 (item 5): (task, rule, symbol) keys NOT run because that key was
+    # already dispatched within 24h — the same unit ``dispatched`` counts in. It was a bare
+    # ``continue``, so a same-day re-scan read 「派發 AI 預警卡 0 張」 with no word why.
+    debounced: int = 0
     # events a subscriber WOULD have received but whose scope is not a card scope; an event
     # with no subscriber at all is not listed (nothing was withheld from anyone).
     skipped: list[AlertEvent] = Field(default_factory=list)
@@ -419,6 +423,7 @@ def dispatch_alert_events_ex(
         for it in subscribers:
             key = debounce_key(it.id, event.rule_id, event.symbol)
             if recently_dispatched(conn, key, now=now):
+                result.debounced += 1
                 continue
             try:
                 runner(

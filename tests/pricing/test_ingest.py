@@ -201,7 +201,7 @@ def test_ingest_consensus_maps_yf_symbols_and_keys_by_portfolio_symbol(
         return {"as_of": as_of.isoformat(), "ratings": {"total": 1}, "source": "yfinance"}
 
     n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=fake_fetch)
-    assert n == 3
+    assert n == ingest.SnapshotSweep(written=3)
     # yfinance symbol mapping is reused (.TW / .KL / bare US).
     assert set(seen) == {"2330.TW", "AAPL", "1155.KL"}
     # stored keyed by the PORTFOLIO symbol, not the yf symbol.
@@ -219,7 +219,8 @@ def test_ingest_consensus_skips_uncovered(conn: sqlite3.Connection) -> None:
         return None if yf_sym == "ZZZ" else {"as_of": as_of.isoformat(), "source": "x"}
 
     n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=fake_fetch)
-    assert n == 1
+    # ZZZ answered with nothing: not a lost fetch (2330's row proves yfinance answered)
+    assert n == ingest.SnapshotSweep(written=1, empty=1)
     assert snapshots_store.latest_snapshot(
         conn, source="yfinance", dataset="consensus", symbol="ZZZ"
     ) is None
@@ -236,7 +237,8 @@ def test_ingest_consensus_isolates_symbol_exception(conn: sqlite3.Connection) ->
         return {"as_of": as_of.isoformat(), "source": "yfinance"}
 
     n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=flaky)
-    assert n == 1
+    # owner 2026-09-30 (item 12): the raise is counted as LOST, apart from no coverage
+    assert n == ingest.SnapshotSweep(written=1, failed=1)
     assert snapshots_store.latest_snapshot(
         conn, source="yfinance", dataset="consensus", symbol="2330"
     ) is not None
@@ -297,7 +299,7 @@ def test_fundamentals_union_writes_one_row_per_enabled_source(
         fetchers={s: lambda ref, *, as_of, token, _s=s: _fake_block(_s) for s in
                   ("yfinance", "finnhub", "alphavantage")},
     )
-    assert n == 3  # UNION: all three rows coexist (PK carries source)
+    assert n == ingest.SnapshotSweep(written=3)  # UNION: all three rows coexist
     for source in ("yfinance", "finnhub", "alphavantage"):
         snap = snapshots_store.latest_snapshot(
             conn, source=source, dataset="fundamentals", symbol="AAPL"
@@ -315,7 +317,7 @@ def test_fundamentals_union_keyless_sources_write_nothing(
         conn, now=_NOW,
         fetchers={"yfinance": lambda ref, *, as_of, token: _fake_block("yfinance")},
     )
-    assert n == 1
+    assert n == ingest.SnapshotSweep(written=1)
     assert snapshots_store.latest_snapshot(
         conn, source="finnhub", dataset="fundamentals", symbol="AAPL"
     ) is None
@@ -333,7 +335,7 @@ def test_fundamentals_union_sources_and_universe_are_restricted(
         conn, now=_NOW, sources=("alphavantage",), universe=held,
         fetchers={"alphavantage": lambda ref, *, as_of, token: _fake_block("av")},
     )
-    assert n == 1
+    assert n == ingest.SnapshotSweep(written=1)
     assert snapshots_store.latest_snapshot(
         conn, source="alphavantage", dataset="fundamentals", symbol="AAPL"
     ) is not None
@@ -359,7 +361,8 @@ def test_fundamentals_union_isolates_per_source_failure(
         fetchers={"finnhub": boom,
                   "yfinance": lambda ref, *, as_of, token: _fake_block("yfinance")},
     )
-    assert n == 1  # the yfinance row survives finnhub's failure
+    # the yfinance row survives finnhub's failure, which is counted as lost (item 12)
+    assert n == ingest.SnapshotSweep(written=1, failed=1)
 
 
 def test_fundamentals_union_ledger_only_db_degrades_to_keyless(
@@ -375,7 +378,56 @@ def test_fundamentals_union_ledger_only_db_degrades_to_keyless(
         lambda ref, *, as_of, token=None: _fake_block("yfinance"),
     )
     n = ingest.ingest_fundamentals_union(conn, now=_NOW)
-    assert n == 1
+    assert n == ingest.SnapshotSweep(written=1)
     assert snapshots_store.latest_snapshot(
         conn, source="yfinance", dataset="fundamentals", symbol="AAPL"
     ) is not None
+
+
+# --- written / empty / failed, counted apart (owner 2026-09-30, item 12) ---------------
+# Both ingests returned one count, so "every fetch failed" and "no symbol has coverage" were
+# the same 0 and the three scheduler jobs wrote 成功 over either.
+
+
+def test_fundamentals_union_counts_each_key_apart(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    _add_instrument(conn, "AAPL", "US")
+    _stub_registry(monkeypatch, {"US": ["alphavantage", "finnhub", "yfinance"]})
+
+    def boom(ref: object, *, as_of: object, token: object) -> None:
+        raise RuntimeError("finnhub 500")
+
+    n = ingest.ingest_fundamentals_union(
+        conn, now=_NOW,
+        fetchers={"yfinance": lambda ref, *, as_of, token: _fake_block("yfinance"),
+                  "finnhub": boom,
+                  # AV has no OVERVIEW for this symbol: a keyed leg's empty IS an answer
+                  "alphavantage": lambda ref, *, as_of, token: None},
+    )
+    assert n == ingest.SnapshotSweep(written=1, empty=1, failed=1)
+    assert n.total == 3
+
+
+def test_yfinance_empty_answers_count_only_with_proof_from_the_same_run(
+    monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection
+) -> None:
+    """yfinance hides a failed HTTP call as an empty answer (DEF-067 ④): with no yfinance
+    snapshot stored this run, its empties are lost fetches — and another source's success
+    proves nothing about yfinance."""
+    _add_instrument(conn, "AAPL", "US")
+    _add_instrument(conn, "MSFT", "US")
+    _stub_registry(monkeypatch, {"US": ["finnhub", "yfinance"]})
+    n = ingest.ingest_fundamentals_union(
+        conn, now=_NOW,
+        fetchers={"yfinance": lambda ref, *, as_of, token: None,
+                  "finnhub": lambda ref, *, as_of, token: _fake_block("finnhub")},
+    )
+    assert n == ingest.SnapshotSweep(written=2, empty=0, failed=2, unproven=2)
+
+
+def test_ingest_consensus_all_empty_is_unproven(conn: sqlite3.Connection) -> None:
+    _add_instrument(conn, "2330", "TW")
+    _add_instrument(conn, "AAPL", "US")
+    n = ingest.ingest_consensus(conn, now=_NOW, fetch_consensus=lambda s, *, as_of: None)
+    assert n == ingest.SnapshotSweep(failed=2, unproven=2)

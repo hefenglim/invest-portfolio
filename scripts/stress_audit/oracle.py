@@ -68,6 +68,21 @@ CENT = D("0.01")
 # --- per-currency minor units (data-and-pricing.md) --------------------------------
 MINOR_UNITS = {"TWD": 0, "USD": 2, "MYR": 2}
 
+#: A fee rule's market -> its settlement currency (transcribed; see ``settled``).
+_RULE_CCY = {"TW": "TWD", "US": "USD", "MY": "MYR"}
+
+
+def settled(qty: Decimal, price: Decimal, ccy: str) -> Decimal:
+    """The settled 價金 of a trade — the oracle's OWN transcription of the rule (owner
+    2026-09-30), deliberately not an import of ``shared.money.settled_notional``: TWD drops
+    everything below the dollar (TWSE's odd-lot 交割價金 元以下捨去), USD / MYR round the cent /
+    sen half up; a product already in the minor unit is kept exactly as it is."""
+    raw = qty * price
+    unit = ONE if str(ccy) == "TWD" else CENT
+    rounding = ROUND_DOWN if str(ccy) == "TWD" else ROUND_HALF_UP
+    q = raw.quantize(unit, rounding=rounding)
+    return raw if q == raw else q
+
 # --- account -> (fee_rule, settlement_ccy, funding_ccy) (config_seed DEFAULT_ACCOUNTS) ---
 # Batch B (2026-07-21 merge): the two legacy Moomoo accounts (moomoo_my_us + moomoo_my_my) are
 # MERGED into ONE dual-market account ``moomoo_my`` — a single brokerage account that settles US
@@ -218,7 +233,8 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
     """
     rule_name = fee_rule_for(account_id, market)
     r = FEE_RULES[rule_name]
-    notional = qty * price
+    rule_market = next(m for (_a, m), name in ACCOUNT_MARKET_RULE.items() if name == rule_name)
+    notional = settled(qty, price, _RULE_CCY[rule_market])  # the fee base is the 價金
     fee = ZERO
     tax = ZERO
     notes: list[str] = []
@@ -871,7 +887,8 @@ def replay(facts: Facts) -> OracleResult:
                 cover = min(ev.qty, pos.short_shares)
                 per_share = ZERO
                 if cover > ZERO:
-                    per_share = (ev.qty * ev.price + ev.fee + ev.tax) / ev.qty
+                    per_share = (settled(ev.qty, ev.price, qccy(ev.symbol))
+                                 + ev.fee + ev.tax) / ev.qty
                     short_avg = pos.short_proceeds / pos.short_shares
                     realized_rows.append(RealizedRow(
                         ev.account_id, ev.symbol, qccy(ev.symbol), ev.trade_date, cover,
@@ -884,7 +901,8 @@ def replay(facts: Facts) -> OracleResult:
                     # Exact all-in total when nothing was covered (an ordinary buy must not
                     # round-trip through a per-share division); leftover shares of a covering
                     # buy start their long life at that same per-share cost (the rule).
-                    cost = (ev.qty * ev.price + ev.fee + ev.tax if cover == ZERO
+                    cost = (settled(ev.qty, ev.price, qccy(ev.symbol)) + ev.fee + ev.tax
+                            if cover == ZERO
                             else per_share * to_long)
                     pos.shares += to_long
                     pos.original_total += cost
@@ -893,7 +911,8 @@ def replay(facts: Facts) -> OracleResult:
                 # DECLARED short sale: long lot first (ordinary realized P&L), remainder
                 # opens/extends the short lot holding its net proceeds. Costs pro rata.
                 from_long = min(ev.qty, pos.shares if pos.shares > ZERO else ZERO)
-                per_share_net = (ev.qty * ev.price - ev.fee - ev.tax) / ev.qty
+                per_share_net = (settled(ev.qty, ev.price, qccy(ev.symbol))
+                                 - ev.fee - ev.tax) / ev.qty
                 if from_long > ZERO:
                     frac = from_long / pos.shares
                     orig_removed = pos.original_total * frac
@@ -923,7 +942,7 @@ def replay(facts: Facts) -> OracleResult:
                 frac = ev.qty / pos.shares
                 orig_removed = pos.original_total * frac
                 adj_removed = pos.adjusted_total * frac
-                proceeds_net = ev.qty * ev.price - ev.fee - ev.tax
+                proceeds_net = settled(ev.qty, ev.price, qccy(ev.symbol)) - ev.fee - ev.tax
                 realized_rows.append(RealizedRow(
                     ev.account_id, ev.symbol, qccy(ev.symbol), ev.trade_date, ev.qty,
                     proceeds_net, orig_removed, adj_removed, proceeds_net - adj_removed))
@@ -1105,7 +1124,7 @@ def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Deci
         if t.trade_date > day:
             continue
         ccy = insts[t.symbol].quote_ccy
-        gross = t.qty * t.price
+        gross = settled(t.qty, t.price, ccy)
         if t.side.upper() == "BUY":
             add(t.trade_date, ccy, gross + t.fee + t.tax)
         else:
@@ -1142,10 +1161,11 @@ def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
         inst = facts.instruments.get(t.symbol)
         if inst is None:
             continue
+        gross = settled(t.qty, t.price, inst.quote_ccy)
         if t.side == "BUY":
-            bal[(t.account_id, inst.quote_ccy)] -= (t.qty * t.price + t.fee + t.tax)
+            bal[(t.account_id, inst.quote_ccy)] -= (gross + t.fee + t.tax)
         else:
-            bal[(t.account_id, inst.quote_ccy)] += (t.qty * t.price - t.fee - t.tax)
+            bal[(t.account_id, inst.quote_ccy)] += (gross - t.fee - t.tax)
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)
         if inst is None:
@@ -1260,10 +1280,11 @@ def _fx_pools(facts: Facts):
                 continue
             if facts.instruments[t.symbol].quote_ccy != foreign:
                 continue
+            gross = settled(t.qty, t.price, foreign)
             if t.side == "BUY":
-                cash -= t.qty * t.price + t.fee + t.tax
+                cash -= gross + t.fee + t.tax
             else:
-                cash += t.qty * t.price - t.fee - t.tax
+                cash += gross - t.fee - t.tax
         for dv in facts.divs:
             if dv.account_id != aid:
                 continue
@@ -1341,10 +1362,11 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
         add(o.build_date, insts[o.symbol].quote_ccy, -o.orig_total)
     for t in facts.txs:
         ccy = insts[t.symbol].quote_ccy
+        gross = settled(t.qty, t.price, ccy)
         if t.side == "BUY":
-            add(t.trade_date, ccy, -(t.qty * t.price + t.fee + t.tax))
+            add(t.trade_date, ccy, -(gross + t.fee + t.tax))
         else:
-            add(t.trade_date, ccy, t.qty * t.price - t.fee - t.tax)
+            add(t.trade_date, ccy, gross - t.fee - t.tax)
     for dv in facts.divs:
         if dv.type in CASH_DIVIDEND_TYPES:
             add(dv.d, insts[dv.symbol].quote_ccy, dv.net)

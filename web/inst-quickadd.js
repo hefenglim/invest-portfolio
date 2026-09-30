@@ -8,7 +8,8 @@
         board/is_etf); found:false is the typo guard and blocks the confirm. The lookup
         fires automatically on open (prefilled symbol) AND re-fires (debounced) whenever
         the user edits the symbol or market; auto-fills only overwrite fields the user
-        has not touched (pristine tracking, FU-D42a),
+        has not touched (pristine tracking, FU-D42a). Input with a CJK character is a name,
+        never a code, and skips the lookup straight to step 3 (owner 2026-09-30),
      2. lets the user confirm the name + pick/enter a sector (canonical select + free text),
      3. one UNIFIED 「AI 辨識」 action (Wave A1) — POST /api/instruments/ai-resolve maps the raw
         input + target market to the LOCAL exchange code + name + GICS sector (+ optional
@@ -205,17 +206,25 @@
      change on the settings page is honoured without a reload; a failed read keeps the
      default (ON — the R6-B behaviour), never silently switches the feature off. */
   let autoAiPref = true;
+  /* Returns the read as a promise (never rejects): the miss branch below awaits it before it
+     decides whether to fire. Owner 2026-09-30 — a prefilled NAME no longer waits on a lookup,
+     so without the await the default (ON) decided before the switch had answered. */
   function loadAutoAiPref() {
-    if (!api) return;
-    api.get('/api/ui-prefs').then((p) => {
+    if (!api) return Promise.resolve();
+    return api.get('/api/ui-prefs').then((p) => {
       if (p && typeof p.auto_ai_resolve === 'boolean') autoAiPref = p.auto_ai_resolve;
     }).catch(() => { /* keep the default */ });
   }
+  /* Owner 2026-09-30 (verifier R8 F-01): a string with a CJK character can never be a ticker,
+     so it skips GET /api/instruments/lookup — whose provider quote lookup took 25–30 s to say
+     「查無報價」 for 台積電 — and goes straight to AI 辨識 (or, switch off, the hint). The class
+     mirrors shared/symbol_format.py::CJK_CLASS verbatim (a contract test pins the two). */
+  const CJK_RE = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]/;
 
   window.pdInstQuickAdd = function (opts) {
     opts = opts || {};
     if (!api) return;
-    loadAutoAiPref();
+    const prefReady = loadAutoAiPref();
     /* Wave A1: ONE modal builder for BOTH flows. mode:'edit' turns this into the instrument
        editor (locked 代號/市場, edit-only 目標價 + TW 板別, PUT save, no 記一筆買入); the DEFAULT
        (add) mode is byte-for-byte the prior register flow, so the cross-agent add caller shape
@@ -415,21 +424,29 @@
         clearCandidates();
         lookupState = { found: false, registered: false, archived: false, board: null };
         if (!sym) { status.textContent = '請輸入代號'; return; }
-        status.textContent = '查詢中…';
-        /* FU-D42b: lookup-in-flight indicator on the name field (pristine only — a
-           user-typed name is never masked). */
-        if (namePristine) nameIn.placeholder = '查詢中…';
+        /* Owner 2026-09-30 (R8 F-01): a name (台積電) is never a code — no lookup at all; it
+           takes the miss branch below at once, which goes to AI 辨識 or shows the switch-off
+           hint. A pure code keeps the lookup exactly as before (F-02). */
+        const nameTyped = CJK_RE.test(sym);
         let r;
-        try {
-          r = await api.get('/api/instruments/lookup', { symbol: sym, market: mktSel.value });
-        } catch (err) {
+        if (nameTyped) {
+          r = { found: false };
+        } else {
+          status.textContent = '查詢中…';
+          /* FU-D42b: lookup-in-flight indicator on the name field (pristine only — a
+             user-typed name is never masked). */
+          if (namePristine) nameIn.placeholder = '查詢中…';
+          try {
+            r = await api.get('/api/instruments/lookup', { symbol: sym, market: mktSel.value });
+          } catch (err) {
+            if (seq !== lookupSeq) return;  // superseded by a newer edit
+            nameIn.placeholder = '名稱（自動查詢，可修改）';
+            status.textContent = '查詢失敗，請稍後再試';
+            return;
+          }
           if (seq !== lookupSeq) return;  // superseded by a newer edit
           nameIn.placeholder = '名稱（自動查詢，可修改）';
-          status.textContent = '查詢失敗，請稍後再試';
-          return;
         }
-        if (seq !== lookupSeq) return;  // superseded by a newer edit
-        nameIn.placeholder = '名稱（自動查詢，可修改）';
         lookupState = r || { found: false };
         if (r && r.registered) {
           status.textContent = '已註冊 — 此標的已在觀察清單中';
@@ -473,18 +490,26 @@
              name-like input (CJK, spaces, longer text, or a name in the 名稱 field) still
              fires. (d) the 設定 → AI 與額度 switch `auto_ai_resolve` turns the automatic
              fire off entirely; the manual button is never gated. */
+          /* Owner 2026-09-30: a name reaches this line with no lookup round trip — possibly
+             before /api/ui-prefs has answered — so the switch is read before deciding. */
+          await prefReady;
+          if (seq !== lookupSeq) return;  // superseded while the switch was read
           const q = aiQuery();
           const key = q + '|' + mktSel.value;
           const codeLike = /^[A-Za-z0-9.\-]{1,6}$/.test(symIn.value.trim()) && !nameIn.value.trim();
           if (!autoAiPref) {
-            status.textContent = '查無報價 — 請確認代號與市場；或按「AI 辨識」判讀（自動辨識已在設定關閉）';
+            status.textContent = nameTyped
+              ? '名稱無法直接查報價 — 請改輸入代號；或按「AI 辨識」判讀（自動辨識已在設定關閉）'
+              : '查無報價 — 請確認代號與市場；或按「AI 辨識」判讀（自動辨識已在設定關閉）';
           } else if (codeLike) {
             status.textContent = '查無報價 — 請確認代號與市場；若是用名稱找，可按「AI 辨識」（使用 AI 額度）';
           } else if (q && key !== lastAiKey) {
             lastAiKey = key;
             runAiResolve({ auto: true });  // sets its own 「AI 判讀中…」 status
           } else {
-            status.textContent = '查無報價 — 請確認代號與市場是否正確';
+            status.textContent = nameTyped
+              ? '查無此標的 — 請確認名稱與市場是否正確'
+              : '查無報價 — 請確認代號與市場是否正確';
           }
           return;
         }

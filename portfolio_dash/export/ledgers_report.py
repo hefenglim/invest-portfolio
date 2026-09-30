@@ -49,7 +49,9 @@ from portfolio_dash.export.report_html import (
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.corporate_actions import KIND_ZH
+from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.ledger import dividend_effective_date, pending_from
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 _DIV_TYPE_ZH = {"CASH": "現金", "STOCK": "配股", "DRIP": "DRIP", "NET": "淨額"}
@@ -188,7 +190,10 @@ def _transactions_section(
             continue
         count += 1
         ccy = ccys.get(t.symbol, "")
-        gross = t.quantity * t.price
+        # The settled 價金 the cash pool books (owner 2026-09-30); an unregistered symbol
+        # (no currency) cannot have ledger rows, so the raw product is an unreachable fallback.
+        gross = (settled_notional(t.quantity, t.price, Currency(ccy)) if ccy
+                 else t.quantity * t.price)
         net = -(gross + t.fees + t.tax) if t.side.value == "BUY" else (gross - t.fees - t.tax)
         _add(net_totals, ccy, net)
         side = _side_chip(t.side.value, daytrade=t.daytrade, short_sale=t.short_sale)

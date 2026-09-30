@@ -81,6 +81,7 @@ from portfolio_dash.shared.models.ledger import (
     dividend_effective_date,
     pending_from,
 )
+from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -660,8 +661,13 @@ def symbol_detail(
         aev.append((a.date, int(EventPriority.CORPORATE_ACTION),
                     _action_wire(a, symbol, acct_names.get(a.account_id, a.account_id), ccy)))
     for tx in act_txs:
+        # The settled 價金 the cash pool booked (owner 2026-09-30). A symbol with no registry
+        # row has no ledger rows either (every write door registers first), so the raw
+        # product below is the unreachable fallback, not a second definition.
+        gross = (settled_notional(tx.quantity, tx.price, inst.quote_ccy) if inst is not None
+                 else tx.quantity * tx.price)
         if tx.side is Side.BUY:
-            total = -(tx.quantity * tx.price + tx.fees + tx.tax)
+            total = -(gross + tx.fees + tx.tax)
             aev.append((tx.trade_date, int(EventPriority.BUY), {
                 "date": tx.trade_date.isoformat(),
                 "account_id": tx.account_id,
@@ -670,7 +676,7 @@ def symbol_detail(
                 "price": decimal_str(tx.price), "fee": decimal_str(tx.fees),
                 "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy}))
         else:
-            total = tx.quantity * tx.price - tx.fees - tx.tax
+            total = gross - tx.fees - tx.tax
             aev.append((tx.trade_date, int(EventPriority.SELL), {
                 "date": tx.trade_date.isoformat(),
                 "account_id": tx.account_id,

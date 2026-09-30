@@ -25,9 +25,10 @@ from portfolio_dash.portfolio.cost_basis import (
 )
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
-from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 _ZERO = Decimal("0")
@@ -242,7 +243,10 @@ def compute_whatif(
     fr = compute_fees(rules, side, shares, price, is_etf=is_etf, stamp_fx=stamp_fx)
     fee = fr.fee
     tax = fr.tax
-    amount = shares * price
+    # The settled 價金, as the replay books it (owner 2026-09-30) — a preview mirrors the
+    # replay. An unregistered symbol settles in its fee rule's market currency.
+    ccy = inst.quote_ccy if inst is not None else MARKET_QUOTE_CCY[rules.market]
+    amount = settled_notional(shares, price, ccy)
     fee_rule_desc = _fee_rule_desc(fr.snapshot, side)
 
     out: dict[str, str | bool | None] = {

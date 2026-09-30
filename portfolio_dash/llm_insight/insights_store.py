@@ -27,6 +27,7 @@ from pydantic import BaseModel, ValidationError
 from portfolio_dash.llm_insight.cards import InsightCard, Prediction
 from portfolio_dash.llm_insight.composer_store import StrategyVersionRef
 from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
+from portfolio_dash.shared.money import to_db
 from portfolio_dash.shared.wire import to_wire
 
 logger = logging.getLogger(__name__)
@@ -337,7 +338,7 @@ def add_card(
             due_at,
             input_snapshot,
             model,
-            str(cost_usd),
+            to_db(cost_usd),  # canonical text, never str()'s 9E-8 form
             now.isoformat(),
             None if price_at_create is None else str(price_at_create),
             ceiling_at_create,

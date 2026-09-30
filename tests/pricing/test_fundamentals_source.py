@@ -9,6 +9,8 @@ bans sockets in tests). Pinned behaviours:
 * unit unification at the seam (finnhub millions -> raw; AV ratios -> percents);
 * fast_info camelCase AND legacy snake_case keys both read;
 * keyless keyed legs return None without any HTTP;
+* a keyed leg's failed request or Alpha Vantage refusal RAISES (a lost fetch), while
+  an empty answer is None (no coverage) — owner 2026-09-30, item 12;
 * every-field-absent -> no block (None), so no hollow snapshot is stored.
 """
 
@@ -184,14 +186,52 @@ def test_alphavantage_block_all_placeholders_is_no_block() -> None:
     ) is None
 
 
-def test_alphavantage_throttle_body_is_not_a_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    # AV rate-limits with HTTP 200 + {"Note": ...}: the seam must read it as "no data".
-    class _Resp:
-        def raise_for_status(self) -> None:
-            return None
+class _Resp:
+    def __init__(self, body: object) -> None:
+        self._body = body
 
-        def json(self) -> dict[str, str]:
-            return {"Note": "thank you for using Alpha Vantage ..."}
+    def raise_for_status(self) -> None:
+        return None
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp())
-    assert F._fetch_av_overview("AAPL", "demo-key") is None
+    def json(self) -> object:
+        return self._body
+
+
+@pytest.mark.parametrize("body", [
+    {"Note": "Thank you for using Alpha Vantage! Our standard API call frequency is ..."},
+    {"Information": "Our standard API rate limit is 25 requests per day."},
+    {"Error Message": "Invalid API call."},
+])
+def test_alphavantage_refusal_body_is_a_lost_fetch(
+    monkeypatch: pytest.MonkeyPatch, body: dict[str, str]
+) -> None:
+    """AV refuses with HTTP 200 + a message body instead of an error status. This test
+    pinned that body as "no data" until owner 2026-09-30 (item 12): a Saturday pass over its
+    quota then read 成功 over zero rows. A refusal raises into the ingest loop."""
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp(body))
+    with pytest.raises(RuntimeError, match="Alpha Vantage refused"):
+        F._fetch_av_overview("AAPL", "demo-key")
+    with pytest.raises(F.AlphaVantageRefused):
+        F.fetch_alphavantage(_REF_US, as_of=_AS_OF, token="demo-key")
+
+
+def test_alphavantage_empty_body_is_no_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ETF or an unknown symbol: AV answers ``{}`` — an answer with nothing, not a loss."""
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp({}))
+    assert F._fetch_av_overview("SPY", "demo-key") is None
+    assert F.fetch_alphavantage(_REF_US, as_of=_AS_OF, token="demo-key") is None
+
+
+@pytest.mark.parametrize("fetch", [F.fetch_finnhub, F.fetch_alphavantage])
+def test_a_keyed_leg_lets_a_failed_request_raise(
+    monkeypatch: pytest.MonkeyPatch, fetch: F.FetchFn
+) -> None:
+    """``requests`` raises on a dead connection (and ``raise_for_status`` on 401/429/5xx) —
+    a clean "the fetch failed" signal these legs used to turn into ``None``, the value "no
+    coverage" returns (owner 2026-09-30, item 12). The ingest loop counts it as lost."""
+    def down(*_a: object, **_k: object) -> None:
+        raise requests.ConnectionError("unreachable")
+
+    monkeypatch.setattr(requests, "get", down)
+    with pytest.raises(requests.ConnectionError):
+        fetch(_REF_US, as_of=_AS_OF, token="demo-key")

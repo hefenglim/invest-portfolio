@@ -13,7 +13,9 @@ canonical strings (``str(Decimal)``) so no float ever reaches storage.
 """
 
 import sqlite3
+from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -217,6 +219,55 @@ def ingest_index(
     return 1
 
 
+@dataclass(frozen=True)
+class SnapshotSweep:
+    """What a per-symbol snapshot ingest did with each key it was sent for.
+
+    A key is one (symbol, source) fetch. ``written`` stored a snapshot. ``empty`` is a
+    source that ANSWERED with nothing — no analyst coverage, no Alpha Vantage OVERVIEW for
+    an ETF — which is not a lost key (DEF-067). ``failed`` is a fetch that raised, plus
+    ``unproven``: empty answers that prove nothing (:data:`_EMPTY_NEEDS_PROOF`).
+
+    Owner 2026-09-30 (item 12): both ingests returned ONE count, so a run in which every
+    fetch failed and a run in which no symbol had coverage were the same ``0``, and
+    ``consensus_daily`` / ``fundamentals_daily`` / ``fundamentals_av_weekly`` wrote 成功.
+    """
+
+    written: int = 0
+    empty: int = 0
+    failed: int = 0
+    #: Already counted in ``failed``; kept apart so the run detail can say why.
+    unproven: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.written + self.empty + self.failed
+
+
+# Sources whose EMPTY answer is no evidence they answered (owner 2026-09-30, item 12).
+# yfinance reports a failed HTTP call as an empty result, not an exception
+# (``YfConfig.debug.hide_exceptions``), and its legs here degrade every endpoint error to
+# ``None`` because it also RAISES for plain "no coverage" (a quote summary without an
+# analyst module). DEF-067 ④'s rule for ``history_daily`` therefore applies: its empties
+# count as answers only when the same run stored at least one of its snapshots. The keyed
+# legs (finnhub, alphavantage) raise on a failed request, so their empty IS an answer.
+_EMPTY_NEEDS_PROOF = frozenset({"yfinance"})
+
+_WRITTEN, _EMPTY, _FAILED = "written", "empty", "failed"
+
+
+def _sweep_of(tally: Counter[tuple[str, str]]) -> SnapshotSweep:
+    """Fold per-(source, outcome) counts into one :class:`SnapshotSweep`."""
+    written = empty = failed = unproven = 0
+    for source in {s for s, _ in tally}:
+        w, e, f = tally[source, _WRITTEN], tally[source, _EMPTY], tally[source, _FAILED]
+        if source in _EMPTY_NEEDS_PROOF and w == 0:
+            unproven += e
+            f, e = f + e, 0
+        written, empty, failed = written + w, empty + e, failed + f
+    return SnapshotSweep(written=written, empty=empty, failed=failed, unproven=unproven)
+
+
 FetchConsensus = Callable[..., dict[str, Any] | None]
 
 
@@ -225,39 +276,43 @@ def ingest_consensus(
     *,
     now: datetime,
     fetch_consensus: FetchConsensus | None = None,
-) -> int:
+) -> SnapshotSweep:
     """Ingest analyst-consensus snapshots per registered instrument (all markets).
 
     Maps each instrument to its yfinance symbol (``yf_symbol`` — reuses the TPEx
     ``.TWO`` mapping), fetches the consensus payload, and appends a snapshot keyed by the
     PORTFOLIO symbol (not the yf symbol) so the variable layer looks it up by the same
     symbol it renders per-symbol cards for. A per-symbol failure/absence writes no row
-    and never stops the rest (per-symbol isolation). Returns rows written.
+    and never stops the rest (per-symbol isolation) — but the two are COUNTED apart
+    (:class:`SnapshotSweep`, owner 2026-09-30).
 
     The client resolves to the live ``consensus_source.fetch_consensus`` at call time
     when not overridden, so a monkeypatch of the module is honoured (scheduler-job tests).
     """
     fetch = fetch_consensus or consensus_source.fetch_consensus
     as_of = now.date()
-    written = 0
+    source = consensus_source.SOURCE
+    tally: Counter[tuple[str, str]] = Counter()
     for ref in all_universe(conn):
         try:
             payload = fetch(yf_symbol(ref), as_of=as_of)
         except Exception:  # noqa: BLE001 — one bad symbol must not drop the rest
+            tally[source, _FAILED] += 1  # a lost fetch — never "no coverage"
             continue
         if not payload:
+            tally[source, _EMPTY] += 1
             continue
         S.add_snapshot(
             conn,
-            source=consensus_source.SOURCE,
+            source=source,
             dataset=consensus_source.DATASET,
             symbol=ref.symbol,
             as_of=as_of,
             payload=payload,
             fetched_at=now,
         )
-        written += 1
-    return written
+        tally[source, _WRITTEN] += 1
+    return _sweep_of(tally)
 
 
 FetchFundamentals = Callable[..., dict[str, Any] | None]
@@ -270,7 +325,7 @@ def ingest_fundamentals_union(
     sources: tuple[str, ...] | None = None,
     universe: list[InstrumentRef] | None = None,
     fetchers: dict[str, FetchFundamentals] | None = None,
-) -> int:
+) -> SnapshotSweep:
     """Ingest fundamentals snapshots with UNION semantics (W3, AI-D13/D14).
 
     Unlike every quote/FX/dividend fetch (first-success-wins fallback chain), EVERY
@@ -286,7 +341,8 @@ def ingest_fundamentals_union(
     covers HELD symbols only; the held set is a ``portfolio/`` replay result, computed by
     the api layer and INJECTED — pricing/ must not derive it, per the injection convention
     in architecture.md). Per-(symbol, source) isolation: one failure/absence writes no
-    row and never stops the rest. Returns rows written.
+    row and never stops the rest; each (symbol, source) is one key of the returned
+    :class:`SnapshotSweep`, a raised fetch counted apart from an empty answer.
     """
     wanted = sources if sources is not None else fundamentals_source.SOURCES
     fetch_map = fetchers if fetchers is not None else fundamentals_source.FETCHERS
@@ -309,7 +365,7 @@ def ingest_fundamentals_union(
             market: (["yfinance"] if "yfinance" in wanted else [])
             for market in {ref.market for ref in refs}
         }
-    written = 0
+    tally: Counter[tuple[str, str]] = Counter()
     for ref in refs:
         for source in enabled.get(ref.market, []):
             fetch = fetch_map.get(source)
@@ -325,8 +381,10 @@ def ingest_fundamentals_union(
             try:
                 payload = fetch(ref, as_of=as_of, token=token)
             except Exception:  # noqa: BLE001 — one bad (symbol, source) drops no other
+                tally[source, _FAILED] += 1  # a lost fetch — never "no coverage"
                 continue
             if not payload:
+                tally[source, _EMPTY] += 1
                 continue
             S.add_snapshot(
                 conn,
@@ -337,5 +395,5 @@ def ingest_fundamentals_union(
                 payload=payload,
                 fetched_at=now,
             )
-            written += 1
-    return written
+            tally[source, _WRITTEN] += 1
+    return _sweep_of(tally)

@@ -246,4 +246,116 @@
   }
 
   flLoad();
+
+  // --- 帳本操作稽核 (post-closure item 10, owner 2026-09-30) ------------------------------
+  // The read-only reader of `ledger_audit`: every edit / delete of a ledger row, newest
+  // first, with the row as it was BEFORE the change. The server presents every string — the
+  // zh ledger and action names, labelled fields, accounts as {account:<id>} tokens that
+  // api.js resolves to the display name (DEF-044) — so this code only lays them out and
+  // pages. Nothing here computes a number; the only arithmetic is the pager's offset.
+  var laBody = document.getElementById('la-body');
+  var laCount = document.getElementById('la-count');
+  var laRefresh = document.getElementById('la-refresh');
+  var LA_PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
+  var laOffset = 0;
+  var laPager = null;
+
+  function laCell(cls, text) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    if (text !== undefined) td.textContent = text;
+    return td;
+  }
+
+  /* The before-image, collapsed to its one-line summary; the <details> opens onto every
+     field as label / value — never a raw JSON blob. A NULL reads as the null glyph, not as
+     an empty cell that could be mistaken for an empty string. */
+  function laBefore(r) {
+    var td = laCell('col-text la-before-cell');
+    var det = document.createElement('details');
+    det.className = 'la-before';
+    var sum = document.createElement('summary');
+    sum.textContent = r.summary || '展開查看';
+    det.appendChild(sum);
+    var dl = document.createElement('dl');
+    dl.className = 'la-fields';
+    (r.fields || []).forEach(function (fd) {
+      var dt = document.createElement('dt');
+      dt.textContent = fd.label;
+      var dd = document.createElement('dd');
+      if (fd.value === null || fd.value === undefined) {
+        dd.textContent = f.NULL_GLYPH;
+        dd.classList.add('sign-nil');
+      } else {
+        dd.textContent = fd.value;
+      }
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+    det.appendChild(dl);
+    td.appendChild(det);
+    return td;
+  }
+
+  function laRow(r) {
+    var tr = document.createElement('tr');
+    tr.dataset.auditId = String(r.id);
+    tr.appendChild(laCell('num', f.datetime(r.at)));
+    tr.appendChild(laCell('col-text', r.table_label));
+    tr.appendChild(laCell('col-text la-row', r.row_label));
+    var act = laCell('col-text');
+    var verb = document.createElement('span');
+    verb.className = 'la-act la-act-' + r.action;
+    verb.textContent = r.action_label;
+    act.appendChild(verb);
+    if (r.source) {  // DEF-049: a bulk door (批次復原 #id), not the row's own ledger tab
+      var src = document.createElement('span');
+      src.className = 'la-source';
+      src.textContent = r.source;
+      act.appendChild(src);
+    }
+    tr.appendChild(act);
+    tr.appendChild(laBefore(r));
+    return tr;
+  }
+
+  function laRender(resp) {
+    laBody.replaceChildren();
+    var rows = (resp && resp.rows) || [];
+    var total = (resp && resp.total_count) || 0;
+    if (!rows.length) {
+      var tr = document.createElement('tr');
+      var td = laCell('panel-sub', '目前沒有任何帳本編輯或刪除紀錄。');
+      td.colSpan = 5;
+      tr.appendChild(td);
+      laBody.appendChild(tr);
+    } else {
+      rows.forEach(function (r) { laBody.appendChild(laRow(r)); });
+    }
+    if (laCount) laCount.textContent = '共 ' + f.num(total) + ' 筆';
+    if (laPager) laPager.update({ offset: laOffset, totalCount: total });
+  }
+
+  function laLoad() {
+    if (!laBody) return;
+    if (laRefresh) laRefresh.disabled = true;
+    window.pdApi.get('/api/ledger-audit', { limit: LA_PAGE, offset: laOffset })
+      .then(laRender)
+      .catch(function (err) {
+        if (laPager) laPager.update({});
+        if (window.toast) window.toast('帳本操作稽核載入失敗', 'fail', (err && err.message) || undefined);
+      }).then(function () {
+        if (laRefresh) laRefresh.disabled = false;
+      });
+  }
+
+  if (laBody && window.pdPager) {
+    laPager = window.pdPager.create({
+      host: document.getElementById('la-pager'),
+      limit: LA_PAGE, offset: 0, totalCount: 0,
+      onPage: function (offset) { laOffset = offset; laLoad(); }
+    });
+  }
+  if (laRefresh) laRefresh.addEventListener('click', laLoad);
+  laLoad();
 })();

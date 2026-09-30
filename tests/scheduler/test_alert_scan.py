@@ -8,7 +8,7 @@ strategy alert computation stubbed so they assert the bridge wiring, not market 
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -75,6 +75,34 @@ def test_alert_scan_records_events_and_dispatches(
     assert ab.unconsumed_events(conn) == []
     # DEF-062: the run detail (排程中心) names the fired rule in words, never by its id
     assert "波動突升" in detail and "vol_spike" not in detail
+
+
+def test_alert_scan_detail_counts_what_the_24h_debounce_skipped(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner 2026-09-30 (item 5, measured on demo in the G-09 re-run): a same-day re-scan
+    whose every candidate had been carded within 24h wrote only 「派發 AI 預警卡 0 張」 —
+    nothing said the debounce, not a fault, produced the zero. The detail now counts what
+    the debounce skipped, and says nothing about it when it skipped nothing."""
+    symbols = ("2330", "2317", "2454")
+    monkeypatch.setattr(
+        jobs, "_compute_alerts_for_scan",
+        lambda c, *, now: [
+            Alert(id=f"vol_spike:{s}", sev="warn", rule="vol_spike", title="t", detail="d",
+                  scope="symbol", subject=s)
+            for s in symbols
+        ],
+    )
+    cs.create_insight_type(
+        conn, name="Vol", scope="on_alert", alert_rules=["vol_spike"], enabled=True, now=NOW
+    )
+    jobs.register_insight_runner(lambda c, i, **kw: None)
+    jobs.register_alert_held_fn(lambda c, *, now: set(symbols))
+    first = jobs.alert_scan(conn, now=NOW).detail
+    assert "，派發 AI 預警卡 3 張；推播" in first  # unchanged: no 「略過 0 條」 clause
+    assert "24 小時" not in first
+    again = jobs.alert_scan(conn, now=NOW + timedelta(hours=1)).detail
+    assert "，派發 AI 預警卡 0 張；另有 3 條 24 小時內已派發，略過；推播" in again
 
 
 def test_alert_scan_no_subscribers_records_but_no_dispatch(

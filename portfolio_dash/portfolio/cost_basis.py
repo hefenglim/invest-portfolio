@@ -28,6 +28,7 @@ from portfolio_dash.shared.models.ledger import (
     OpeningInventory,
     Transaction,
 )
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 
@@ -612,9 +613,12 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # cover settles at THIS buy's all-in per-share cost and the leftover shares
                     # start their long life at that same cost — the owner's stated rule
                     # (2026-07-31): 買回的每股成本結算獲利，剩下的股數以本次成本為起點。
+                    # The settled 價金 (owner 2026-09-30): what the trade actually moved, in
+                    # the currency's minor unit — the cash pool books the same amount.
+                    settled = settled_notional(ev.quantity, ev.price, ccy)
                     cover = min(ev.quantity, pos.short_shares)
                     if cover > _ZERO:
-                        per_share = (ev.quantity * ev.price + ev.fees + ev.tax) / ev.quantity
+                        per_share = (settled + ev.fees + ev.tax) / ev.quantity
                         short_avg = pos.short_proceeds / pos.short_shares
                         realized_rows.append(
                             RealizedRow(
@@ -636,7 +640,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     if to_long > _ZERO:
                         # Exact total when nothing was covered, so an ordinary buy is
                         # byte-identical to the pre-short engine (no per-share round trip).
-                        cost = (ev.quantity * ev.price + ev.fees + ev.tax if cover == _ZERO
+                        cost = (settled + ev.fees + ev.tax if cover == _ZERO
                                 else per_share * to_long)
                         pos.shares += to_long
                         pos.original_total += cost
@@ -648,7 +652,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # OFF by default, so a missing buy can never become a fabricated short.
                     from_long = pos.shares if pos.shares > _ZERO else _ZERO
                     from_long = min(ev.quantity, from_long)
-                    per_share_net = (ev.quantity * ev.price - ev.fees - ev.tax) / ev.quantity
+                    per_share_net = (settled_notional(ev.quantity, ev.price, ccy)
+                                     - ev.fees - ev.tax) / ev.quantity
                     if from_long > _ZERO:
                         frac = from_long / pos.shares
                         original_removed = pos.original_total * frac
@@ -701,7 +706,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     frac = ev.quantity / pos.shares
                     original_removed = pos.original_total * frac
                     adjusted_removed = pos.adjusted_total * frac
-                    proceeds_net = ev.quantity * ev.price - ev.fees - ev.tax
+                    proceeds_net = (settled_notional(ev.quantity, ev.price, ccy)
+                                    - ev.fees - ev.tax)
                     realized_rows.append(
                         RealizedRow(
                             account_id=ev.account_id,

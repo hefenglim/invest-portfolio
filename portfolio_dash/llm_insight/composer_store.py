@@ -616,6 +616,78 @@ def archive_strategy(
     return get_strategy(conn, strategy_id)
 
 
+# --- insight_types: the universe's accepted shapes (owner 2026-09-30) -----------------------
+#
+# A per_symbol task's universe is one of three objects or nothing at all. The create wizard
+# (``web/pipeline-wizard.js``) and the universe dialog (``web/pipeline.js``) only ever write
+# these, and the one resolver (``api/insight_service.py::_resolve_universe_raw``) knows only
+# these. Until 2026-09-30 anything else was stored as opaque JSON and resolved as "follow
+# holdings": the verifier's R10 task sent ``["2884"]`` for one symbol and paid for 13 cards.
+# Owner ruling (item 11): every door refuses an unknown shape loudly, never coerces it. The
+# READ side stays tolerant (``_json_or_none`` below + the resolver): a row written before the
+# rule keeps loading; only writing that shape again is refused.
+
+#: The modes the resolver understands — ``custom`` carries ``symbols``, the others nothing.
+UNIVERSE_MODES: tuple[str, ...] = ("all", "all_registered", "custom")
+
+#: The accepted shapes, machine-readable, for a refusal's ``issues``. The zh message names
+#: them in the owner's words instead (DEF-053: user text never names an identifier).
+UNIVERSE_SHAPES: tuple[dict[str, Any], ...] = (
+    {"mode": "all"},
+    {"mode": "all_registered"},
+    {"mode": "custom", "symbols": ["2330"]},
+)
+
+
+class UniverseShapeError(ValueError):
+    """A universe that is none of :data:`UNIVERSE_SHAPES`; ``str(exc)`` is the zh message."""
+
+
+def universe_shape_problem(universe: object) -> str | None:
+    """Why *universe* is not an accepted shape (a short zh clause), or None when it is one.
+
+    ``None`` (not set → follow holdings) is accepted. An empty ``custom`` list is accepted
+    too: it is a shape the universe dialog can reach, and the R2 gate already reports it
+    loudly as 「標的宇宙為空」 at run time. A symbol must be a non-blank STRING — a JSON
+    number is refused rather than stringified, because ``0056`` sent as a number is ``56``.
+    """
+    if universe is None:
+        return None
+    if isinstance(universe, list):
+        return "收到的是清單"
+    if not isinstance(universe, dict):
+        return "收到的是文字" if isinstance(universe, str) else "收到的格式無法辨識"
+    mode = universe.get("mode")
+    if mode is None:
+        return "缺少模式"
+    if not isinstance(mode, str) or mode not in UNIVERSE_MODES:
+        return f"未知的模式「{mode}」"
+    allowed = {"mode", "symbols"} if mode == "custom" else {"mode"}
+    extra = sorted(str(k) for k in universe if k not in allowed)
+    if extra:
+        return f"含無法辨識的欄位「{'、'.join(extra)}」"
+    if mode == "custom":
+        symbols = universe.get("symbols")
+        if not isinstance(symbols, list):
+            return "自選標的需附代號清單"
+        if not all(isinstance(s, str) and s.strip() for s in symbols):
+            return "代號清單只能是非空白的文字代號"
+    return None
+
+
+def universe_shape_message(problem: str) -> str:
+    """The zh refusal sentence for a :func:`universe_shape_problem` clause."""
+    return (f"標的範圍格式不符（{problem}）：只接受「全部持倉」、「持倉＋觀察清單」、"
+            "「自選標的（附代號清單）」三種設定，或不填（跟隨持倉）")
+
+
+def _check_universe(universe: object) -> None:
+    """The persistence seam's backstop: the API doors refuse first, with a 422."""
+    problem = universe_shape_problem(universe)
+    if problem is not None:
+        raise UniverseShapeError(universe_shape_message(problem))
+
+
 # --- insight_types CRUD -------------------------------------------------------
 
 
@@ -677,7 +749,9 @@ def create_insight_type(
     ``horizon_days`` is the task-default prediction horizon (spec 04.10), ``eval_prompt``
     an optional custom self-evaluation prompt (NULL → standard master-scoring template).
     ``preset_key`` is the official-pack provenance stamp (M3 fix; NULL for user tasks).
+    A universe that is none of :data:`UNIVERSE_SHAPES` raises :class:`UniverseShapeError`.
     """
+    _check_universe(universe)
     ts = now.isoformat()
     cur = conn.execute(
         "INSERT INTO insight_types (name, scope, use_system_prompt, self_correct, "
@@ -758,7 +832,9 @@ def update_insight_type(
     Does not touch ``job_id``/``active_calibration_version``/``archived`` (those move via
     the schedule, active-calibration, and cascade helpers). ``horizon_days``/``eval_prompt``
     are overwritten on every update (spec 04.10), so a None ``eval_prompt`` clears it.
+    A universe that is none of :data:`UNIVERSE_SHAPES` raises :class:`UniverseShapeError`.
     """
+    _check_universe(universe)
     if get_insight_type(conn, insight_type_id) is None:
         return None
     conn.execute(

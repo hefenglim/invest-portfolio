@@ -27,8 +27,9 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Market
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.money import settled_notional
 
 if TYPE_CHECKING:  # annotation only — fees.py stays a pure calculation module
     from portfolio_dash.shared.models.assets import Instrument
@@ -311,7 +312,12 @@ def compute_fees(
     Returns:
         FeeResult with fee, tax (both Decimal) and the rate/component snapshot (``engine="v2"``).
     """
-    notional = quantity * price
+    # The fee base is the settled 價金 (owner 2026-09-30): brokers charge on the amount they
+    # settle, and the cash pool books the same figure (shared.money.settled_notional).
+    try:
+        notional = settled_notional(quantity, price, MARKET_QUOTE_CCY[rules.market])
+    except InvalidOperation as exc:  # overflow-sized input: the same M4 degradation as below
+        raise FeeComputationError("數值過大，無法計算費用/稅") from exc
     snap: dict[str, str] = {}
 
     if rules.market is Market.TW:

@@ -110,10 +110,27 @@ date does not. The stored close therefore fixes one canonical meaning:
   - Note: `quantize_amount` (general amounts, e.g. proceeds) still uses ROUND_HALF_UP; the
     floor is specific to the TW **fee/tax** engine (`fees.py`, `rounding="floor"`). US/MY fee
     components quantize per-component ROUND_HALF_UP to the 2-dp minor unit.
+  - **A trade moves its SETTLED 價金, never the raw quantity × price** (owner 2026-09-30, method
+    left to the developer: 「依券商實務」). `shared/money.py::settled_notional(qty, price, ccy)`:
+    TWD drops everything below the dollar (TWSE computes an odd-lot 交割價金 per order and price
+    with 元以下捨去, 2024-04-01; a board lot is always whole dollars), USD / MYR round the cent /
+    sen half up. Every figure OF RECORD a trade moves reads it — the cash pool, the cost basis,
+    realized proceeds, the XIRR and net-invested flows, the FX pool's foreign cash, the fee base,
+    and every preview that mirrors them (manual door, drawer 試算) — so 0.5 AAPL at 191.23 is
+    95.62 everywhere, never 95.615 in one place. A product already in the minor unit is returned
+    AS IS (the identity short-circuit, as in the split-basis seams below), so whole-lot ledgers
+    are byte-identical. A VALUATION (price × shares held), a projection or a tolerance check is
+    not a settlement. `tests/portfolio/test_settled_notional.py` scans every quantity × price in
+    the package; the stress-audit oracle transcribes the rule on its own (`oracle.settled`).
 
 **Mechanics:**
 - Persist Decimals as **TEXT** (canonical string) or **scaled integers**; one
-  convention per column, documented. Do not mix.
+  convention per column, documented. Do not mix. The canonical string is `money.to_db`
+  (fixed-point), never `str(Decimal)`, which prints `5E-7` / `0E-24` for some values — and no
+  export cell may print one either (`decimal_str` for a Decimal, `stored_decimal_str` for a
+  stored TEXT). Owner 2026-09-30, after the llm-usage CSV passed a stored `5E-7` through;
+  `tests/contract/test_exports_never_print_scientific_notation.py` builds every export and lists
+  every bare `str()` in `export/`.
 - All FX conversion goes through the single helper in `shared/`. No ad-hoc
   multiply-by-rate scattered across modules.
 - Rounding is explicit (`Decimal.quantize` + stated rounding mode). Display formatting

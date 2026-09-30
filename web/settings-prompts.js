@@ -62,14 +62,39 @@
     return back;
   }
 
-  /* 持倉代號（預覽/測試送出時的代入標的選單；正式執行由任務範圍逐檔代入）。 */
-  const HELD_SYMBOLS = ['2330', '0056', '00919', 'AAPL', 'MSFT', 'NVDA', '1155.KL'];
+  /* 代入標的（預覽/測試送出時的選單；正式執行由任務範圍逐檔代入）。Owner 2026-09-30 (item
+     14a): this was a hard-coded seven symbols — most never registered on a real ledger, and
+     '1155.KL' not even the registry's spelling ('1155'). It is now the registry itself, read
+     once at boot from GET /api/instruments: the non-archived rows, holdings first, then the
+     watchlist — exactly what a per_symbol task can substitute (持倉＋觀察清單, DEF-059).
+     Rows: { symbol, name, held }. Empty (or a failed read) → the picker's empty state. */
+  let PICK = [];
+  let PICK_FAILED = false;   // the read failed — the empty picker must not claim "none exist"
+  function pickRows(resp) {
+    const rows = ((resp && resp.list) || []).filter((i) => i && i.symbol && !i.archived);
+    const bySym = (a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0);
+    return rows.filter((i) => i.held).sort(bySym)
+      .concat(rows.filter((i) => !i.held).sort(bySym))
+      .map((i) => ({ symbol: i.symbol, name: i.name || '', held: !!i.held }));
+  }
+  const firstPick = () => (PICK.length ? PICK[0].symbol : null);
   /* ===== async boot: load the variable registry (GET /api/prompt-vars, populates V in
      place) + the global system prompt (GET /api/system-prompt), THEN build the page.
      Graceful: a fetch failure surfaces ONE toast and falls through with whatever loaded
      so the page still renders (never an unhandled rejection — the e2e smoke asserts ZERO
      console errors). Everything below runs inside boot() so V.CATEGORIES is populated. ===== */
   async function boot() {
+    /* item 14a: the 代入標的 registry read runs in PARALLEL with the loads below and is
+       awaited before the cards render; a failure is ONE toast and an empty picker. */
+    const pickReady = (async () => {
+      try {
+        PICK = pickRows(await api.get('/api/instruments'));
+      } catch (err) {
+        PICK = [];
+        PICK_FAILED = true;
+        _toast('標的清單載入失敗', 'fail', (err && err.message) || undefined);
+      }
+    })();
     try {
       await V.load();              // populates V.CATEGORIES / index from /api/prompt-vars
     } catch (err) {
@@ -98,6 +123,7 @@
   } catch (err) {
     D.library = [];
   }
+  await pickReady;   // never rejects (its failure branch toasts and leaves PICK empty)
   window.pdField.writeIfUntouched($('#sys-prompt'), '', D.system_prompt);   // I-12
   /* DEF-057: the meta line leads with the version, as a strategy card's does (「v3・更新 …」). */
   function sysMetaSet() {
@@ -120,12 +146,25 @@
   function symbolPicker(onChange) {
     const row = el('div', 'pv-field');
     row.appendChild(el('label', null, '代入標的（本策略含「單一標的」變數）'));
+    if (!PICK.length) {
+      row.appendChild(el('div', 'pv-note pv-sym-empty', PICK_FAILED
+        ? '標的清單載入失敗 — 暫時無法選擇代入標的，請重新整理頁面再試'
+        : '尚無可代入的標的 — 持倉與觀察清單皆為空；到「觀察清單」加入標的後即可選擇'));
+      return { row, sel: null };
+    }
     const sel = el('select', 'select');
-    HELD_SYMBOLS.forEach((s) => {
-      const o = el('option', null, s);
-      o.value = s;
-      sel.appendChild(o);
-    });
+    [['持倉', PICK.filter((p) => p.held)], ['觀察清單', PICK.filter((p) => !p.held)]]
+      .forEach(([label, rows]) => {
+        if (!rows.length) return;
+        const g = document.createElement('optgroup');
+        g.label = label;
+        rows.forEach((p) => {
+          const o = el('option', null, p.name ? p.symbol + ' ' + p.name : p.symbol);
+          o.value = p.symbol;
+          g.appendChild(o);
+        });
+        sel.appendChild(g);
+      });
     sel.addEventListener('change', () => onChange(sel.value));
     row.appendChild(sel);
     return { row, sel };
@@ -186,7 +225,9 @@
       body.appendChild(el('div', 'pv-note',
         '變數已代入目前快照的真實計算值（不呼叫 AI，零成本）。實際送出 = 系統提示詞 ＋ 本策略；組合器執行時再附加組合的生效校正提示詞。'));
       const out = el('div'); /* re-rendered on each fetch (symbol change) */
-      let sym = hasPerSymbolVars(ta.value) ? HELD_SYMBOLS[0] : null;
+      /* null when the registry is empty: the preview is free, so it still renders — the
+         per-symbol variables just have no symbol to fill. */
+      let sym = hasPerSymbolVars(ta.value) ? firstPick() : null;
 
       const fetchAndRender = async () => {
         out.replaceChildren(el('div', 'pv-testing', '⏳ 載入預覽…'));
@@ -294,13 +335,16 @@
         }
       };
       if (hasPerSymbolVars(ta.value)) {
-        let sym = HELD_SYMBOLS[0];
+        let sym = firstPick();
         const pk = symbolPicker((v) => { sym = v; run(sym); });
         const wrap = el('div', 'pv-fields');
         wrap.appendChild(pk.row);
         body.appendChild(wrap);
         body.appendChild(out);
-        run(sym);
+        /* A test send is a PAID call: with nothing to substitute it would bill the owner for
+           a per-symbol prompt about no symbol, so it is not sent (the picker says why). */
+        if (sym) run(sym);
+        else out.appendChild(el('div', 'pv-note', '沒有可代入的標的，未送出（不花費額度）'));
       } else {
         body.appendChild(out);
         run(null);

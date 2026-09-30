@@ -54,6 +54,7 @@ from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.symbol_format import contains_cjk
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,15 @@ class QuickRegisterError(Exception):
         self.code = code
         self.message = message
         self.status = status
+
+
+def _quote_not_found(sym: str) -> QuickRegisterError:
+    """The typo guard's refusal — ONE sentence for the provider miss and the CJK fast path."""
+    return QuickRegisterError(
+        "quote_not_found",
+        f"查無 {sym} 的報價 — 請確認代號與市場是否正確（確定無誤可強制加入）",
+        422,
+    )
 
 
 class QuickRegisterOutcome(BaseModel):
@@ -152,6 +162,11 @@ def lookup_instrument(
             board=existing.board or None,
             is_etf=existing.is_etf,
         )
+    if contains_cjk(sym):
+        # Owner 2026-09-30 (R8 F-01): a name (台積電) is never a code, so the provider can only
+        # answer 「查無報價」 — after the board probe + quote fetch had taken 25–30 s. Same
+        # answer, from the registry alone; the dialog then goes straight to AI 辨識.
+        return InstrumentLookup(found=False)
     # Brand-new symbol: probe the board (TW) then verify existence via a real quote fetch.
     board = probe_tw_board(sym) if market is Market.TW else None
     resolved_board = board if board is not None else (
@@ -383,6 +398,12 @@ def quick_register(
             restored=True,
             last_price_date=last_date,
         )
+    if contains_cjk(sym) and not force:
+        # Owner 2026-09-30 (R8 F-01): a name is never a code — refuse with the SAME 查無報價
+        # the provider would have produced, without first spending 25–30 s asking it. This is
+        # also the manual-trade auto-register door. ``force`` (an explicit register despite a
+        # provider outage) keeps its path unchanged.
+        raise _quote_not_found(sym)
 
     # 1. Board: explicit value respected; TW probed once here (register_instrument
     #    receives the result and must NOT re-probe — no double network call).
@@ -409,11 +430,7 @@ def quick_register(
     except Exception:  # noqa: BLE001 — a provider crash degrades like "no quote"
         logger.warning("quick-register quote fetch crashed for %s", sym, exc_info=True)
     if not quote_ok and not force:
-        raise QuickRegisterError(
-            "quote_not_found",
-            f"查無 {sym} 的報價 — 請確認代號與市場是否正確（確定無誤可強制加入）",
-            422,
-        )
+        raise _quote_not_found(sym)
 
     # 3. Name: caller-supplied wins; otherwise best-effort provider lookup.
     resolved_name = name.strip()

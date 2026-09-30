@@ -260,6 +260,35 @@ def test_dispatch_runs_each_subscriber_once_and_debounces(conn: sqlite3.Connecti
     assert calls == []  # debounced within 24h
 
 
+def test_dispatch_result_counts_the_keys_the_24h_debounce_skipped(
+    conn: sqlite3.Connection,
+) -> None:
+    """Owner 2026-09-30 (item 5): a debounced key was a bare ``continue``, so the run that
+    skipped everything reported only 「派發 AI 預警卡 0 張」. ``debounced`` counts in the unit
+    ``dispatched`` counts in — one (task, rule, symbol) key — so the two add up to what the
+    subscribers asked for."""
+    cs.create_insight_type(
+        conn, name="A", scope="on_alert", alert_rules=["single_weight"], enabled=True, now=NOW
+    )
+    cs.create_insight_type(
+        conn, name="B", scope="on_alert", alert_rules="all", enabled=True, now=NOW
+    )
+    held = {"2330", "2317", "2454"}
+
+    def runner(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    for sym in ("2330", "2317"):
+        ab.record_event(conn, rule_id="single_weight", symbol=sym, now=NOW, scope="symbol")
+    first = ab.dispatch_alert_events_ex(conn, runner, now=NOW, held_symbols=lambda: held)
+    assert (first.dispatched, first.debounced) == (4, 0)
+    later = NOW + timedelta(hours=1)
+    for sym in ("2330", "2317", "2454"):  # 2454 is new: its two keys are not debounced
+        ab.record_event(conn, rule_id="single_weight", symbol=sym, now=later, scope="symbol")
+    second = ab.dispatch_alert_events_ex(conn, runner, now=later, held_symbols=lambda: held)
+    assert (second.dispatched, second.debounced) == (2, 4)
+
+
 def test_dispatch_no_subscribers_is_noop(conn: sqlite3.Connection) -> None:
     ab.record_event(conn, rule_id="fx_drift", symbol="schwab", now=NOW)
     calls: list[int] = []

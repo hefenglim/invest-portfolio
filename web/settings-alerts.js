@@ -377,7 +377,10 @@
          typed here any more. */
       { name: '全帳本匯出（zip）', desc: '各帳本各一份 CSV ＋ 費率規則快照，打包下載。', path: '/api/export/ledgers', ledgers: true },
       { name: 'AI 用量明細 CSV', desc: 'llm_usage 全表：每次呼叫的模型、tokens、成本。', path: '/api/export/llm-usage' },
-      { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', path: '/api/export/job-runs' }
+      { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', path: '/api/export/job-runs' },
+      /* Post-closure item 10 (owner 2026-09-30): the audit trail's file, beside the other
+         logs; the 資料中心 「帳本操作稽核」 list is its on-screen reader. */
+      { name: '帳本操作稽核 CSV', desc: 'ledger_audit 全表：每一次編輯或刪除帳本資料的時間、帳本、動作與變更前內容。', path: '/api/export/ledger-audit' }
     ]},
     { group: '報稅', items: [
       { name: '年度報稅包', desc: '指定年度的已實現損益＋股利收入（含預扣稅）＋匯損益實現明細，各幣別分列。', path: '/api/export/tax-package', year: true }

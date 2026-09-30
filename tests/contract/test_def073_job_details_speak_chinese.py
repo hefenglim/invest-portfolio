@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -38,6 +38,7 @@ import pytest
 
 from portfolio_dash.api import digest_service, signals_service, snapshots
 from portfolio_dash.api import dividend_inbox as inbox
+from portfolio_dash.pricing import ingest
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
@@ -131,14 +132,20 @@ def _all_answer(monkeypatch: pytest.MonkeyPatch) -> None:
 def _stub_seams(monkeypatch: pytest.MonkeyPatch, *, failing: bool) -> None:
     """The runner seams the app registers, wired to the REAL api-side runners wherever
     they run hermetically on the golden DB; only network-bound steps are stubbed."""
-    for fn in ("ingest_chips", "ingest_valuation", "ingest_fundamentals", "ingest_consensus",
-               "ingest_fundamentals_union", "ingest_sentiment", "ingest_index"):
+    for fn in ("ingest_chips", "ingest_valuation", "ingest_fundamentals",
+               "ingest_sentiment", "ingest_index"):
         monkeypatch.setattr(jobs.ingest, fn, lambda conn, *, now, **kw: 0 if failing else 2)
+    # The per-symbol ingests count their keys (owner 2026-09-30, item 12); the failure
+    # branch includes unproven empties so that clause of the sentence is scanned too.
+    sweep = (ingest.SnapshotSweep(failed=3, unproven=2) if failing
+             else ingest.SnapshotSweep(written=2, empty=1))
+    for fn in ("ingest_consensus", "ingest_fundamentals_union"):
+        monkeypatch.setattr(jobs.ingest, fn, lambda conn, *, now, **kw: sweep)
     monkeypatch.setattr(jobs, "_SNAPSHOT_RUNNER", snapshots.snapshot_job)
     monkeypatch.setattr(jobs, "_SIGNAL_SCAN_RUNNER", signals_service.scan_signals)
     monkeypatch.setattr(jobs, "_DIGEST_RUNNER", digest_service.run_digest)
     monkeypatch.setattr(jobs, "_DIVIDEND_SCAN_RUNNER", inbox.scan_job)
-    monkeypatch.setattr(jobs, "_FUNDAMENTALS_RUNNER", lambda conn, *, now: 0 if failing else 5)
+    monkeypatch.setattr(jobs, "_FUNDAMENTALS_RUNNER", lambda conn, *, now: sweep)
     news = {"organized": 0 if failing else 2, "headline_only": 1, "skipped_existing": 3,
             "refetched": 1, "stopped_budget": failing}
     monkeypatch.setattr(jobs, "_NEWS_RUNNER", lambda conn, *, now: news)
@@ -220,6 +227,28 @@ def test_the_push_summary_speaks_chinese_on_every_branch(db: sqlite3.Connection)
     assert "放棄" in details[2]  # the third failed attempt gives up — that branch ran
     for d in details:
         assert not english_words(d), d
+
+
+def test_the_alert_scan_debounce_note_speaks_chinese(
+    db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner 2026-09-30 (item 5): the scan above registers no insight runner, so it never
+    reaches the 24h-debounce clause. Drive it: the first scan cards the alert, a second one
+    an hour later finds that key already dispatched."""
+    from portfolio_dash.llm_insight import composer_store
+    from portfolio_dash.strategy.alerts import Alert
+
+    monkeypatch.setattr(jobs, "_compute_alerts_for_scan", lambda conn, *, now: [
+        Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d",
+              scope="symbol", subject="2330")])
+    composer_store.create_insight_type(db, name="Vol", scope="on_alert",
+                                       alert_rules=["vol_spike"], enabled=True, now=NOW)
+    monkeypatch.setattr(jobs, "_INSIGHT_RUNNER", lambda conn, i, **kw: None)
+    monkeypatch.setattr(jobs, "_ALERT_HELD_FN", lambda conn, *, now: {"2330"})
+    run_job_outcome(db, "alert_scan", now=NOW)
+    _, outcome = run_job_outcome(db, "alert_scan", now=NOW + timedelta(hours=1))
+    assert "24 小時內已派發" in outcome.detail  # the branch ran
+    assert not english_words(outcome.detail), outcome.detail
 
 
 def test_the_pending_list_is_not_stale() -> None:

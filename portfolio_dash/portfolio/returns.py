@@ -22,6 +22,7 @@ from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 FxRate = Callable[[Currency, Currency], Decimal]
@@ -199,10 +200,11 @@ def xirr_reporting(
         add(oi.build_date, ccy_of(oi.symbol), -oi.original_cost_total)
     for tx in transactions:
         ccy = ccy_of(tx.symbol)
+        gross = settled_notional(tx.quantity, tx.price, ccy)  # the cash that moved
         if tx.side is Side.BUY:
-            add(tx.trade_date, ccy, -(tx.quantity * tx.price + tx.fees + tx.tax))
+            add(tx.trade_date, ccy, -(gross + tx.fees + tx.tax))
         else:
-            add(tx.trade_date, ccy, tx.quantity * tx.price - tx.fees - tx.tax)
+            add(tx.trade_date, ccy, gross - tx.fees - tx.tax)
     # A dividend the REPLAY refused (it landed on an open short, which this ledger has
     # no debit row for) must not be an inflow here either — otherwise one payment gets
     # three answers: excluded from 總報酬, counted by XIRR, and flagged 待釐清 on the

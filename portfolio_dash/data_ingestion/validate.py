@@ -1683,7 +1683,11 @@ def validate_corporate_action_change(
     if not set_rows:
         return issues
 
-    accounts = "、".join(sorted({s.account_id for s in set_rows}))
+    # Tokens, never raw ids (post-closure item 13, owner 2026-09-30): the group-delete
+    # confirm in web/ledger.js prints this sentence verbatim, and read 「還有 moomoo_my 的
+    # 同一筆事件」. The ids were joined into this local first, so the DEF-023 f-string guard
+    # never saw them; tests/contract/test_pc13_* follows an id through a local now.
+    accounts = "、".join(account_ref(a) for a in sorted({s.account_id for s in set_rows}))
     if replacement is None or (
         replacement.from_symbol != row.from_symbol
         or replacement.date != row.date

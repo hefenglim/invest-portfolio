@@ -70,6 +70,20 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, the ledger audit trail's reader (post-closure item 10, 2026-09-30) ------
+    Feature(
+        version="0.1.29",
+        id="ledger-audit-list",
+        title="帳本的每一次編輯與刪除，現在都查得到改之前的樣子",
+        desc="系統一直會在你編輯或刪除任何一筆帳本資料（交易、股利、換匯、期初庫存、資金收支、"
+        "公司行動）之前，把原本的內容留存下來——但過去沒有任何畫面讀得到它。現在資料中心多了"
+        "「帳本操作稽核」：新到舊列出時間、帳本、哪一列、編輯或刪除，點開就能看到變更前每個欄位的"
+        "原始內容，帳戶一律顯示名稱；批次復原刪掉的列會標出是哪一個批次。唯讀，不能改也不能刪。"
+        "要整份留存，匯出中心有對應的 CSV",
+        href="data-center.html",
+        area="資料中心 → 帳本操作稽核",
+        target="#la-body",
+    ),
     # --- v0.1.29, system + news-organizer prompt version history (DEF-057, 2026-09-25) ----
     Feature(
         version="0.1.29",

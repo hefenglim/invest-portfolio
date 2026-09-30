@@ -801,8 +801,8 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         inst = facts.instruments.get(t.symbol)
         if inst is None:
             continue
-        delta = -(t.qty * t.price + t.fee + t.tax) if t.side == "BUY" \
-            else (t.qty * t.price - t.fee - t.tax)
+        gross = O.settled(t.qty, t.price, inst.quote_ccy)  # the settled 價金 (2026-09-30)
+        delta = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         add((t.account_id, inst.quote_ccy), t.trade_date, (2, t.id), f"{t.side}", delta)
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)
@@ -994,8 +994,8 @@ def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
         ev.check("ledger.tx.fee", f"id={t.id}", t.fee, a["fee"], phase)
         ev.check("ledger.tx.tax", f"id={t.id}", t.tax, a["tax"], phase)
         # 'total' derived field: BUY negative, SELL positive
-        exp_total = -(t.qty * t.price + t.fee + t.tax) if t.side == "BUY" \
-            else (t.qty * t.price - t.fee - t.tax)
+        gross = O.settled(t.qty, t.price, facts.instruments[t.symbol].quote_ccy)
+        exp_total = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         ev.check("ledger.tx.total", f"id={t.id}", exp_total, a["total"], phase)
     # dividends
     drows = api.get("/api/ledgers/dividends", limit=500).json()["rows"]

@@ -185,6 +185,27 @@ def _r1_violations(conn: sqlite3.Connection, scope: str, strategy_ids: list[int]
     return seen
 
 
+def _universe_refusal(universe: object) -> JSONResponse | None:
+    """422 for a universe that is none of the accepted shapes; None when it is one.
+
+    Owner 2026-09-30 (item 11): a list universe (``["2884"]``) used to be stored verbatim
+    and run as "follow holdings" — 13 cards for one symbol. Every door that takes a universe
+    (create / update on both prefixes, the draft preflight) answers here, before anything is
+    written or estimated. The shapes are defined once, in ``composer_store``; the message
+    names them in words and ``issues`` carries them machine-readable for an API client.
+    """
+    problem = cs.universe_shape_problem(universe)
+    if problem is None:
+        return None
+    return JSONResponse(
+        status_code=422,
+        content=error_body(
+            "validation_error", cs.universe_shape_message(problem), field="universe",
+            issues=[{"code": "universe_shape", "accepted": list(cs.UNIVERSE_SHAPES)}],
+        ),
+    )
+
+
 def _r1_error_response(tokens: list[str]) -> JSONResponse:
     issues = [{"code": "scope_violation", "token": t} for t in tokens]
     return JSONResponse(
@@ -536,6 +557,9 @@ def create_insight_type(
     now: datetime = Depends(get_now),
 ) -> Any:
     cs.ensure_seeded(conn)
+    refusal = _universe_refusal(payload.universe)
+    if refusal is not None:
+        return refusal
     violations = _r1_violations(conn, payload.scope, payload.strategy_ids)
     if violations:
         return _r1_error_response(violations)
@@ -567,6 +591,9 @@ def update_insight_type(
             status_code=404,
             content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
         )
+    refusal = _universe_refusal(payload.universe)
+    if refusal is not None:
+        return refusal
     violations = _r1_violations(conn, payload.scope, payload.strategy_ids)
     if violations:
         return _r1_error_response(violations)
@@ -1105,6 +1132,12 @@ def insight_task_preflight(
         # all-defaults draft (strategy_ids=[]) silently shadows the saved combo and
         # every gate reports a bogus R3 "no live templates".
         draft = None
+    if draft is not None:
+        # Owner 2026-09-30 (item 11): the wizard's dry run is a universe door too — a list
+        # universe here estimated the holdings-wide run the verifier then paid for.
+        refusal = _universe_refusal(draft.universe)
+        if refusal is not None:
+            return refusal
     payload = insight_service.build_preflight(
         conn, insight_type_id, now=now, reporting=reporting, draft=draft,
     )

@@ -65,11 +65,17 @@ def main() -> int:
             os.environ.get("ALPHAVANTAGE_KEY") if source == "alphavantage" else None
         )
         for ref in refs:
-            block = fetch(ref, as_of=as_of, token=token)
+            # The keyed legs RAISE on a failed request / AV refusal (owner 2026-09-30,
+            # item 12) — the ingest counts that as a lost fetch; here it is one cell.
+            try:
+                block = fetch(ref, as_of=as_of, token=token)
+                written = "yes" if block else "NO"
+            except Exception as exc:  # noqa: BLE001 - a probe prints every outcome
+                block, written = None, f"ERR {type(exc).__name__}"
             for field in F.CANONICAL_FIELDS:
                 rows[field].append(str((block or {}).get(field, "-")))
             rows["(meta) currency"].append(str((block or {}).get("currency", "-")))
-            rows["(block written)"].append("yes" if block else "NO")
+            rows["(block written)"].append(written)
     label_w = max(len(f) for f in rows)
     widths = [max(len(c), 14) for c in cols]  # 14: a full market_cap never truncates
     print(" " * (label_w + 1) + " | ".join(c.ljust(w) for c, w in zip(cols, widths, strict=True)))

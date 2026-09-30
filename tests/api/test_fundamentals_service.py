@@ -58,13 +58,15 @@ def test_av_runner_covers_held_symbols_only(
     _add(conn, "MSFT", Market.US, held=False)  # watchlist-only: excluded
     captured: dict[str, Any] = {}
 
-    def fake_union(conn: sqlite3.Connection, *, now: datetime, **kwargs: Any) -> int:
+    def fake_union(
+        conn: sqlite3.Connection, *, now: datetime, **kwargs: Any
+    ) -> ingest.SnapshotSweep:
         captured.update(kwargs)
-        return 7
+        return ingest.SnapshotSweep(written=7)
 
     monkeypatch.setattr(ingest, "ingest_fundamentals_union", fake_union)
     written = fundamentals_service.run_fundamentals_av(conn, now=_NOW)
-    assert written == 7
+    assert written == ingest.SnapshotSweep(written=7)
     assert captured["sources"] == ("alphavantage",)
     universe = captured["universe"]
     assert {r.symbol for r in universe} == {"AAPL", "2330"}
@@ -81,4 +83,4 @@ def test_av_runner_no_held_positions_writes_nothing(
         raise AssertionError("ingest must not run with an empty held set")
 
     monkeypatch.setattr(ingest, "ingest_fundamentals_union", fail_if_called)
-    assert fundamentals_service.run_fundamentals_av(conn, now=_NOW) == 0
+    assert fundamentals_service.run_fundamentals_av(conn, now=_NOW) == ingest.SnapshotSweep()

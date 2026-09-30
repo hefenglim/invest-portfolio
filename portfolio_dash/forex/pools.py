@@ -47,6 +47,7 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import Dividend, FXConversion, Transaction, counts_by
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -237,10 +238,11 @@ def foreign_cash_balance(
             continue
         if instruments[t.symbol].quote_ccy != foreign:
             continue
+        gross = settled_notional(t.quantity, t.price, foreign)  # the settled 價金
         if t.side is Side.BUY:
-            cash -= t.quantity * t.price + t.fees + t.tax
+            cash -= gross + t.fees + t.tax
         else:
-            cash += t.quantity * t.price - t.fees - t.tax
+            cash += gross - t.fees - t.tax
     for d in dividends:
         if as_of is not None and not counts_by(d.date, as_of):
             continue

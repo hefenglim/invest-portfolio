@@ -33,6 +33,19 @@
   /* per-category 小計 subtotal row — emphasized, stable on hover. */
   tr.dc-subtotal td { font-weight:700;color:var(--text-2);background:var(--panel-2);border-top:1px solid var(--border-soft); }
   tr.dc-subtotal:hover td { background:var(--panel-2); }
+
+  /* 帳本操作稽核 (post-closure item 10, owner 2026-09-30). The before-image cell WRAPS —
+     table.data td is nowrap, and a fee snapshot is one long line — and the verb's colour is a
+     CLASS with a rule here, never an inline style (DEF-077 R7). */
+  td.la-before-cell { white-space:normal; min-width:260px; max-width:560px; }
+  details.la-before > summary { cursor:pointer; color:var(--text-2); }
+  details.la-before > summary:hover { color:var(--text); }
+  .la-fields { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:2px 12px; margin:6px 0 2px; font-size:11.5px; }
+  .la-fields dt { color:var(--text-3); }
+  .la-fields dd { margin:0; overflow-wrap:anywhere; font-family:var(--font-num); }
+  .la-act-update { color:var(--text-2); }
+  .la-act-delete { color:var(--amber); font-weight:600; }
+  .la-source { display:block; font-size:10.5px; color:var(--text-3); }
 </style>
 </head>
 <body data-page="datacenter" data-title="資料中心">
@@ -82,13 +95,30 @@
     <div class="set-body" style="padding-top:6px;"><span class="panel-sub" id="fl-note"></span></div>
   </section>
 
-  <!-- D. 資料保留策略 (copy-only forward-looking note; no controls exist yet) -->
+  <!-- D. 帳本操作稽核 (post-closure item 10, owner 2026-09-30) — the read-only reader of
+       ledger_audit: every edit / delete of a ledger row, with the row as it was BEFORE it.
+       Its CSV lives in the export centre, beside the other logs (the owner's ruling). -->
+  <section class="panel" data-screen-label="帳本操作稽核">
+    <div class="panel-head">
+      <h2 class="panel-title">帳本操作稽核</h2>
+      <span class="panel-sub">唯讀 — 每一次編輯或刪除帳本資料前的原始內容，新→舊；CSV 請至 <a href="settings.html#exports">系統設定 › 匯出中心</a></span>
+      <span class="spacer"></span>
+      <span class="panel-sub num" id="la-count"></span>
+      <button class="btn" id="la-refresh" type="button"><span class="ico">⟳</span>重新整理</button>
+    </div>
+    <div class="table-wrap"><table class="data"><thead><tr>
+      <th>時間</th><th class="col-text">帳本</th><th class="col-text">列</th><th class="col-text">動作</th><th class="col-text">變更前內容</th>
+    </tr></thead><tbody id="la-body"></tbody></table></div>
+    <div id="la-pager" hidden="hidden"></div>
+  </section>
+
+  <!-- E. 資料保留策略 (copy-only forward-looking note; no controls exist yet) -->
   <section class="panel" data-screen-label="資料保留策略">
     <div class="panel-head">
       <h2 class="panel-title">資料保留策略</h2>
       <span class="panel-sub">未來規劃</span>
     </div>
-    <div class="set-body"><span class="panel-sub">除 AI 抽取失敗記錄（上方，上限 300 筆滾動）之外，本頁其餘為唯讀統計。未來將於此設定各資料表的保留期限與自動清理策略；目前其他歷史完整保留，不做任何自動清理。</span></div>
+    <div class="set-body"><span class="panel-sub">除 AI 抽取失敗記錄（上方，上限 300 筆滾動）之外，本頁其餘為唯讀統計與紀錄。未來將於此設定各資料表的保留期限與自動清理策略；目前其他歷史完整保留，不做任何自動清理。</span></div>
   </section>
 
 </div>
@@ -102,6 +132,7 @@
 <script src="api.js?v=0.1.28"></script>
 <script src="shell.js?v=0.1.28"></script>
 <script src="format.js?v=0.1.28"></script>
+<script src="pager.js?v=0.1.28"></script>
 <script src="data-center.js?v=0.1.28"></script>
 </body>
 </html>

@@ -129,19 +129,24 @@ def test_custom_universe_with_missing_symbol_gets_anomaly_card(conn: sqlite3.Con
 
 def test_unknown_universe_mode_falls_back_to_holdings(conn: sqlite3.Connection) -> None:
     # Deep review 2026-07-11 (batch-3 adequacy gap): a typo'd universe mode (here
-    # "all_registred") is SILENTLY accepted at write time (composer_store stores the universe
-    # as opaque JSON) and resolves to holdings-only — identical to the default / mode:all.
-    # This DOCUMENTS the accept-behavior: a run-time reject would brick stored scheduled tasks
-    # (see the stored-bad-cron lesson) — degrading to the safe default beats crashing a saved
-    # task. The saved-task resolver and its draft-preflight twin must agree.
+    # "all_registred") resolves to holdings-only — identical to the default / mode:all.
+    # A run-time reject would brick stored scheduled tasks (see the stored-bad-cron lesson) —
+    # degrading to the safe default beats crashing a saved task. The saved-task resolver and
+    # its draft-preflight twin must agree.
+    # Owner 2026-09-30 (item 11): the WRITE is now refused (every door answers 422, the store
+    # raises — tests/contract/test_insight_task_universe_shape.py), so the only way such a
+    # row exists is from before the rule; it is written here the way it was then, by SQL. The
+    # READ stays tolerant, which is what this test pins.
     from portfolio_dash.api.insight_service import _resolve_universe, _resolve_universe_raw
     from portfolio_dash.portfolio.dashboard import build_dashboard
 
     data = build_dashboard(conn, now=NOW, reporting=Currency.TWD)
-    it = cs.create_insight_type(
-        conn, name="Typo", scope="per_symbol",
-        universe={"mode": "all_registred"}, now=NOW,  # deliberate typo, not a rejected write
-    )
+    it0 = cs.create_insight_type(conn, name="Typo", scope="per_symbol", now=NOW)
+    conn.execute("UPDATE insight_types SET universe = ? WHERE id = ?",
+                 ('{"mode": "all_registred"}', it0.id))  # a pre-2026-09-30 row
+    conn.commit()
+    it = cs.get_insight_type(conn, it0.id)
+    assert it is not None and it.universe == {"mode": "all_registred"}
     # holdings-only (golden holds 2330 + AAPL) — the same result as the default / mode:all.
     assert _resolve_universe(conn, it, data) == ["2330", "AAPL"]
     # the draft-preflight twin resolves identically from the raw universe value.

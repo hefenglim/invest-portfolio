@@ -390,8 +390,8 @@ def _cash_statement(ev, facts, app_bal, phase):
         inst = facts.instruments.get(t.symbol)
         if inst is None:
             continue
-        d = -(t.qty * t.price + t.fee + t.tax) if t.side == "BUY" \
-            else (t.qty * t.price - t.fee - t.tax)
+        gross = O.settled(t.qty, t.price, inst.quote_ccy)  # the settled 價金 (2026-09-30)
+        d = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         add((t.account_id, inst.quote_ccy), d)
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)

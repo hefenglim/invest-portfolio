@@ -49,7 +49,9 @@ def _cap_price(v: Decimal) -> Decimal:
 # ---------------------------------------------------------------------------
 # Every row correction (edit / delete) on the four ledgers captures the BEFORE state
 # here, so an explicit correction is auditable even though the ledger is not literally
-# append-only. No UI viewer this wave — db-stats visibility is enough.
+# append-only. Read back by the 資料中心 「帳本操作稽核」 list and its export-centre CSV
+# (``export/ledger_audit.py``, post-closure item 10, owner 2026-09-30) — for its first
+# months nothing read it, and a trail nobody can open is not an audit trail.
 
 
 #: DEF-049 (2026-09-25): WHICH door removed the row, when it was not the row's own ledger
@@ -123,17 +125,37 @@ def _capture(
 
 
 def list_ledger_audit(
-    conn: sqlite3.Connection, *, table_name: str | None = None
+    conn: sqlite3.Connection,
+    *,
+    table_name: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict[str, object]]:
-    """Return ledger_audit rows (newest first); optionally filter by table_name."""
+    """Return ledger_audit rows (newest first); optionally filter by table_name.
+
+    ``limit`` / ``offset`` page the list for the 資料中心 reader (post-closure item 10,
+    owner 2026-09-30); ``None`` keeps the whole trail. ``source`` rides along (DEF-049's
+    「批次復原 #id」, NULL for a single-row correction) so the reader can say which door
+    removed a row.
+    """
     where = " WHERE table_name=?" if table_name is not None else ""
     params: tuple[object, ...] = (table_name,) if table_name is not None else ()
+    page = ""
+    if limit is not None:
+        page = " LIMIT ? OFFSET ?"
+        params = (*params, limit, offset)
     rows = conn.execute(
-        f"SELECT id, table_name, row_id, action, before_json, at "
-        f"FROM ledger_audit{where} ORDER BY id DESC",
+        f"SELECT id, table_name, row_id, action, before_json, at, source "
+        f"FROM ledger_audit{where} ORDER BY id DESC{page}",
         params,
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def count_ledger_audit(conn: sqlite3.Connection) -> int:
+    """How many audit rows exist — the reader's pager total."""
+    row = conn.execute("SELECT COUNT(*) AS n FROM ledger_audit").fetchone()
+    return int(row["n"])
 
 
 def upsert_instrument(

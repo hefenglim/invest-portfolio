@@ -38,6 +38,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     HoldingRow,
     HoldingSubtotal,
 )
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 
@@ -85,11 +86,14 @@ def _filter_label(
     """A human 篩選 statement for the active filter, or None when nothing is filtered.
 
     The account display name is read from the already-enriched holding rows (no new
-    lookup); an account with no held rows falls back to its id."""
+    lookup); an account with no held rows falls back to its ``{account:<id>}`` token."""
     if account is None and market is None:
         return None
     acct_names = {h.account_id: h.account_name for h in data.holdings}
-    acct_txt = "全部" if account is None else acct_names.get(account, account)
+    # The fallback is the TOKEN, not the raw id (post-closure item 13, owner 2026-09-30):
+    # an account that holds nothing has no row to read a name off, and printed 「帳戶
+    # moomoo_my」. ``account_name`` is already the token, so both branches read the same.
+    acct_txt = "全部" if account is None else acct_names.get(account, account_ref(account))
     mkt_txt = "全部" if market is None else _MARKET_ZH.get(market, market.value)
     return f"篩選　帳戶 {acct_txt}　·　市場 {mkt_txt}"
 
