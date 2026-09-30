@@ -51,16 +51,32 @@ the demo's cards: the model paired a registered code with another company's name
 - **Old cards: `scripts/fix_card_names.py`.** It does a dry run by default; `--apply` writes.
   It replaces the wrong name and keeps the code, preferring a Chinese alias when the
   registered name has none. Where it cannot bound the wrong name's extent it fixes only a
-  reviewed `--wrong-name`. On a copy of the demo's 224 cards: 27 pairings on 10 cards, 0 left
-  for review. The rest was already right, so nothing else is rewritten.
+  reviewed `--wrong-name`. A reviewed wrong name directly after a bare code (「2603 萬海」) is
+  replaced too (`830056c`), since the checker reads a bare code only when a registered name
+  follows it. The rest was already right, so nothing else is rewritten.
 - Library tag `official-v27 (2026-10-01)`: the naming note v1 + AI instrument-resolve v3.
 
-Mutations: 46 (41 in the first pass, 5 on the two gaps closed at integration), all caught.
+Mutations: 48 (41 in the first pass, 5 on the two gaps closed at integration, 2 on the
+bare-form fix), all caught.
 
 Gates: ruff clean · mypy --strict 983 files 0 (fresh cache) · pytest 6,834 (6,832 passed, 2
 skipped; the two failures the first pass found — the late-write guard's list and the audit
 reader's column labels — fixed and their files re-run) · e2e 96 files 322/322, server-side 5xx
 0 (the aliases flow run three times) · stress-audit phase 1 ops 128, 6,025 pass / 0 fail.
+
+Live on the demo (`e8bcf53` → `830056c`, DB backed up before each step, verify_live ALL PASS on
+both):
+- 22 of the 26 instruments carry aliases, written through the edit API so every list passed the
+  server's checks. The other four (中環, 黑松, 興泰, IHH Healthcare) need none.
+- `fix_card_names.py --apply` corrected 29 pairings on 11 of 248 cards, reviewed first in a dry
+  run. Card #231 (2026-09-28, 「萬海（2603）」) was newer than the measured corpus. A dry run
+  without any `--wrong-name` afterwards finds 0.
+- The browser shows 「亦稱 大立光、大立光電」 under LARGAN, the search finds 3008 by 大立光, and
+  the edit dialog carries the list.
+- Left as found: two news headlines quoting 「長榮航運」 (an article's own words, no code).
+- Left for the owner: card #82's summary 「LRDIM (6883)」, the same holding its body names as
+  3008. 6883 is not registered, so the rule does not reach it, and a code change is outside
+  what the script does.
 
 **Functional-test manual closed; the owner's 18 rulings on its open items (2026-09-30).** The
 manual closed on `d2e5e08` (PASS 119 / N/A 1, 86 defects closed or not-a-defect); the verifier
