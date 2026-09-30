@@ -90,6 +90,12 @@ def create_llm_tables(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_usage)")}
     if "cache_tokens" not in cols:
         conn.execute("ALTER TABLE llm_usage ADD COLUMN cache_tokens INTEGER NOT NULL DEFAULT 0")
+    # 2026-09-30 (owner, the verifier's R10 observation ④): 1 = the provider sent no usage
+    # and the counts are a local estimate (shared/llm.metered_usage), never a measured 0.
+    if "usage_estimated" not in cols:
+        conn.execute(
+            "ALTER TABLE llm_usage ADD COLUMN usage_estimated INTEGER NOT NULL DEFAULT 0"
+        )
     # DEF-065: the quota-alert threshold table is created with the rest of the LLM store (at
     # boot, via bootstrap_db), not by the first GET /api/dashboard that reads it.
     conn.execute(_THRESHOLD_DDL)

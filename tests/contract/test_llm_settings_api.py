@@ -350,8 +350,9 @@ def test_llm_requests_ledger_lists_and_filters(api_client: TestClient) -> None:
     assert r["totals"]["count"] >= 2
     newest = r["rows"][0]
     assert set(newest) == {"ts", "model", "agent", "tokens_in", "tokens_out",
-                           "cache_tokens", "cost_usd"}
+                           "cache_tokens", "cost_usd", "estimated"}
     assert newest["model"] == "haiku-4.5" and newest["cache_tokens"] == 0
+    assert newest["estimated"] is False  # reported by the provider, not a local count
     second = r["rows"][1]
     assert second["cache_tokens"] == 1024 and second["cost_usd"] == "0.0011685"
     # ts is Taipei-normalized "YYYY-MM-DD HH:MM:SS"

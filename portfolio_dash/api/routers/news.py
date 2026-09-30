@@ -29,6 +29,7 @@ from portfolio_dash.scheduler.jobs import (
     start_job_run,
 )
 from portfolio_dash.shared.db import session
+from portfolio_dash.shared.llm import usage_tally
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -129,18 +130,23 @@ def _news_run_worker(
             ).fetchone()
             if row is None:
                 return
-            try:
-                result = news_service.run_news_for(conn, universe, now=now)
-                # DEF-073 / DEF-067 (R6): the nightly job's sentence AND verdict — it read
-                # 「manual: organized 2, … over 2 symbol(s) (budget stop)」 under a 成功 chip.
-                outcome = news_run_outcome(result, symbols=len(universe))
-                detail, status = outcome.detail, outcome.status
-            except Exception as exc:  # noqa: BLE001 — swallow + log via the run row
-                # I-16: the scheduler's one sentence for a failed run (DEF-030) — the bare
-                # ``str(exc)`` (a KeyError's repr, an English provider message) reached the
-                # 排程中心 status chip from this worker only.
-                detail, status = failure_detail(exc), "error"
-            finish_job_run(conn, int(row["id"]), status=status, detail=detail, now=now)
+            # The run row records what the run spent, like every scheduler door (owner
+            # 2026-09-30) — the organizer's calls are counted by this tally.
+            with usage_tally() as usage:
+                try:
+                    result = news_service.run_news_for(conn, universe, now=now)
+                    # DEF-073 / DEF-067 (R6): the nightly job's sentence AND verdict — it read
+                    # 「manual: organized 2, … over 2 symbol(s) (budget stop)」 under a 成功 chip.
+                    outcome = news_run_outcome(result, symbols=len(universe))
+                    detail, status = outcome.detail, outcome.status
+                except Exception as exc:  # noqa: BLE001 — swallow + log via the run row
+                    # I-16: the scheduler's one sentence for a failed run (DEF-030) — the bare
+                    # ``str(exc)`` (a KeyError's repr, an English provider message) reached the
+                    # 排程中心 status chip from this worker only.
+                    detail, status = failure_detail(exc), "error"
+            finish_job_run(
+                conn, int(row["id"]), status=status, detail=detail, now=now, usage=usage
+            )
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return
 

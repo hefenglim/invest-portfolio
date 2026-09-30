@@ -46,6 +46,8 @@ from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.instrument_scope import tracked_instruments
+from portfolio_dash.shared.llm import UsageTally, usage_tally
+from portfolio_dash.shared.money import to_db
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
 
 logger = logging.getLogger(__name__)
@@ -309,6 +311,12 @@ def create_scheduler_tables(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "job_runs", "reason", "TEXT")
     _add_column_if_missing(conn, "job_runs", "cost_usd", "TEXT")
     _add_column_if_missing(conn, "job_runs", "is_shadow", "INTEGER NOT NULL DEFAULT 0")
+    # 2026-09-30 (owner, the verifier's R10 observation ③): a run row carries what the run
+    # spent — its calls and tokens beside the existing ``cost_usd`` — counted from its own
+    # ``llm_usage`` rows (``shared.llm.usage_tally``). NULL = the run made no AI call.
+    _add_column_if_missing(conn, "job_runs", "llm_calls", "INTEGER")
+    _add_column_if_missing(conn, "job_runs", "tokens_in", "INTEGER")
+    _add_column_if_missing(conn, "job_runs", "tokens_out", "INTEGER")
     conn.commit()
 
 
@@ -1866,18 +1874,17 @@ def run_job_outcome(
     conn.commit()
     _mark_running(job_id)
     try:
-        try:
-            outcome = _outcome_of(spec.func(conn, now=now))
-        except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
-            outcome = JobOutcome("error", failure_detail(exc))
+        with usage_tally() as usage:
+            try:
+                outcome = _outcome_of(spec.func(conn, now=now))
+            except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
+                outcome = JobOutcome("error", failure_detail(exc))
         # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
         # reads as a negative-duration run in any naive display.
-        conn.execute(
-            "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
-            (datetime.now(tz=now.tzinfo or UTC).isoformat(), outcome.status, outcome.detail,
-             run_id),
+        _finalize_run(
+            conn, run_id, finished_at=datetime.now(tz=now.tzinfo or UTC).isoformat(),
+            status=outcome.status, detail=outcome.detail, usage=usage,
         )
-        conn.commit()
     finally:
         _clear_running(job_id)
     return run_id, outcome
@@ -1897,6 +1904,19 @@ def start_job_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> in
     return int(cur.lastrowid or 0)
 
 
+def run_usage_columns(usage: UsageTally | None) -> dict[str, Any]:
+    """The ``job_runs`` spend columns for a run's :class:`UsageTally`.
+
+    A run that made no AI call records NULL — "no AI here", which the 排程中心 prints as —,
+    never ``$0``. The cost is the exact Decimal sum of the run's ``llm_usage`` rows, stored as
+    its canonical fixed-point string (``money.to_db`` — never ``str()``'s ``9E-8``).
+    """
+    if usage is None or usage.calls == 0:
+        return {"cost_usd": None, "llm_calls": None, "tokens_in": None, "tokens_out": None}
+    return {"cost_usd": to_db(usage.cost), "llm_calls": usage.calls,
+            "tokens_in": usage.tokens_in, "tokens_out": usage.tokens_out}
+
+
 def finish_job_run(
     conn: sqlite3.Connection,
     run_id: int,
@@ -1904,17 +1924,45 @@ def finish_job_run(
     status: str,
     detail: str,
     now: datetime | None = None,
+    usage: UsageTally | None = None,
 ) -> None:
-    """Finalize a running ``job_runs`` row with its terminal status + detail.
+    """Finalize a running ``job_runs`` row with its terminal status + detail (+ its spend).
 
     ``finished_at`` shares *now*'s timezone when given (started_at comes from get_now
-    in +08:00; a UTC finish next to it reads as a negative-duration run).
+    in +08:00; a UTC finish next to it reads as a negative-duration run). ``usage`` is the
+    tally the caller opened around the job's work; every door that runs a job passes it
+    (owner 2026-09-30: ``evaluate_insights`` #212 spent $0.0021532 on a row that said
+    nothing). Without one — the insight runner's error exits, which record their own
+    spend on the success path — the spend columns are left as they are.
     """
     finished_at = datetime.now(tz=now.tzinfo if now is not None else UTC).isoformat()
-    conn.execute(
-        "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
-        (finished_at, status, detail, run_id),
-    )
+    _finalize_run(conn, run_id, finished_at=finished_at, status=status, detail=detail,
+                  usage=usage)
+
+
+def _finalize_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    finished_at: str,
+    status: str,
+    detail: str,
+    usage: UsageTally | None,
+) -> None:
+    """The one UPDATE that closes a static job's run row (both wrappers and every door)."""
+    if usage is None:
+        conn.execute(
+            "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
+            (finished_at, status, detail, run_id),
+        )
+    else:
+        spend = run_usage_columns(usage)
+        conn.execute(
+            "UPDATE job_runs SET finished_at = ?, status = ?, detail = ?, cost_usd = ?, "
+            "llm_calls = ?, tokens_in = ?, tokens_out = ? WHERE id = ?",
+            (finished_at, status, detail, spend["cost_usd"], spend["llm_calls"],
+             spend["tokens_in"], spend["tokens_out"], run_id),
+        )
     conn.commit()
 
 
@@ -1983,12 +2031,14 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             # after finish_job_run commits, so the poll never reads a done run as queued.
             _mark_running(job_id)
             try:
-                try:
-                    outcome = _outcome_of(spec.func(conn, now=now))
-                except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the thread
-                    outcome = JobOutcome("error", failure_detail(exc))
+                with usage_tally() as usage:
+                    try:
+                        outcome = _outcome_of(spec.func(conn, now=now))
+                    except Exception as exc:  # noqa: BLE001 — never crash the thread
+                        outcome = JobOutcome("error", failure_detail(exc))
                 finish_job_run(
-                    conn, run_id, status=outcome.status, detail=outcome.detail, now=now
+                    conn, run_id, status=outcome.status, detail=outcome.detail, now=now,
+                    usage=usage,
                 )
             finally:
                 _clear_running(job_id)

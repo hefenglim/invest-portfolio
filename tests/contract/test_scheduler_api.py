@@ -315,20 +315,20 @@ def _usage_row(
     )
 
 
-def test_status_cost_block_news_window_sum_honest(
+def test_status_cost_block_is_the_run_rows_own_spend(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """news_daily cost = sum of news_organize llm_usage rows INSIDE the run window only;
-    other agents and out-of-window rows are excluded. Decimal-string math, no floats."""
+    """A static LLM job serves the spend its run row recorded (calls, tokens, cost).
+
+    2026-09-30 (owner, the verifier's R10 observation ③): this block used to be re-derived
+    by summing news_organize rows inside the run's time window, while the run history read
+    the same run's empty ``cost_usd``. The run now records its own spend when it finishes.
+    """
     golden_db.execute(
-        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
-        "VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
-        "'2026-06-11T06:10:00+08:00','ok','news: organized 2')"
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, cost_usd, "
+        "llm_calls, tokens_in, tokens_out) VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
+        "'2026-06-11T06:10:00+08:00','ok','news: organized 2','0.012',2,110,55)"
     )
-    _usage_row(golden_db, "2026-06-11T06:02:00+08:00", "news_organize", "0.010", 100, 50)
-    _usage_row(golden_db, "2026-06-11T06:08:30+08:00", "news_organize", "0.002", 10, 5)
-    _usage_row(golden_db, "2026-06-11T07:00:00+08:00", "news_organize", "9", 999, 999)
-    _usage_row(golden_db, "2026-06-11T06:05:00+08:00", "insight_generate", "5", 500, 500)
     golden_db.commit()
     lr = api_client.get("/api/scheduler/status").json()["jobs"]["news_daily"]["last_run"]
     assert lr["cost"] == {
@@ -336,14 +336,30 @@ def test_status_cost_block_news_window_sum_honest(
         "tokens_in": 110,
         "tokens_out": 55,
         "calls": 2,
-        "source": "usage_window",
+        "source": "run_row",
     }
+
+
+def test_status_cost_block_never_guesses_from_usage_in_the_window(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A row written before runs recorded their spend serves no block — usage rows that
+    happen to fall inside its window are not attributed to it (the history shows — too)."""
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
+        "'2026-06-11T06:10:00+08:00','ok','news: organized 2')"
+    )
+    _usage_row(golden_db, "2026-06-11T06:02:00+08:00", "news_organize", "0.010", 100, 50)
+    golden_db.commit()
+    lr = api_client.get("/api/scheduler/status").json()["jobs"]["news_daily"]["last_run"]
+    assert lr["cost"] is None
 
 
 def test_status_cost_none_when_llm_job_made_no_calls(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """An LLM-capable job whose window saw zero usage rows honestly serves no block."""
+    """An LLM-capable job whose run made no call honestly serves no block."""
     golden_db.execute(
         "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
         "VALUES ('digest_daily','2026-06-11T15:10:00+08:00',"

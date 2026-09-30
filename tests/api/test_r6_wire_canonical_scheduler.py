@@ -15,9 +15,10 @@ silently leaves the exact Decimal-string contract that the whole front/back seam
 on. The regex is not restated here: it is READ OUT OF ``web/format.js`` so this test cannot
 drift from the guard it is asserting against.
 
-Both branches of ``_cost_block`` are covered: the usage-window SUM (where the defect was)
-and the ``insight:*`` run-row passthrough (whose value comes from the DB and can carry the
-same form, since the insight runner persists it with ``str(cost)``).
+Both kinds of run row are covered: a static job's (whose spend the run now records itself —
+the usage-window SUM where the defect was is gone, 2026-09-30) and a legacy ``insight:*`` row
+(the insight runner persisted it with ``str(cost)`` until 2026-09-30, so the stored TEXT can
+carry the scientific form). The two run lists serve the same column and are covered too.
 """
 
 import re
@@ -46,14 +47,6 @@ def _plain_decimal_re() -> re.Pattern[str]:
     return re.compile(body)
 
 
-def _usage_row(conn: sqlite3.Connection, ts: str, agent: str, cost: str) -> None:
-    conn.execute(
-        "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost) "
-        "VALUES (?,?,?,?,?,?)",
-        (ts, "test-model", agent, 1, 1, cost),
-    )
-
-
 def test_the_source_values_really_do_produce_scientific_notation() -> None:
     """Pin the premise: this is a serialization choice, not an invented scenario."""
     total = Decimal("0.00000003") + Decimal("0.00000006")
@@ -64,20 +57,18 @@ def test_the_source_values_really_do_produce_scientific_notation() -> None:
     assert plain.fullmatch(decimal_str(total))
 
 
-def test_usage_window_cost_is_plain_decimal_not_scientific(
+def test_static_run_row_cost_is_plain_decimal_not_scientific(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
     golden_db.execute(
-        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
-        "VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
-        "'2026-06-11T06:10:00+08:00','ok','news: organized 2')"
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, cost_usd, "
+        "llm_calls, tokens_in, tokens_out) VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
+        "'2026-06-11T06:10:00+08:00','ok','news: organized 2','9E-8',2,2,2)"
     )
-    _usage_row(golden_db, "2026-06-11T06:02:00+08:00", "news_organize", "0.00000003")
-    _usage_row(golden_db, "2026-06-11T06:08:30+08:00", "news_organize", "0.00000006")
     golden_db.commit()
 
     block = api_client.get("/api/scheduler/status").json()["jobs"]["news_daily"]["last_run"]["cost"]
-    assert block is not None and block["source"] == "usage_window"
+    assert block is not None and block["source"] == "run_row"
     assert block["cost_usd"] == "0.00000009", (
         f"the wire carries {block['cost_usd']!r}. shared/wire.py defines the ONE canonical "
         f"Decimal wire form as format(value, 'f') — NEVER scientific notation."
@@ -115,3 +106,19 @@ def test_insight_run_row_cost_is_plain_decimal_not_scientific(
         f"must serialize it through decimal_str like every other Decimal on the wire."
     )
     assert _plain_decimal_re().fullmatch(block["cost_usd"])
+
+
+def test_run_history_and_task_runs_serve_the_canonical_form(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """The two run lists pass ``job_runs.cost_usd`` through — through the canonical form."""
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
+        "cost_usd) VALUES ('insight:9','2026-06-11T09:00:00+08:00',"
+        "'2026-06-11T09:00:40+08:00','ok','1 card(s)','9','9E-8')"
+    )
+    golden_db.commit()
+    history = api_client.get("/api/scheduler/runs", params={"job_id": "insight:9"}).json()
+    assert [r["cost_usd"] for r in history["rows"]] == ["0.00000009"]
+    task_runs = api_client.get("/api/insight-tasks/9/runs").json()
+    assert [r["cost_usd"] for r in task_runs["rows"]] == ["0.00000009"]

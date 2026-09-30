@@ -44,6 +44,7 @@ from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
 from portfolio_dash.shared import llm
 from portfolio_dash.shared.account_ref import resolve_account_refs
 from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded, LLMError
+from portfolio_dash.shared.money import to_db
 
 # The agent tag recorded in llm_usage for an insight generation call.
 _AGENT = "insight_generate"
@@ -240,6 +241,7 @@ def _write_job_run(
     now: datetime,
     run_id: int | None = None,
     is_shadow: bool = False,
+    usage: llm.UsageTally | None = None,
 ) -> None:
     """Record an insight run in ``job_runs`` (raw SQL; no scheduler import).
 
@@ -249,9 +251,15 @@ def _write_job_run(
 
     ``reason`` is the single machine enum (spec 07 §7.4); ``detail`` is the human text
     (defaults to ``reason`` / ``status``). A SHADOW batch (Loop 4) stamps ``is_shadow=1`` so
-    the user-facing /runs lists can exclude it (spec 04 fix #3).
+    the user-facing /runs lists can exclude it (spec 04 fix #3). ``usage`` is the run's
+    :class:`~portfolio_dash.shared.llm.UsageTally`: its calls and tokens go beside the cost
+    (NULL when the run made no AI call, as for every other job).
     """
     job_id = f"insight:{insight_type_id}"
+    counted = usage if usage is not None and usage.calls else None
+    calls = counted.calls if counted is not None else None
+    tokens_in = counted.tokens_in if counted is not None else None
+    tokens_out = counted.tokens_out if counted is not None else None
     # DEF-073: never the enum or the status word — the 排程中心 prints this field as it is.
     detail_text = detail if detail is not None else _STATUS_ZH.get(status, "已結束")
     shadow_flag = 1 if is_shadow else 0
@@ -261,17 +269,19 @@ def _write_job_run(
     if run_id is not None:
         conn.execute(
             "UPDATE job_runs SET finished_at = ?, status = ?, detail = ?, payload = ?, "
-            "reason = ?, cost_usd = ?, is_shadow = ? WHERE id = ?",
+            "reason = ?, cost_usd = ?, is_shadow = ?, llm_calls = ?, tokens_in = ?, "
+            "tokens_out = ? WHERE id = ?",
             (
                 finished_at, status, detail_text, str(insight_type_id),
-                reason or None, str(cost), shadow_flag, run_id,
+                reason or None, to_db(cost), shadow_flag, calls, tokens_in, tokens_out, run_id,
             ),
         )
         conn.commit()
         return
     conn.execute(
         "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
-        "reason, cost_usd, is_shadow) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "reason, cost_usd, is_shadow, llm_calls, tokens_in, tokens_out) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id,
             now.isoformat(),
@@ -280,8 +290,11 @@ def _write_job_run(
             detail_text,
             str(insight_type_id),
             reason or None,
-            str(cost),
+            to_db(cost),
             shadow_flag,
+            calls,
+            tokens_in,
+            tokens_out,
         ),
     )
     conn.commit()
@@ -353,7 +366,30 @@ def run_insight_type(
     layer feeds one per resolved target. Returns a :class:`RunResult` and records the run in
     ``job_runs`` (finalizing *run_id* when the async path pre-inserted a running row, else
     inserting a fresh row). Pure controller — no pricing/data_ingestion read here.
+
+    The run's cost is every ``llm_usage`` row it wrote (owner 2026-09-30), counted by a
+    :func:`~portfolio_dash.shared.llm.usage_tally` opened here — the one point every insight
+    run passes through, whichever door started it. It used to be the sum of the cards'
+    costs, so a retry after a broken reply, or a primary model that failed before the
+    fallback answered, was paid for and left off the run.
     """
+    with llm.usage_tally() as usage:
+        return _run_insight_type(
+            conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now,
+            run_id=run_id, usage=usage,
+        )
+
+
+def _run_insight_type(
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    *,
+    var_contexts: dict[str | None, V.VarContext],
+    inputs: RunInputs,
+    now: datetime,
+    run_id: int | None,
+    usage: llm.UsageTally,
+) -> RunResult:
     it = cs.get_insight_type(conn, insight_type_id)
     if it is None:
         _write_job_run(
@@ -381,7 +417,6 @@ def run_insight_type(
         )
 
     remaining = inputs.budget_remaining
-    total_cost = Decimal("0")
     created = 0
     cache_hits = 0
     stopped_early = False
@@ -457,7 +492,6 @@ def run_insight_type(
             cache_hits += 1
             continue  # cache hit — same-day identical inputs, no LLM, no duplicate row
 
-        before = remaining
         try:
             completion = llm.complete_structured_meta(
                 prompt, InsightCard, agent=_AGENT, conn=conn
@@ -480,9 +514,8 @@ def run_insight_type(
         # threaded out of the LLM seam so the stored row records the model used — not a
         # card field (spec 04 fix #1: insights.model was wrongly set to card.symbol).
         used_model = completion.model
-        spent = completion.cost
-        total_cost += spent
-        remaining = before - spent
+        spent = completion.cost  # this CARD's call; the run's spend is the tally's
+        remaining = inputs.budget_remaining - usage.cost
         if target is not None:
             card = card.model_copy(update={"symbol": target})
         # For an on_alert card, also cap the card's own prediction horizon to the forced
@@ -532,8 +565,8 @@ def run_insight_type(
     )
     _write_job_run(
         conn, insight_type_id, status=status, reason=reason, detail=run_detail,
-        cost=total_cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow,
+        cost=usage.cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow, usage=usage,
     )
     return RunResult(
-        status=status, reason=reason, cards_created=created, cost_usd=total_cost
+        status=status, reason=reason, cards_created=created, cost_usd=usage.cost
     )

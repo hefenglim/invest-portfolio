@@ -26,6 +26,7 @@ from portfolio_dash.portfolio.results import CombinedView
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
+from portfolio_dash.shared.money import usd_display
 from portfolio_dash.strategy.rules_config import AlertRules, get_alert_rules
 
 Severity = Literal["risk", "warn", "info"]
@@ -149,11 +150,6 @@ class TargetLevels(BaseModel):
 def _pct(x: Decimal) -> str:
     """A ratio as a display percentage: 0.7528455… → ``75.3%`` (display only)."""
     return f"{(x * Decimal('100')).quantize(Decimal('0.1'))}%"
-
-
-def _usd(x: Decimal) -> str:
-    """A USD amount for display: ``$1.50`` (2 dp, display only)."""
-    return f"${x.quantize(Decimal('0.01'))}"
 
 
 def _pp(x: Decimal) -> str:
@@ -360,7 +356,11 @@ def compute_alerts_from(
             # (tests/contract/test_def076_alert_titles_use_rule_vocabulary.py).
             id="quota_low", sev=sev, rule="quota_low", title="AI 額度偏低",
             scope="portfolio",
-            detail=f"剩餘額度 {_usd(quota_remaining)}＜警戒值 {_usd(quota_threshold)}",
+            # usd_display, the one USD formatter (owner 2026-09-30, the verifier's R11 note):
+            # a local `_usd` rounded half-even, had no thousands separator and printed
+            # 「$-0.00」 where the gate, the pipeline node and the budget refusal print 「$0.00」.
+            detail=(f"剩餘額度 {usd_display(quota_remaining)}＜警戒值 "
+                    f"{usd_display(quota_threshold)}"),
             # I-15: straight to 設定 › AI 模型 (the quota lives there). A bare "/settings" landed
             # on the default tab, 帳戶與費率 — the DEF-038 class, reached from the backend.
             href="/settings#llm"))

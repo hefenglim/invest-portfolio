@@ -245,6 +245,9 @@ def list_llm_requests(
             "tokens_out": r["output_tokens"],
             "cache_tokens": (r["cache_tokens"] or 0) if "cache_tokens" in keys_probe else 0,
             "cost_usd": decimal_str(Decimal(r["cost"] or "0")),
+            # The provider sent no usage; tokens and cost are a local estimate (估算).
+            "estimated": bool(r["usage_estimated"]) if "usage_estimated" in keys_probe
+            else False,
         }
         for r in rows
     ]
@@ -452,23 +455,26 @@ def test_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
         latency_ms = int((time.monotonic() - started) * 1000)
         return {"ok": False, "latency_ms": latency_ms, "error_detail": _ping_failure(exc)}
     latency_ms = int((time.monotonic() - started) * 1000)
-    content = (resp.choices[0].message.content or "")[:120]
-    usage = getattr(resp, "usage", None)
-    if usage is not None:  # honest accounting: a real test call costs tokens
-        pricing = llm.ModelPricing(
-            model=model.model_name,
-            input_price_per_mtok=model.input_price_per_mtok,
-            output_price_per_mtok=model.output_price_per_mtok,
-        )
-        llm.log_usage(
-            conn,
-            model=model.model_name,
-            agent="llm_settings_test",
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
-            cost=llm.cost_of(pricing, usage.prompt_tokens, usage.completion_tokens),
-        )
-    return {"ok": True, "latency_ms": latency_ms, "reply_snippet": content}
+    reply = resp.choices[0].message.content or ""
+    # Honest accounting: a real test call costs tokens — also when the provider sends no
+    # usage block, which ``metered_usage`` estimates instead of booking it as free.
+    metered = llm.metered_usage("ping", reply, getattr(resp, "usage", None))
+    pricing = llm.ModelPricing(
+        model=model.model_name,
+        input_price_per_mtok=model.input_price_per_mtok,
+        output_price_per_mtok=model.output_price_per_mtok,
+    )
+    llm.log_usage(
+        conn,
+        model=model.model_name,
+        agent="llm_settings_test",
+        input_tokens=metered.tokens_in,
+        output_tokens=metered.tokens_out,
+        cost=llm.cost_of(pricing, metered.tokens_in, metered.tokens_out),
+        cache_tokens=metered.cache_tokens,
+        estimated=metered.estimated,
+    )
+    return {"ok": True, "latency_ms": latency_ms, "reply_snippet": reply[:120]}
 
 
 class TopupBody(BaseModel):

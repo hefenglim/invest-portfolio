@@ -121,3 +121,19 @@ narrator, not a calculator.
 - Bound context: pass a compact computed summary, not raw transaction history or
   full article bodies — extract/trim first.
 - Log token usage per run for cost visibility.
+- **`llm_usage` is the one account of spend, and a call is never booked as free** (owner,
+  2026-09-30 — the verifier's R10 observation ④). `shared/llm.py::log_usage` is its only
+  writer, and every seam that books a call reads the provider's counts through
+  `metered_usage`: a reply with no usage block (gemini via OpenRouter, cut off mid-string —
+  20 of 1,113 demo rows read 0 tokens / $0) is counted locally with LiteLLM's bundled
+  tokenizer and the row is marked `usage_estimated` (the request ledger prints 「估算」). Both
+  counts at zero means "not reported" — a call always has prompt tokens.
+  `tests/shared/test_unreported_usage_is_estimated.py` finds the seams by scan.
+- **A run's recorded cost is the sum of the usage rows it wrote** (owner, 2026-09-30 — R10
+  observation ③). Every door that runs a job opens `llm.usage_tally()` around the work and
+  closes the `job_runs` row with its cost, calls and tokens; NULL means the run made no AI
+  call. The innermost open tally counts, so an insight run started inside `alert_scan` is
+  booked once, on its own row. Never re-derive a run's spend from agents and time windows (the
+  status popover did, while the history printed —), and never add up what a run PRODUCED: a
+  retry after a broken reply and a primary model that failed before the fallback answered are
+  paid for. `tests/scheduler/test_run_records_its_spend.py` scans every run closer.

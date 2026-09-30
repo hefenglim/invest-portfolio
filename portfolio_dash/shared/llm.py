@@ -5,9 +5,12 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litellm
 from litellm import exceptions as litellm_errors
@@ -85,16 +88,21 @@ __all__ = [
     "LLMError",
     "LLMRole",
     "LLMUnavailable",
+    "MeteredUsage",
     "ModelPricing",
     "StructuredCompletion",
     "TextCompletion",
+    "UsageTally",
     "complete_structured",
     "complete_structured_meta",
     "complete_text",
     "cost_of",
+    "estimate_tokens",
     "is_transient",
     "log_usage",
+    "metered_usage",
     "provider_failure_zh",
+    "usage_tally",
 ]
 
 
@@ -133,6 +141,100 @@ def cached_tokens_of(usage: object) -> int:
         return 0
 
 
+class MeteredUsage(NamedTuple):
+    """The token counts a call is billed on, and whether the provider reported them."""
+
+    tokens_in: int
+    tokens_out: int
+    cache_tokens: int
+    estimated: bool
+
+
+def _reported_tokens(usage: object, name: str) -> int:
+    try:
+        return int(getattr(usage, name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def estimate_tokens(text: str) -> int:
+    """A LOCAL token count of *text* — LiteLLM's default tokenizer, which ships with it.
+
+    Deliberately not the model's own tokenizer: for some model families LiteLLM fetches one
+    from the network at call time, and an estimate must never make a request of its own.
+    Anything unexpected falls back to one token per character (an upper bound for the CJK
+    text these prompts are mostly made of); an estimate must never break the call it is for.
+    """
+    if not text:
+        return 0
+    try:
+        return int(litellm.token_counter(text=text))
+    except Exception:  # noqa: BLE001 — see the docstring
+        return len(text)
+
+
+def metered_usage(prompt_text: str, content: str, usage: object) -> MeteredUsage:
+    """What a reply cost in tokens — the provider's numbers, or an estimate when it sent none.
+
+    Owner ruling 2026-09-30 (the verifier's R10 observation ④): gemini-2.5-flash-lite via
+    OpenRouter returns a reply cut off mid-string (as short as 12 characters) with NO usage
+    block; LiteLLM fills in zeros and every one of those calls was booked 0 tokens / $0 —
+    20 of 1,113 demo rows, 18 of them a failed parse — so the quota, the per-agent totals
+    and the run costs counted a paid call as free. A call always has prompt tokens, so both
+    counts at zero means "not reported", never "free": the prompt and the reply are counted
+    locally (:func:`estimate_tokens`) and the row is marked ``usage_estimated``.
+    """
+    tokens_in = _reported_tokens(usage, "prompt_tokens")
+    tokens_out = _reported_tokens(usage, "completion_tokens")
+    if tokens_in > 0 or tokens_out > 0:
+        return MeteredUsage(tokens_in, tokens_out, cached_tokens_of(usage), estimated=False)
+    return MeteredUsage(
+        estimate_tokens(prompt_text), estimate_tokens(content), 0, estimated=True
+    )
+
+
+@dataclass
+class UsageTally:
+    """Every ``llm_usage`` row written while this tally was the active one.
+
+    Owner ruling 2026-09-30 (the verifier's R10 observation ③): a run's recorded cost must be
+    what the run spent. ``evaluate_insights`` #212 spent $0.0021532 and its ``job_runs`` row
+    said nothing — static jobs' spend was only ever re-derived at read time, by an agent +
+    time-window guess, for one popover — and an insight run added up the cards it PRODUCED,
+    so a retry after a broken reply, or a primary model that failed before the fallback
+    answered, was paid for and left out. A tally is opened around a run's work
+    (:func:`usage_tally`) and :func:`log_usage` — the one writer of ``llm_usage`` — adds
+    every row to it, so the run's total is by construction the sum of its usage rows.
+    """
+
+    calls: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost: Decimal = field(default_factory=lambda: Decimal("0"))
+    estimated: int = 0  # calls among ``calls`` whose usage the provider did not report
+
+
+_ACTIVE_TALLY: ContextVar[UsageTally | None] = ContextVar("llm_usage_tally", default=None)
+
+
+@contextmanager
+def usage_tally() -> Iterator[UsageTally]:
+    """Count this block's LLM usage. The innermost open tally is the one that counts.
+
+    Innermost only, on purpose: an insight run started from inside another job (``alert_scan``
+    dispatching its on_alert task) writes its own ``job_runs`` row with its own total, and
+    counting it again on the job that started it would book one spend on two rows. A context
+    variable, not a global: the scheduler, a manual door's worker thread and a request can
+    each be inside a run at once, and a new thread starts with no tally at all.
+    """
+    tally = UsageTally()
+    token = _ACTIVE_TALLY.set(tally)
+    try:
+        yield tally
+    finally:
+        _ACTIVE_TALLY.reset(token)
+
+
 def log_usage(
     conn: sqlite3.Connection,
     *,
@@ -142,22 +244,31 @@ def log_usage(
     output_tokens: int,
     cost: Decimal,
     cache_tokens: int = 0,
+    estimated: bool = False,
 ) -> int:
     """Append one row to the ``llm_usage`` table, commit, and return its row id.
 
     The id is returned so a failure capture (:mod:`shared.llm_fail_log`) can point at the
     call it was billed for: a failed structured call is logged HERE before it is parsed,
     so every captured failure has a usage row and the two reconcile. Callers that do not
-    need the link ignore the value.
+    need the link ignore the value. ``estimated`` marks counts the provider did not report
+    (:func:`metered_usage`); the row is also added to the active :class:`UsageTally`.
     """
     cur = conn.execute(
         "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost, "
-        "cache_tokens) VALUES (?,?,?,?,?,?,?)",
+        "cache_tokens, usage_estimated) VALUES (?,?,?,?,?,?,?,?)",
         (app_now().isoformat(), model, agent, input_tokens, output_tokens, str(cost),
-         cache_tokens),
+         cache_tokens, 1 if estimated else 0),
     )
     conn.commit()
     usage_id = int(cur.lastrowid or 0)
+    tally = _ACTIVE_TALLY.get()
+    if tally is not None:
+        tally.calls += 1
+        tally.tokens_in += input_tokens
+        tally.tokens_out += output_tokens
+        tally.cost += cost
+        tally.estimated += 1 if estimated else 0
     # Structured log of the LLM call (spec 19.4): one point covers both call paths
     # (complete_structured + complete_text) — same values written to the DB row, cost as
     # its canonical string. Logging only; no LLM behaviour or numbers change.
@@ -169,6 +280,7 @@ def log_usage(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost": str(cost),
+            "usage_estimated": estimated,
         },
     )
     return usage_id
@@ -443,6 +555,7 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     model_name: str = ""
     usage_id: int | None = None
     failed_before: list[CandidateFailure] = []
+    usage_estimated: bool = False  # the provider sent no usage; tokens are a local count
 
 
 def _parse_outcome(exc: Exception) -> str:
@@ -512,8 +625,6 @@ def _complete_with_meta[T: BaseModel](
         # as an HTTP 500 instead of the intended 503 degrade (found 2026-08-28).
         try:
             content = resp.choices[0].message.content or ""
-            usage = resp.usage
-            tokens_in, tokens_out = usage.prompt_tokens, usage.completion_tokens
         except (AttributeError, IndexError, KeyError, TypeError) as exc:
             fail_log.record(
                 conn, agent=agent, outcome="provider_error", model=model.model_name,
@@ -523,6 +634,9 @@ def _complete_with_meta[T: BaseModel](
             )
             raise LLMUnavailable("供應商回應格式異常") from exc
 
+        # A reply with no usage block is a reply the provider did not meter, not a free one.
+        metered = metered_usage(prompt_text, content, getattr(resp, "usage", None))
+        tokens_in, tokens_out = metered.tokens_in, metered.tokens_out
         cost = cost_of(
             ModelPricing(
                 model=model.model_name,
@@ -539,7 +653,8 @@ def _complete_with_meta[T: BaseModel](
             input_tokens=tokens_in,
             output_tokens=tokens_out,
             cost=cost,
-            cache_tokens=cached_tokens_of(usage),
+            cache_tokens=metered.cache_tokens,
+            estimated=metered.estimated,
         )
         try:
             parsed = schema.model_validate_json(content)
@@ -569,6 +684,7 @@ def _complete_with_meta[T: BaseModel](
             value=parsed, model=model.model_alias, cost=cost,
             tokens_in=tokens_in, tokens_out=tokens_out,
             model_name=model.model_name, usage_id=usage_id,
+            usage_estimated=metered.estimated,
         )
     raise LLMUnavailable(_parse_failures_zh(parse_failures))
 
@@ -684,6 +800,7 @@ class TextCompletion(BaseModel):
     tokens_in: int
     tokens_out: int
     cost: Decimal
+    usage_estimated: bool = False  # the provider sent no usage; tokens are a local count
 
 
 def _text_with(
@@ -712,7 +829,6 @@ def _text_with(
     # must degrade as 503, not escape as a 500.
     try:
         content = resp.choices[0].message.content or ""
-        usage = resp.usage
     except (AttributeError, IndexError, KeyError, TypeError) as exc:
         fail_log.record(
             conn, agent=agent, outcome="provider_error", model=model.model_name,
@@ -721,30 +837,33 @@ def _text_with(
         )
         raise LLMUnavailable("供應商回應格式異常") from exc
 
+    metered = metered_usage(prompt_text, content, getattr(resp, "usage", None))
     cost = cost_of(
         ModelPricing(
             model=model.model_name,
             input_price_per_mtok=model.input_price_per_mtok,
             output_price_per_mtok=model.output_price_per_mtok,
         ),
-        usage.prompt_tokens,
-        usage.completion_tokens,
+        metered.tokens_in,
+        metered.tokens_out,
     )
     log_usage(
         conn,
         model=model.model_name,
         agent=agent,
-        input_tokens=usage.prompt_tokens,
-        output_tokens=usage.completion_tokens,
+        input_tokens=metered.tokens_in,
+        output_tokens=metered.tokens_out,
         cost=cost,
-        cache_tokens=cached_tokens_of(usage),
+        cache_tokens=metered.cache_tokens,
+        estimated=metered.estimated,
     )
     return TextCompletion(
         reply=content,
         model=model.model_alias,
-        tokens_in=usage.prompt_tokens,
-        tokens_out=usage.completion_tokens,
+        tokens_in=metered.tokens_in,
+        tokens_out=metered.tokens_out,
         cost=cost,
+        usage_estimated=metered.estimated,
     )
 
 

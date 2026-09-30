@@ -39,7 +39,7 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.scheduler.runtime import remove_job, reschedule_job
 from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.shared.wire import decimal_str, stored_decimal_str
 
 # Insight-type schedule bindings are Asia/Taipei by definition (spec 4.2 —
 # ``bind_insight_schedule``'s default); the live-trigger mount uses the same tz.
@@ -1031,7 +1031,7 @@ def _insight_run_row(row: sqlite3.Row) -> dict[str, Any]:
         "status": row["status"],
         "detail": row["detail"],
         "reason": row["reason"],
-        "cost_usd": row["cost_usd"],
+        "cost_usd": stored_decimal_str(row["cost_usd"]),  # canonical (a row can hold 9E-8)
     }
 
 

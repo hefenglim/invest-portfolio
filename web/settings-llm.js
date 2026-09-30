@@ -726,6 +726,16 @@
     td('num', f.num(r.tokens_out, 0));
     td('num', r.cache_tokens ? f.num(r.cache_tokens, 0) : '—');
     td('num', '$' + f.num(r.cost_usd, 4));
+    /* The provider sent no usage for this call (a reply cut off mid-way): the counts are a
+       local estimate, not a measured 0 — provenance, so the neutral 推導-style tag. */
+    if (r.estimated) {
+      const tag = document.createElement('span');
+      tag.className = 'badge badge-info-mini usage-est';
+      tag.textContent = '估算';
+      tag.title = '供應商未回報用量，輸入與輸出 token 依本機分詞估算';
+      tr.lastChild.appendChild(document.createTextNode(' '));
+      tr.lastChild.appendChild(tag);
+    }
     return tr;
   }
 
