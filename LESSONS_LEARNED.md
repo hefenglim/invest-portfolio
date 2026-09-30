@@ -2038,3 +2038,28 @@ census (`_EXPECTED_HTML_TABLES`) no agent had run, because each ran only its tar
 4. **Settle before you sum.** A value of record that is a product (quantity × price) needs the
    same quantization at every reader, or the cash pool, the cost basis and the preview disagree
    by fractions of a cent; one helper plus an AST scan of every product makes that a rule.
+
+## 2026-10-01 — item 8: a card names each code by one of its names
+
+**What happened.** Three things were caught by the checks, not by eye. (a) The first naming
+table listed the whole registry, and the per-market isolation guard failed: the TW prompt now
+carried AAPL. (b) The first name check, measured on the demo's 224 real cards, flagged unit
+words (USD), generic referents (標的, 美股) and date notes in brackets. It shipped only after the
+corpus read 27 pairings on 10 cards, each one checked by hand. (c) A subagent found the alias
+rule enforced in one direction only: an alias equal to another instrument's name was refused,
+but a NAME equal to another instrument's alias was accepted, so 「長榮」 could still mean 2603
+and 2618.
+
+**Rules.**
+1. **Text appended to a prompt inherits the prompt's scope.** A table built from the registry
+   must be cut to the codes the prompt already mentions, or it leaks exactly what the
+   per-market guard exists to keep out.
+2. **Measure a free-text validator on the real corpus before wiring it to a gate.** Every false
+   alarm on 224 stored cards becomes a dropped card at generation time (寧缺勿錯 costs
+   something only when the check is wrong).
+3. **A uniqueness rule between two sets has two directions.** "An alias may not be another
+   instrument's name" needs its mirror, "a name may not be another instrument's alias". Test
+   both doors and the rename path (a rename onto its own alias drops that alias from the list).
+4. **Write regex character classes for CJK and full-width punctuation as `\u` escapes.** They
+   are patterns, not copy; the zh punctuation guard reads every string literal, and a literal
+   「（」 inside a pattern reads to it as a mixed-width sentence.

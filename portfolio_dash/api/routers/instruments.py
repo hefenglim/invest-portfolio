@@ -16,6 +16,9 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import (
     QuickRegisterError,
+    auto_aliases,
+    checked_aliases,
+    checked_name,
     gap_backfill,
     last_price_date,
     lookup_instrument,
@@ -28,6 +31,7 @@ from portfolio_dash.data_ingestion.store import (
     get_instrument,
     has_ledger_history,
     list_instruments,
+    set_instrument_aliases,
     set_instrument_archived,
     upsert_instrument,
 )
@@ -41,6 +45,7 @@ from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_names import AliasError, normalize_aliases
 from portfolio_dash.shared.llm import complete_structured
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.sectors import (
@@ -110,7 +115,10 @@ def _element(conn: sqlite3.Connection, inst: Instrument,
         if len(hist) >= 2 and hist[-2].value != 0:
             chg_pct = decimal_str((hist[-1].value - hist[-2].value) / hist[-2].value)
     return {
-        "symbol": inst.symbol, "name": inst.name, "market": inst.market.value,
+        "symbol": inst.symbol, "name": inst.name,
+        # Owner 2026-09-30, item 8: the other names a card may use for this instrument.
+        "aliases": list(inst.aliases),
+        "market": inst.market.value,
         "board": _board_wire(conn, inst), "sector": inst.sector,
         "industry": inst.industry,  # R6: GICS industry passthrough (null until next-wave fill)
         "ccy": inst.quote_ccy.value, "held": _held(conn, inst.symbol, now, actions=actions),
@@ -297,6 +305,12 @@ class AiInstrumentResolveReply(BaseModel):
     confidence: str = "low"
     candidates: list[AiResolveCandidate] = Field(default_factory=list)
     not_found: bool = False
+    # Owner 2026-09-30, item 8: the common (Chinese) names this instrument goes by — 微軟 for
+    # MSFT, 大立光 for 3008. Advisory like everything else here: the endpoint normalizes them,
+    # drops any another instrument already answers to, and serves them only on a RESOLVED
+    # (confident + provider-verified) reply, so an uncertain guess never teaches the registry
+    # a name.
+    aliases: list[str] = Field(default_factory=list)
 
 
 @router.post("/instruments/ai-resolve")
@@ -339,6 +353,7 @@ def ai_resolve(
                     "status": "resolved",
                     "symbol": existing.symbol,
                     "name": existing.name,
+                    "aliases": list(existing.aliases),
                     "sector": existing.sector,
                     "industry": existing.industry,
                     "confidence": "high",
@@ -395,10 +410,15 @@ def ai_resolve(
             provider_name = lk.name
 
         if verified and confidence == "high":
+            resolved_name = provider_name or reply.name.strip()  # prefer the provider's name
             result = {
                 "status": "resolved",
                 "symbol": primary_symbol,
-                "name": provider_name or reply.name.strip(),  # prefer the provider's name
+                "name": resolved_name,
+                # item 8: the dialog carries these into its 別名 field and the register door
+                # stores them; unusable / taken ones are dropped here, silently.
+                "aliases": auto_aliases(conn, symbol=primary_symbol, name=resolved_name,
+                                        candidates=reply.aliases),
                 "sector": sector,
                 "industry": industry,
                 "confidence": "high",
@@ -453,6 +473,9 @@ class RegisterBody(BaseModel):
     target_low: Decimal | None = None
     target_high: Decimal | None = None
     is_etf: bool = False
+    # Owner 2026-09-30, item 8: the dialog's 別名 field (pre-filled from the lookup / AI
+    # resolve). Checked like the edit door's; an empty list stores only what auto-fill finds.
+    aliases: list[str] = Field(default_factory=list)
 
 
 class UpdateBody(BaseModel):
@@ -463,6 +486,21 @@ class UpdateBody(BaseModel):
     target_low: Decimal | None = None
     target_high: Decimal | None = None
     is_etf: bool | None = None
+    # Owner 2026-09-30, item 8: None (or omitted) = leave the stored aliases unchanged;
+    # [] = clear them; a list = replace them (normalized, refused whole on any conflict).
+    aliases: list[str] | None = None
+
+
+def _aliases_refused(exc: AliasError) -> JSONResponse:
+    """The 422 both owner-facing alias doors answer with — the sentence names the alias."""
+    return JSONResponse(status_code=422, content=error_body(
+        "validation_error", str(exc), field="aliases"))
+
+
+def _name_refused(exc: AliasError) -> JSONResponse:
+    """The 422 for a typed name that is another instrument's alias (item 8)."""
+    return JSONResponse(status_code=422, content=error_body(
+        "validation_error", str(exc), field="name"))
 
 
 def _apply_extras(
@@ -522,12 +560,26 @@ def register(
     # via UpdateBody + exclude_unset, is the path that can explicitly clear it).
     industry = (body.industry or "").strip() or None
     existing = get_instrument(conn, sym)
+    # Item 8: checked BEFORE anything is written, so a refused list registers nothing.
+    try:
+        checked_name(conn, symbol=sym, name=body.name)
+    except AliasError as exc:
+        return _name_refused(exc)
+    try:
+        aliases = checked_aliases(conn, symbol=sym, raw=body.aliases,
+                                  name=body.name.strip() or (existing.name if existing else ""))
+    except AliasError as exc:
+        return _aliases_refused(exc)
     if existing is not None and existing.archived:
         saved = restore_archived(
             conn, existing, name=body.name, sector=body.sector,
             board=body.board or None, quote_ccy=body.quote_ccy,
             target_low=body.target_low, is_etf=body.is_etf,
         )
+        if aliases:  # blank keeps the archived row's list, like every other restore field
+            set_instrument_aliases(conn, sym, normalize_aliases(
+                aliases, symbol=sym, name=saved.name))
+            saved = get_instrument(conn, sym) or saved
         # FU-D28 (target_high) + R6 (industry): the onboarding service carries neither.
         saved = _apply_extras(conn, saved, target_high=body.target_high, industry=industry)
         last_date = last_price_date(conn, sym)  # read BEFORE the backfill runs
@@ -541,7 +593,7 @@ def register(
             conn, symbol=body.symbol, market=body.market, now=now, name=body.name,
             sector=body.sector, board=body.board or None, quote_ccy=body.quote_ccy,
             target_low=body.target_low, is_etf=body.is_etf, force=True,
-            backfill_history=False,
+            backfill_history=False, aliases=aliases,
         )
     except QuickRegisterError as exc:
         return JSONResponse(status_code=exc.status,
@@ -619,6 +671,28 @@ def update(
     # null = remove the alert) — the old exclude_none silently dropped it, so
     # clearing a target price never worked.
     fields = body.model_dump(exclude_unset=True)
+    # Item 8 (owner 2026-09-30): aliases have ONE writer (``set_instrument_aliases``), never
+    # the upsert — so they leave ``fields`` here and are checked against the name the row is
+    # about to carry, BEFORE anything is written (a refused list changes nothing at all).
+    raw_aliases = fields.pop("aliases", None)
+    aliases: list[str] | None = None
+    if fields.get("name") is not None and fields["name"].strip() != existing.name:
+        try:
+            checked_name(conn, symbol=symbol, name=fields["name"])
+        except AliasError as exc:
+            return _name_refused(exc)
+    if raw_aliases is not None:
+        new_name = fields["name"] if fields.get("name") is not None else existing.name
+        try:
+            aliases = checked_aliases(conn, symbol=symbol, name=new_name, raw=raw_aliases)
+        except AliasError as exc:
+            return _aliases_refused(exc)
+    elif fields.get("name") is not None and existing.aliases:
+        # A rename onto one of its own aliases: the alias is now the name, so the list drops
+        # it — one name is kept in one place.
+        kept = normalize_aliases(existing.aliases, symbol=symbol, name=fields["name"])
+        if kept != existing.aliases:
+            aliases = kept
     if fields.get("is_etf") is not None:
         # AI-D40: a human just answered the question, so the row stops being unanswered.
         # Without this the 待確認 issue would keep firing on every sell AFTER the owner
@@ -634,6 +708,8 @@ def update(
         conn.execute("UPDATE instruments SET board_status='resolved' WHERE symbol=?",
                      (symbol,))
         conn.commit()
+    if aliases is not None:
+        set_instrument_aliases(conn, symbol, aliases)
     saved = get_instrument(conn, symbol)
     assert saved is not None
     return _element(conn, saved, now, actions=load_action_index(conn))

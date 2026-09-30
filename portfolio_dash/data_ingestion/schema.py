@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS instruments (
     archived INTEGER NOT NULL DEFAULT 0,
     target_high TEXT,
     industry TEXT,
-    target_set_at TEXT
+    target_set_at TEXT,
+    aliases TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +193,10 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # industry (R6, 2026-07-19): nullable GICS industry, filled by the next wave's AI service.
     # Backend plumbing only this wave; additive, so an existing DB migrates in untouched.
     _add_column_if_missing(conn, "instruments", "industry", "TEXT")
+    # aliases (owner 2026-09-30, item 8): a JSON list of the other names an instrument goes by
+    # (大立光 for LARGAN). Written only by store.set_instrument_aliases; additive, so an
+    # existing DB migrates in with every instrument at [] and no figure changes.
+    _add_column_if_missing(conn, "instruments", "aliases", "TEXT NOT NULL DEFAULT '[]'")
     # target_set_at (D44, 2026-08-15): the ISO date the target band above was last CHANGED.
     # Owned end-to-end by store.upsert_instrument, which compares against the stored row —
     # so it cannot drift from the values it dates. It exists to make one question answerable:

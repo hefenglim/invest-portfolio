@@ -70,6 +70,20 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, instrument aliases (post-closure item 8, 2026-09-30) ---------------------
+    Feature(
+        version="0.1.29",
+        id="instrument-aliases",
+        title="標的可以登錄別名了：卡片用中文名稱提到英文登錄的標的也對得上",
+        desc="觀察清單的「編輯」多了「別名」欄：一檔標的除了登錄名稱，還可以有其他名稱（例如 "
+        "3008 登錄為 LARGAN，別名是大立光），用逗號或頓號分隔，清單上會在名稱旁顯示「亦稱」，"
+        "搜尋也找得到。AI 洞察卡在代號旁寫的名稱，必須是登錄名稱或別名之一。新加入的台股"
+        "會自動帶入交易所的中文簡稱，經 AI 辨識加入的標的也會帶入常見的中文名稱；同一個名稱不能"
+        "同時屬於兩檔標的",
+        href="instruments.html",
+        area="觀察清單 → 編輯 → 別名",
+        target="#inst-body",
+    ),
     # --- v0.1.29, the ledger audit trail's reader (post-closure item 10, 2026-09-30) ------
     Feature(
         version="0.1.29",

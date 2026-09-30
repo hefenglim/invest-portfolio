@@ -101,6 +101,18 @@ narrator, not a calculator.
   executable subset: `tests/shared/test_def083_portable_schema.py` finds every structured
   call site by AST and checks each schema, because no fake provider validates a schema — the
   only thing that ever did was the real one.
+- **A card names each registered code by one of its names, or it is not stored** (owner
+  2026-09-30, item 8: 「新的名稱代號確保正確不會再錯誤」, 「登錄名稱＋中文別名」). The registry
+  holds a `name` and `aliases` per instrument (3008 LARGAN / 大立光); `generate` appends the
+  names of the codes its prompt mentions (`INSIGHT_NAMING_NOTE`, scoped to the prompt so a
+  per-market card still sees no other market's symbols), checks the reply with
+  `llm_insight/name_check.py` (「名稱 (代號)」, 「代號 (名稱)」, and a bare code followed by
+  ANOTHER instrument's name), asks once more with the wrong pairings named
+  (`INSIGHT_NAMING_RETRY`), and does not store a card that still misnames — the run reads
+  「N 張因名稱與代號不符未存」 (partial, reason `name_mismatch`). Before the rule the demo held 27
+  wrong pairings on 10 of 224 cards (聯詠 (3008), 陽明 (2603)…); `scripts/fix_card_names.py`
+  corrects stored cards (the name is replaced, the code kept; an extent it cannot bound is
+  fixed only for a reviewed `--wrong-name`). `tests/llm_insight/test_item8_card_names_match_their_codes.py`.
 - **A failover is reported, not swallowed.** `StructuredCompletion` carries `model_name`,
   `usage_id` and `failed_before` (every candidate that failed first, with its zh reason). The
   AI door turns it into `meta.fallback_note` — an owner who picked a model by hand is told it

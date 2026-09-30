@@ -37,10 +37,35 @@ class TpexProvider(ProviderBase):
                 )
         return None
 
-    def fetch_quote_latest(self, instruments: list[InstrumentRef]) -> list[PriceRow]:
+    def _parse_name(self, rows: list[dict[str, Any]], *, instrument: str) -> str | None:
+        """The exchange's short name (``CompanyName``, e.g. 群聯) for *instrument*, or None.
+
+        Owner 2026-09-30, item 8: registration keeps it as an alias, read from the SAME list
+        the board probe already fetched — never a second request.
+        """
+        for row in rows:
+            if row.get("SecuritiesCompanyCode") == instrument:
+                name = row.get("CompanyName")
+                if not isinstance(name, str):
+                    return None
+                return name.strip() or None
+        return None
+
+    def _fetch(self) -> list[dict[str, Any]]:
         resp = requests.get(_URL, timeout=15)
         resp.raise_for_status()
-        rows = resp.json()
+        rows: list[dict[str, Any]] = resp.json()
+        return rows
+
+    def fetch_quote_named(self, instrument: InstrumentRef) -> tuple[PriceRow | None, str | None]:
+        """ONE request → the latest close and the exchange's short name (board probe)."""
+        rows = self._fetch()
+        row = self._parse(rows, instrument=instrument.symbol)
+        return row, (self._parse_name(rows, instrument=instrument.symbol)
+                     if row is not None else None)
+
+    def fetch_quote_latest(self, instruments: list[InstrumentRef]) -> list[PriceRow]:
+        rows = self._fetch()
         out: list[PriceRow] = []
         for ref in instruments:
             parsed = self._parse(rows, instrument=ref.symbol)

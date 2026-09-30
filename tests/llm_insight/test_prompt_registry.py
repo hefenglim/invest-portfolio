@@ -52,6 +52,7 @@ EXPECTED_CALL_SITES: dict[str, list[str] | str] = {
         "insight_strategy",
         "insight_calibration",
         "insight_on_alert_note",
+        "insight_naming_note",   # item 8 (2026-09-30): the naming guardrail + its retry
     ],
     "llm_insight/master.py": ["master_score", "master_calibrate", "master_validate"],
     "api/digest_service.py": ["digest_note"],
@@ -149,6 +150,7 @@ def test_code_owned_versions_pin_the_module_version_tags() -> None:
     version_attr: dict[str, str] = {
         "AI_INPUT_PROMPT_BODY": "AI_INPUT_PROMPT_VERSION",
         "ON_ALERT_NOTE": "ON_ALERT_NOTE_VERSION",
+        "INSIGHT_NAMING_NOTE": "INSIGHT_NAMING_NOTE_VERSION",
         "MASTER_SCORE_SYSTEM": "MASTER_SCORE_PROMPT_VERSION",
         "MASTER_CALIBRATION_SYSTEM": "MASTER_CALIBRATION_PROMPT_VERSION",
         "MASTER_VALIDATE_SYSTEM": "MASTER_VALIDATE_PROMPT_VERSION",

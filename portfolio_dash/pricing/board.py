@@ -15,25 +15,39 @@ from portfolio_dash.shared.enums import Market
 
 
 class _QuoteProber(Protocol):
-    def fetch_quote_latest(self, instruments: list[InstrumentRef]) -> list[PriceRow]: ...
+    def fetch_quote_named(
+        self, instrument: InstrumentRef
+    ) -> tuple[PriceRow | None, str | None]: ...
 
 
-def _has(provider: _QuoteProber, symbol: str) -> bool:
+def _listing(provider: _QuoteProber, symbol: str) -> tuple[bool, str | None]:
+    """(listed on this board, the exchange's short name when it gave one)."""
     ref = InstrumentRef(symbol=symbol, market=Market.TW, board="")
     try:
-        return bool(provider.fetch_quote_latest([ref]))
+        row, name = provider.fetch_quote_named(ref)
     except Exception:  # noqa: BLE001 — network/HTTP error -> treat as "not found here"
-        return False
+        return False, None
+    return row is not None, name
 
 
 def probe_tw_board(
-    symbol: str, *, twse: _QuoteProber | None = None, tpex: _QuoteProber | None = None
+    symbol: str, *, twse: _QuoteProber | None = None, tpex: _QuoteProber | None = None,
+    names: dict[str, str] | None = None,
 ) -> str | None:
-    """Return ``"TWSE"`` / ``"TPEx"`` for a TW *symbol*, or ``None`` if neither lists it."""
+    """Return ``"TWSE"`` / ``"TPEx"`` for a TW *symbol*, or ``None`` if neither lists it.
+
+    ``names`` (owner 2026-09-30, item 8) is an optional sink: when given, the board that
+    lists *symbol* also records the exchange's own short name (台積電 / 群聯) under
+    ``names[symbol]`` — taken from the SAME response the probe needed anyway, so the
+    registration door can keep it as an alias without a second request. Absent a name the
+    sink is left untouched; the probe's answer never depends on it.
+    """
     twse = twse if twse is not None else TwseProvider()
     tpex = tpex if tpex is not None else TpexProvider()
-    if _has(twse, symbol):
-        return "TWSE"
-    if _has(tpex, symbol):
-        return "TPEx"
+    for board, provider in (("TWSE", twse), ("TPEx", tpex)):
+        listed, name = _listing(provider, symbol)
+        if listed:
+            if names is not None and name:
+                names[symbol] = name
+            return board
     return None

@@ -143,7 +143,10 @@ Canonical tables (names indicative; finalize in the spec phase):
 
 - `accounts` — first-class entity: broker, settlement currency, funding currency,
   fee-rule-set ref, dividend model (see `domain-ledger.md`).
-- `instruments` — symbol, market (`US` / `TW` / `MY`), quote currency, sector, name.
+- `instruments` — symbol, market (`US` / `TW` / `MY`), quote currency, sector, name, and
+  `aliases` (a JSON list of the other names a card may use — 大立光 for 3008 LARGAN; one
+  writer, `store.set_instrument_aliases`; one name belongs to one instrument — item 8,
+  2026-09-30).
 - `transactions` — source of truth: account, instrument, side, quantity, price, fees,
   tax, trade date. **Append-only in spirit**; corrections are new rows or explicit
   edits, never silent mutation. Store a fee/tax/FX-rate **snapshot** per row so 重算

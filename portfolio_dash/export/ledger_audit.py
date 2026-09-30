@@ -112,6 +112,7 @@ FIELD_LABELS: dict[str, str] = {
     "archived": "已封存",
     "industry": "產業",
     "target_set_at": "目標帶設定日",
+    "aliases": "別名",  # item 8 (owner 2026-09-30)
 }
 
 #: Columns stored as Decimal TEXT — printed in the canonical fixed-point form.
@@ -198,6 +199,15 @@ def _display(table: str, field: str, value: object) -> str | None:
     text = _text(value)
     if field in _DECIMAL_FIELDS:
         return stored_decimal_str(text) or text
+    if field == "aliases":
+        # Stored as a JSON list; read as the names joined, the way the page lists them.
+        try:
+            items = json.loads(text)
+        except ValueError:
+            items = None
+        if isinstance(items, list):
+            return "、".join(str(a) for a in items) or "無"
+        return text
     if field == "side":
         return _SIDE_ZH.get(text.upper(), text)
     if field == "kind":

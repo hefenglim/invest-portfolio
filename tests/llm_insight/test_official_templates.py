@@ -14,7 +14,7 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 
 def test_library_version_is_official_v15() -> None:
-    assert ot.LIBRARY_VERSION == "official-v26 (2026-09-23)"
+    assert ot.LIBRARY_VERSION == "official-v27 (2026-10-01)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -113,7 +113,7 @@ def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
     # prompts. It lives in the registry (code-owned), carries the local-exchange-code rules +
     # the embedded GICS sector vocabulary + all reply-schema fields, and states that the real
     # lookup re-verifies (so the model claims no authority).
-    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v2"
+    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v3"
     body = ot.AI_INSTRUMENT_RESOLVE_PROMPT
     for placeholder in ("{query}", "{market}"):
         assert placeholder in body
@@ -187,7 +187,7 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
 
 def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v26 (2026-09-23)"
+    assert wire["library_version"] == "official-v27 (2026-10-01)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")

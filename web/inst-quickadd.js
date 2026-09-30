@@ -40,8 +40,13 @@
      onConfirm(result)  after 確認 registers
      onBuy(result)      after 記一筆買入 registers (the caller navigates to the manual pane)
    opts (EDIT — additive):
-     mode:'edit', symbol, market, name, sector, industry, board, is_etf, ccy,
+     mode:'edit', symbol, market, name, aliases, sector, industry, board, is_etf, ccy,
      target_low, target_high, onSaved(result)
+   別名 (owner 2026-09-30, item 8 「登錄名稱＋中文別名」): BOTH modes carry a 別名 field — the
+   other names a card may use for this instrument (大立光 for 3008 LARGAN). ADD pre-fills it
+   from the lookup (a TW symbol's exchange short name) and a RESOLVED AI reply, pristine-only
+   like every auto-fill; EDIT shows the stored list. Either way it is sent as a list (split on
+   , ， 、) and the server normalizes it, refusing a list another instrument's name is in.
    result = the POST /api/instruments (add) or PUT /api/instruments/{symbol} (edit) response
    element (+ restored / last_price_date when a soft-deleted symbol was RESTORED, add only).
 
@@ -57,6 +62,12 @@
     return n;
   };
   const MARKETS = [['TW', '台股'], ['US', '美股'], ['MY', '馬股']];
+  /* Item 8: the 別名 field's text ⇄ the wire's list. Splitting text is not money math — the
+     server still trims, de-duplicates and checks every alias. */
+  const ALIAS_SEP = /[,，、]/;
+  const parseAliases = (text) => String(text || '').split(ALIAS_SEP)
+    .map((t) => t.trim()).filter(Boolean);
+  const joinAliases = (list) => (Array.isArray(list) ? list.join('、') : '');
 
   /* ---- FU-D31 / R6 / Wave A1: shared canonical-sector field (used by BOTH modes of this
      dialog via window.pdSectorField). A <select> of the canonical GICS vocabulary (dual-text
@@ -276,6 +287,16 @@
     if (isEdit) nameIn.value = opts.name || '';
     body.appendChild(fld('名稱', nameIn));
 
+    /* Item 8 (owner 2026-09-30): 別名 — shown joined by 、, sent as a list. */
+    const aliasIn = el('input', 'input qa-aliases');
+    aliasIn.placeholder = '以逗號或頓號分隔（選填）';
+    aliasIn.spellcheck = false;
+    if (isEdit) aliasIn.value = joinAliases(opts.aliases);
+    const aliasField = fld('別名', aliasIn);
+    aliasField.appendChild(el('div', 'hint qa-alias-hint',
+      '卡片提到這檔標的時可用的其他名稱，例如 大立光、長榮'));
+    body.appendChild(aliasField);
+
     /* R6: optional GICS 產業細分 — AI-populated, editable, submitted on register/save. Declared
        before the sector field so its setIndustry closure can fill it. */
     const industryIn = el('input', 'input qa-industry');
@@ -381,6 +402,8 @@
     let sectorPristine = true;
     let etfPristine = true;
     let industryPristine = true;
+    let aliasPristine = true;
+    aliasIn.addEventListener('input', () => { aliasPristine = false; });
     nameIn.addEventListener('input', () => { namePristine = false; });
     sectorField.element.addEventListener('change', () => { sectorPristine = false; });
     sectorField.element.addEventListener('input', () => { sectorPristine = false; });
@@ -480,6 +503,7 @@
           if (namePristine) nameIn.value = '';
           if (sectorPristine) sectorField.setValue('');
           if (industryPristine) industryIn.value = '';
+          if (aliasPristine) aliasIn.value = '';
           /* AUTOMATIC unified AI resolve (R6-B): fire once per DISTINCT settled input — the
              observable union of the two spec triggers (code-format miss OR registry+provider
              miss both surface here as found:false). The form stays fully editable meanwhile.
@@ -519,6 +543,13 @@
            supplied name/sector — a sparse provider lookup (sector is blank for a brand-new
            symbol) must NOT overwrite them; fill only a field the AI left blank. */
         if (namePristine && r.name && !(wasAiResolve && nameIn.value)) nameIn.value = r.name;
+        if (aliasPristine) {
+          /* Item 8: the lookup's aliases (a TW symbol's exchange short name). After an AI fill
+             they are ADDED to the AI's names, never swapped in for them. */
+          const have = wasAiResolve ? parseAliases(aliasIn.value) : [];
+          (r.aliases || []).forEach((a) => { if (have.indexOf(a) < 0) have.push(a); });
+          aliasIn.value = joinAliases(have);
+        }
         if (sectorPristine && !(wasAiResolve && sectorField.value())) {
           sectorField.setValue(r.sector || '');
         }
@@ -554,6 +585,7 @@
       function applyResolved(resp) {
         symIn.value = (resp.symbol || '').trim().toUpperCase();
         if (namePristine && resp.name) nameIn.value = resp.name;
+        if (aliasPristine) aliasIn.value = joinAliases(resp.aliases);
         if (sectorPristine && resp.sector) sectorField.setValue(resp.sector);
         if (industryPristine && resp.industry) industryIn.value = resp.industry;
         markAiKey();  // A2: the filled state is now AI-resolved — a re-validation miss won't re-fire
@@ -635,6 +667,7 @@
           name: nameIn.value.trim(), sector: sectorField.value(),
           industry: industryIn.value.trim(),  // R6: optional GICS 產業細分
           is_etf: etfCb.checked,
+          aliases: parseAliases(aliasIn.value),  // item 8
         };
         /* Only a TW board rides through (US/MY resolve their board server-side). */
         if (mktSel.value === 'TW' && lookupState.board) reqBody.board = lookupState.board;
@@ -694,6 +727,7 @@
           name: nameIn.value.trim() || (opts.name || ''),
           sector: sectorField.value(),
           industry: industryIn.value.trim() || null,  // R6: '' clears (exclude_unset ⇒ set)
+          aliases: parseAliases(aliasIn.value),  // item 8: [] clears, the list replaces
           is_etf: etfCb.checked,
           target_low: rawLow === '' ? null : rawLow,
           target_high: rawHi === '' ? null : rawHi,

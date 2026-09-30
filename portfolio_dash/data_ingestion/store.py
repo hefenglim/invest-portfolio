@@ -590,14 +590,40 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         target_set_at=(
             date.fromisoformat(row["target_set_at"]) if row["target_set_at"] else None
         ),
+        aliases=_aliases_of(row),
     )
+
+
+def _aliases_of(row: sqlite3.Row) -> list[str]:
+    """The stored alias list; a missing column or unreadable text reads as none."""
+    if "aliases" not in row.keys() or not row["aliases"]:
+        return []
+    try:
+        value = json.loads(row["aliases"])
+    except ValueError:
+        return []
+    return [str(a) for a in value if isinstance(a, str) and a.strip()] if isinstance(
+        value, list) else []
+
+
+def set_instrument_aliases(conn: sqlite3.Connection, symbol: str, aliases: list[str]) -> None:
+    """Replace *symbol*'s alias list — the column's ONE writer (owner 2026-09-30, item 8).
+
+    Callers normalize and check first (``shared.instrument_names.normalize_aliases`` /
+    ``alias_conflicts``); this stores what it is given, in order, as a JSON list.
+    """
+    conn.execute(
+        "UPDATE instruments SET aliases = ? WHERE symbol = ?",
+        (json.dumps(list(aliases), ensure_ascii=False), symbol),
+    )
+    conn.commit()
 
 
 def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, etf_flag_unknown, archived, industry, target_set_at "
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases "
         "FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
@@ -611,7 +637,8 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     so no money figure is affected by archiving)."""
     rows = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, etf_flag_unknown, archived, industry, target_set_at FROM instruments"
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases "
+        "FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
 

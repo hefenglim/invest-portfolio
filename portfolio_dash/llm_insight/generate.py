@@ -31,13 +31,19 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from portfolio_dash.llm_insight import assemble, figure_check
+from portfolio_dash.llm_insight import assemble, figure_check, name_check
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import InsightCard
 from portfolio_dash.llm_insight.gating import GateContext, GateResult, evaluate_gates, skip_reasons
 from portfolio_dash.llm_insight.insights_store import HorizonBasis, InsightTrigger
+from portfolio_dash.llm_insight.official_templates import (
+    INSIGHT_NAMING_NOTE as _NAMING_NOTE,
+)
+from portfolio_dash.llm_insight.official_templates import (
+    INSIGHT_NAMING_RETRY as _NAMING_RETRY,
+)
 from portfolio_dash.llm_insight.official_templates import ON_ALERT_CONTEXT as _ON_ALERT_CONTEXT
 from portfolio_dash.llm_insight.official_templates import ON_ALERT_NOTE as _ON_ALERT_NOTE
 from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
@@ -331,6 +337,16 @@ def _stop_detail(exc: LLMError, created: int) -> str:
     return f"AI 呼叫失敗，本次停止（{kept}）：{str(exc)[:300]}"
 
 
+def _name_dropped_text(dropped: int) -> str:
+    """「；N 張因名稱與代號不符未存」 — cards the naming check refused twice (item 8)."""
+    return f"；{dropped} 張因名稱與代號不符未存" if dropped else ""
+
+
+def _card_text(card: InsightCard) -> str:
+    """Title, summary and body — every field a reader sees a name in."""
+    return f"{card.title}\n{card.summary}\n{card.body_md}"
+
+
 def _ok_detail(created: int, cache_hits: int) -> str:
     """「產生 N 張卡（M 張沿用當日快取）」 — a clean run's detail (it read 「ok」 until DEF-073)."""
     text = f"產生 {created} 張卡"
@@ -418,6 +434,11 @@ def _run_insight_type(
 
     remaining = inputs.budget_remaining
     created = 0
+    # Item 8 (owner 2026-09-30, 「新的名稱代號確保正確不會再錯誤」): every prompt carries the
+    # registry's names, and a reply that pairs a registered code with another name is asked
+    # for once more and, still wrong, not stored. Read once per run.
+    registry = name_check.registry_from_db(conn)
+    name_dropped = 0
     cache_hits = 0
     stopped_early = False
     stop_reason = ""
@@ -492,10 +513,24 @@ def _run_insight_type(
             cache_hits += 1
             continue  # cache hit — same-day identical inputs, no LLM, no duplicate row
 
+        # The names of the instruments THIS prompt mentions (never another market's).
+        table = name_check.naming_table(registry, within=prompt)
+        naming_note = _NAMING_NOTE.format(table=table) if table else ""
         try:
             completion = llm.complete_structured_meta(
-                prompt, InsightCard, agent=_AGENT, conn=conn
+                prompt + naming_note, InsightCard, agent=_AGENT, conn=conn
             )
+            wrong = name_check.mismatches(_card_text(completion.value), registry)
+            if wrong:
+                completion = llm.complete_structured_meta(
+                    prompt + naming_note
+                    + _NAMING_RETRY.format(lines=name_check.feedback_lines(wrong)),
+                    InsightCard, agent=_AGENT, conn=conn,
+                )
+                if name_check.mismatches(_card_text(completion.value), registry):
+                    name_dropped += 1      # 寧缺勿錯: a card that still misnames is not stored
+                    remaining = inputs.budget_remaining - usage.cost
+                    continue
         except LLMError as exc:
             # Graceful degradation: a provider/budget/activation failure stops the run as
             # partial (produced cards kept); never crash the scheduler/dashboard. The
@@ -557,12 +592,12 @@ def _run_insight_type(
         )
         created += 1
 
-    status = "partial" if stopped_early else "ok"
-    reason = stop_reason if stopped_early else ""
+    status = "partial" if stopped_early or name_dropped else "ok"
+    reason = stop_reason if stopped_early else ("name_mismatch" if name_dropped else "")
     run_detail = (
         (stop_detail or _STATUS_ZH["partial"]) if stopped_early
         else _ok_detail(created, cache_hits)
-    )
+    ) + _name_dropped_text(name_dropped)
     _write_job_run(
         conn, insight_type_id, status=status, reason=reason, detail=run_detail,
         cost=usage.cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow, usage=usage,

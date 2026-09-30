@@ -9,6 +9,59 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Item 8 — a card names each registered code by one of its names (owner 2026-09-30,
+「新的名稱代號確保正確不會再錯誤」, ruled 「登錄名稱＋中文別名」).** The spec
+(`docs/spec/2026-09-30-code-name-consistency-check.md`) found 聯詠 (3008) and 陽明 (2603) on
+the demo's cards: the model paired a registered code with another company's name.
+
+- **Instruments carry aliases.** `instruments.aliases` (JSON list, additive column, default
+  `[]`) holds the other names a card may use: 大立光 for 3008 LARGAN, 微軟 for MSFT. It has one
+  writer, `store.set_instrument_aliases`; `upsert_instrument` never touches it. The rules live
+  in `shared/instrument_names.py`:
+  - an alias is not all digits, not the instrument's own code, and at most 30 characters;
+  - one name belongs to one instrument. An alias that is another instrument's code, name or
+    alias is refused, and so is a typed NAME that is another instrument's alias. Two
+    instruments may still share a registered name (GOOG / GOOGL);
+  - a rename onto one of the instrument's own aliases drops that alias from the list.
+- **Where aliases come from.**
+  - The 觀察清單 edit / register dialog has a 別名 field. Owner-typed lists are checked
+    strictly: 422 naming every conflict, and nothing is written.
+  - A new TW symbol keeps the exchange's short name from the board probe's own response (no
+    extra request). The same name becomes the NAME when no other name is found, instead of a
+    blank row.
+  - A confident, provider-verified AI 辨識 reply proposes common names (`AI_INSTRUMENT_RESOLVE_PROMPT`
+    v3). Auto-filled candidates are checked leniently: a taken or unusable one is dropped
+    silently, capped at 5.
+  - The list shows 「亦稱 …」 under the name, and search matches an alias. The ledger-audit
+    reader labels the column 別名.
+- **New cards are checked before they are stored.**
+  - `generate` appends the names of the codes its prompt mentions (`INSIGHT_NAMING_NOTE` v1).
+    The table is scoped to those codes, so the per-market isolation guard still holds.
+  - `llm_insight/name_check.py` reads the reply. It checks 「名稱 (代號)」 and 「代號 (名稱)」,
+    and flags a bare code only when it is followed by ANOTHER registered instrument's name.
+  - Accepted forms:
+    - a Chinese name or alias, or a leading part of at least 2 characters (玉山金 for 玉山金控);
+    - a Latin name by DEF-082's whole word forms;
+    - generic referents, unit words and bracket notes are not names.
+  - A mismatch asks once more with the wrong pairings named (`INSIGHT_NAMING_RETRY`). A card
+    that still misnames is not stored (寧缺勿錯), and the run reads 「N 張因名稱與代號不符未存」
+    (partial, reason `name_mismatch`).
+  - The check reads the registry by direct SQL on `instruments` (llm_insight may not import
+    data_ingestion) and degrades to "no names known" on a database without the table.
+- **Old cards: `scripts/fix_card_names.py`.** It does a dry run by default; `--apply` writes.
+  It replaces the wrong name and keeps the code, preferring a Chinese alias when the
+  registered name has none. Where it cannot bound the wrong name's extent it fixes only a
+  reviewed `--wrong-name`. On a copy of the demo's 224 cards: 27 pairings on 10 cards, 0 left
+  for review. The rest was already right, so nothing else is rewritten.
+- Library tag `official-v27 (2026-10-01)`: the naming note v1 + AI instrument-resolve v3.
+
+Mutations: 46 (41 in the first pass, 5 on the two gaps closed at integration), all caught.
+
+Gates: ruff clean · mypy --strict 983 files 0 (fresh cache) · pytest 6,834 (6,832 passed, 2
+skipped; the two failures the first pass found — the late-write guard's list and the audit
+reader's column labels — fixed and their files re-run) · e2e 96 files 322/322, server-side 5xx
+0 (the aliases flow run three times) · stress-audit phase 1 ops 128, 6,025 pass / 0 fail.
+
 **Functional-test manual closed; the owner's 18 rulings on its open items (2026-09-30).** The
 manual closed on `d2e5e08` (PASS 119 / N/A 1, 86 defects closed or not-a-defect); the verifier
 fills the owner's sign-off per ruling 3 and black-box checks the news popup's prompt version

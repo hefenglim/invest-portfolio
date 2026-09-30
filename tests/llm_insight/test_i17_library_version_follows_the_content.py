@@ -17,12 +17,12 @@ from portfolio_dash.llm_insight import official_templates as ot
 
 #: The library tag and the per-prompt versions it shipped. Update BOTH together.
 _SHIPPED: tuple[str, dict[str, str]] = (
-    "official-v26 (2026-09-23)",
+    "official-v27 (2026-10-01)",
     {
         "ai_input": "v8", "news_organizer": "v2", "insight_system": "v2",
         "insight_on_alert_note": "v2", "master_score": "v2", "master_calibrate": "v1",
         "master_validate": "v1", "digest_note": "digest-daily-note-v1",
-        "ai_instrument_resolve": "v2",
+        "ai_instrument_resolve": "v3", "insight_naming_note": "v1",
         "strategy:持倉週報策略": "v2.5", "strategy:個股健檢策略": "v2.9",
         "strategy:市場週報策略": "v1.2", "strategy:持倉建議與提點策略": "v3.2",
         "strategy:持倉提點策略": "v1",

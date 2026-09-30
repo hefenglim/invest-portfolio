@@ -27,8 +27,10 @@ from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 # W4 live baseline measured into existence. v25: the AI-input prompt v8 (DEF-036
 # stated_amount — a transcribed total the door checks against shares × price). v26: the
 # on-alert addendum v2 (DEF-037 — ``ON_ALERT_CONTEXT`` names WHICH alert fired); the content
-# changed under v25 and the library tag did not follow (I-17).
-LIBRARY_VERSION = "official-v26 (2026-09-23)"
+# changed under v25 and the library tag did not follow (I-17). v27: the insight naming note v1
+# (item 8 — a card may name a code only by its registered name or an alias) and the AI
+# instrument-resolve prompt v3 (it now proposes aliases).
+LIBRARY_VERSION = "official-v27 (2026-10-01)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -312,12 +314,16 @@ _GICS_SECTOR_LIST = ", ".join(GICS_SECTOR_KEYS)
 # against the fetched Bursa directory), the ACE-market leading-zero rule (0166, never 166),
 # and the brand/mall/subsidiary → LISTED-parent rule (IOI Mall → IOI Properties). Paired with
 # the baked ``pricing.bursa_registry`` so a valid code now verifies offline → status:"resolved".
-AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v2"
+# v3 (owner 2026-09-30, item 8 「登錄名稱＋中文別名」): the reply also carries ``aliases`` — the
+# common Chinese names the instrument goes by (微軟 for MSFT, 大立光 for 3008). A card may name an
+# instrument by its registered name or an alias, so a registration that came through AI resolve
+# keeps them; the endpoint drops any another instrument already answers to.
+AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v3"
 AI_INSTRUMENT_RESOLVE_PROMPT = (
     "<task>你是股票標的判讀助理。使用者輸入了一段可能是公司名稱、俗稱，或某種形式的代號"
     "（可能是錯誤形式，例如把台股打成美股 ADR 代號）。請在『目標市場』中判讀他實際想指的"
-    "股票，並一次回傳：該市場的『當地交易所代號』、正式名稱、GICS 產業類別，以及可選的 "
-    "GICS 產業細分。</task>\n"
+    "股票，並一次回傳：該市場的『當地交易所代號』、正式名稱、GICS 產業類別、可選的 "
+    "GICS 產業細分，以及它常見的中文名稱（別名）。</task>\n"
     "<market_rules>symbol 必須是『目標市場』的當地交易所代號，格式如下，且絕不可回傳其他"
     "交易所的代號：\n"
     "・TW（台股，TWSE/TPEx）：4-6 位數字＋可選英文字尾（如 2330、00878B）。必須輸出當地"
@@ -344,10 +350,14 @@ AI_INSTRUMENT_RESOLVE_PROMPT = (
     "留空陣列，絕不可捏造任何代號。\n"
     "4. 你只輸出識別與分類這類定性資訊，不得輸出任何價格、報酬或數字資料；你的回覆僅是建議，"
     "系統會以真實報價覆核，覆核不通過即不採用。\n"
+    "5. aliases：列出這檔標的在中文新聞與報告中常見、且確實指它的名稱（例：MSFT 為「微軟」、"
+    "3008 為「大立光」、2603 為「長榮」），最多 3 個；不要放代號、不要重複 name 本身，絕不可"
+    "放其他公司的名稱。只在 confidence=\"high\" 時填寫，其餘情況與不確定時一律給空陣列。\n"
     "</rules>\n"
     "<example_output>{{\"symbol\": \"2303\", \"name\": \"聯華電子\", "
     "\"gics_sector\": \"Information Technology\", \"gics_industry\": \"Semiconductors\", "
-    "\"confidence\": \"high\", \"candidates\": [], \"not_found\": false}}</example_output>\n"
+    "\"confidence\": \"high\", \"candidates\": [], \"not_found\": false, "
+    "\"aliases\": [\"聯電\"]}}</example_output>\n"
     "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
 )
 
@@ -370,6 +380,21 @@ ON_ALERT_CONTEXT = (
     "\n[觸發預警] 規則代碼：{rule}；預警標題：{title}；預警內容：{detail}；觸發日：{fired_on}。"
     "以上是系統計算的預警事實：說明「觸發了什麼」時只能依此描述，"
     "不得改寫成其他警示，也不得推測未列出的事件。"
+)
+
+# The naming guardrail every insight card is generated with (owner 2026-09-30, item 8:
+# 「新的名稱代號確保正確不會再錯誤」). ``generate`` appends it with the registry's names and
+# aliases, and ``llm_insight/name_check.py`` checks the reply against the same table — the
+# note makes a right pairing likely, the check makes a wrong one impossible to store.
+INSIGHT_NAMING_NOTE_VERSION = "v1"
+INSIGHT_NAMING_NOTE = (
+    "\n\n[標的名稱守則] 提到標的時一律寫成「名稱 (代號)」或「代號 (名稱)」，名稱只能用下表"
+    "該代號列出的名稱；不在表上的公司不要寫代號，表上的代號不要配別的名稱。\n{table}"
+)
+# The one-shot correction appended when a reply pairs a name with the wrong code: {lines}
+# names each wrong pairing and the names its code goes by.
+INSIGHT_NAMING_RETRY = (
+    "\n\n[名稱修正] 上一版有名稱與代號不符，請改正後重新輸出完整 JSON：\n{lines}"
 )
 
 # Master-role system prompts (llm_insight/master.py): the scoring rubric, the calibration
@@ -958,6 +983,18 @@ PROMPT_REGISTRY: list[PromptRegistryEntry] = [
         "version": ON_ALERT_NOTE_VERSION,
         "agent": "insight_generate",
         "default_constant": "ON_ALERT_NOTE",
+        "storage": "",
+        "call_site": "llm_insight/generate.py:run_insight_type",
+    },
+    {
+        "key": "insight_naming_note",
+        "feature": (
+            "洞察卡標的名稱守則（generate 對每張卡附加登錄名稱＋別名對照表；配對不符時重產一次）"
+        ),
+        "tier": "code-owned",
+        "version": INSIGHT_NAMING_NOTE_VERSION,
+        "agent": "insight_generate",
+        "default_constant": "INSIGHT_NAMING_NOTE",
         "storage": "",
         "call_site": "llm_insight/generate.py:run_insight_type",
     },

@@ -181,6 +181,11 @@ _OWN_GUARD: dict[str, str] = {
     "inst-quickadd.js: if (namePristine && r.name && !(wasAiResolve && nameIn.value)) "
     "nameIn.value = r.name;":
         "gated on namePristine (and never over an AI-resolved name)",
+    "inst-quickadd.js: if (aliasPristine) aliasIn.value = '';":
+        "gated on aliasPristine, cleared by the 別名 field's input handler (item 8)",
+    "inst-quickadd.js: aliasIn.value = joinAliases(have);":
+        "inside `if (aliasPristine) { … }` — the 別名 field's own flag; after an AI fill it "
+        "ADDS the lookup's names to the AI's, never replaces them (item 8)",
 }
 
 

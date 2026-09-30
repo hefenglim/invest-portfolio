@@ -20,15 +20,17 @@ register endpoint passes it for backward compatibility.
 
 import logging
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.data_ingestion.register import register_instrument
 from portfolio_dash.data_ingestion.store import (
     get_instrument,
+    list_instruments,
+    set_instrument_aliases,
     set_instrument_archived,
     upsert_instrument,
 )
@@ -53,6 +55,13 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_names import (
+    AliasError,
+    NamedInstrument,
+    alias_conflicts,
+    name_conflict,
+    normalize_aliases,
+)
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.symbol_format import contains_cjk
 
@@ -86,6 +95,100 @@ def reconcile_price_basis(conn: sqlite3.Connection, symbols: Iterable[str]) -> i
     groups the entire action ledger, so binding it per symbol would re-read it per symbol.
     """
     return reconcile_prices(conn, symbols, factor_of=split_factor_fn(conn))
+
+
+# --- Aliases (owner 2026-09-30, item 8: 「登錄名稱＋中文別名」) --------------------------
+#
+# A card may name an instrument by its registered name or by an alias, and nothing else — so
+# the alias list is part of what makes a card checkable. Two doors write it: the owner's own
+# (the edit / register forms: STRICT — a bad list is refused whole with the reason) and the
+# auto-fill at registration (the exchange's short name, the AI's common names: LENIENT — a bad
+# candidate is dropped and the rest kept, because a convenience must never fail a registration).
+# Both apply the same registry-wide rule: one name, one instrument.
+
+#: At most this many auto-filled aliases per registration: every stored alias widens what a
+#: card may call the instrument, and a reply listing a dozen names is noise, not knowledge.
+AUTO_ALIAS_CAP = 5
+
+
+def named_registry(conn: sqlite3.Connection) -> list[NamedInstrument]:
+    """Every registered instrument's names, for the conflict check. Archived rows included:
+    an archived instrument still owns its names, and restoring it must not find them taken."""
+    return [NamedInstrument(symbol=i.symbol, name=i.name, aliases=tuple(i.aliases))
+            for i in list_instruments(conn)]
+
+
+def checked_aliases(
+    conn: sqlite3.Connection, *, symbol: str, name: str, raw: Iterable[str]
+) -> list[str]:
+    """An owner-typed alias list, normalized — or :class:`AliasError` with the zh sentence.
+
+    Refused whole when any alias is unusable (``normalize_aliases``) or is another
+    instrument's code / name / alias: 長榮 may not mean both 2603 and 2618, or the card check
+    could no longer tell which pairing is wrong. Every conflict is named at once.
+    """
+    aliases = normalize_aliases(raw, symbol=symbol, name=name)
+    conflicts = alias_conflicts(symbol, aliases, named_registry(conn))
+    if conflicts:
+        raise AliasError("；".join(conflicts))
+    return aliases
+
+
+def checked_name(conn: sqlite3.Connection, *, symbol: str, name: str) -> None:
+    """Raise :class:`AliasError` when an owner-typed *name* is another instrument's alias.
+
+    The strict doors only (register / edit with a typed name). A name a provider or the
+    exchange supplied is never refused: it is the market's answer, and a registration must
+    not fail on it — an alias that collides with it is the thing to fix.
+    """
+    refused = name_conflict(symbol, name, named_registry(conn))
+    if refused is not None:
+        raise AliasError(refused)
+
+
+def auto_aliases(
+    conn: sqlite3.Connection, *, symbol: str, name: str, candidates: Iterable[str | None]
+) -> list[str]:
+    """Auto-filled alias candidates with every unusable or taken one dropped SILENTLY.
+
+    The lenient half: a candidate that is a code, the symbol itself, too long, the name
+    itself, a repeat, or a name another instrument already answers to is skipped and the
+    rest kept — capped at :data:`AUTO_ALIAS_CAP`. Never raises.
+    """
+    registry = named_registry(conn)
+    kept: list[str] = []
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            cleaned = normalize_aliases([raw], symbol=symbol, name=name)
+        except AliasError:
+            continue
+        for alias in cleaned:
+            if any(alias.casefold() == k.casefold() for k in kept):
+                continue
+            if alias_conflicts(symbol, [alias], registry):
+                continue
+            kept.append(alias)
+            if len(kept) >= AUTO_ALIAS_CAP:
+                return kept
+    return kept
+
+
+def _save_registration_aliases(
+    conn: sqlite3.Connection, symbol: str, name: str, *,
+    explicit: Sequence[str], found: Iterable[str | None],
+) -> None:
+    """Store the aliases a registration ends with: the door's already-checked ``explicit``
+    list, then the auto-filled ``found`` candidates. Re-normalized against the FINAL name — a
+    provider may have filled the name after the door checked — so an alias equal to it drops.
+    Writes nothing when the result is empty (a new row already reads ``[]``)."""
+    merged = normalize_aliases(
+        [*explicit, *auto_aliases(conn, symbol=symbol, name=name, candidates=found)],
+        symbol=symbol, name=name,
+    )
+    if merged:
+        set_instrument_aliases(conn, symbol, merged)
 
 
 class QuickRegisterError(Exception):
@@ -136,6 +239,10 @@ class InstrumentLookup(BaseModel):
     sector: str = ""
     board: str | None = None
     is_etf: bool = False
+    # Owner 2026-09-30, item 8: a known symbol's stored aliases; for a brand-new TW symbol the
+    # exchange's short name (read from the board probe's own response) when it differs from
+    # ``name``. The dialog pre-fills its 別名 field with them and sends them back on register.
+    aliases: list[str] = Field(default_factory=list)
 
 
 def lookup_instrument(
@@ -161,6 +268,7 @@ def lookup_instrument(
             sector=existing.sector,
             board=existing.board or None,
             is_etf=existing.is_etf,
+            aliases=list(existing.aliases),
         )
     if contains_cjk(sym):
         # Owner 2026-09-30 (R8 F-01): a name (台積電) is never a code, so the provider can only
@@ -168,7 +276,9 @@ def lookup_instrument(
         # answer, from the registry alone; the dialog then goes straight to AI 辨識.
         return InstrumentLookup(found=False)
     # Brand-new symbol: probe the board (TW) then verify existence via a real quote fetch.
-    board = probe_tw_board(sym) if market is Market.TW else None
+    # ``names`` catches the exchange's short name from the probe's own response (item 8).
+    exchange_names: dict[str, str] = {}
+    board = probe_tw_board(sym, names=exchange_names) if market is Market.TW else None
     resolved_board = board if board is not None else (
         None if market is Market.TW else DEFAULT_BOARD[market]
     )
@@ -204,13 +314,17 @@ def lookup_instrument(
                     is_etf=False,
                 )
         return InstrumentLookup(found=False)
+    # Item 8: no looked-up name -> the exchange's short name from the probe, not a blank.
+    name = lookup_name(sym, market, board=resolved_board) or exchange_names.get(sym, "")
     return InstrumentLookup(
         found=True,
         registered=False,
-        name=lookup_name(sym, market, board=resolved_board) or "",
+        name=name,
         sector="",
         board=resolved_board,
         is_etf=False,
+        aliases=auto_aliases(conn, symbol=sym, name=name,
+                             candidates=[exchange_names.get(sym)]),
     )
 
 
@@ -359,6 +473,7 @@ def quick_register(
     is_etf: bool | None = None,
     force: bool = False,
     backfill_history: bool = True,
+    aliases: Sequence[str] = (),
 ) -> QuickRegisterOutcome:
     """Register *symbol* in one step: probe, fetch a real quote, name it, backfill.
 
@@ -371,6 +486,11 @@ def quick_register(
     (the classic register endpoint, FU-D23) instead schedules the heavy history/dividend
     backfill on FastAPI ``BackgroundTasks`` so the response returns fast (the instant quote
     is still fetched synchronously so ``last`` is populated immediately).
+
+    ``aliases`` (owner 2026-09-30, item 8) is a list the calling door has ALREADY checked
+    (``checked_aliases``). A new registration stores it plus the exchange's short name when this
+    call probed the TW board; restoring an archived symbol replaces the stored list only when
+    ``aliases`` is non-empty (blank keeps what the row had, like every other restore field).
     """
     sym = symbol.strip().upper()
     if not sym:
@@ -386,6 +506,10 @@ def quick_register(
             conn, existing, name=name, sector=sector, board=board,
             quote_ccy=quote_ccy, target_low=target_low, is_etf=is_etf,
         )
+        if aliases:
+            set_instrument_aliases(conn, sym, normalize_aliases(
+                aliases, symbol=sym, name=restored_inst.name))
+            restored_inst = get_instrument(conn, sym) or restored_inst
         gap_backfill(sym, now=now, conn=conn)
         price = get_latest_price(conn, sym, now=now)
         last_date = last_price_date(conn, sym)
@@ -408,8 +532,9 @@ def quick_register(
     # 1. Board: explicit value respected; TW probed once here (register_instrument
     #    receives the result and must NOT re-probe — no double network call).
     resolved_board = board
+    exchange_names: dict[str, str] = {}  # item 8: the probe's own response names the symbol
     if resolved_board is None and market is Market.TW:
-        resolved_board = probe_tw_board(sym)
+        resolved_board = probe_tw_board(sym, names=exchange_names)
     if resolved_board is None and market is not Market.TW:
         resolved_board = DEFAULT_BOARD[market]
 
@@ -436,7 +561,9 @@ def quick_register(
     resolved_name = name.strip()
     name_source = "user" if resolved_name else "none"
     if not resolved_name:
-        found = lookup_name(sym, market, board=resolved_board)
+        # Item 8: when the name lookup finds nothing, the exchange's short name read by the
+        # board probe above is still the exchange's own answer — better than a blank row.
+        found = lookup_name(sym, market, board=resolved_board) or exchange_names.get(sym)
         if found:
             resolved_name, name_source = found, "provider"
 
@@ -453,6 +580,8 @@ def quick_register(
         etf_flag_unknown=is_etf is None,
     )
     register_instrument(conn, inst, prober=None, confirm=True)
+    _save_registration_aliases(conn, sym, resolved_name, explicit=aliases,
+                               found=[exchange_names.get(sym)])
 
     # 5. Initial history window (config-driven, 5y default; owner 2026-07-08) —
     #    best-effort, never blocks registration. Skipped when ``backfill_history=False``

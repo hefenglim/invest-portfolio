@@ -109,7 +109,9 @@
         ? '隱藏已移除／封存'
         : ('顯示已移除／封存（' + archivedCount + '）');
     }
-    const matches = (i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q);
+    /* Item 8 (owner 2026-09-30): an alias finds the row too — 大立光 finds 3008 LARGAN. */
+    const matches = (i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q)
+      || (i.aliases || []).some((a) => a.toLowerCase().includes(q));
     const visible = D.list.filter((i) => showArchived || !i.archived).filter(matches);
     visible.forEach((i) => {
         const tr = el('tr');
@@ -122,6 +124,10 @@
         });
         cell.appendChild(el('span', 'sym-code', i.symbol));
         cell.appendChild(el('span', 'sym-name', i.name));
+        /* Item 8: the other names a card may use for this instrument, under its own name. */
+        if (i.aliases && i.aliases.length) {
+          cell.appendChild(el('span', 'sym-alias', '亦稱 ' + i.aliases.join('、')));
+        }
         tdSym.appendChild(cell);
         tr.appendChild(tdSym);
         tr.appendChild(el('td', 'col-text', MARKET_ZH[i.market]));
@@ -296,6 +302,7 @@
       symbol: i.symbol,
       market: i.market,
       name: i.name || '',
+      aliases: i.aliases || [],  // item 8: shown in the 別名 field, saved with the rest
       sector: i.sector || '',
       industry: i.industry || '',
       board: i.board || null,

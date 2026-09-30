@@ -60,5 +60,11 @@ class Instrument(BaseModel):
     # ``etf_flag_unknown`` on a TW SELL so the rate is disclosed rather than assumed.
     etf_flag_unknown: bool = False
     archived: bool = False  # FU-D13: stop-tracking flag; stays registered, off fetch scopes
+    # Other names the instrument goes by (owner ruling 2026-09-30, item 8 = registry names +
+    # Chinese aliases): 3008 LARGAN is also 大立光. A card may name an instrument by its
+    # ``name`` or any alias; anything else beside its code is a wrong pairing. READ-ONLY on
+    # this model — the column has ONE writer (``store.set_instrument_aliases``), so an
+    # ``upsert_instrument`` built without it can never wipe it.
+    aliases: list[str] = []
     industry: str | None = None  # GICS industry (R6): nullable free text, filled by the
     # next wave's AI service; backend plumbing only this wave (no frontend form yet).
