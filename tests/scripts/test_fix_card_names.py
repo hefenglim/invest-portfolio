@@ -48,6 +48,19 @@ def test_an_unknown_extent_needs_a_reviewed_name() -> None:
     assert text == "持股以大立光 (3008) 為最" and left == []
 
 
+def test_a_reviewed_wrong_name_after_a_bare_code_is_replaced() -> None:
+    """Demo card #231 (2026-09-28): title 「2603 萬海：多頭趨勢延續」. 萬海 is not registered, so
+    the checker cannot read the bare form — a reviewed ``--wrong-name`` can. A reviewed name
+    that IS a name of the code it follows is left alone."""
+    fix = _load()
+    text, changes, left = fix.fix_field("2603 萬海：多頭趨勢延續", REG, [])
+    assert (text, changes, left) == ("2603 萬海：多頭趨勢延續", [], [])
+    text, changes, left = fix.fix_field("2603 萬海：多頭趨勢延續；2609 陽明", REG, ["萬海", "陽明"])
+    assert text == "2603 長榮：多頭趨勢延續；2609 陽明"
+    assert [(c["code"], c["from"], c["to"]) for c in changes] == [("2603", "萬海", "長榮")]
+    assert left == []
+
+
 def _db(tmp_path: Path) -> Path:
     path = tmp_path / "cards.db"
     c = sqlite3.connect(path)

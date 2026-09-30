@@ -111,6 +111,12 @@ def _is_name(text: str, inst: NamedInstrument) -> bool:
                for k in range(len(name), _MIN_CJK_PREFIX - 1, -1))
 
 
+def accepts(written: str, inst: NamedInstrument) -> bool:
+    """True when *written* is a name *inst* may be called by (a name, an alias, a Chinese
+    leading part of 2+ characters, a Latin word form) — the rule every check here applies."""
+    return _is_name(written, inst)
+
+
 def _owner_of_tail(before: str, index: Mapping[str, NamedInstrument],
                    code_inst: NamedInstrument) -> tuple[str, str] | None:
     """(name, symbol) when *before* ends with ANOTHER instrument's whole name or alias."""

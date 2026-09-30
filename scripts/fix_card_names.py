@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from portfolio_dash.llm_insight.name_check import (  # noqa: E402
     Mismatch,
+    accepts,
     mismatches,
     registry_from_db,
 )
@@ -56,6 +58,26 @@ def _span(text: str, mm: Mismatch, wrong_names: list[str]) -> tuple[int, int] | 
     return None
 
 
+def _bare_reviewed(text: str, registry: list[NamedInstrument], wrong_names: list[str]
+                   ) -> tuple[NamedInstrument, int, int] | None:
+    """A reviewed wrong name written right after its bare code (「2603 萬海：…」), or None.
+
+    The checker reads a bare code only when ANOTHER registered instrument's name follows it —
+    ordinary words follow a bare code far more often than names — so an unregistered wrong
+    name there is invisible to it. A name the owner reviewed as wrong is not: it is replaced
+    wherever it directly follows a registered code it is not a name of (聯詠 stays right
+    after 3034, were 3034 registered)."""
+    for inst in registry:
+        for name in sorted(wrong_names, key=len, reverse=True):
+            if accepts(name, inst):
+                continue
+            m = re.search(rf"(?<![A-Za-z0-9.]){re.escape(inst.symbol)}[ \t]+{re.escape(name)}",
+                          text)
+            if m:
+                return inst, m.end() - len(name), m.end()
+    return None
+
+
 def fix_field(text: str, registry: list[NamedInstrument], wrong_names: list[str]
               ) -> tuple[str, list[dict[str, str]], list[dict[str, str]]]:
     """(fixed text, changes made, pairings left for review)."""
@@ -66,12 +88,18 @@ def fix_field(text: str, registry: list[NamedInstrument], wrong_names: list[str]
         fixable = [(mm, _span(text, mm, wrong_names)) for mm in pending]
         target = next(((mm, sp) for mm, sp in fixable if sp is not None), None)
         if target is None:
-            return text, changes, [{"code": mm.code, "written": mm.written}
-                                   for mm in pending]
-        mm, (start, end) = target
-        inst = index.get(mm.code) or index[mm.code.split(".")[0]]
+            bare = _bare_reviewed(text, registry, wrong_names)
+            if bare is None:
+                return text, changes, [{"code": mm.code, "written": mm.written}
+                                       for mm in pending]
+            inst, start, end = bare
+            code = inst.symbol
+        else:
+            mm, (start, end) = target
+            inst = index.get(mm.code) or index[mm.code.split(".")[0]]
+            code = mm.code
         new_name = preferred_name(inst)
-        changes.append({"code": mm.code, "from": text[start:end], "to": new_name,
+        changes.append({"code": code, "from": text[start:end], "to": new_name,
                         "context": text[max(0, start - 12):end + 10]})
         text = text[:start] + new_name + text[end:]
     raise RuntimeError("more than 50 corrections in one field — stopping")
