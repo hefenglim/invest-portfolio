@@ -20,6 +20,8 @@ so a zero was not visible anywhere — it was simply absent from every total.
 """
 
 import ast
+import csv
+import io
 import sqlite3
 from collections.abc import Iterator
 from decimal import Decimal
@@ -37,6 +39,7 @@ from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.routers import llm_settings
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.export.usage import build_llm_usage_csv
 from portfolio_dash.shared import llm as llm_mod
 from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.llm_config import (
@@ -204,6 +207,20 @@ def test_the_request_ledger_marks_the_estimate(
     rows = client.get("/api/llm/requests").json()["rows"]
     assert [r["estimated"] for r in rows] == [False, True]  # newest first
     assert rows[1]["tokens_in"] > 0 and Decimal(rows[1]["cost_usd"]) > 0
+
+
+def test_the_usage_export_marks_the_estimate(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The llm-usage CSV (I-01, H-02's reconciliation file) says which rows are estimates:
+    a trailing ``usage_estimated`` column, so every earlier column stays where it was."""
+    _script(monkeypatch, _Reported(_CUT), _NoUsage(_CUT))
+    with pytest.raises(LLMUnavailable):
+        llm_mod.complete_structured_meta("寫", _Card, agent="insight_generate", conn=conn)
+    lines = build_llm_usage_csv(conn, frm=None, to=None).content.decode("utf-8-sig")
+    table = list(csv.reader(io.StringIO(lines)))
+    assert table[0][-1] == "usage_estimated"
+    assert [row[-1] for row in table[1:]] == ["0", "1"]
 
 
 def test_the_estimate_is_local_and_never_breaks_the_call(

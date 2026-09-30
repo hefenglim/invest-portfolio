@@ -25,6 +25,8 @@ differed. The tests below compare a run's row with the ``llm_usage`` rows it wro
 """
 
 import ast
+import csv
+import io
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -41,6 +43,7 @@ from fastapi.testclient import TestClient
 import portfolio_dash
 from portfolio_dash.api import news_service
 from portfolio_dash.api.routers import news as news_router
+from portfolio_dash.export.usage import build_job_runs_csv
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import generate
 from portfolio_dash.llm_insight import insights_store as istore
@@ -110,6 +113,18 @@ def test_the_scheduled_scoring_run_records_what_it_spent(
         "cost_usd": "0.0021532", "tokens_in": 3418, "tokens_out": 443, "calls": 2,
         "source": "run_row",
     }
+
+
+def test_the_job_runs_export_carries_the_runs_spend(conn: sqlite3.Connection) -> None:
+    """The 工作紀錄 CSV (I-01) is the run row as stored — its spend included, in trailing
+    columns; a run with no AI call leaves them empty."""
+    jobs.register_evaluation_runner(_scoring_runner)
+    run_id = jobs.run_job(conn, "evaluate_insights", now=NOW)
+    text = build_job_runs_csv(conn, frm=None, to=None).content.decode("utf-8-sig")
+    table = list(csv.reader(io.StringIO(text)))
+    assert table[0][-4:] == ["cost_usd", "llm_calls", "tokens_in", "tokens_out"]
+    [row] = [r for r in table[1:] if r[0] == str(run_id)]
+    assert row[-4:] == ["0.0021532", "2", "3418", "443"]
 
 
 def test_the_manual_run_door_records_it_too(conn: sqlite3.Connection) -> None:

@@ -9,7 +9,8 @@ def test_export_job_runs_csv(api_client: TestClient) -> None:
     assert r.headers["content-type"].startswith("text/csv")
     assert "job_runs_all_all.csv" in r.headers["content-disposition"]
     text = r.content[3:].decode("utf-8")
-    assert text.split("\r\n", 1)[0] == "id,job_id,started_at,finished_at,status,detail"
+    assert text.split("\r\n", 1)[0] == (
+        "id,job_id,started_at,finished_at,status,detail,cost_usd,llm_calls,tokens_in,tokens_out")
 
 
 def test_export_llm_usage_csv_empty(api_client: TestClient) -> None:
@@ -18,7 +19,8 @@ def test_export_llm_usage_csv_empty(api_client: TestClient) -> None:
     assert r.status_code == 200
     assert "llm_usage_2026-01-01_2026-12-31.csv" in r.headers["content-disposition"]
     text = r.content[3:].decode("utf-8")
-    assert text.split("\r\n", 1)[0] == "ts,model,agent,input_tokens,output_tokens,cost"
+    assert text.split("\r\n", 1)[0] == (
+        "ts,model,agent,input_tokens,output_tokens,cost,usage_estimated")
 
 
 def test_export_bad_range_400(api_client: TestClient) -> None:
