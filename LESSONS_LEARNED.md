@@ -1984,3 +1984,35 @@ could not name a model at all (DEF-084).
 4. **A frontend action no backend path sends is a dead fix** — check both directions. The
    dry run's red 「AI 額度」 row had no button while 「前往額度設定」 had been defined for it all
    along; the existing guard checked only backend → frontend.
+
+## 2026-09-30 — Functional-test manual R11 → R12 (three follow-ups after the sign-offs)
+
+**What happened.** After R11 closed, the verifier's notes named three things nobody had tested:
+a gemini reply cut off mid-string was booked 0 tokens / $0 (the provider sent no usage block and
+LiteLLM filled in zeros); `evaluate_insights` #212 spent $0.0021532 on a run row that said
+nothing; and the quota alert printed its amounts with a private `_usd` while R11 had just
+unified three other surfaces on `usd_display`.
+
+**Root causes.** (1) **A default read as a measurement.** Three seams took the provider's token
+counts on trust; zero is what an absent field becomes, and a call always has prompt tokens.
+(2) **A total re-derived at read time instead of recorded at write time.** A static run's spend
+was reconstructed for one popover from agent names and a time window, so the run history — the
+same run — printed —; an insight run added up what it PRODUCED, not what it PAID, and every fake
+provider in the suite answered on the first try, so the two sums never differed in a test.
+(3) **A class check written as a list.** R11 pinned the three surfaces it had fixed by name; the
+fourth USD formatter sat in a module the list did not name.
+
+**Rules.**
+1. **"Missing" is not "zero".** When a counterparty may omit a figure, decide explicitly what
+   absence means (here: not reported → local estimate, marked), and never let a library default
+   stand in for a measurement.
+2. **Record a total where it is incurred, from the ledger rows themselves.** A context-scoped
+   tally at the one writer (`log_usage`) makes "the run's cost = the sum of its usage rows" true
+   by construction; innermost-only keeps a nested run from being booked twice. A test must make
+   the paid and the produced sums differ (a retry, a failover) or it cannot tell them apart.
+3. **A class guard scans; it does not enumerate.** Every "the N sites we fixed" test is a list
+   waiting for the N+1st — derive the sites from the code (AST over every f-string, every
+   `log_usage` call, every run closer) and whitelist the exceptions with their reasons.
+4. **An export is a surface.** The class scan for both findings reached the CSVs only on the
+   second pass (the usage export printed an estimate as measured; the job_runs export dropped the
+   spend) — list a finding's surfaces by doors and downloads, not by pages.

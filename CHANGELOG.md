@@ -9,6 +9,60 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Functional-test manual R11 → R12 — three follow-ups ruled after the sign-offs (2026-09-30).**
+The verifier closed R11 on `91ec1b0` (PASS 119 / N/A 1) and noted three things without opening
+tickets; the owner ruled all three into a new round and removed the six pre-DEF-084 fail-log
+rows from the demo. Because the code changed after the sign-offs, the manual's §10 applies: the
+J group is re-run and 輪次彙總 gets row R12.
+
+- **A reply the provider did not meter is booked as an estimate, never as free (R10
+  observation ④).** gemini-2.5-flash-lite via OpenRouter returns a reply cut off mid-string (as
+  short as 12 characters) with no usage block; LiteLLM fills in zeros and every seam read them as
+  measured — 20 of 1,113 demo `llm_usage` rows at 0 tokens / $0, 18 of them a failed parse. The
+  three seams that book a call (`shared/llm.py` structured and free text, the settings
+  connection test — which skipped the row entirely when `usage` was None) now go through
+  `llm.metered_usage`: both counts at zero means "not reported", so the prompt and the reply are
+  counted with LiteLLM's bundled tokenizer (never a network fetch) and the row is marked
+  `usage_estimated` (new column). The request ledger shows 「估算」 and the llm-usage CSV gains a
+  trailing `usage_estimated` column. **Class scan:** direct reads of `prompt_tokens` /
+  `completion_tokens` 12 → 0; `log_usage` calls 3, all with the flag. Per-call attributions (card,
+  news item, AI-door cost, prompt test run) carry the same numbers, no longer 0; the mark lives on
+  the ledger row (0 of 245 demo cards and 0 of 65 news items came from such a reply). The 20
+  historical rows are not rewritten.
+- **A run's recorded cost is the sum of the usage rows it wrote (R10 observation ③).**
+  `evaluate_insights` #212 spent $0.0021532 on a `job_runs` row that said nothing: static jobs
+  never wrote their spend (`scheduler/jobs.py`'s two closers, the manual news worker) — it was
+  re-derived at read time for one popover by an agent + time-window sum while the run history
+  printed — for the same run — and an insight run summed the cards it produced, leaving out a
+  retry after a broken reply and a primary model that failed before the fallback answered (the
+  mid-run budget check shared that sum). `llm.usage_tally()` is opened around every run's work;
+  `log_usage`, the one writer of `llm_usage`, adds each row to the innermost open tally, so an
+  insight run dispatched by `alert_scan` is booked once, on its own row. The row records
+  `cost_usd` beside new `llm_calls` / `tokens_in` / `tokens_out` (NULL = no AI call); the status
+  block reads it and the window sum is gone (rows written before this serve no block, as the
+  history already showed them). Both run lists serve the canonical Decimal form (a stored
+  `9E-8` went out raw), and the job_runs CSV gains the four spend columns. **Class scan:** 7 run
+  closers — 4 carry the spend, 3 are no-work or code-defect exits (listed with reasons); 6 SQL
+  statements finish a run row, 5 write `cost_usd`; 5 surfaces print a run's cost.
+- **One USD formatter.** `strategy/alerts.py`'s local `_usd` (half-even, no thousands
+  separator, 「$-0.00」) printed the 「AI 額度偏低」 alert detail; it is now `usd_display`, like
+  the dry-run gate, the pipeline node and the budget refusal. R11's check pinned those three
+  surfaces by name, which is how the fourth was missed; `tests/contract/test_one_usd_formatter.py`
+  reads every f-string and fails on a `$` in front of any other value (5 sites: this one fixed,
+  the password hash's separators 2, a NT$ fee floor 1, `usd_display` itself 1).
+
+Guards: `tests/shared/test_unreported_usage_is_estimated.py`, `tests/scheduler/
+test_run_records_its_spend.py`, `tests/contract/test_one_usd_formatter.py`, `tests/e2e/
+test_run_spend_and_estimate_flow.py`; 20 mutations (the old forms put back, three of them the
+whole `91ec1b0` file) all caught, baseline 0/103 after restore.
+
+Gates: ruff clean · mypy --strict 965 files 0 (fresh cache) · pytest 6,585 (6,583 passed, 2
+skipped) · e2e 92 files 312/312, server-side 5xx 0 · demo on `d2e5e08`, verify_live ALL PASS.
+Live on the demo: a manual news run for 2884 (#244) recorded $0.0016277, 5 calls, 11,861 / 1,104
+tokens — digit for digit the sum of `llm_usage` #1114–#1118, in the history, the status popover
+and the job_runs CSV. The six pre-DEF-084 fail-log rows (#499–#518) were deleted after a backup,
+re-identified by content (32 → 26 rows).
+
 **Functional-test manual R10 → R11 — three findings of the full re-run (M, L, L)
 (2026-09-29).** On the owner's instruction the verifier re-ran all 120 cases on `3a35454`:
 PASS 116, FAIL 2 (F-08, G-09), OBSERVE 1 (H-05), N/A 1 (G-10); the R9 sign-off was withdrawn.
