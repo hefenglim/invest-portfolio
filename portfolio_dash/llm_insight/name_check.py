@@ -17,11 +17,15 @@ Two shapes are read, both with half- or full-width parentheses:
 * 「代號 (名稱)」 — the parenthesised text must BE an accepted name form.
 
 Accepted forms, per instrument: every name (registered + aliases); for a Chinese name also any
-leading part of two characters or more (「玉山金」 for 玉山金控, 「群聯」 for 群聯電子 — how people
-shorten Chinese company names); for a Latin name the DEF-082 word forms (「IHH」 for IHH
-Healthcare), matched whole, case-blind, never by prefix (R9: 「(LARGA)」 is not LARGAN). A
-generic referent before the code (「該標的 (2323)」) or no name at all (「…，(2330)」) is not a
-pairing and passes.
+leading part of two characters or more — of ANY length from two up (「玉山」, 「玉山金」 for
+玉山金控; 「群聯」 for 群聯電子 — how people shorten Chinese company names) — provided it points
+at this instrument ALONE (owner ruling 2026-10-01, DEF-089 1C): a leading part that is another
+instrument's name or alias, or that another instrument's name also starts with, is not
+accepted. 「長榮 (2618)」 passed while 長榮 is 2603's alias, and 「中華 (2610)」 passed while
+中華電信 also starts with 中華 — the exact mix-up item 8 exists to stop. For a Latin name the
+DEF-082 word forms (「IHH」 for IHH Healthcare), matched whole, case-blind, never by prefix (R9:
+「(LARGA)」 is not LARGAN). A generic referent before the code (「該標的 (2323)」) or no name at
+all (「…，(2330)」) is not a pairing and passes.
 """
 
 from __future__ import annotations
@@ -88,12 +92,30 @@ def _forms(inst: NamedInstrument) -> tuple[list[str], set[str]]:
     return cjk, latin
 
 
-def _ends_with_name(before: str, inst: NamedInstrument) -> bool:
-    cjk, latin = _forms(inst)
+def _other_cjk_names(inst: NamedInstrument,
+                     registry: Iterable[NamedInstrument]) -> tuple[str, ...]:
+    """Every Chinese name or alias of the OTHER instruments — what a shortening of *inst*'s
+    name must not collide with (DEF-089)."""
+    return tuple(n for i in registry if i.symbol != inst.symbol for n in i.names if has_cjk(n))
+
+
+def _short_forms(inst: NamedInstrument, others: tuple[str, ...]) -> list[str]:
+    """*inst*'s Chinese names whole, then every leading part of 2+ characters that points at
+    *inst* alone: not another instrument's name, and no other name starts with it."""
+    cjk, _ = _forms(inst)
+    forms = list(cjk)
     for name in cjk:
-        for k in range(len(name), _MIN_CJK_PREFIX - 1, -1):
-            if before.endswith(name[:k]):
-                return True
+        for k in range(len(name) - 1, _MIN_CJK_PREFIX - 1, -1):
+            part = name[:k]
+            if part not in forms and not any(o.startswith(part) for o in others):
+                forms.append(part)
+    return forms
+
+
+def _ends_with_name(before: str, inst: NamedInstrument, others: tuple[str, ...]) -> bool:
+    _, latin = _forms(inst)
+    if any(before.endswith(form) for form in _short_forms(inst, others)):
+        return True
     upper = before.upper()
     for form in latin:
         if upper.endswith(form):
@@ -103,18 +125,17 @@ def _ends_with_name(before: str, inst: NamedInstrument) -> bool:
     return False
 
 
-def _is_name(text: str, inst: NamedInstrument) -> bool:
-    cjk, latin = _forms(inst)
-    if text.upper() in latin:
-        return True
-    return any(text == name[:k] for name in cjk
-               for k in range(len(name), _MIN_CJK_PREFIX - 1, -1))
+def _is_name(text: str, inst: NamedInstrument, others: tuple[str, ...]) -> bool:
+    _, latin = _forms(inst)
+    return text.upper() in latin or text in _short_forms(inst, others)
 
 
-def accepts(written: str, inst: NamedInstrument) -> bool:
+def accepts(written: str, inst: NamedInstrument,
+            registry: Iterable[NamedInstrument] = ()) -> bool:
     """True when *written* is a name *inst* may be called by (a name, an alias, a Chinese
-    leading part of 2+ characters, a Latin word form) — the rule every check here applies."""
-    return _is_name(written, inst)
+    leading part of 2+ characters that no other instrument in *registry* shares, a Latin word
+    form) — the rule every check here applies."""
+    return _is_name(written, inst, _other_cjk_names(inst, registry))
 
 
 def _owner_of_tail(before: str, index: Mapping[str, NamedInstrument],
@@ -146,6 +167,14 @@ def _looks_like_a_name(text: str) -> bool:
 def mismatches(text: str, registry: Iterable[NamedInstrument]) -> list[Mismatch]:
     """Every wrong 「name / code」 pairing in *text* for a REGISTERED code, in text order."""
     index = _registry_index(registry)
+    unique = list({id(x): x for x in index.values()}.values())
+    taken: dict[str, tuple[str, ...]] = {}
+
+    def others_of(inst: NamedInstrument) -> tuple[str, ...]:
+        if inst.symbol not in taken:
+            taken[inst.symbol] = _other_cjk_names(inst, unique)
+        return taken[inst.symbol]
+
     found: list[Mismatch] = []
     for m in _NAME_THEN_CODE.finditer(text):
         inst = index.get(m.group(1).upper())
@@ -155,7 +184,7 @@ def mismatches(text: str, registry: Iterable[NamedInstrument]) -> list[Mismatch]
         before = raw_before.rstrip(_QUOTES)
         if not before or not (has_cjk(before[-1]) or before[-1].isalpha()):
             continue                      # nothing names a company here: 「，(2330)」
-        if before.endswith(_GENERIC) or _ends_with_name(before, inst):
+        if before.endswith(_GENERIC) or _ends_with_name(before, inst, others_of(inst)):
             continue
         last_word = before.rsplit(None, 1)[-1].upper()
         if last_word in _NOT_A_TICKER:
@@ -172,19 +201,20 @@ def mismatches(text: str, registry: Iterable[NamedInstrument]) -> list[Mismatch]
     for m in _CODE_THEN_NAME.finditer(text):
         inst = index.get(m.group(1).upper())
         inner = m.group(2).strip()
-        if inst is None or not _looks_like_a_name(inner) or _is_name(inner, inst):
+        if (inst is None or not _looks_like_a_name(inner)
+                or _is_name(inner, inst, others_of(inst))):
             continue
         if index.get(inner.upper()) is not None:
             continue                      # 「3008 (2330)」 is two codes, not a name
-        belongs = next((i.symbol for i in {id(x): x for x in index.values()}.values()
-                        if i.symbol != inst.symbol and _is_name(inner, i)), None)
+        belongs = next((i.symbol for i in unique
+                        if i.symbol != inst.symbol and _is_name(inner, i, others_of(i))),
+                       None)
         start = m.start(2) + (len(m.group(2)) - len(m.group(2).lstrip()))
         found.append(Mismatch(m.group(1), inner, inst.names, belongs,
                               (start, start + len(inner))))
     # 「代號 名稱」 without brackets (a title's 「2603 陽明：多方格局」). The words after a bare
     # code are mostly not a name (「3008 權重過高警示」), so only the provable case counts:
     # the code followed directly by ANOTHER registered instrument's name.
-    others = {id(x): x for x in index.values()}.values()
     for m in _BARE_CODE.finditer(text):
         inst = index.get(m.group(1).upper())
         if inst is None:
@@ -192,7 +222,7 @@ def mismatches(text: str, registry: Iterable[NamedInstrument]) -> list[Mismatch]
         after = text[m.end():]
         if any(after.upper().startswith(n.upper()) for n in inst.names if n):
             continue
-        hit = max(((n, i.symbol) for i in others if i.symbol != inst.symbol
+        hit = max(((n, i.symbol) for i in unique if i.symbol != inst.symbol
                    for n in i.names if len(n) >= _MIN_CJK_PREFIX
                    and after.upper().startswith(n.upper())),
                   key=lambda t: len(t[0]), default=None)

@@ -19,7 +19,7 @@ Two views are exposed:
   what has happened by today — the same rule ``networth.daily_cash_series`` has always
   applied when it walks the calendar, which is why the two used to disagree by exactly
   the future row. ``as_of=None`` is the whole history (the pre-ruling reading).
-* ``pool_lines`` / ``running_low`` / ``running_min`` / ``running_statement`` — the
+* ``pool_lines`` / ``running_low`` / ``running_eod`` / ``running_min`` / ``running_statement`` — the
   DATE-ORDERED timeline of one pool, so a back-dated withdrawal that dips the running
   balance below zero is caught (audit C3) and the statement view (audit C5) can show a
   per-line running balance. The timeline is deliberately NOT bounded by a date: a
@@ -267,6 +267,20 @@ def running_low(lines: Sequence[CashLine]) -> tuple[Decimal, date | None]:
         if bal < mn:
             mn, on = bal, ln.date
     return mn, on
+
+
+def running_eod(lines: Sequence[CashLine]) -> tuple[tuple[date, Decimal], ...]:
+    """The pool's END-OF-DAY running balance, one point per day that has a line.
+
+    What ``shared/cash_dip.py`` compares day by day (DEF-090). Same-day credits are booked
+    before debits (:func:`_ordered`), so a day's lowest point is its end-of-day balance and
+    this series loses nothing :func:`running_low` would have seen."""
+    out: dict[date, Decimal] = {}
+    bal = _ZERO
+    for ln in _ordered(lines):
+        bal += ln.delta
+        out[ln.date] = bal
+    return tuple(out.items())
 
 
 def running_min(lines: Sequence[CashLine]) -> Decimal:

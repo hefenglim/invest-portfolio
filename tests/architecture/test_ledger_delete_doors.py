@@ -180,7 +180,7 @@ def test_each_allowlist_entry_carries_a_reason(key: tuple[str, str]) -> None:
 #: pool guards (cash / FX ledgers, which no equity replay reads).
 _GUARDS = frozenset({
     "_replay_guard", "action_change_guard", "batch_undo_guard",
-    "fx_delete_guard", "fx_change_guard", "movement_guard", "_pool_low",
+    "fx_delete_guard", "fx_change_guard", "movement_guard", "_pool_dip",
 })
 _LEDGER_PATHS = ("/api/ledgers/", "/api/import/batches", "/api/cash/movements")
 

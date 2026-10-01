@@ -2063,3 +2063,28 @@ and 2618.
 4. **Write regex character classes for CJK and full-width punctuation as `\u` escapes.** They
    are patterns, not copy; the zh punctuation guard reads every string literal, and a literal
    「（」 inside a pattern reads to it as a mixed-width sentence.
+
+## 2026-10-01 — R13: the verifier's full rerun before prod
+
+**What happened.** The pre-prod rerun on 830056c found three defects my own gates had passed.
+(a) DEF-087: the export guard (`test_exports_never_print_scientific_notation`) was red from
+e8bcf53 on. The bare `str()` it flags came in as the fix for ANOTHER guard's failure late in
+that round, and afterwards only the failed tests were re-run, never the batch that holds the
+export guard. (b) DEF-090: the withdraw and 換匯 guards compared the pool's lowest point before
+and after, so a new negative stretch shallower than an older dip went through — the same
+"aggregate hides the event" class as the net-only sell check of 2026-07-31. (c) DEF-089: the
+name check accepted any two-character leading part, so 「長榮 (2618)」 passed although 長榮 is
+2603's alias — the mix-up item 8 exists to stop, let back in by its own convenience rule.
+
+**Rules.**
+1. **The last full suite runs after the last code change of the round — and its batches must
+   add up to the collection.** A fix for one guard can break another that already ran green;
+   re-running only the failures certifies only the failures. Compare the batch totals with
+   `pytest --collect-only -q` before reporting a pass.
+2. **Never compare two timelines by their extremes.** "Did the low get lower" cannot see a new
+   dip that is shallower than an old one. Compare day by day, and say which question each
+   door asks: the hard guards refuse any day made worse; a correction door asks only about a
+   day it turns negative or pushes below the old low.
+3. **A leniency must be checked against every OTHER entry it could match.** A prefix rule that
+   only asks "is this a prefix of my name" accepts other instruments' names; ask "does it point
+   at me alone".

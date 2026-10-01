@@ -105,6 +105,34 @@ def test_a_wrong_pairing_is_found(text: str, code: str, written: str, belongs_to
         assert mm.span is not None and text[mm.span[0]:mm.span[1]] == written
 
 
+#: DEF-089 (owner ruling 1C, 2026-10-01): a Chinese leading part counts only when it points at
+#: its instrument alone. 2618 長榮航 and 2610 華航 / 中華航空 join the registry here.
+REG_1C = [*REG, NamedInstrument("2618", "長榮航", ("長榮航空",)),
+          NamedInstrument("2610", "華航", ("中華航空",))]
+
+
+@pytest.mark.parametrize("text", [
+    "玉山 (2884)", "玉山金 (2884)",              # any length from two up (owner: 「不一定 2 個字」)
+    "陽明海 (2609)", "聯發 (2454)",               # a leading part of an alias, 3 and 2 chars
+    "長榮航 (2618)", "長榮 (2603)",               # each instrument's own whole name
+    "中華電 (2412)", "中華航 (2610)",             # 中華電… is 2412's alone, 中華航… 2610's
+])
+def test_an_abbreviation_that_points_at_one_instrument_passes(text: str) -> None:
+    assert mismatches(text, REG_1C) == []
+
+
+@pytest.mark.parametrize("text, code, written, belongs_to", [
+    ("長榮 (2618) 客運回升", "2618", "長榮", "2603"),   # 2603's alias, a leading part of 2618's
+    ("2618（長榮）", "2618", "長榮", "2603"),
+    ("中華 (2610) 運價", "2610", "中華", None),          # 中華電信 and 中華航空 both start so
+    ("中華 (2412) 配息", "2412", "中華", None),
+])
+def test_an_abbreviation_another_instrument_shares_is_a_wrong_pairing(
+        text: str, code: str, written: str, belongs_to: str | None) -> None:
+    [mm] = mismatches(text, REG_1C)
+    assert (mm.code, mm.written, mm.belongs_to) == (code, written, belongs_to)
+
+
 def test_an_unregistered_code_is_not_this_checks_business() -> None:
     """「LRDIM (6883)」 — 6883 is not registered: the DEF-082 figure check flags it."""
     assert mismatches("主要動能來自 LRDIM (6883)", REG) == []

@@ -69,7 +69,7 @@ def _bare_reviewed(text: str, registry: list[NamedInstrument], wrong_names: list
     after 3034, were 3034 registered)."""
     for inst in registry:
         for name in sorted(wrong_names, key=len, reverse=True):
-            if accepts(name, inst):
+            if accepts(name, inst, registry):
                 continue
             m = re.search(rf"(?<![A-Za-z0-9.]){re.escape(inst.symbol)}[ \t]+{re.escape(name)}",
                           text)

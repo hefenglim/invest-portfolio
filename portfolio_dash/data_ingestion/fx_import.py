@@ -49,6 +49,7 @@ from portfolio_dash.data_ingestion.validate import (
     alias_import_account,
     amount_too_large_issue,
     cash_dip_sentence,
+    pool_dip,
     unknown_account_issue,
 )
 from portfolio_dash.shared.enums import Currency
@@ -166,33 +167,39 @@ def fx_balance_issues(
     included — is added ALONGSIDE the balance, never in place of it, and its message names
     the day the pool bottoms (M5-07).
 
-    A PRE-EXISTING dip the conversion does not DEEPEN never blocks it
-    (``after.low < min(before.low, 0)``) — scoped exactly like ``_withdraw_issues``, so a
-    ledger already in the red stays correctable.
+    A PRE-EXISTING dip the conversion does not DEEPEN never blocks it — scoped exactly like
+    ``_withdraw_issues``, so a ledger already in the red stays correctable — and the two
+    timelines are compared DAY BY DAY (DEF-090, ``validate.pool_dip``): comparing their
+    lowest points let a new negative stretch through whenever an older, unrelated dip was
+    deeper. The message names the first short day and the lowest point (DEF-091, 2B).
 
     *siblings* are the would-be legs of the OTHER conversions being written in the same batch
     (empty for a single-row door). There is no ack override in either branch: FU-D34 is a hard
     rule, and a door that offered one would be financing.
     """
     before = pool(account.account_id, from_ccy, include=siblings, as_of=on)
-    # DEF-008: the withdraw guard's ONE sentence (``validate.cash_dip_sentence``) — the
-    # account as a token, the day in both branches, the figure at the minor unit.
-    if from_amount > before.balance:
-        return [Issue(
-            kind="fx_insufficient_balance",
-            message=cash_dip_sentence(
-                what="換匯", account_id=account.account_id, ccy=from_ccy, on=on,
-                low=before.balance - from_amount, cause="換匯當日",
-            ) + "— 換匯不可透支（不提供融資）")]
     legs = fx_legs(account_id=account.account_id, on=on, from_ccy=from_ccy,
                    from_amount=from_amount, to_ccy=to_ccy, to_amount=to_amount)
     after = pool(account.account_id, from_ccy, include=[*siblings, *legs])
-    if after.low < min(before.low, _ZERO):
+    dip = pool_dip(before, after)
+    # DEF-008: the withdraw guard's ONE sentence (``validate.cash_dip_sentence``) — the
+    # account as a token, the day in both branches, the figure at the minor unit.
+    if from_amount > before.balance:
+        known = dip is not None and dip.low_on is not None
         return [Issue(
             kind="fx_insufficient_balance",
             message=cash_dip_sentence(
-                what="換匯", account_id=account.account_id, ccy=from_ccy,
-                on=after.low_date, low=after.low, cause="換匯日早於資金到位",
+                what="換匯", account_id=account.account_id, ccy=from_ccy, first=on,
+                on=dip.low_on if dip is not None and known else on,
+                low=dip.low if dip is not None and known else before.balance - from_amount,
+                cause="換匯當日",
+            ) + "— 換匯不可透支（不提供融資）")]
+    if dip is not None:
+        return [Issue(
+            kind="fx_insufficient_balance",
+            message=cash_dip_sentence(
+                what="換匯", account_id=account.account_id, ccy=from_ccy, first=dip.first,
+                on=dip.low_on, low=dip.low, cause="換匯日早於資金到位",
             ) + "— 換匯不可透支，請先補登入金或換匯")]
     return []
 

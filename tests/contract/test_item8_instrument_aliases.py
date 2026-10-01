@@ -463,6 +463,23 @@ def test_ai_resolve_serves_its_common_names_filtered(
     assert "aliases" not in body and all("aliases" not in c for c in body["candidates"])
 
 
+def test_ai_resolve_keeps_a_chinese_model_name_the_exchange_name_replaced(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEF-088 (verifier R13, F-01): for a TW name the provider's name is the exchange short
+    name (長榮航); the model, following the prompt's example, puts the full name in ``name``
+    and the short one in ``aliases``. Replacing the name dropped 長榮航空, and 長榮航 then
+    equalled the name — every TW reply served no alias (長榮航, 華航, 聯電 alike)."""
+    monkeypatch.setattr(inst_mod, "complete_structured", _completer(AiInstrumentResolveReply(
+        symbol="2618", name="長榮航空", gics_sector="Industrials", confidence="high",
+        aliases=["長榮航"])))
+    monkeypatch.setattr(inst_mod, "lookup_instrument", _lookup_found("長榮航"))
+    body = api_client.post("/api/instruments/ai-resolve",
+                           json={"query": "長榮航", "market": "TW"}).json()
+    assert body["status"] == "resolved" and body["name"] == "長榮航"
+    assert body["aliases"] == ["長榮航空"]
+
+
 def test_ai_resolve_registered_short_circuit_serves_stored_aliases(
     api_client: TestClient,
 ) -> None:

@@ -70,9 +70,11 @@ from portfolio_dash.portfolio.cash import (
     account_statement,
     cash_balances,
     pool_lines,
+    running_eod,
     running_low,
 )
 from portfolio_dash.pricing.store import get_fx, get_fx_on
+from portfolio_dash.shared.cash_dip import Dip, first_dip
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
@@ -120,19 +122,21 @@ def _balances(
     )
 
 
-def _pool_low(
+def _pool_dip(
     conn: sqlite3.Connection,
     account_id: str,
     ccy: Currency,
     *,
     movements: list[StoredCashMovement] | None = None,
     fx: list[StoredFxConversion] | None = None,
-) -> tuple[Decimal, date | None]:
-    """Minimum running balance of one pool over its date-ordered ledger (audit C3), and the
-    first day it is reached (M5-07; ``None`` when the pool never dips).
+) -> Dip | None:
+    """Where one pool's date-ordered ledger is below zero (audit C3): the first short day and
+    the lowest point with its day (DEF-091, owner ruling 2B; M5-07 named only the lowest).
+    ``None`` when the pool never dips.
 
     Callers pass the WOULD-BE movement/fx list; unspecified ledgers load from store. The
-    timeline is never date-bounded — see ``portfolio/cash.py``.
+    timeline is never date-bounded — see ``portfolio/cash.py``. Unscoped on purpose: these
+    are the ack-able correction doors, which report any dip in the would-be pool.
     """
     ms = movements if movements is not None else list_cash_movements(conn)
     fxs = fx if fx is not None else list_fx_conversions(conn)
@@ -140,7 +144,7 @@ def _pool_low(
         account_id, ccy, ms, fxs, list_transactions(conn), list_dividends(conn),
         {i.symbol: i for i in list_instruments(conn)},
     )
-    return running_low(lines)
+    return first_dip(running_eod(lines))
 
 
 def _synthetic(movement: CashMovementInput) -> StoredCashMovement:
@@ -200,13 +204,14 @@ def cash_pool_fn(
     ) -> CashPool:
         rows: list[StoredCashMovement] = [m for m in movements if m.id != exclude_id]
         rows.extend(_synthetic(m) for m in include)
-        low, low_date = running_low(
-            pool_lines(account_id, ccy, rows, fx, txns, divs, insts))
+        lines = pool_lines(account_id, ccy, rows, fx, txns, divs, insts)
+        low, low_date = running_low(lines)
         return CashPool(
             balance=cash_balances(rows, fx, txns, divs, insts, as_of=as_of).get(
                 (account_id, ccy), _ZERO),
             low=low,
             low_date=low_date,
+            eod=running_eod(lines),  # DEF-090: the guards compare the timelines day by day
         )
 
     return probe
@@ -255,15 +260,14 @@ def _movement_error(issues: Sequence[Issue]) -> JSONResponse | None:
         "validation_error", hard.message, field=field))
 
 
-def _negative_response(
-    account_id: str, ccy: Currency, low: Decimal, on: date | None
-) -> JSONResponse:
+def _negative_response(account_id: str, ccy: Currency, dip: Dip) -> JSONResponse:
     # DEF-008: the pool guards' ONE sentence — the account as a token, the figure at the
-    # currency's minor unit — with this door's own remedy (it is the ack-able one).
+    # currency's minor unit — with this door's own remedy (it is the ack-able one). DEF-091:
+    # the first short day and the lowest point, like the hard guards.
     return JSONResponse(status_code=422, content=error_body(
         "negative_cash",
-        cash_dip_sentence(what="", account_id=account_id, ccy=ccy, on=on, low=low,
-                          cause=None)
+        cash_dip_sentence(what="", account_id=account_id, ccy=ccy, first=dip.first,
+                          on=dip.low_on, low=dip.low, cause=None)
         + " — 通常代表漏記入金或換匯；確認無誤可強制寫入"))
 
 
@@ -344,9 +348,9 @@ def fx_delete_guard(
         return None
     would_be = [f for f in list_fx_conversions(conn) if f.id != existing.id]
     for ccy in (existing.to_ccy, existing.from_ccy):
-        low, on = _pool_low(conn, existing.account_id, ccy, fx=would_be)
-        if low < _ZERO:
-            return _negative_response(existing.account_id, ccy, low, on)
+        dip = _pool_dip(conn, existing.account_id, ccy, fx=would_be)
+        if dip is not None:
+            return _negative_response(existing.account_id, ccy, dip)
     return None
 
 
@@ -701,11 +705,11 @@ def edit_movement(
                 # must never resurface as an ack-able warning. What remains ack-able here
                 # is only the effect of REMOVING the old row (e.g. a deposit edited into
                 # a withdraw stranding later flows) — deposit-side semantics, untouched.
-                low, on = _pool_low(conn, account_id, ccy, movements=without)
+                dip = _pool_dip(conn, account_id, ccy, movements=without)
             else:
-                low, on = _pool_low(conn, account_id, ccy, movements=would_be)
-            if low < _ZERO:
-                return _negative_response(account_id, ccy, low, on)
+                dip = _pool_dip(conn, account_id, ccy, movements=would_be)
+            if dip is not None:
+                return _negative_response(account_id, ccy, dip)
     update_cash_movement(
         conn, move_id, account_id=body.account_id, move_date=body.date,
         kind=kind, ccy=body.ccy, amount=body.amount, note=body.note,
@@ -725,9 +729,9 @@ def remove_movement(
                             content=error_body("not_found", f"紀錄 #{move_id} 不存在"))
     if not ack_negative:
         would_be = [m for m in list_cash_movements(conn) if m.id != move_id]
-        low, on = _pool_low(conn, existing.account_id, existing.ccy, movements=would_be)
-        if low < _ZERO:
-            return _negative_response(existing.account_id, existing.ccy, low, on)
+        dip = _pool_dip(conn, existing.account_id, existing.ccy, movements=would_be)
+        if dip is not None:
+            return _negative_response(existing.account_id, existing.ccy, dip)
     delete_cash_movement(conn, move_id)
     return {"ok": True, "id": move_id}
 

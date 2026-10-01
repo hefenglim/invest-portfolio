@@ -49,6 +49,13 @@ inbox's dedup now reads the credit's explicit ``rebate_period`` link instead of 
 so the ORDINARY deposit-side guard answers them exactly as it answers ``edit_rebate_amount``
 on this ledger — 422 ``negative_cash`` — and neither writes. Same sequence, same final ledger.
 
+⚠ TWO pins were re-recorded on 2026-10-01 for DEF-091 (owner ruling 2B: an overdraft names
+the FIRST day the pool is short and its lowest point). ``edit_deposit_shrinks_pool`` and
+``delete_rebate`` used to name only the lowest day (2026-07-20); the tw_broker pool is short
+from 2026-01-05, so they now read 「自 2026-01-05 起為負，最低於 2026-07-20 降至 …」. The three
+pins whose first day IS the lowest day (2026-01-05) keep their one-day sentence. Same status,
+same code, same figure, same verdict.
+
 The cases run as ONE ordered sequence against one ledger, because several of them only mean
 something in sequence: the withdraw messages quote a balance that earlier rows created, the
 self-exclusion edit needs a row to edit, and the REBATE lock needs a booked rebate. The final
@@ -263,7 +270,8 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "1"},
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-07-20 降至 −544,846 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金自 2026-01-05 起為負，"
+                    "最低於 2026-07-20 降至 −544,846 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     # ...and the ack DOES still bypass the deposit-side guard (only the withdraw one is hard).
     {"n": "edit_deposit_shrinks_acked", "m": _PUT, "target": "deposit_ok", "b": {
@@ -276,7 +284,8 @@ _SEQUENCE: list[dict[str, Any]] = [
     {"n": "delete_rebate", "m": _DELETE, "target": "rebate_ok",
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-07-20 降至 −544,999 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金自 2026-01-05 起為負，"
+                    "最低於 2026-07-20 降至 −544,999 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     {"n": "delete_unknown_id", "m": _DELETE, "target": "__missing__",
      "status": 404, "err": {"code": "not_found", "message": "紀錄 #99999 不存在"}},

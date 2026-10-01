@@ -113,6 +113,11 @@ narrator, not a calculator.
   wrong pairings on 10 of 224 cards (聯詠 (3008), 陽明 (2603)…); `scripts/fix_card_names.py`
   corrects stored cards (the name is replaced, the code kept; an extent it cannot bound is
   fixed only for a reviewed `--wrong-name`). `tests/llm_insight/test_item8_card_names_match_their_codes.py`.
+  A Chinese ABBREVIATION — a leading part of a name or alias, any length from two characters
+  up (玉山金 for 玉山金控) — counts only when it points at that instrument alone (owner ruling
+  1C, 2026-10-01, DEF-089): one that is another instrument's name or alias, or that another
+  instrument's name also starts with, is a wrong pairing. 「長榮 (2618)」 (長榮 is 2603's) and
+  「中華 (2610)」 (中華電信 starts so too) passed before the rule.
 - **A failover is reported, not swallowed.** `StructuredCompletion` carries `model_name`,
   `usage_id` and `failed_before` (every candidate that failed first, with its zh reason). The
   AI door turns it into `meta.fallback_note` — an owner who picked a model by hand is told it

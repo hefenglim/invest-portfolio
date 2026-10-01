@@ -206,7 +206,9 @@ def _display(table: str, field: str, value: object) -> str | None:
         except ValueError:
             items = None
         if isinstance(items, list):
-            return "、".join(str(a) for a in items) or "無"
+            # The one writer (store.set_instrument_aliases) stores names as text; joining
+            # only text keeps this off the bare-str() list the export guard holds (DEF-087).
+            return "、".join(a for a in items if isinstance(a, str)) or "無"
         return text
     if field == "side":
         return _SIDE_ZH.get(text.upper(), text)

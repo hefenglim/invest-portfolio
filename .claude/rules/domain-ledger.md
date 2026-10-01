@@ -164,6 +164,14 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   net across all dates. A net-only check let a back-dated sell through whenever a LATER buy
   covered it — and the replay then discarded that symbol's cost basis permanently. Mirrors
   the cash ledger's `running_min` guard (audit C3).
+- **A cash guard compares the pool DAY BY DAY, never lowest point against lowest point**
+  (DEF-090, 2026-10-01; `shared/cash_dip.py`). A withdrawal / 換匯 is refused when it makes
+  any day negative or more negative (`new_dip`); the import-batch undo asks when a day turns
+  negative or drops below the pool's old low (`caused_dip`). Comparing only the two lowest
+  points let a back-dated withdrawal open a new negative stretch whenever an older, unrelated
+  dip was deeper — the aggregate hid the event, the same class as the net-only sell check
+  above. Every refusal names the FIRST short day and the lowest point (owner ruling 2B,
+  DEF-091): 「自 D1 起為負，最低於 D2 降至 −N」.
 - **Same-day trades replay in WRITE order — the ledger id — never buys-before-sells**
   (DEF-012, recorded 2026-09-23). A transaction has no time-of-day column, so the only
   evidence of intraday order is the row id: the order the owner entered the rows, or the

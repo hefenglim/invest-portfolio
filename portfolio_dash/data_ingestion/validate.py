@@ -21,7 +21,7 @@ so the guards hold no matter which path a row arrives on. For transactions:
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from typing import Protocol
@@ -56,6 +56,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book
 from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.cash_dip import Dip, new_dip
 from portfolio_dash.shared.cash_kinds import (
     CASH_KIND_VALUES,
     CASH_KIND_ZH,
@@ -174,14 +175,21 @@ def amount_too_large_issue(value: Decimal, label: str) -> Issue | None:
     return None
 
 
-def dip_phrase(on: date | None) -> str:
-    """「於 <day> 降至」 for an overdraft message, naming THE DAY the pool bottoms (M5-07).
+def dip_phrase(on: date | None, first: date | None = None) -> str:
+    """「於 <day> 降至」 for an overdraft message, naming THE DAY the pool bottoms (M5-07) —
+    and, when the pool is already short earlier, 「自 <first> 起為負，最低於 <day> 降至」
+    (owner ruling 2026-10-01, DEF-091 2B: the first day is when the money must be there by,
+    the lowest point how much is missing; one day when they coincide).
 
-    ``running_low`` supplies the day; ``None`` (a pool that never dips, which no caller
-    should reach here with, or a test double that reports no day) keeps the old 「於某時點」
-    rather than printing ``None`` into the owner's sentence.
+    ``None`` for *on* (a pool that never dips, which no caller should reach here with, or a
+    test double that reports no day) keeps the old 「於某時點」 rather than printing ``None``
+    into the owner's sentence.
     """
-    return f"於 {on.isoformat()} 降至" if on is not None else "於某時點降至"
+    if on is None:
+        return "於某時點降至"
+    if first is not None and first != on:
+        return f"自 {first.isoformat()} 起為負，最低於 {on.isoformat()} 降至"
+    return f"於 {on.isoformat()} 降至"
 
 
 #: U+2212 — the minus sign ``web/format.js`` and ``export/cash_statement.py`` print, so an
@@ -210,7 +218,7 @@ def cash_amount_text(value: Decimal, ccy: Currency) -> str:
 
 def cash_dip_sentence(
     *, what: str, account_id: str, ccy: Currency, on: date | None, low: Decimal,
-    cause: str | None,
+    cause: str | None, first: date | None = None,
 ) -> str:
     """「此筆<what>會使 {account:…} 的 <CCY> 現金於 <day> 降至 <low>（<cause>）」 — ONE sentence.
 
@@ -226,10 +234,13 @@ def cash_dip_sentence(
     The account is a TOKEN (``shared/account_ref.py``): the backend owns no zh name, and the
     fetch layer resolves it to the one ``pdNames`` spelling. The caller appends its own tail
     (the remedy differs per door), which is why this returns the clause, not the whole line.
+
+    *first* is the first day the pool is short (DEF-091); the sentence names it only when it
+    is not *on* itself (:func:`dip_phrase`).
     """
     tail = f"（{cause}）" if cause else ""
     return (f"此筆{what}會使 {account_ref(account_id)} 的 {ccy.value} 現金"
-            f"{dip_phrase(on)} {cash_amount_text(low, ccy)}{tail}")
+            f"{dip_phrase(on, first)} {cash_amount_text(low, ccy)}{tail}")
 
 
 def _same_ratio(a_to: Decimal, a_from: Decimal, b_to: Decimal, b_from: Decimal) -> bool:
@@ -1818,12 +1829,39 @@ class CashPool(BaseModel):
     still counts — which is what catches a withdrawal that strands a later flow while the
     balance on its own day still looks fine. ``low_date`` is the first day that minimum is
     reached (M5-07), ``None`` when the pool never dips (or the probe is a test double that
-    does not report it).
+    does not report it). ``eod`` is the same whole timeline as end-of-day balances
+    (``portfolio/cash.py::running_eod``) — what the guards compare DAY BY DAY (DEF-090).
     """
 
     balance: Decimal
     low: Decimal
     low_date: date | None = None
+    eod: tuple[tuple[date, Decimal], ...] = ()
+
+
+@dataclass(frozen=True)
+class PoolShort:
+    """Where a change leaves a pool short: the first such day, and the lowest point with its
+    day (``None`` days only from a probe that reports no timeline — a test double)."""
+
+    first: date | None
+    low: Decimal
+    low_on: date | None
+
+
+def pool_dip(before: CashPool, after: CashPool) -> PoolShort | None:
+    """The dip a change causes — the ONE decision the withdraw and 換匯 guards share.
+
+    The real probe (``api/routers/cash.py::cash_pool_fn``) reports the timeline, compared DAY
+    BY DAY by ``shared/cash_dip.py::new_dip`` (DEF-090). A probe that reports only its lowest
+    point — a test double — keeps the comparison that point allows (the rule before DEF-090);
+    nothing in the package builds such a probe for a real guard."""
+    if before.eod or after.eod:
+        dip: Dip | None = new_dip(before.eod, after.eod)
+        return None if dip is None else PoolShort(dip.first, dip.low, dip.low_on)
+    if after.low < min(before.low, _ZERO):
+        return PoolShort(None, after.low, after.low_date)
+    return None
 
 
 class CashPoolFn(Protocol):
@@ -1962,9 +2000,12 @@ def _withdraw_issues(
 
     Date-aware check (audit C3, hardened for withdrawals): a withdrawal that INTRODUCES or
     DEEPENS a below-zero dip in the running timeline — e.g. one that strands a later spend —
-    is blocked too, and the message names the day the pool bottoms (M5-07). The timeline is
-    never bounded, so a future-dated flow still counts. A PRE-EXISTING dip it does not
-    worsen never blocks it (scoped like the ledger-correction replay guard, audit H3).
+    is blocked too. Judged DAY BY DAY (DEF-090, ``shared/cash_dip.py::new_dip``): it compared
+    the whole timeline's lowest point before and after, so a new negative stretch shallower
+    than an older, unrelated dip was written. The message names the first day the pool is
+    short and its lowest point (DEF-091, owner ruling 2B; M5-07 named the lowest day only).
+    The timeline is never bounded, so a future-dated flow still counts. A PRE-EXISTING dip it
+    does not worsen never blocks it (scoped like the ledger-correction replay guard, audit H3).
 
     *batch* is every row committed together, INCLUDING *inp* (the convention
     :func:`validate_corporate_action` uses). A cash CSV is normally "the deposit that funded
@@ -1976,23 +2017,27 @@ def _withdraw_issues(
     siblings = [_pool_row(b) for b in batch if b is not inp]
     before = pool(inp.account_id, inp.ccy, include=siblings, exclude_id=exclude_id,
                   as_of=inp.date)
+    after = pool(inp.account_id, inp.ccy,
+                 include=[*siblings, _pool_row(inp)], exclude_id=exclude_id)
+    dip = pool_dip(before, after)
     # DEF-008: both branches state the same three facts in ONE sentence — which pool, on
     # which day, down to what — and differ only in the cause (see cash_dip_sentence).
     if inp.amount > before.balance:
+        known = dip is not None and dip.low_on is not None
         return [Issue(
             kind="withdraw_insufficient_balance",
             message=cash_dip_sentence(
-                what="出金", account_id=account.account_id, ccy=inp.ccy, on=inp.date,
-                low=before.balance - inp.amount, cause="出金當日",
+                what="出金", account_id=account.account_id, ccy=inp.ccy, first=inp.date,
+                on=dip.low_on if dip is not None and known else inp.date,
+                low=dip.low if dip is not None and known else before.balance - inp.amount,
+                cause="出金當日",
             ) + "— 出金不可透支，請先補登入金或換匯")]
-    after = pool(inp.account_id, inp.ccy,
-                 include=[*siblings, _pool_row(inp)], exclude_id=exclude_id)
-    if after.low < min(before.low, _ZERO):
+    if dip is not None:
         return [Issue(
             kind="withdraw_insufficient_balance",
             message=cash_dip_sentence(
-                what="出金", account_id=account.account_id, ccy=inp.ccy,
-                on=after.low_date, low=after.low, cause="出金日早於資金到位",
+                what="出金", account_id=account.account_id, ccy=inp.ccy, first=dip.first,
+                on=dip.low_on, low=dip.low, cause="出金日早於資金到位",
             ) + "— 出金不可透支，請先補登入金或換匯")]
     return []
 

@@ -45,10 +45,11 @@ from portfolio_dash.data_ingestion.store import (
     list_transactions,
     load_ledger_bundle,
 )
-from portfolio_dash.portfolio.cash import pool_lines, running_low
+from portfolio_dash.portfolio.cash import pool_lines, running_eod
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.cash_dip import caused_dip
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
 
@@ -315,11 +316,14 @@ def _pool_refusal(
     own row doors are not.
 
     ⚠ SCOPED like the replay block above, which the row doors' cash check is not: a pool is
-    refused only when the mutation makes its running low WORSE (post low < 0 and below the
-    current low). A pool that is already short for reasons that have nothing to do with the
-    mutation — the golden ledger's TWD pool sits at −500,000 from its first buy, and a 1,000
-    deposit undone months later funds nothing — must not ask the owner to acknowledge a dip
-    the mutation did not cause (audit H3/H8's rule, applied to cash).
+    refused only when the mutation makes a day negative that was not, or pushes a day below
+    the pool's old lowest point (``shared/cash_dip.py::caused_dip``, compared DAY BY DAY —
+    DEF-090: comparing only the two timelines' lowest points let a new, shallower negative
+    stretch through beside an older, deeper one). A pool that is already short for reasons
+    that have nothing to do with the mutation — the golden ledger's TWD pool sits at −500,000
+    from its first buy, and a 1,000 deposit undone months later funds nothing — must not ask
+    the owner to acknowledge a dip the mutation did not cause (audit H3/H8's rule, applied to
+    cash).
     """
     movements = list_cash_movements(conn)
     fxs = list_fx_conversions(conn)
@@ -334,14 +338,12 @@ def _pool_refusal(
     all_divs = list_dividends(conn)
     insts = {i.symbol: i for i in list_instruments(conn)}
     for account_id, ccy in sorted(pools, key=lambda p: (p[0], p[1].value)):
-        low, on = running_low(pool_lines(
-            account_id, ccy, would_moves, would_fx, would_txs, would_divs, insts))
-        if low >= 0:
-            continue
-        pre_low, _ = running_low(pool_lines(
-            account_id, ccy, movements, fxs, all_txs, all_divs, insts))
-        if low < pre_low:
-            return _negative_response(account_id, ccy, low, on)
+        dip = caused_dip(
+            running_eod(pool_lines(account_id, ccy, movements, fxs, all_txs, all_divs, insts)),
+            running_eod(pool_lines(
+                account_id, ccy, would_moves, would_fx, would_txs, would_divs, insts)))
+        if dip is not None:
+            return _negative_response(account_id, ccy, dip)
     return None
 
 

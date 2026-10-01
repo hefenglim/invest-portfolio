@@ -45,7 +45,7 @@ from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.instrument_names import AliasError, normalize_aliases
+from portfolio_dash.shared.instrument_names import AliasError, has_cjk, normalize_aliases
 from portfolio_dash.shared.llm import complete_structured
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.sectors import (
@@ -416,9 +416,17 @@ def ai_resolve(
                 "symbol": primary_symbol,
                 "name": resolved_name,
                 # item 8: the dialog carries these into its 別名 field and the register door
-                # stores them; unusable / taken ones are dropped here, silently.
-                "aliases": auto_aliases(conn, symbol=primary_symbol, name=resolved_name,
-                                        candidates=reply.aliases),
+                # stores them; unusable / taken ones are dropped here, silently. A Chinese
+                # model name leads (DEF-088): a TW provider name is the exchange short name
+                # (長榮航), the prompt's example puts the short name in ``aliases`` and the
+                # full one (長榮航空) in ``name`` — so replacing the name dropped the full one
+                # and the short one then equalled the name: every TW reply stored no alias.
+                # A Latin model name needs no row: the name check reads the registered
+                # Latin name's word forms ("Microsoft" for Microsoft Corporation).
+                "aliases": auto_aliases(
+                    conn, symbol=primary_symbol, name=resolved_name,
+                    candidates=[*([reply.name] if has_cjk(reply.name) else []),
+                                *reply.aliases]),
                 "sector": sector,
                 "industry": industry,
                 "confidence": "high",

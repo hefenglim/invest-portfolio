@@ -9,6 +9,39 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Pre-prod R13 fixes (the verifier's full rerun on 830056c, 2026-10-01; owner rulings 1C /
+2B / 3A / 4A).** R13 found three defects and two specification questions; the owner ruled the
+two in chat.
+
+- **DEF-090 — a cash guard compares the pool day by day** (`shared/cash_dip.py`, new). The
+  withdraw and 換匯 guards compared the timeline's LOWEST point before and after, so a
+  back-dated withdrawal that opened a new negative stretch went through whenever an older,
+  unrelated dip was deeper. Demo: the Schwab TWD pool sat at −220,000 from 2026-01-12, and
+  348,000 out on 07-17 left 07-19 / 07-20 at −148,000 / −153,000 — written. Now the probe
+  also reports the end-of-day timeline (`portfolio/cash.py::running_eod`, `CashPool.eod`):
+  - the HARD guards refuse any day the change makes negative or more negative (`new_dip`);
+  - the import-batch undo's ack-able check asks when a day turns negative or drops below
+    the pool's old lowest point (`caused_dip`). Deepening a shortfall that was already there
+    still does not ask (audit H3: the golden tw_broker pool is short from its first buy).
+- **DEF-091 — an overdraft names the first short day and the lowest point** (owner 2B: the
+  first day is when the money must be there by, the lowest is how much is missing). Every
+  pool sentence — the two hard guards and the ack-able `negative_cash` doors — reads
+  「自 D1 起為負，最低於 D2 降至 −N」, or the old 「於 D 降至 −N」 when the days coincide. Two
+  recorded responses in `test_cash_movement_guard_contract.py` were re-recorded for it.
+- **DEF-089 — a Chinese abbreviation counts only when it points at one instrument** (owner
+  1C; any length from two characters up). `name_check` accepted any leading part of 2+
+  characters, so 「長榮 (2618)」 passed although 長榮 is 2603's alias, and 「中華 (2610)」 passed
+  although 中華電信 also starts with 中華. A leading part that is another instrument's name or
+  alias, or that another instrument's name starts with, is now a wrong pairing (asked again,
+  then not stored). 「玉山金 (2884)」 still passes. `fix_card_names.py` applies the same rule.
+- **DEF-088 — AI 辨識 of a TW name serves aliases again.** The provider's name (the exchange
+  short name, 長榮航) replaced the model's, and the model had put the full name (長榮航空) in
+  `name` and the short one in `aliases`, so the full name was dropped and the short one equalled
+  the name: every TW reply stored no alias. A Chinese model name is now the first candidate.
+- **DEF-087 — the export guard is green again.** `export/ledger_audit.py` joined the aliases
+  with a bare `str()` that `test_exports_never_print_scientific_notation` does not allow; the
+  aliases are text, so the join no longer converts.
+
 **Item 8 — a card names each registered code by one of its names (owner 2026-09-30,
 「新的名稱代號確保正確不會再錯誤」, ruled 「登錄名稱＋中文別名」).** The spec
 (`docs/spec/2026-09-30-code-name-consistency-check.md`) found 聯詠 (3008) and 陽明 (2603) on
@@ -40,7 +73,8 @@ the demo's cards: the model paired a registered code with another company's name
   - `llm_insight/name_check.py` reads the reply. It checks 「名稱 (代號)」 and 「代號 (名稱)」,
     and flags a bare code only when it is followed by ANOTHER registered instrument's name.
   - Accepted forms:
-    - a Chinese name or alias, or a leading part of at least 2 characters (玉山金 for 玉山金控);
+    - a Chinese name or alias, or a leading part of at least 2 characters (玉山金 for 玉山金控)
+      — since DEF-089 only when no other instrument shares it (see the R13 fixes above);
     - a Latin name by DEF-082's whole word forms;
     - generic referents, unit words and bracket notes are not names.
   - A mismatch asks once more with the wrong pairings named (`INSIGHT_NAMING_RETRY`). A card
