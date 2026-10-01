@@ -74,9 +74,10 @@ both):
 - The browser shows 「亦稱 大立光、大立光電」 under LARGAN, the search finds 3008 by 大立光, and
   the edit dialog carries the list.
 - Left as found: two news headlines quoting 「長榮航運」 (an article's own words, no code).
-- Left for the owner: card #82's summary 「LRDIM (6883)」, the same holding its body names as
-  3008. 6883 is not registered, so the rule does not reach it, and a code change is outside
-  what the script does.
+- Card #82's summary 「LRDIM (6883)」 (the same holding its body names as 3008; 6883 is not
+  registered, so neither the rule nor the script reaches it) was corrected by hand to
+  「大立光 (3008)」 with the owner's approval in chat on 2026-10-01, after a backup. No card now
+  contains LRDIM or 6883.
 
 **Functional-test manual closed; the owner's 18 rulings on its open items (2026-09-30).** The
 manual closed on `d2e5e08` (PASS 119 / N/A 1, 86 defects closed or not-a-defect); the verifier
