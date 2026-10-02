@@ -226,12 +226,12 @@ def test_def009_a_confirmed_rebate_is_fully_editable_and_its_month_stays_booked(
     amount.fill("100")
     note.fill("實收 100（券商對帳單）")
     modal.locator("button", has_text="儲存").click()
-    # The golden tw_broker pool is negative from its unfunded buy, so any edit asks the
-    # ordinary 現金將變為負數 question first — the same as for a hand-entered row.
-    neg = page.locator(".modal-backdrop .modal", has_text="現金將變為負數")
-    expect(neg).to_be_visible()
-    neg.locator("button", has_text="我了解，仍要寫入").click()
+    # The golden tw_broker pool is negative from its unfunded buy, but this edit turns no day
+    # negative and pushes none below that old low — so it is written without the 現金將變為
+    # 負數 question (DEF-092, owner ruling A, 2026-10-02: a correction asks only about a dip
+    # it causes; until then any edit in this pool asked, quoting the unrelated old dip).
     expect(page.locator("#cm-body tr", has_text="實收 100")).to_have_count(1)
+    expect(page.locator(".modal-backdrop .modal", has_text="現金將變為負數")).to_have_count(0)
     moved = next(m for m in _get_json(base, "/api/cash?limit=500")["movements"]["rows"]
                  if m["kind"] == "rebate")
     assert (moved["date"], moved["amount"], moved["note"], moved["rebate_period"]) == (

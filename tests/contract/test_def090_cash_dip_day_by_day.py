@@ -21,7 +21,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from portfolio_dash.data_ingestion.store import insert_cash_movement
-from portfolio_dash.shared.cash_dip import Dip, caused_dip, first_dip, new_dip
+from portfolio_dash.shared.cash_dip import Dip, caused_dip, new_dip
 from portfolio_dash.shared.enums import Currency
 
 D = date.fromisoformat
@@ -51,8 +51,6 @@ def test_a_new_stretch_shallower_than_an_older_dip_is_found() -> None:
 def test_an_untouched_older_dip_is_never_reported_as_new() -> None:
     assert new_dip(_OLD, _OLD) is None
     assert caused_dip(_OLD, _OLD) is None
-    assert first_dip(_OLD) == Dip(first=D("2026-01-12"), low=_n("-220000"),
-                                  low_on=D("2026-01-12"))
 
 
 def test_deepening_a_day_that_was_already_short() -> None:

@@ -83,8 +83,11 @@ def test_fx_guard_names_the_day(api_client: TestClient) -> None:
 
 
 def test_negative_cash_envelope_names_the_day(api_client: TestClient) -> None:
-    """Deleting the golden 2330 dividend (5,000 on 03-01) leaves tw_broker TWD at −500,000
-    from the 01-05 buy onward; the ack-able envelope names 01-05."""
+    """tw_broker TWD sits at −500,000 from the 01-05 buy (−495,000 after the golden 03-01
+    dividend). A 600,000 deposit on 06-01 funds it; deleting that deposit turns 06-01 onward
+    negative again, and the ack-able envelope names THAT day. It named the pool's older,
+    deeper 01-05 low until DEF-092 (owner ruling A, 2026-10-02): a dip the deletion did not
+    cause, quoted as 「此筆會使…」."""
     dep = api_client.post("/api/cash/movements", json={
         "account_id": "tw_broker", "date": "2026-06-01", "kind": "deposit",
         "ccy": "TWD", "amount": "600000"})
@@ -93,5 +96,5 @@ def test_negative_cash_envelope_names_the_day(api_client: TestClient) -> None:
     assert r.status_code == 422, r.json()
     msg = r.json()["error"]["message"]
     assert r.json()["error"]["code"] == "negative_cash"
-    assert "於 2026-01-05 降至 −500,000" in msg, msg  # DEF-008: thousands, U+2212
+    assert "於 2026-06-01 降至 −495,000" in msg, msg  # DEF-008: thousands, U+2212
     assert "某時點" not in msg

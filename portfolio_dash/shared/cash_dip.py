@@ -6,16 +6,18 @@ day's lowest point IS its end-of-day balance and nothing finer is needed.
 
 Two questions, one owner, so every cash guard answers them the same way:
 
-* :func:`first_dip` — is the timeline below zero anywhere? (the edit / delete doors'
-  ack-able ``negative_cash`` check, which deliberately also reports a dip it did not cause)
 * :func:`new_dip` — did a change make a day negative, or a negative day more negative? (the
-  hard withdraw and 換匯 guards, and the import-batch undo). Compared DAY BY DAY. The old
+  hard withdraw and 換匯 guards). Compared DAY BY DAY. The old
   rule compared the whole timeline's lowest point before and after, so a new negative
   stretch shallower than an older, unrelated dip went through — DEF-090: the Schwab TWD pool
   sat at −220,000 from 2026-01-12, a withdrawal back-dated to 07-17 left 07-19 and 07-20 at
   −148,000 / −153,000, and it was written. A dip the change does not touch still never
   blocks it: on every day before the change, and on every day it leaves alone, the two
   timelines are equal.
+* :func:`caused_dip` — did a CORRECTION turn a day negative, or push one below the pool's old
+  lowest point? (every ack-able ``negative_cash`` door: the import-batch undo, and — owner
+  ruling A, 2026-10-02, DEF-092 — the single-row edit / delete and FX delete doors, which had
+  reported any dip in the pool and called an unrelated one 「此筆會使…」).
 
 Both answer with :class:`Dip` — the FIRST day below zero, and the lowest point with its day.
 Owner ruling 2026-10-01 (DEF-091, 2B): the message names both, because the first day is when
@@ -74,11 +76,6 @@ def _dip(points: Sequence[tuple[date, Decimal]]) -> Dip | None:
     return Dip(first=points[0][0], low=low, low_on=low_on)
 
 
-def first_dip(eod: Series) -> Dip | None:
-    """The pool's own dip: the first day below zero and its lowest point, or None."""
-    return _dip([(day, bal) for day, bal in eod if bal < _ZERO])
-
-
 def _paired(before: Series, after: Series) -> tuple[list[date], list[Decimal], list[Decimal]]:
     days = sorted({d for d, _ in before} | {d for d, _ in after})
     return days, _filled(before, days), _filled(after, days)
@@ -97,9 +94,10 @@ def new_dip(before: Series, after: Series) -> Dip | None:
 
 
 def caused_dip(before: Series, after: Series) -> Dip | None:
-    """The dip a CORRECTION causes, for the ack-able scoped check (audit H3, the import-batch
-    undo): a day that was not negative and now is, or a day pushed below the pool's old
-    lowest point. Deepening a shortfall that was already there, without either, does not
+    """The dip a CORRECTION causes, for every ack-able ``negative_cash`` door (audit H3 — the
+    import-batch undo, and since DEF-092 the single-row edit / delete doors): a day that was
+    not negative and now is, or a day pushed below the pool's old lowest point. Deepening a
+    shortfall that was already there, without either, does not
     ask — the golden tw_broker pool is short from its first buy, and undoing a 1,000 deposit
     months later must not ask the owner to acknowledge that. The old comparison (lowest point
     before vs after) asked only in the second case, so a new negative stretch shallower than

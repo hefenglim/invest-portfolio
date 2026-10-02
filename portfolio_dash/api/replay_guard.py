@@ -315,9 +315,10 @@ def _pool_refusal(
     sentence and the same ack. Trades and dividends are not a trigger here, exactly as their
     own row doors are not.
 
-    ⚠ SCOPED like the replay block above, which the row doors' cash check is not: a pool is
-    refused only when the mutation makes a day negative that was not, or pushes a day below
-    the pool's old lowest point (``shared/cash_dip.py::caused_dip``, compared DAY BY DAY —
+    ⚠ SCOPED like the replay block above — and, since DEF-092 (owner ruling A, 2026-10-02),
+    like the single-row cash doors, which share the rule (``api/routers/cash.py::_pool_dip``):
+    a pool is refused only when the mutation makes a day negative that was not, or pushes a
+    day below the pool's old lowest point (``shared/cash_dip.py::caused_dip``, compared DAY BY DAY —
     DEF-090: comparing only the two timelines' lowest points let a new, shallower negative
     stretch through beside an older, deeper one). A pool that is already short for reasons
     that have nothing to do with the mutation — the golden ledger's TWD pool sits at −500,000

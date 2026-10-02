@@ -9,8 +9,9 @@ ledger. Writes: deposits/withdrawals/openings and FX conversions. WITHDRAWALS (F
 and FX conversions (FU-D34) are HARD-blocked when the pool cannot cover them — 422
 ``withdraw_insufficient_balance`` / ``fx_insufficient_balance``, NO ack override, no
 financing. Deposit/opening-side mutations (edits/deletes that shrink funding) keep the
-DATE-AWARE running-balance check (audit C3): a change that would drive the pool below
-zero at ANY point in time answers 422 ``negative_cash`` until explicitly acked — a
+DATE-AWARE running-balance check (audit C3): a change that turns a day negative, or pushes
+one below the pool's old lowest point, answers 422 ``negative_cash`` until explicitly acked
+(scoped by DEF-092 — a dip the change did not cause no longer asks) — a
 negative pool almost always means a missed deposit/conversion, the cash analog of the
 oversell guard. Currency↔account coherence is enforced too (audit C2): a movement/FX
 leg must be in the account's {settlement, funding} currencies. GET /api/cash/statement
@@ -74,7 +75,7 @@ from portfolio_dash.portfolio.cash import (
     running_low,
 )
 from portfolio_dash.pricing.store import get_fx, get_fx_on
-from portfolio_dash.shared.cash_dip import Dip, first_dip
+from portfolio_dash.shared.cash_dip import Dip, caused_dip
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account
@@ -130,21 +131,29 @@ def _pool_dip(
     movements: list[StoredCashMovement] | None = None,
     fx: list[StoredFxConversion] | None = None,
 ) -> Dip | None:
-    """Where one pool's date-ordered ledger is below zero (audit C3): the first short day and
-    the lowest point with its day (DEF-091, owner ruling 2B; M5-07 named only the lowest).
-    ``None`` when the pool never dips.
+    """The dip a correction CAUSES in one pool (audit C3, scoped by DEF-092): the first short
+    day and the lowest point with its day (DEF-091, owner ruling 2B). ``None`` when the
+    change turns no day negative and pushes none below the pool's old lowest point.
 
-    Callers pass the WOULD-BE movement/fx list; unspecified ledgers load from store. The
-    timeline is never date-bounded — see ``portfolio/cash.py``. Unscoped on purpose: these
-    are the ack-able correction doors, which report any dip in the would-be pool.
+    Callers pass the WOULD-BE movement/fx list; the stored ledger is the "before", and an
+    unspecified would-be ledger loads from store. Compared day by day by
+    ``shared/cash_dip.py::caused_dip`` — the rule the import-batch undo already used. Owner
+    ruling A (2026-10-02, the verifier's R14 observation): these doors reported ANY dip in
+    the would-be pool and called it 「此筆會使…」, so deleting a withdrawal from the Schwab TWD
+    pool — which only raises balances — read 「此筆會使…於 2026-01-12 降至 −220,000」, a dip
+    that sat there before and has nothing to do with the row. The timeline is never
+    date-bounded — see ``portfolio/cash.py``.
     """
-    ms = movements if movements is not None else list_cash_movements(conn)
-    fxs = fx if fx is not None else list_fx_conversions(conn)
-    lines = pool_lines(
-        account_id, ccy, ms, fxs, list_transactions(conn), list_dividends(conn),
-        {i.symbol: i for i in list_instruments(conn)},
-    )
-    return first_dip(running_eod(lines))
+    stored_moves = list_cash_movements(conn)
+    stored_fx = list_fx_conversions(conn)
+    txns = list_transactions(conn)
+    divs = list_dividends(conn)
+    insts = {i.symbol: i for i in list_instruments(conn)}
+    before = pool_lines(account_id, ccy, stored_moves, stored_fx, txns, divs, insts)
+    after = pool_lines(account_id, ccy,
+                       movements if movements is not None else stored_moves,
+                       fx if fx is not None else stored_fx, txns, divs, insts)
+    return caused_dip(running_eod(before), running_eod(after))
 
 
 def _synthetic(movement: CashMovementInput) -> StoredCashMovement:

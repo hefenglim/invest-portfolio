@@ -41,6 +41,14 @@ two in chat.
 - **DEF-087 — the export guard is green again.** `export/ledger_audit.py` joined the aliases
   with a bare `str()` that `test_exports_never_print_scientific_notation` does not allow; the
   aliases are text, so the join no longer converts.
+- **DEF-092 — a single-row cash edit / delete asks only about a dip it causes** (the
+  verifier's R14 observation; owner ruling A, 2026-10-02). The cash movement edit and delete
+  doors and the FX delete door reported ANY dip in the would-be pool as 「此筆會使…」, so
+  deleting a withdrawal — which only raises balances — quoted the Schwab TWD pool's
+  unrelated −220,000 from 2026-01-12. They now share the import-batch undo's rule
+  (`caused_dip`): a day the change turns negative, or pushes below the pool's old low. Seven
+  recorded responses in `test_cash_movement_guard_contract.py` and one M5-07 pin were
+  re-recorded; three rebate edits that cause no dip are now written.
 
 **Item 8 — a card names each registered code by one of its names (owner 2026-09-30,
 「新的名稱代號確保正確不會再錯誤」, ruled 「登錄名稱＋中文別名」).** The spec

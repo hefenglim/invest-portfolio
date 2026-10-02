@@ -2088,3 +2088,8 @@ name check accepted any two-character leading part, so 「長榮 (2618)」 passe
 3. **A leniency must be checked against every OTHER entry it could match.** A prefix rule that
    only asks "is this a prefix of my name" accepts other instruments' names; ask "does it point
    at me alone".
+4. **A confirmation must be about what the action causes.** The single-row cash doors asked
+   about ANY dip in the pool and phrased it 「此筆會使…」, so deleting a withdrawal quoted an
+   older, unrelated −220,000 (DEF-092, R14). A prompt that fires on conditions the action did
+   not create is either false or trains the owner to click through; one rule (`caused_dip`)
+   now serves every ack-able cash door.

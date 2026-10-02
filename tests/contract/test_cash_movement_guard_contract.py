@@ -56,6 +56,16 @@ from 2026-01-05, so they now read 「自 2026-01-05 起為負，最低於 2026-0
 pins whose first day IS the lowest day (2026-01-05) keep their one-day sentence. Same status,
 same code, same figure, same verdict.
 
+⚠ SEVEN pins were re-recorded on 2026-10-02 for DEF-092 (owner ruling A: the single-row
+edit / delete doors ask only about a dip the change CAUSES — a day it turns negative, or
+one it pushes below the pool's old low — like the import-batch undo). The tw_broker pool
+is short from 2026-01-05 for a reason none of these rows touches, and the doors used to
+quote that dip as 「此筆會使…」. Now ``edit_rebate_kind`` / ``_date`` / ``_amount`` raise
+nothing below the old low and are WRITTEN (200); ``edit_deposit_shrinks_pool`` names the
+stretch it opens from 07-01 and the new low it reaches (−544,799 — the rebate is 200 now);
+``delete_rebate`` names only the new low on 07-20; and the final ledger reads the 200
+rebate (tw_broker −544,799).
+
 The cases run as ONE ordered sequence against one ledger, because several of them only mean
 something in sequence: the withdraw messages quote a balance that earlier rows created, the
 self-exclusion edit needs a row to edit, and the REBATE lock needs a booked rebate. The final
@@ -241,37 +251,27 @@ _SEQUENCE: list[dict[str, Any]] = [
         "ccy": "TWD", "amount": "600000"},
      "status": 400, "err": {"code": "validation_error", "field": "kind",
                             "message": f"未知類型 nope{_KINDS}"}},
-    # DEF-009: no longer locked — the ordinary deposit-side guard answers (see the docstring).
+    # DEF-009: no longer locked. DEF-092 (owner ruling A): none of these three edits turns a day
+    # negative or below the pool's old low, so they are written (see the docstring).
     {"n": "edit_rebate_kind", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-02", "kind": "deposit",
         "ccy": "TWD", "amount": "153"},
-     "status": 422, "err": {
-         "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-01-05 降至 −500,000 — "
-                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
+     "status": 200},
     {"n": "edit_rebate_date", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-03", "kind": "rebate",
         "ccy": "TWD", "amount": "153"},
-     "status": 422, "err": {
-         "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-01-05 降至 −500,000 — "
-                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
-    # Amount stays correctable — but the deposit-side ack guard still applies, and here the
-    # tw_broker pool was already negative at the 2026-01-05 buy, so it answers negative_cash.
+     "status": 200},
     {"n": "edit_rebate_amount", "m": _PUT, "target": "rebate_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-02", "kind": "rebate",
         "ccy": "TWD", "amount": "200", "note": "改金額"},
-     "status": 422, "err": {
-         "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-01-05 降至 −500,000 — "
-                    "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
+     "status": 200},
     {"n": "edit_deposit_shrinks_pool", "m": _PUT, "target": "deposit_ok", "b": {
         "account_id": "tw_broker", "date": "2026-07-01", "kind": "deposit",
         "ccy": "TWD", "amount": "1"},
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金自 2026-01-05 起為負，"
-                    "最低於 2026-07-20 降至 −544,846 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金自 2026-07-01 起為負，"
+                    "最低於 2026-07-20 降至 −544,799 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     # ...and the ack DOES still bypass the deposit-side guard (only the withdraw one is hard).
     {"n": "edit_deposit_shrinks_acked", "m": _PUT, "target": "deposit_ok", "b": {
@@ -284,8 +284,7 @@ _SEQUENCE: list[dict[str, Any]] = [
     {"n": "delete_rebate", "m": _DELETE, "target": "rebate_ok",
      "status": 422, "err": {
          "code": "negative_cash",
-         "message": "此筆會使 {account:tw_broker} 的 TWD 現金自 2026-01-05 起為負，"
-                    "最低於 2026-07-20 降至 −544,999 — "
+         "message": "此筆會使 {account:tw_broker} 的 TWD 現金於 2026-07-20 降至 −544,999 — "
                     "通常代表漏記入金或換匯；確認無誤可強制寫入"}},
     {"n": "delete_unknown_id", "m": _DELETE, "target": "__missing__",
      "status": 404, "err": {"code": "not_found", "message": "紀錄 #99999 不存在"}},
@@ -297,14 +296,14 @@ _EXPECTED_BALANCES = [
     ("moomoo_my", "USD", "0"),
     ("schwab", "TWD", "-32000"),
     ("schwab", "USD", "100000"),
-    ("tw_broker", "TWD", "-544846"),
+    ("tw_broker", "TWD", "-544799"),
 ]
 _EXPECTED_MOVEMENTS = [
     # id, kind, ccy, amount, acq_home_amount, acq_rate (newest-first, as /api/cash serves)
     (7, "withdraw", "USD", "1500", None, None),
     (6, "withdraw", "TWD", "50000", None, None),
     (5, "deposit", "USD", "500", None, None),
-    (2, "rebate", "TWD", "153", None, None),
+    (2, "rebate", "TWD", "200", None, None),
     (4, "opening", "USD", "1000", "4400.01", "4.40001"),
     (3, "opening", "USD", "100000", "3135870", "31.3587"),
     (1, "deposit", "TWD", "1", None, None),
