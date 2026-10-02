@@ -157,11 +157,12 @@
      nobody implements is worse than no exit.
 
      `fx_insufficient_balance` is DELIBERATELY absent. FU-D34 makes an overdrafting conversion
-     a HARD refusal with no ack, so `PUT /api/ledgers/fx/{id}` answers that code and never
-     `negative_cash`; offering an ack for it here would be financing. That is also the answer
-     to "does the edit door have the same defect?" — it does not, because the edit door has no
-     ack-able code at all today. The table is shared by BOTH doors anyway so the two can never
-     drift again: a code either is ack-able on this page or it is not, in ONE place. */
+     a HARD refusal with no ack (its FROM-pool), and offering an ack for it here would be
+     financing. Since DEF-093 (owner ruling A, 2026-10-03) `PUT /api/ledgers/fx/{id}` ALSO
+     answers `negative_cash` — for the money an edit takes out of the TO-pool (a smaller 換入
+     金額), the same question the delete asks — and `putWithAckGuard` already carries that ack
+     in the body. The table is shared by BOTH doors so the two can never drift again: a code
+     either is ack-able on this page or it is not, in ONE place. */
   const ACK_CODES = {
     oversell: { param: 'ack_oversell', title: '賣超確認' },
     negative_cash: { param: 'ack_negative', title: '現金將變為負數' },

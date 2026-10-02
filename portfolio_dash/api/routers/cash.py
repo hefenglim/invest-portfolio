@@ -363,6 +363,35 @@ def fx_delete_guard(
     return None
 
 
+def fx_edit_negative_guard(
+    conn: sqlite3.Connection, existing: StoredFxConversion, edited: StoredFxConversion,
+    *, ack_negative: bool,
+) -> JSONResponse | None:
+    """The ack-able ``negative_cash`` check for EDITING a conversion; ``None`` when clean.
+
+    DEF-093 (owner ruling A, 2026-10-03, the verifier's R15 observation): the edit door ran
+    only :func:`fx_change_guard`, whose hard rule reads the FROM-pool (a conversion may not
+    spend money that is not there, FU-D34). A smaller 換入金額 — or a later date, another
+    account, another currency — takes money out of the TO-pool, and nothing looked: 319,000
+    TWD edited to 1,000 left the Schwab pool at −199,000 / −204,000 on 07-19 / 07-20 with no
+    question, while deleting the same row asked. Now every pool the edit touches (old and new
+    account × both legs) gets the delete door's scoped check (``_pool_dip`` — a day the edit
+    turns negative, or pushes below the pool's old low). Ack-able, like the delete: this is
+    a correction door. The from-pool's hard rule runs first and is unchanged; a from-pool
+    that passes it can never show a dip here.
+    """
+    if ack_negative:
+        return None
+    would_be = [edited if f.id == existing.id else f for f in list_fx_conversions(conn)]
+    pools = {(existing.account_id, existing.to_ccy), (existing.account_id, existing.from_ccy),
+             (edited.account_id, edited.to_ccy), (edited.account_id, edited.from_ccy)}
+    for account_id, ccy in sorted(pools, key=lambda p: (p[0], p[1].value)):
+        dip = _pool_dip(conn, account_id, ccy, fx=would_be)
+        if dip is not None:
+            return _negative_response(account_id, ccy, dip)
+    return None
+
+
 @router.get("/cash")
 def cash_overview(
     limit: int = Query(50, ge=1, le=500),

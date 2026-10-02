@@ -168,12 +168,14 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   (DEF-090, 2026-10-01; `shared/cash_dip.py`). A withdrawal / 換匯 is refused when it makes
   any day negative or more negative (`new_dip`); every ack-able `negative_cash` door — the
   import-batch undo, and since DEF-092 (owner ruling A, 2026-10-02) the single-row edit /
-  delete and FX delete doors — asks only when a day turns negative or drops below the pool's
-  old low (`caused_dip`), so 「此筆會使…」 never quotes a dip the row did not cause. Comparing
-  only the two lowest points let a back-dated withdrawal open a new negative stretch whenever
-  an older, unrelated dip was deeper — the aggregate hid the event, the same class as the
-  net-only sell check above. Every refusal names the FIRST short day and the lowest point
-  (owner ruling 2B, DEF-091): 「自 D1 起為負，最低於 D2 降至 −N」.
+  delete and FX delete doors, and since DEF-093 (2026-10-03) the FX EDIT door for every pool
+  it takes money from (its from-pool stays hard) — asks only when a day turns negative or
+  drops below the pool's old low (`caused_dip`), so 「此筆會使…」 never quotes a dip the row
+  did not cause. Comparing only the two lowest points let a back-dated withdrawal open a new
+  negative stretch whenever an older, unrelated dip was deeper — the aggregate hid the event,
+  the same class as the net-only sell check above. Every refusal names the FIRST short day
+  and the lowest point (owner ruling 2B, DEF-091): 「自 D1 起為負，最低於 D2 降至 −N」. A door
+  that changes a two-legged row checks EVERY pool it touches, not only the leg it spends.
 - **Same-day trades replay in WRITE order — the ledger id — never buys-before-sells**
   (DEF-012, recorded 2026-09-23). A transaction has no time-of-day column, so the only
   evidence of intraday order is the row id: the order the owner entered the rows, or the

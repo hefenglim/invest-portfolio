@@ -61,7 +61,12 @@ from portfolio_dash.api.replay_guard import action_change_guard
 # Sibling router, same layer, no cycle (``cash`` imports nothing from here) — the same shape
 # ``rebates.py`` already uses for ``movement_guard``. The alternative is a second spelling of
 # the 換匯 guard on the correction door, which is exactly the drift QA-10 found.
-from portfolio_dash.api.routers.cash import cash_pool_fn, fx_change_guard, fx_delete_guard
+from portfolio_dash.api.routers.cash import (
+    cash_pool_fn,
+    fx_change_guard,
+    fx_delete_guard,
+    fx_edit_negative_guard,
+)
 from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
@@ -819,6 +824,9 @@ class FxEditBody(BaseModel):
     from_amt: Decimal
     to_ccy: Currency
     to_amt: Decimal
+    # DEF-093: the ack for the to-pool's negative_cash question (web/ledger.js putWithAckGuard
+    # sends it in the body, like ack_oversell on the other edit doors).
+    ack_negative: bool = False
 
 
 @router.put("/ledgers/fx/{fx_id}")
@@ -857,6 +865,15 @@ def edit_fx(
         exclude_fx_id=fx_id)
     if bad is not None:
         return bad
+    # DEF-093: the guard above reads the FROM-pool only; the money this edit takes out of
+    # the TO-pool (a smaller 換入金額, a later date, another account / currency) asks the
+    # delete door's ack-able question.
+    edited = existing.model_copy(update={
+        "account_id": body.account_id, "date": body.date, "from_ccy": body.from_ccy,
+        "from_amount": body.from_amt, "to_ccy": body.to_ccy, "to_amount": body.to_amt})
+    asked = fx_edit_negative_guard(conn, existing, edited, ack_negative=body.ack_negative)
+    if asked is not None:
+        return asked
     update_fx_conversion(
         conn, fx_id, account_id=body.account_id, date=body.date,
         from_ccy=body.from_ccy, from_amount=body.from_amt,

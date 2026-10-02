@@ -23,8 +23,10 @@ page: a contract test on the endpoint passes today and passed before the fix.
 """
 
 import json
+import sqlite3
 import urllib.request
 from collections.abc import Iterator
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -32,6 +34,8 @@ import pytest
 from playwright.sync_api import Page
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
+from portfolio_dash.data_ingestion.store import insert_cash_movement
+from portfolio_dash.shared.enums import Currency
 from tests.conftest import _seed_golden
 from tests.e2e.conftest import FlowServerFactory
 
@@ -188,4 +192,53 @@ def test_edit_modal_surfaces_preview_issues_restated_for_a_correction(
 
     assert not console_errors and not page_errors, (
         f"edit issue panel flow: console={console_errors!r} page={page_errors!r}"
+    )
+
+
+def _seed_golden_twd_funded(conn: sqlite3.Connection) -> None:
+    """Golden, plus 100,000 TWD into schwab on 01-02 — so the golden 01-08 conversion's FROM
+    side is covered and editing it leaves only the TO side in question (DEF-093)."""
+    _seed_golden(conn)
+    insert_cash_movement(conn, account_id="schwab", move_date=date(2026, 1, 2),
+                         kind="DEPOSIT", ccy=Currency.TWD, amount=Decimal("100000"))
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_fx_edit_that_shrinks_the_to_pool_asks_and_the_ack_writes(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """DEF-093 (owner ruling A, 2026-10-03): 編輯換匯 with a smaller 換入金額 strands the AAPL
+    buy that spent the USD → 422 negative_cash → the shared danger confirm → ack → written.
+    Before the rule the PUT wrote 200 in silence while the row's 刪除 asked."""
+    base = flow_server(_seed_golden_twd_funded)
+    page = fresh_page
+    console_errors, page_errors = _sink(page)
+
+    page.goto(base + "/trades.html", wait_until="load")
+    page.click("#tab-lfx")
+    page.wait_for_selector("#fx-body tr")
+    row = page.locator("#fx-body tr", has_text="2026-01-08")
+    row.locator("button", has_text="編輯").click()
+    modal = page.locator(".modal-backdrop .modal", has_text="編輯換匯")
+    modal.locator(".field", has_text="換入金額").locator("input").fill("500")
+    with page.expect_response("**/api/ledgers/fx/**") as first:
+        modal.locator(".modal-foot .btn-primary").click()
+    assert first.value.status == 422, f"expected negative_cash, got {first.value.status}"
+
+    page.wait_for_selector(".modal-title:has-text('現金將變為負數')")
+    body = page.locator(".modal-body").inner_text()
+    assert "2026-01-10" in body and "強制寫入" in body, body
+    with page.expect_response("**/api/ledgers/fx/**") as second:
+        page.click(".modal-foot .btn-danger")
+    assert second.value.status == 200, f"the ack must write, got {second.value.status}"
+    assert json.loads(second.value.request.post_data or "{}").get("ack_negative") is True
+
+    page.wait_for_selector(".toast-ok")
+    fx = [r for r in _get_json(base, "/api/ledgers/fx?limit=500")["rows"]
+          if r["account_id"] == "schwab" and r["date"] == "2026-01-08"]
+    assert len(fx) == 1 and Decimal(fx[0]["to_amt"]) == Decimal("500"), fx
+
+    assert not console_errors and not page_errors, (
+        f"fx edit ack flow: console={console_errors!r} page={page_errors!r}"
     )

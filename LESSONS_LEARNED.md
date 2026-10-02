@@ -2093,3 +2093,8 @@ name check accepted any two-character leading part, so 「長榮 (2618)」 passe
    older, unrelated −220,000 (DEF-092, R14). A prompt that fires on conditions the action did
    not create is either false or trains the owner to click through; one rule (`caused_dip`)
    now serves every ack-able cash door.
+5. **A door that edits a two-legged row checks every pool it touches.** `fx_delete_guard`'s own
+   docstring said "a guard that inspects one leg is a guard that misses the next one", and the
+   edit door next to it inspected one leg: a smaller 換入金額 drained the TO-pool with no
+   question (DEF-093, R15). When one door of a row is fixed, read its siblings' guards against
+   the same sentence.

@@ -49,6 +49,14 @@ two in chat.
   (`caused_dip`): a day the change turns negative, or pushes below the pool's old low. Seven
   recorded responses in `test_cash_movement_guard_contract.py` and one M5-07 pin were
   re-recorded; three rebate edits that cause no dip are now written.
+- **DEF-093 — editing a conversion asks about the money it takes out of the TO-pool** (the
+  verifier's R15 observation; owner ruling A, 2026-10-03). `PUT /api/ledgers/fx/{id}` ran
+  only the hard FROM-pool rule (FU-D34): a 換入金額 edited from 319,000 to 1,000 left the
+  Schwab TWD pool at −199,000 / −204,000 on 07-19 / 07-20 with no question, while deleting
+  the same row asked. `cash.fx_edit_negative_guard` now gives every pool the edit touches
+  (old and new account × both legs) the delete door's ack-able `caused_dip` question; the
+  body carries `ack_negative`, which `web/ledger.js` `putWithAckGuard` already sent. The
+  from-pool's hard refusal is unchanged, ack or not.
 
 **Item 8 — a card names each registered code by one of its names (owner 2026-09-30,
 「新的名稱代號確保正確不會再錯誤」, ruled 「登錄名稱＋中文別名」).** The spec
