@@ -56,7 +56,10 @@ two in chat.
   the same row asked. `cash.fx_edit_negative_guard` now gives every pool the edit touches
   (old and new account × both legs) the delete door's ack-able `caused_dip` question; the
   body carries `ack_negative`, which `web/ledger.js` `putWithAckGuard` already sent. The
-  from-pool's hard refusal is unchanged, ack or not.
+  from-pool's hard refusal is unchanged, ack or not. Three of the verifier's six R16
+  mutations passed the first contract tests (checking only the new account's pools, `new_dip`
+  instead of `caused_dip`, asking on any negative day), so a test per mutation was added
+  after closure — test-only, the code is d9f1c68's.
 
 **Item 8 — a card names each registered code by one of its names (owner 2026-09-30,
 「新的名稱代號確保正確不會再錯誤」, ruled 「登錄名稱＋中文別名」).** The spec
