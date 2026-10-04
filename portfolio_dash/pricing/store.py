@@ -393,10 +393,22 @@ def upsert_fx(conn: sqlite3.Connection, rows: list[FxRow], *, fetched_at: dateti
            VALUES (?,?,?,?,?,?)
            ON CONFLICT(base, quote, as_of_date) DO UPDATE SET
                rate=excluded.rate, source=excluded.source, fetched_at=excluded.fetched_at""",
-        [(r.base.value, r.quote.value, r.as_of.isoformat(), to_db(_cap_dp(r.rate, _FX_DP)),
+        [(r.base.value, r.quote.value, r.as_of.isoformat(), stored_rate_text(r.rate),
           r.source, fetched_at.isoformat()) for r in rows],
     )
     conn.commit()
+
+
+def stored_rate_text(rate: Decimal) -> str:
+    """The ``fx_rates.rate`` TEXT :func:`upsert_fx` stores for *rate*: the 6-dp float-noise
+    cap, then the canonical string.
+
+    THE one owner of that expression. :func:`pricing.cross.derive_cross_rates` compares a
+    derived rate with the stored row through it (CR-14), so "unchanged" means exactly "this
+    seam would store the same bytes" — a second copy of the cap there could drift from this
+    one and turn every comparison into a rewrite, or worse, into a skip.
+    """
+    return to_db(_cap_dp(rate, _FX_DP))
 
 
 def get_fx(
