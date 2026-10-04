@@ -8,7 +8,11 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from portfolio_dash.shared.corporate_actions import CorporateAction, UnreadableAction
+from portfolio_dash.shared.corporate_actions import (
+    CorporateAction,
+    CorporateActionKind,
+    UnreadableAction,
+)
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -290,6 +294,32 @@ class LedgerBundle:
             actions=[a for a in self.actions if a.date < day],
             unreadable_actions=[u for u in self.unreadable_actions if u.date < day],
         )
+
+    def position_opened_by(self, account_id: str, symbol: str, day: date) -> bool:
+        """Whether anything in this bundle OPENED an (account, symbol) position on or before
+        *day* — the question a dividend booked on *day* must answer (CR-02 / R9, 2026-10-04).
+
+        The rule is the replay's: ``build_book`` creates a position object from an opening,
+        from a NON-ZERO trade of either side (a zero-quantity row is skipped before), and from
+        an EXCHANGE / SPINOFF into the symbol — all of which sort before a same-day dividend,
+        so the bound is inclusive. A position sold down to zero still exists (a dividend after
+        a full close is realized income, owner ruling H2).
+
+        ONE rule, two forms: this one over a bundle (the correction doors' fallback when a
+        ledger cannot be replayed), and ``data_ingestion.holdings.position_exists_by`` over
+        SQL (the dividend doors' per-row check). Both count a corporate action the replay may
+        later REFUSE; the replay then refuses the dividend on the book. The two forms and the
+        replay are pinned to one answer by ``tests/contract/test_r5_r9_orphan_per_dividend.py``.
+        """
+        opened_by = (CorporateActionKind.EXCHANGE, CorporateActionKind.SPINOFF)
+        return (any(o.account_id == account_id and o.symbol == symbol and o.build_date <= day
+                    for o in self.opening)
+                or any(t.account_id == account_id and t.symbol == symbol
+                       and t.trade_date <= day and t.quantity != 0
+                       for t in self.transactions)
+                or any(a.account_id == account_id and a.to_symbol == symbol
+                       and a.date <= day and a.kind in opened_by
+                       for a in self.actions))
 
     @property
     def unregistered_symbols(self) -> list[str]:

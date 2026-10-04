@@ -326,11 +326,17 @@
          The sections below take `detail`, never `pos`, so they render unchanged here. */
       body.appendChild(signalsSection(symbol));
       body.appendChild(adviceSection(symbol));
-      const closed = ((detail && detail.activity) || []).length > 0;
-      /* CR-02 (2026-10-04): a THIRD unheld state — no trade, no opening, only dividend rows the
-         book refused because the account never held the symbol. It is not a watchlist name
-         (the ledger has rows for it) and was rendered as one, with its 配息史 — and the line
-         saying why those rows are not booked — dropped. */
+      /* R8 (round 2): CLOSED means something OPENED a position — an opening, a trade or a
+         corporate action. A received DRIP / 配股 row is in `activity` too, and on its own it
+         opens nothing: a symbol whose only rows were such dividends (refused by the book, the
+         account never held it) read 「帳本有交易紀錄，部位已結清」 over a position that never
+         existed. The share-adding dividend rows are therefore not evidence of a position. */
+      const closed = ((detail && detail.activity) || []).some(
+        (r) => r.side !== 'drip' && r.side !== 'stock');
+      /* CR-02 (2026-10-04): a THIRD unheld state — nothing opened a position, only dividend
+         rows the book refused because the account never held the symbol. It is not a
+         watchlist name (the ledger has rows for it) and was rendered as one, with its 配息史 —
+         and the line saying why those rows are not booked — dropped. */
       const orphaned = ((detail && detail.ledger_issues
         && detail.ledger_issues.orphan_dividends) || []).length > 0;
       if (closed) {
@@ -1371,6 +1377,12 @@
       const ledger = (detail && detail.ledger_issues) || {};
       (ledger.oversold_flat || []).filter(keep).forEach((r) => {
         lines.push('⚠ 賣超待釐清（' + acctZh(r.account_id) + '）：' + r.reason);
+      });
+      /* R8 (round 2): a refused DRIP / 配股 row ADDS shares on the ledger's share path that the
+         book does not hold, so the footer above goes red — and a red footer never renders
+         without its cause. (A refused CASH row moves no shares and is named under 配息史.) */
+      (ledger.orphan_dividends || []).filter(keep).filter((r) => r.reinvest).forEach((r) => {
+        lines.push('⚠ 股利無對應持倉（' + acctZh(r.account_id) + '）：' + r.reason);
       });
       lines.forEach((text) => {
         const row = el('div', 'sd-tx-issue', text);

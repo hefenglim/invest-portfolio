@@ -139,13 +139,16 @@ class CashMovementFlow(Protocol):
     def amount(self) -> Decimal: ...
 
 
-def _dividend_key(dv: Dividend) -> tuple[object, ...]:
+def dividend_key(dv: Dividend) -> tuple[object, ...]:
     """Value identity for a dividend row, so a REFUSED one can be matched and skipped.
 
     By value rather than by object identity: the caller may have re-loaded the bundle between
     ``build_book`` and here. Two byte-identical dividend rows on the same position and date
     would both be refused by the replay anyway (they hit the same branch), so set semantics
     are correct — this can never drop a bookable row that merely resembles a refused one.
+
+    Public since R6 (2026-10-04): the dashboard's dividend summary skips the same refused rows
+    XIRR does, through this same key, so the two cannot disagree about which payout was booked.
     """
     return (dv.account_id, dv.symbol, dv.date, dv.type, str(dv.gross), str(dv.net))
 
@@ -208,11 +211,11 @@ def xirr_reporting(
     # A dividend the REPLAY refused (it landed on an open short, which this ledger has
     # no debit row for) must not be an inflow here either — otherwise one payment gets
     # three answers: excluded from 總報酬, counted by XIRR, and flagged 待釐清 on the
-    # trend. Matched by VALUE, per _dividend_key (review 2026-08-24).
-    refused = {_dividend_key(dv) for dv in refused_dividends}
+    # trend. Matched by VALUE, per dividend_key (review 2026-08-24).
+    refused = {dividend_key(dv) for dv in refused_dividends}
     for dv in dividends:
         if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
-            if _dividend_key(dv) in refused:
+            if dividend_key(dv) in refused:
                 continue
             add(dv.date, ccy_of(dv.symbol), dv.net)
         # DRIP / STOCK are neutral (no external cashflow)

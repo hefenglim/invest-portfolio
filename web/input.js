@@ -2391,6 +2391,20 @@
     }, 250);
   }
 
+  /* The draft rows a re-validation of `kind` sends (R3, round 2). A dividend is judged against
+     the trades of the SAME paste — the page commits 交易 before 股利, so a buy in the paste is
+     the position its dividend is paid on (CR-02's `dividend_without_position`, which the AI
+     door's first preview already honoured). Sending only the edited kind's drafts left the
+     server with no trades, so editing a dividend's gross turned it into a hard refusal: unticked,
+     untickable, unwritable with its own buy. The trades go along as CONTEXT only — the answer
+     is read for `kind` alone. A trade kind holding a typed value that does not parse is left
+     out (its rows cannot be written until fixed, and its fix re-judges the dividends below). */
+  function aiRevalidateRows(kind) {
+    const rows = aiDrafts[kind] || [];
+    if (kind !== 'dividends' || aiKindHasFieldErr('transactions')) return rows;
+    return (aiDrafts.transactions || []).concat(rows);
+  }
+
   /* Send `kind`'s drafts back through the AI door (no model call) and re-render from the
      answer. `fresh` = the row set itself changed (a partial commit kept only the unwritten
      rows), so the old checkbox states do not map onto it. */
@@ -2400,7 +2414,7 @@
     refreshAiWriteBtn();
     let resp;
     try {
-      resp = await api.post('/api/input/ai/preview', { drafts: { rows: aiDrafts[kind] || [] } });
+      resp = await api.post('/api/input/ai/preview', { drafts: { rows: aiRevalidateRows(kind) } });
     } catch (err) {
       if (seq !== aiRevalSeq[kind]) return;
       aiPending[kind] = false;
@@ -2437,6 +2451,13 @@
     if (sec) sec.hidden = rows.length === 0;
     renderAiRows(kind, rows, prev);
     refreshAiWriteBtn();
+    /* R3: the dividends' verdict depends on the trades (a buy moved after its dividend strands
+       it), so a trade re-validation re-judges the dividends too. Not on a partial-commit refresh
+       (`fresh`): the written trades are in the ledger by then and the dividends commit next. */
+    if (kind === 'transactions' && !fresh && (aiDrafts.dividends || []).length
+        && !aiKindHasFieldErr('dividends')) {
+      scheduleAiRevalidate('dividends');
+    }
   }
 
   /* Rebuild ONE KIND's committed csv from ONLY its checked rows (header + their source

@@ -224,6 +224,22 @@ def _unclear(h: Holding) -> bool:
     return h.oversold or h.unbookable_action
 
 
+def _withheld(book: Book, key: tuple[str, str]) -> bool:
+    """True when *book*'s position at *key* is 待釐清 — held OR flat (R4, 2026-10-04).
+
+    :func:`_unclear` answers for a ``Holding``, and ``Book.holdings`` drops every zero-share
+    position: a 賣超 that a later buy netted back to exactly 0 had no holding to ask, so the
+    preview read it as "never held" and the BUY branch quoted a fresh-looking average over a
+    basis the replay had discarded (the dashboard then flagged the written row 賣超待釐清).
+    ``Book.oversold_positions`` keeps every 賣超 position, so both shapes withhold, for the one
+    reason :func:`_unclear` states.
+    """
+    held = next((h for h in book.holdings if (h.account_id, h.symbol) == key), None)
+    if held is not None and _unclear(held):
+        return True
+    return any((p.account_id, p.symbol) == key for p in book.oversold_positions)
+
+
 def _book_of(bundle: LedgerBundle) -> Book | None:
     """:func:`_book_or_none` over a bundle the caller already holds (never-500, same arms).
 
@@ -746,7 +762,9 @@ def _position_preview(
             return None
         key = (body.account_id, body.symbol)
         held = next((h for h in book.holdings if (h.account_id, h.symbol) == key), None)
-        if held is not None and _unclear(held):
+        if _withheld(book, key):
+            # (R4, 2026-10-04: `_withheld` also covers the FLAT 賣超 — a position netted back
+            # to 0 has no holding, and this guard used to see "never held".)
             # HELD, but 待釐清 — and this branch is why the exclusion in
             # :func:`_holdings_or_none` is only HALF a fix. Dropping the key makes the SELL
             # side hide (it already returns None for "not held"), but the BUY side reads a
@@ -794,7 +812,7 @@ def _position_preview(
         # the replay holds it right AFTER the draft on the same date (the 「新」 side). Before
         # M4-01 both were the end-state ``Holding``; until DEF-048 the new side still was.
         prior = next((h for h in before.holdings if (h.account_id, h.symbol) == key), None)
-        if prior is not None and _unclear(prior):
+        if _withheld(before, key):
             # The trade-date position is 待釐清 even if today's is not — same withholding, for
             # the same reason as ``held`` above: its totals and share count disagree.
             return None
@@ -884,6 +902,12 @@ def _position_preview(
                 **_old_position_fields(prior),
                 **dated,
             }
+        if final is not None and _unclear(final):
+            # A BUY cannot create a 待釐清 position, so a flagged result means the position
+            # was one already — both guards above withhold that. Kept as the BRANCH the
+            # replay has (a preview mirrors every branch, for every projected column): never
+            # quote ``new_*_avg`` over a basis the ledger will flag as discarded.
+            return None
         if prior_shares < _ZERO:
             # A buy against an open short COVERS it first (cost_basis.py, owner rule
             # 2026-07-31); it does not average into a long lot. The cover's realized figure

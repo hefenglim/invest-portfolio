@@ -775,14 +775,25 @@
     const fDate = inp(o.date, 'date');
     const note = el('div', 'hint',
       '原始總成本是成本的依據：只改股數或建檔日時，原始總成本維持不變，原始均價會在儲存後依'
-      + '「原始總成本 ÷ 股數」重新計算（目前 ' + f.price(o.avg, o.ccy) + '）。');
+      + '「原始總成本 ÷ 股數」重新計算（目前 ' + f.price(o.avg, o.ccy) + '）。清空此欄＝保留原值。');
     editModal('編輯期初 — ' + o.symbol + '（' + acctZh(o.account_id) + '）', [
       ['股數', fShares], ['原始總成本' + (o.ccy ? '（' + o.ccy + '）' : ''), fTotal],
       ['建檔日', fDate], ['', note],
     ], async (ui) => {
       await putWithAckGuard(
         '/api/ledgers/openings/' + encodeURIComponent(o.account_id) + '/' + encodeURIComponent(o.symbol),
-        (ack) => ({ shares: fShares.value, total: fTotal.value, date: fDate.value, ack_oversell: ack }),
+        (ack) => {
+          const body = { shares: fShares.value, date: fDate.value, ack_oversell: ack };
+          /* R7 (round 2): a CLEARED field means 「保留原值」 — the key is left out, so the server
+             keeps the stored total (the server also reads a blank as not stated). A number box
+             also reads '' for text it cannot parse (「1,000」), which is NOT a cleared field:
+             that is refused here, in words, and the dialog stays open with the typed text. */
+          if (fTotal.validity && fTotal.validity.badInput) {
+            throw new Error('原始總成本不是有效的數字——請只填數字與小數點；清空此欄才是保留原值');
+          }
+          if (fTotal.value.trim() !== '') body.total = fTotal.value.trim();
+          return body;
+        },
         '編輯', ui);
     });
   }

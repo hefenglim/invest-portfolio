@@ -115,3 +115,43 @@ def test_the_drawer_names_a_flat_oversell_and_an_orphan_dividend(
     unexpected = [u for u in bad if not u.endswith("/api/whatif")]
     assert not unexpected and not page_errors, (
         f"drawer ledger issues: unexpected 5xx={unexpected!r} page={page_errors!r}")
+
+
+def _seed_orphan_reinvest(conn: sqlite3.Connection) -> None:
+    """Golden + tw_broker 2317: ONLY a 配股 row — 50 shares — for a symbol never held there."""
+    _seed_golden(conn)
+    upsert_instrument(conn, Instrument(symbol="2317", market=Market.TW, quote_ccy=Currency.TWD,
+                                       sector="Electronics", name="Hon Hai", board="TWSE"))
+    insert_dividend(conn, account_id="tw_broker", symbol="2317", div_date=date(2026, 4, 1),
+                    div_type="STOCK", gross=Decimal("0"), withholding=Decimal("0"),
+                    net=Decimal("0"), reinvest_shares=Decimal("50"))
+    conn.commit()
+
+
+@pytest.mark.e2e
+def test_a_symbol_whose_only_rows_are_refused_reinvest_dividends(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """R8 (round 2): 交易明細 lists a received 配股 row, so `activity` is not empty — and the
+    drawer read that as 「帳本有交易紀錄，部位已結清」 over a position that never existed. The
+    orphan-only state is decided on whether anything OPENED a position, and the red footer
+    (the SQL share path counts the 50 shares, the book does not) carries its cause."""
+    base = flow_server(_seed_orphan_reinvest)
+    page = fresh_page
+    page_errors: list[str] = []
+    page.on("pageerror", lambda e: page_errors.append(str(e)))
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector(".kpi-card")
+    with page.expect_response("**/api/symbol/2317/detail") as resp:
+        page.evaluate("() => window.pdOpenSymbol('2317')")
+    assert resp.value.status == 200, f"detail status {resp.value.status}"
+    page.wait_for_selector(".sd-drawer .sd-section")
+    expect(page.locator(".sd-drawer")).not_to_contain_text("部位已結清")
+    expect(page.locator(".sd-drawer .sd-empty",
+                        has_text="帳本只有無法入帳的股利紀錄")).to_have_count(1)
+    expect(page.locator(".sd-ledger-issue")).to_have_count(1)       # under 配息史
+    page.wait_for_selector(".sd-tx-section .sd-tx-reconcile")
+    expect(page.locator(".sd-tx-section .sd-tx-reconcile")).to_contain_text("⚠ 對帳不一致")
+    cause = page.locator(".sd-tx-section .sd-tx-issue", has_text="股利無對應持倉")
+    expect(cause).to_have_count(1)                                  # never a red footer alone
+    assert not page_errors, page_errors

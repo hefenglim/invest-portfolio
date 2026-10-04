@@ -20,6 +20,7 @@ through the injected ``provenance.BatchUndoGuard`` seam.
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from fastapi.responses import JSONResponse
@@ -59,7 +60,7 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, OversoldPosition
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.ledger import LedgerBundle
+from portfolio_dash.shared.models.ledger import LedgerBundle, dividend_effective_date
 from portfolio_dash.shared.wire import decimal_str
 
 
@@ -161,29 +162,46 @@ def _replayed(bundle: LedgerBundle) -> Book | None:
         return None
 
 
-def _orphan_keys(bundle: LedgerBundle, book: Book | None) -> set[tuple[str, str]]:
-    """(account, symbol) of every dividend with no position to book against.
+#: A dividend's ORPHAN identity: (account, symbol, effective date). Exact, not an
+#: approximation: whether a position exists when a dividend books depends on nothing else —
+#: every event that can open one (opening, trade, corporate action) sorts BEFORE a same-day
+#: dividend (``EventPriority``), so two dividends sharing the triple always share the verdict.
+_OrphanTriple = tuple[str, str, date]
 
-    Read off the REPLAY whenever it ran (CR-02, 2026-10-04): ``Book.orphan_dividends`` is the
-    replay's own answer — a position created by a corporate action counts, and the date is the
-    dividend's EFFECTIVE date — so the guard and the dashboard cannot disagree about which row
-    is stranded. The direct computation below is kept ONLY for a ledger the replay cannot book
-    at all (``book is None``): it is what lets the caller still scope the block to orphans the
-    mutation INTRODUCES (audit H3) when there is no book to read."""
+
+def _orphan_triples(bundle: LedgerBundle, book: Book | None) -> set[_OrphanTriple]:
+    """Every (account, symbol, effective date) a dividend in *bundle* has no position for.
+
+    Read off the REPLAY whenever it ran (CR-02): ``Book.orphan_dividends`` is the replay's own
+    answer. The fallback — ``book is None``, a ledger the replay refuses outright — is NOT a
+    second definition any more (R9, 2026-10-04): it dated a dividend by its PAYMENT date and
+    ignored EXCHANGE / SPINOFF destinations, so it let an edit strand a 配股 booked on its
+    ex-date and refused a delete over a position an exchange had created. It now asks
+    :meth:`LedgerBundle.position_opened_by`, the rule ``holdings.position_exists_by`` (the
+    dividend doors' check) applies in SQL — pinned four ways by
+    ``tests/contract/test_r5_r9_orphan_per_dividend.py``.
+    """
     if book is not None:
-        return {(d.account_id, d.symbol) for d in book.orphan_dividends}
-    orphans: set[tuple[str, str]] = set()
-    for dv in bundle.dividends:
-        covered = any(
-            o.account_id == dv.account_id and o.symbol == dv.symbol
-            and o.build_date <= dv.date for o in bundle.opening
-        ) or any(
-            t.account_id == dv.account_id and t.symbol == dv.symbol
-            and t.trade_date <= dv.date for t in bundle.transactions
-        )
-        if not covered:
-            orphans.add((dv.account_id, dv.symbol))
-    return orphans
+        return {(d.account_id, d.symbol, d.effective_date) for d in book.orphan_dividends}
+    return {(d.account_id, d.symbol, d.effective_date) for d in bundle.dividends
+            if not bundle.position_opened_by(d.account_id, d.symbol, d.effective_date)}
+
+
+def _orphan_rows(
+    rows: Sequence[StoredDividend], triples: set[_OrphanTriple]
+) -> dict[int, StoredDividend]:
+    """The stored dividend ROWS (by id) whose orphan identity is in *triples*.
+
+    Rows, not (account, symbol) keys (R5, 2026-10-04): compared per key, a legacy orphan on a
+    key MASKED a new one the mutation strands on the same key — a legacy orphan D1 (2330,
+    2025-01-01) let the delete of the only buy behind a valid D2 through with 200 and no
+    question. By id, a row that was already stranded stays exactly as correctable as before
+    (the H3 rule), and every row the mutation newly strands is named. An edit keeps the row's
+    id, so editing a legacy orphan in place is not "a new orphan" either.
+    """
+    return {r.id: r for r in rows
+            if (r.account_id, r.symbol,
+                dividend_effective_date(r.type, r.date, r.ex_date)) in triples}
 
 
 def _oversold_shares(book: Book | None) -> dict[tuple[str, str], OversoldPosition] | None:
@@ -255,14 +273,17 @@ def _replay_block(
                       instruments=base.instruments)
     pre_book, post_book = _replayed(pre), _replayed(post)
 
-    # ONE definition on both sides of the difference: the replay's whenever both ledgers can
-    # be booked, the direct computation otherwise — never one of each, which would report a
-    # definitional difference as an orphan this mutation introduced.
+    # ONE source on both sides of the difference: the replay's whenever both ledgers can be
+    # booked, the fallback otherwise — never one of each. (Since R9 the two agree, so this is
+    # belt and braces: a difference between them must never read as an introduced orphan.)
     both = pre_book is not None and post_book is not None
-    introduced_orphans = (_orphan_keys(post, post_book if both else None)
-                          - _orphan_keys(pre, pre_book if both else None))
-    if introduced_orphans:
-        ordered = sorted(introduced_orphans)
+    pre_rows = base.dividends   # R10: the one read, not a second SELECT
+    post_rows = divs if divs is not None else pre_rows
+    stranded_now = _orphan_rows(post_rows, _orphan_triples(post, post_book if both else None))
+    stranded_before = _orphan_rows(pre_rows, _orphan_triples(pre, pre_book if both else None))
+    introduced = [r for i, r in stranded_now.items() if i not in stranded_before]
+    if introduced:
+        ordered = sorted({(r.account_id, r.symbol) for r in introduced})
         sym = ordered[0][1]
         return _ReplayBlock(
             code="orphan",

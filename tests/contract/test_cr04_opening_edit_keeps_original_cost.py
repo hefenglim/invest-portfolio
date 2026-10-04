@@ -87,6 +87,21 @@ def test_an_explicit_total_is_the_one_way_to_change_the_cost(
     assert _row(client)["total"] == "90000"
 
 
+def test_a_blank_total_keeps_the_stored_one(
+    dashboard_client_factory: DashboardClientFactory,
+) -> None:
+    """R7 (round 2): the refusal sentence promises 「或不填，保留原值」, and the dialog sends the
+    field's value — so a CLEARED 原始總成本 arrives as ``""``. It was a 400 (Pydantic's
+    decimal_parsing); blank now means "not stated", exactly like an omitted key."""
+    conns: list[sqlite3.Connection] = []
+    client = dashboard_client_factory(_seed(conns))
+    for blank in ("", "   "):
+        r = client.put(_PATH, json={"shares": "3", "total": blank, "date": "2026-01-04"})
+        assert r.status_code == 200, (blank, r.text)
+        assert _row(client)["total"] == "100000"
+    assert _row(client)["date"] == "2026-01-04"
+
+
 def test_the_legacy_avg_field_is_refused_and_nothing_is_written(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:

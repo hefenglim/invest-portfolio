@@ -60,6 +60,7 @@ from portfolio_dash.portfolio.results import (
 )
 from portfolio_dash.portfolio.returns import (
     CashMovementFlow,
+    dividend_key,
     total_return,
     xirr_reporting,
 )
@@ -382,8 +383,21 @@ def _holdings_subtotals(
     return out
 
 
-# How many unapplied actions the XIRR reason names individually before it summarizes.
+# How many rows an XIRR reason names individually before it summarizes.
 _UNAPPLIED_ACTIONS_NAMED = 3
+
+
+def _named_capped[T](items: Sequence[T], name: Callable[[T], str]) -> str:
+    """「A（…）、B（…）、C（…），另有 N 筆」 — the ONE capped list every XIRR reason names its rows
+    with (R11, 2026-10-04: three reasons carried three copies of it).
+
+    Capped rather than unbounded: the string renders inside a KPI badge, and a 20-row ledger
+    problem would push the dashboard sideways (the same overflow class as the 136-digit XIRR,
+    2026-08-05). The remainder is counted, never dropped silently.
+    """
+    named = "、".join(name(i) for i in items[:_UNAPPLIED_ACTIONS_NAMED])
+    rest = len(items) - _UNAPPLIED_ACTIONS_NAMED
+    return named + (f"，另有 {rest} 筆" if rest > 0 else "")
 
 
 def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
@@ -393,22 +407,16 @@ def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
     the single figure a skipped action blanks portfolio-wide, so the message has to point at
     the one ledger row responsible instead of leaving the owner to hunt for it across a
     multi-account book. The 賣超 reason said only that *a* position was 待釐清 until CR-01
-    (2026-10-04) gave it this same shape (:func:`_oversold_reason`).
-
-    The list is capped rather than unbounded: this string renders inside a KPI badge, and a
-    20-row ledger problem would push the dashboard sideways (the same overflow class as the
-    136-digit XIRR, 2026-08-05). The remainder is counted, never dropped silently.
+    (2026-10-04) gave it this same shape (:func:`_oversold_reason`). Capped by
+    :func:`_named_capped`.
     """
     # The account is a TOKEN the fetch layer resolves to the zh display name (DEF-023):
     # this string used to carry the bare id, so the badge read 「2884（tw_broker・…）」.
-    named = "、".join(
-        f"{a.from_symbol}（{account_ref(a.account_id)}・{a.date.isoformat()}）"
-        for a in unapplied[:_UNAPPLIED_ACTIONS_NAMED]
-    )
-    rest = len(unapplied) - _UNAPPLIED_ACTIONS_NAMED
-    more = f"，另有 {rest} 筆" if rest > 0 else ""
+    named = _named_capped(
+        unapplied,
+        lambda a: f"{a.from_symbol}（{account_ref(a.account_id)}・{a.date.isoformat()}）")
     return (
-        f"帳本中有 {len(unapplied)} 筆公司行動無法套用（待釐清）：{named}{more}"
+        f"帳本中有 {len(unapplied)} 筆公司行動無法套用（待釐清）：{named}"
         " — 這些部位的股數仍是行動前的基準，與行動後的現價不同步，無法計算 XIRR"
     )
 
@@ -420,34 +428,25 @@ def _oversold_reason(positions: list[OversoldPosition]) -> str:
     wearing the badge. One netted back to exactly zero shares has none — it is listed only on
     the BOOK — so the sentence now names each position the way the unapplied-action reason
     does: account (as a token the fetch layer resolves), symbol, the day the sell exceeded the
-    holding, and 「部位已歸零」 when no holdings row will show it. Capped like that reason, the
-    remainder counted, never dropped.
+    holding, and 「部位已歸零」 when no holdings row will show it. Capped by
+    :func:`_named_capped`.
     """
     def one(p: OversoldPosition) -> str:
         when = f"・{p.oversold_on.isoformat()}" if p.oversold_on is not None else ""
         flat = "，部位已歸零" if p.shares == _ZERO else ""
         return f"{p.symbol}（{account_ref(p.account_id)}{when}{flat}）"
 
-    named = "、".join(one(p) for p in positions[:_UNAPPLIED_ACTIONS_NAMED])
-    rest = len(positions) - _UNAPPLIED_ACTIONS_NAMED
-    more = f"，另有 {rest} 筆" if rest > 0 else ""
-    return (f"帳本中有賣超部位待釐清：{named}{more}"
+    return (f"帳本中有賣超部位待釐清：{_named_capped(positions, one)}"
             " — 成本基礎已捨棄、該筆賣出沒有已實現損益，無法計算 XIRR")
 
 
 def _orphan_dividend_reason(dividends: list[Dividend]) -> str:
-    """The XIRR badge's zh explanation when the book refused dividends with no position (CR-02).
-
-    Same shape as the two reasons above: account, symbol and the effective date of each row,
-    capped, the remainder counted.
-    """
-    named = "、".join(
-        f"{d.symbol}（{account_ref(d.account_id)}・{d.effective_date.isoformat()}）"
-        for d in dividends[:_UNAPPLIED_ACTIONS_NAMED]
-    )
-    rest = len(dividends) - _UNAPPLIED_ACTIONS_NAMED
-    more = f"，另有 {rest} 筆" if rest > 0 else ""
-    return (f"帳本中有 {len(dividends)} 筆股利沒有對應持倉（待釐清）：{named}{more}"
+    """The XIRR badge's zh explanation when the book refused dividends with no position (CR-02):
+    account, symbol and the effective date of each row, capped by :func:`_named_capped`."""
+    named = _named_capped(
+        dividends,
+        lambda d: f"{d.symbol}（{account_ref(d.account_id)}・{d.effective_date.isoformat()}）")
+    return (f"帳本中有 {len(dividends)} 筆股利沒有對應持倉（待釐清）：{named}"
             " — 該帳戶在股利日之前沒有買進或期初庫存，股利未入帳，無法計算 XIRR")
 
 
@@ -878,9 +877,18 @@ def build_dashboard(
     year_ccy: dict[int, dict[Currency, Decimal]] = {}
     total_ccy: dict[Currency, Decimal] = {}
     ttm_ccy: dict[Currency, Decimal] = {}
+    # R6 (2026-10-04): only what the BOOK booked. The replay refuses a dividend with no
+    # position (CR-02), one landing on an open declared short (the short PAYS it), and one on
+    # a ticker an EXCHANGE vacated — and this walk of the raw ledger summed all three, so one
+    # payout got three answers: counted here, excluded from 總報酬 and XIRR, 無法入帳 in the
+    # drawer. Skipped through the SAME value key XIRR skips them by. Each stays named where it
+    # is explained: the XIRR reason / the drawer (no position), the 待釐清 flag (the other two).
+    refused = {dividend_key(dv) for dv in book.refused_dividends}
     for dv in divs:
         if dv.type is DividendType.STOCK:
             continue  # 配股 adds shares, not cash
+        if dividend_key(dv) in refused:
+            continue
         ccy = instruments[dv.symbol].quote_ccy
         per_year = year_ccy.setdefault(dv.date.year, {})
         per_year[ccy] = per_year.get(ccy, _ZERO) + dv.net

@@ -438,7 +438,10 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
       to ✓ (0 = 0) — the drawer looked clean over a discarded basis and a sell with no realized
       row. A 賣超 that still holds shares is NOT listed: its per-account row carries the chip.
     * **``orphan_dividends``** — a dividend the account never held the symbol for by its
-      date, refused by the replay (never booked as income, never a ghost holding).
+      date, refused by the replay (never booked as income, never a ghost holding). Each row
+      carries ``reinvest`` (R8, round 2): a DRIP / 配股 row ADDS shares on the SQL share path
+      that the book does not hold, so it turns the 交易明細 footer red and the drawer names it
+      beside the footer as well — a red footer never renders without its cause.
 
     A separate key rather than two more ``action_issues`` lists, because both are about the
     trade / dividend ledgers, not corporate actions. ``reason`` is a server sentence the
@@ -456,7 +459,8 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
             if p.symbol == symbol and p.shares == _ZERO
         ],
         "orphan_dividends": [
-            _row(d.account_id, d.effective_date, orphan_dividend_message(d))
+            {**_row(d.account_id, d.effective_date, orphan_dividend_message(d)),
+             "reinvest": DividendType(d.type) in _REINVEST_TYPES}
             for d in data.orphan_dividends if d.symbol == symbol
         ],
     }

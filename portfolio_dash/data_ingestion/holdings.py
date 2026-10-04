@@ -639,6 +639,11 @@ def position_exists_by(
     (``Book.orphan_dividends``), and the dashboard names it — the guard is a door, the replay
     stays the authority.
 
+    The SQL form of ONE rule whose bundle form is ``LedgerBundle.position_opened_by`` (the
+    correction doors' fallback, R9 2026-10-04); a change here is a change there, and
+    ``tests/contract/test_r5_r9_orphan_per_dividend.py`` holds the two and the replay to one
+    answer on every dividend of one ledger.
+
     *pending_from* is the earliest date of a not-yet-written trade of the same key that will be
     committed FIRST in the same submission (the AI door writes 交易 before 股利), so a dividend
     whose buy is in the same paste is not refused at preview.

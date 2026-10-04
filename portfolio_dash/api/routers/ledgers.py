@@ -36,7 +36,7 @@ from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
@@ -987,13 +987,22 @@ class OpeningEditBody(BaseModel):
     used to be the "legacy alias" the total was derived from (``avg × shares``) — and the ledger
     modal sent it on every edit, echoing the server's own 28-digit quotient: a date-only edit of
     3 shares / 100,000 stored 99999.99999999999999999999999, and a shares-only edit scaled the
-    original cost with the count (pre-merge review CR-04)."""
+    original cost with the count (pre-merge review CR-04).
+
+    A BLANK ``total`` / ``avg`` (``""`` or whitespace) is "not stated", exactly like an omitted
+    key (R7, round 2): the refusal sentence below promises 「或不填，保留原值」, and a cleared
+    field in any client arrives as ``""`` — which Pydantic answered with a 400 decimal_parsing."""
 
     shares: Decimal
     total: Decimal | None = None
     avg: Decimal | None = None  # refused (CR-04) — see the docstring
     date: date
     ack_oversell: bool = False
+
+    @field_validator("total", "avg", mode="before")
+    @classmethod
+    def _blank_is_not_stated(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 @router.put("/ledgers/openings/{account_id}/{symbol}")

@@ -108,6 +108,15 @@ def test_editing_an_opening_never_rewrites_its_original_cost(
     after = _opening(base)
     assert (after["shares"], after["total"], after["avg"]) == ("4", "100000", "25000"), after
 
+    # ===== (C) R7: a CLEARED 原始總成本 means "keep it" — the dialog's own hint says so ========
+    _open_edit_dialog(page, base)
+    page.locator(".modal #edit-open-total").fill("")
+    page.locator(".modal input[type=date]").fill("2026-01-04")
+    _save(page)
+    assert "total" not in sent[-1], sent[-1]          # blank = not stated, never ""
+    after = _opening(base)
+    assert (after["total"], after["date"]) == ("100000", "2026-01-04"), after
+
     assert not console_errors and not page_errors, (
         f"opening edit flow: console={console_errors!r} page={page_errors!r}"
     )
