@@ -293,12 +293,13 @@ def _validated(conn: sqlite3.Connection, p: PendingDividend) -> PendingDividend:
     """Round 2 (a), CR-09's class: the confirm door runs the ONE dividend validator.
 
     DEF-061 made ``validate_dividend`` the check every door that writes a dividend runs; this
-    door wrote straight through ``insert_dividend``. So a provider event whose payment date
-    precedes its ex-date — bad data, no distribution pays before it goes ex — was booked as a
-    row every other door refuses (``ex_date_after_pay_date``), and a 配股 so booked counts
-    from an ex-date after its own payment. The validator is asked about the row
-    :func:`confirm` would write; a HARD finding makes the item non-confirmable with that
-    sentence, and since :func:`confirm` recomputes :func:`detect` it cannot be forced.
+    door wrote straight through ``insert_dividend``, so it skipped every check the other doors
+    run. The validator is asked about the row :func:`confirm` would write; a HARD finding makes
+    the item non-confirmable with that sentence, and since :func:`confirm` recomputes
+    :func:`detect` it cannot be forced. A SOFT finding — e.g. ``ex_date_after_pay_date``, a
+    provider event that pays before it goes ex (soft since owner ruling ②, 2026-10-05) — goes
+    into the note and leaves the item confirmable (ruling ⑩: confirming is the owner's
+    acknowledgement of what the item shows).
 
     S11 (round 3): this is also where CR-02's no-position refusal comes from — the
     validator's ``dividend_without_position``, the one rule and the one sentence. The

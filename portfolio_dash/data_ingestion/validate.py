@@ -2254,8 +2254,8 @@ def validate_dividend(
     * ``dividend_amounts`` (hard) — :func:`check_amounts` on the model's amounts;
     * ``reinvest_shares_required`` (hard) — a DRIP / STOCK row with no share count, which
       the replay (``cost_basis.py``) refuses;
-    * ``ex_date_after_pay_date`` (hard, CR-09) — an ex-dividend date later than the payment
-      date, which no distribution has;
+    * ``ex_date_after_pay_date`` (soft, CR-09; owner ruling ② 2026-10-05) — an ex-dividend
+      date later than the payment date, which a distribution almost never has;
     * ``dividend_without_position`` (hard, CR-02 2026-10-04) — the account had opened no
       position in the symbol by the dividend's effective date (no opening, no trade, no
       EXCHANGE / SPINOFF into it). The replay refuses such a row; until this check a door
@@ -2397,16 +2397,19 @@ def _dividend_findings(
                      "——配股／再投資是以股數入帳，缺這個欄位重算會失敗"),
         ))
 
-    # CR-09: no distribution goes ex AFTER it pays — the ex-date is fixed first and the
-    # payment follows it. Hard, on every door, because a 配股 counts from its ex-date
-    # (``Dividend.effective_date``): an ex-date past the payment date books the shares after
-    # they were paid, and on any other type it is a date nothing could have produced. The
-    # same date on both is allowed (a source that knows only one date stores it in both).
+    # CR-09: a distribution goes ex BEFORE it pays — the ex-date is fixed first and the
+    # payment follows it — so an ex-date past the payment date is almost certainly a typo or
+    # bad provider data, and it matters because a 配股 counts from its ex-date
+    # (``Dividend.effective_date``). SOFT, on every door (owner ruling ②, 2026-10-05: 「改為
+    # 警告、確認後可存」 — CR-09 shipped it hard): the owner is asked and may save after
+    # confirming; the inbox shows it in the item's note (ruling ⑩). The same date on both is
+    # not asked at all (a source that knows only one date stores it in both).
     if inp.ex_date is not None and inp.ex_date > inp.div_date:
         issues.append(Issue(
-            kind="ex_date_after_pay_date",
+            kind="ex_date_after_pay_date", needs_confirm=True,
             message=(f"除息日（ex_date）{inp.ex_date.isoformat()} 晚於發放日 "
-                     f"{inp.div_date.isoformat()}：除息日不會晚於發放日，請確認這兩個日期"),
+                     f"{inp.div_date.isoformat()}：除息日通常不會晚於發放日，請確認這兩個日期；"
+                     "確認無誤仍可存檔（配股會從除息日起計入）"),
         ))
 
     # CR-02 (2026-10-04): mirrors the replay's OTHER refusal — a dividend for a position that

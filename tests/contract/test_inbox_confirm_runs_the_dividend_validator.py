@@ -10,7 +10,10 @@ its own payment.
 
 Now ``detect`` asks the validator about the exact row ``confirm`` would write; an item with a
 hard finding is not confirmable and says why (and ``confirm`` recomputes ``detect``, so it
-cannot be forced).
+cannot be forced). An item with a SOFT finding stays confirmable and its note says why —
+owner rulings 2026-10-05: ② made ``ex_date_after_pay_date`` a warning the owner confirms
+(CR-09 shipped it hard), and ⑩ keeps soft findings in the inbox note, where confirming the
+item is the owner's acknowledgement of what it shows.
 
 S11 (round 3): the inbox's own copy of the CR-02 no-position check — a second ``position_exists_by``
 call per item with its own wording — is gone; the validator's `dividend_without_position` is
@@ -57,33 +60,33 @@ def _ledger(api_client: TestClient) -> list[dict[str, Any]]:
     return rows
 
 
-def test_an_event_paid_before_its_ex_date_is_not_confirmable_and_says_why(
+def test_an_event_paid_before_its_ex_date_says_why_and_still_confirms(
     api_client: TestClient, golden_db: sqlite3.Connection,
 ) -> None:
     # Golden: tw_broker bought 2330 on 2026-01-05, so the position exists on both dates —
-    # only the date order is wrong.
+    # only the date order is unusual. Rulings ② + ⑩: a warning in the note, not a block.
     upsert_dividend_events(golden_db, [_event("2026-05-20", "2026-05-10")], fetched_at=_NOW)
     item = next(x for x in _rows(api_client) if x["ex_date"] == "2026-05-20")
-    assert item["confirmable"] is False
+    assert item["confirmable"] is True
     assert "除息日" in str(item["note"]) and "晚於發放日" in str(item["note"])
     before = len(_ledger(api_client))
     r = api_client.post("/api/dividend-inbox/confirm",
                         json={"fingerprints": [item["fingerprint"]]})
-    assert r.status_code == 200 and r.json()["written"] == 0      # cannot be forced
-    assert len(_ledger(api_client)) == before
+    assert r.status_code == 200 and r.json()["written"] == 1
+    assert len(_ledger(api_client)) == before + 1
 
 
-def test_a_stock_distribution_paid_before_its_ex_date_is_not_confirmable(
+def test_a_stock_distribution_paid_before_its_ex_date_says_why_and_still_confirms(
     api_client: TestClient, golden_db: sqlite3.Connection,
 ) -> None:
     upsert_dividend_events(golden_db, [_event("2026-05-20", "2026-05-10", cash=None,
                                               stock="1")], fetched_at=_NOW)
     item = next(x for x in _rows(api_client) if x["kind"] == "stock")
-    assert item["confirmable"] is False
+    assert item["confirmable"] is True
     assert "晚於發放日" in str(item["note"])
     r = api_client.post("/api/dividend-inbox/confirm",
                         json={"fingerprints": [item["fingerprint"]]})
-    assert r.json()["written"] == 0
+    assert r.json()["written"] == 1
 
 
 def test_a_well_dated_event_still_confirms(

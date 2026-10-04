@@ -8,8 +8,9 @@ corrected to STOCK or re-keyed to another symbol, silently moved its effective d
 unrelated day.
 
 Now: the dialog shows and sends ``ex_date`` (absent from the body = keep, for older callers;
-``null`` = clear); every door refuses an ex-date after the payment date
-(``ex_date_after_pay_date``, hard); and an edit that KEEPS the stored ex-date across a symbol
+``null`` = clear); every door ASKS about an ex-date after the payment date
+(``ex_date_after_pay_date`` — soft since owner ruling ②, 2026-10-05: 「改為警告、確認後可存」;
+CR-09 shipped it hard); and an edit that KEEPS the stored ex-date across a symbol
 change, or across a type / payment-date change of a STOCK row, asks the owner to confirm it
 (``ex_date_carried_over``, soft — the preview shows it, the dialog gates 儲存 on it).
 """
@@ -101,27 +102,36 @@ def test_the_correction_can_set_clear_and_keep_the_ex_date(
     assert _stored_ex(client) is None                            # null = clear
 
 
-def test_an_ex_date_after_the_payment_date_is_refused_on_every_door(
+def _sev(payload: dict[str, Any], code: str) -> str:
+    issues = payload.get("issues") or payload.get("error", {}).get("issues") or []
+    return str(next(i for i in issues if i["code"] == code)["sev"])
+
+
+def test_an_ex_date_after_the_payment_date_is_asked_on_every_door(
     dashboard_client_factory: DashboardClientFactory,
 ) -> None:
+    """Owner ruling ② (2026-10-05): a WARNING the owner confirms, never a refusal."""
     client, div_id = _client(dashboard_client_factory)
-    assert "ex_date_after_pay_date" in _preview(client, div_id, ex_date="2026-04-10")
+    p = client.post("/api/ledgers/dividends/preview",
+                    json={**_body(ex_date="2026-04-10"), "replaces_div_id": div_id})
+    assert _sev(p.json(), "ex_date_after_pay_date") == "warn"
     r = client.put(f"/api/ledgers/dividends/{div_id}", json=_body(ex_date="2026-04-10"))
-    assert r.status_code == 400, r.json()
-    assert "ex_date_after_pay_date" in _codes(r.json())
-    assert _stored_ex(client) == EX
-    # An edit that moves the PAYMENT date before the kept ex-date invalidates it too.
-    r = client.put(f"/api/ledgers/dividends/{div_id}", json=_body(date="2026-03-01"))
-    assert r.status_code == 400, r.json()
-    assert "ex_date_after_pay_date" in _codes(r.json())
-    # The same day on both is a legitimate shape (a source that knows one date).
+    assert r.status_code == 200, r.json()                       # the dialog asked; it saves
+    assert _sev(r.json(), "ex_date_after_pay_date") == "warn"   # and the answer says it again
+    assert _stored_ex(client) == "2026-04-10"
+    # An edit that moves the PAYMENT date before the kept ex-date is asked about too.
+    assert "ex_date_after_pay_date" in _preview(client, div_id, date="2026-03-01")
+    # The same day on both is a legitimate shape (a source that knows one date): not asked.
     assert "ex_date_after_pay_date" not in _preview(client, div_id, ex_date=PAY)
-    # The entry doors share the one validator (DEF-061): the CSV door refuses it too.
+    # The entry doors share the one validator (DEF-061): the CSV door asks too, as a warning.
     csv_text = ("account,symbol,date,type,gross,ex_date\n"
                 "tw_broker,2330,2026-04-05,CASH,500,2026-04-10\n")
     p = client.post("/api/import/preview", json={"kind": "dividends", "csv_text": csv_text})
     assert p.status_code == 200, p.json()
     assert "ex_date_after_pay_date" in json.dumps(p.json(), ensure_ascii=False)
+    row = p.json()["rows"][0]
+    assert row["status"] == "warn", row                         # ack-able, not an error row
+    assert "晚於發放日" in row["reason"], row
 
 
 def test_rekeying_to_another_symbol_asks_about_the_carried_ex_date(
