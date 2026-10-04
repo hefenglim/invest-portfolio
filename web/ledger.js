@@ -1064,7 +1064,7 @@
          (runMutation), absent on the first save (saveFromModal): it decides what the dialog
          closes first — the progress toast, or the edit modal. */
       const onErr = (err, prog) => replayAck(err, prog)
-        || warnAck(err, prog ? prog.drop : ui.dismiss);
+        || warnAck(err, prog ? prog.drop : ui.dismiss, prog);
       const replayAck = (err, prog) => ackConfirm(err, '儲存', (param) => {
         body[param] = true;
         runMutation('編輯', put, onErr);
@@ -1075,9 +1075,22 @@
          ONE helper both doors use), so the server refuses `warnings_changed` if what it
          recomputes is not what the owner read. Keys, not text: the text here is api.js's
          RESOLVED copy, which an account-naming warning never matches (R1). */
-      function warnAck(err, before) {
+      function warnAck(err, before, prog) {
         if (!(err && err.status === 422 && (err.code === 'warnings_unacknowledged'
           || err.code === 'warnings_changed'))) return false;
+        /* S3: the helper is checked BEFORE anything is closed. A browser holding a cached
+           pre-R12 corp-action-form.js beside this file has no window.pdActionAckKeys; calling
+           it after before() threw inside this handler — no dialog, no toast, and the modal
+           with the owner's typed values already gone. Without it the warnings cannot be
+           named, so nothing is acknowledged: say to reload, and on the first save keep the
+           modal (saveFromModal leaves it open when this returns true). No inline copy of the
+           key rule — R12 keeps it in ONE place. */
+        if (typeof window.pdActionAckKeys !== 'function') {
+          const sub = '這個頁面的程式需要更新，無法確認警告；這次沒有寫入，請重新整理頁面後再儲存';
+          if (prog) prog.fail('編輯失敗', sub);
+          else if (window.toast) window.toast('編輯失敗', 'fail', sub);
+          return true;
+        }
         before();
         const shown = (err.issues || []).filter((i) => i.sev !== 'error');
         const keys = window.pdActionAckKeys(err.issues);
