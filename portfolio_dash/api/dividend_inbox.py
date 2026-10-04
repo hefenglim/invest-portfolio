@@ -40,6 +40,7 @@ from portfolio_dash.data_ingestion.store import (
     list_dividends,
     list_instruments,
 )
+from portfolio_dash.data_ingestion.validate import DividendInput, validate_dividend
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.refresh import describe_refresh, refresh_dividends, refresh_failures
@@ -275,6 +276,51 @@ def _price_on_or_before(
     return hist[-1].value if hist else None
 
 
+#: The ledger type :func:`confirm` books for each inbox kind — ONE table, read by the confirm
+#: and by the validator gate, so the row that is checked is the row that is written.
+_KIND_TYPE = {"drip": "DRIP", "net": "NET", "stock": "STOCK", "cash": "CASH"}
+
+
+def _row_input(p: PendingDividend) -> DividendInput:
+    """The exact row :func:`confirm` would write for *p*, as the dividend validator's input."""
+    kind_type = _KIND_TYPE.get(p.kind, "CASH")
+    withholding = p.est_withhold if kind_type == "DRIP" else _ZERO
+    return DividendInput(
+        account_id=p.account_id, symbol=p.symbol, div_date=p.pay_date or p.ex_date,
+        type=kind_type, gross=p.est_gross, withholding=withholding, net=p.est_net,
+        reinvest_shares=p.est_reinvest_shares if kind_type in ("DRIP", "STOCK") else None,
+        reinvest_price=p.est_reinvest_price if kind_type == "DRIP" else None,
+        ex_date=p.ex_date)
+
+
+def _validated(conn: sqlite3.Connection, p: PendingDividend) -> PendingDividend:
+    """Round 2 (a), CR-09's class: the confirm door runs the ONE dividend validator.
+
+    DEF-061 made ``validate_dividend`` the check every door that writes a dividend runs; this
+    door wrote straight through ``insert_dividend``. So a provider event whose payment date
+    precedes its ex-date — bad data, no distribution pays before it goes ex — was booked as a
+    row every other door refuses (``ex_date_after_pay_date``), and a 配股 so booked counts
+    from an ex-date after its own payment. The validator is asked about the row
+    :func:`confirm` would write; a HARD finding makes the item non-confirmable with that
+    sentence, and since :func:`confirm` recomputes :func:`detect` it cannot be forced.
+
+    An item that is ALREADY non-confirmable keeps its own reason (CR-02's no-position
+    sentence, 缺再投資價) — that is the more specific answer and the one to act on first. A
+    soft finding is appended to the note: confirming the item is the owner's acknowledgement
+    of what the item shows, so what it shows must include it.
+    """
+    if not p.confirmable:
+        return p
+    findings = validate_dividend(conn, _row_input(p))
+    hard = [i for i in findings if not i.needs_confirm]
+    if hard:
+        return p.model_copy(update={"confirmable": False, "note": hard[0].message})
+    soft = [i.message for i in findings if not i.info]
+    if soft:
+        return p.model_copy(update={"note": "；".join([*([p.note] if p.note else []), *soft])})
+    return p
+
+
 def detect(
     conn: sqlite3.Connection, *, now: datetime, include_skipped: bool = False
 ) -> list[PendingDividend]:
@@ -332,7 +378,7 @@ def detect(
                     _sym: str = symbol, _held: Decimal = held,
                     _ev: DividendEvent = ev, _inst: Instrument = inst,
                 ) -> PendingDividend:
-                    return PendingDividend(
+                    return _validated(conn, PendingDividend(
                         fingerprint=fingerprint, kind=kind, source=_ev.source,
                         account_id=_acct, account_name=_acct_name, symbol=_sym,
                         name=_inst.name or _sym, ex_date=_ev.ex_date,
@@ -342,7 +388,7 @@ def detect(
                         est_reinvest_price=est_reinvest_price,
                         est_reinvest_shares=est_reinvest_shares,
                         ccy=_inst.quote_ccy.value, confirmable=confirmable, note=note,
-                    )
+                    ))
 
                 # --- cash-family item (CASH / DRIP / NET by account model) ---
                 if ev.cash_amount is not None and ev.cash_amount > _ZERO:
@@ -423,40 +469,24 @@ def confirm(
         p = by_fp.get(fp)
         if p is None or not p.confirmable:
             continue
-        div_date = p.pay_date or p.ex_date
-        # R6 (review ⑧): the detection already carries BOTH dates and this door was keeping
-        # only the payment one. Handing the ex-date through costs nothing and is what lets a
-        # 配股's shares be booked when the price adjusts instead of a month later. Passed for
-        # every kind — `Dividend.effective_date` decides which kinds actually use it, so the
-        # rule stays in ONE place rather than being re-decided at each writer.
-        ex_date = p.ex_date
-        if p.kind == "drip":
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                ex_date=ex_date,
-                div_type="DRIP", gross=p.est_gross, withholding=p.est_withhold,
-                net=p.est_net, reinvest_shares=p.est_reinvest_shares,
-                reinvest_price=p.est_reinvest_price,
-            )
-        elif p.kind == "net":
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                ex_date=ex_date,
-                div_type="NET", gross=p.est_gross, withholding=_ZERO, net=p.est_net,
-            )
-        elif p.kind == "stock":
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                ex_date=ex_date,
-                div_type="STOCK", gross=_ZERO, withholding=_ZERO, net=_ZERO,
-                reinvest_shares=p.est_reinvest_shares,
-            )
-        else:  # cash (TW 沖減)
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                ex_date=ex_date,
-                div_type="CASH", gross=p.est_gross, withholding=_ZERO, net=p.est_net,
-            )
+        # The row is built by `_row_input` — the SAME function the validator gate in `detect`
+        # checked (round 2 (a)), so what was validated is exactly what is written: DRIP keeps
+        # its withholding and reinvest figures, NET / CASH book withholding 0, STOCK books
+        # shares only (its estimated amounts are all 0 by construction).
+        #
+        # R6 (review ⑧): the detection carries BOTH dates and this door kept only the payment
+        # one. Handing the ex-date through costs nothing and is what lets a 配股's shares be
+        # booked when the price adjusts instead of a month later. Passed for every kind —
+        # `Dividend.effective_date` decides which kinds actually use it, so the rule stays in
+        # ONE place rather than being re-decided at each writer.
+        row = _row_input(p)
+        row_id = insert_dividend(
+            conn, account_id=row.account_id, symbol=row.symbol, div_date=row.div_date,
+            ex_date=row.ex_date, div_type=row.type, gross=row.gross,
+            withholding=row.withholding if row.withholding is not None else _ZERO,
+            net=row.net if row.net is not None else _ZERO,
+            reinvest_shares=row.reinvest_shares, reinvest_price=row.reinvest_price,
+        )
         written.append(row_id)
     return written
 
