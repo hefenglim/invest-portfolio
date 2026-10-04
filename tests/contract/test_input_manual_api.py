@@ -513,14 +513,22 @@ def test_position_preview_null_when_inputs_incomplete(api_client: TestClient) ->
 def test_position_preview_null_when_ledger_unbookable(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """Never-500 at the build_book seam: an orphan dividend (no prior position) makes the
-    whole ledger un-bookable — position_preview hides entirely (not mis-read as a fresh
-    portfolio), while account_cash still resolves (cash balances do not depend on the book)."""
+    """Never-500 at the build_book seam: an un-bookable ledger — a DRIP row with no share
+    count, which the replay refuses on every path — hides position_preview entirely (not
+    mis-read as a fresh portfolio), while account_cash still resolves (cash balances do not
+    depend on the book).
+
+    The fixture was an ORPHAN dividend until CR-02 (2026-10-04): the replay now records an
+    orphan on ``Book.orphan_dividends`` and keeps booking, so it no longer makes the ledger
+    un-bookable. The DRIP without shares is the shape that still does."""
     upsert_instrument(golden_db, Instrument(
         symbol="GLD", market=Market.US, quote_ccy=Currency.USD, sector="", name="Gold"))
+    insert_transaction(golden_db, account_id="schwab", symbol="GLD", side=Side.BUY,
+                       quantity=Decimal("1"), price=Decimal("100"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2024, 12, 2))
     insert_dividend(golden_db, account_id="schwab", symbol="GLD", div_date=date(2025, 1, 1),
-                    div_type="CASH", gross=Decimal("1"), withholding=Decimal("0"),
-                    net=Decimal("1"))
+                    div_type="DRIP", gross=Decimal("1"), withholding=Decimal("0.3"),
+                    net=Decimal("0.7"))
     golden_db.commit()
     r = api_client.post("/api/input/manual/preview", json={
         "account_id": "tw_broker", "symbol": "2330", "side": "buy",

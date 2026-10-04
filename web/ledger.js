@@ -761,16 +761,28 @@
     });
   }
 
+  /* CR-04 (2026-10-04): the dialog edits 原始總成本 — the money of record — never the average.
+     It used to offer 原始均價 and send the server's own `total / shares` quotient back as
+     `avg`, from which the server derived `total = avg × shares`: a date-only edit of 3 shares /
+     100,000 stored 99999.99999999999999999999999, and a shares-only edit scaled the original
+     cost with the count. The field is pre-filled with the STORED total string, so a save that
+     does not touch it sends it back byte-for-byte; the average is the server's figure, shown
+     as text, and recomputed on read after the save. */
   function editOpen(o) {
     const fShares = inp(o.shares, 'number', 'any');
-    const fAvg = inp(o.avg, 'number', 'any');
+    const fTotal = inp(o.total, 'number', 'any');
+    fTotal.id = 'edit-open-total';
     const fDate = inp(o.date, 'date');
+    const note = el('div', 'hint',
+      '原始總成本是成本的依據：只改股數或建檔日時，原始總成本維持不變，原始均價會在儲存後依'
+      + '「原始總成本 ÷ 股數」重新計算（目前 ' + f.price(o.avg, o.ccy) + '）。');
     editModal('編輯期初 — ' + o.symbol + '（' + acctZh(o.account_id) + '）', [
-      ['股數', fShares], ['原始均價', fAvg], ['建檔日', fDate],
+      ['股數', fShares], ['原始總成本' + (o.ccy ? '（' + o.ccy + '）' : ''), fTotal],
+      ['建檔日', fDate], ['', note],
     ], async (ui) => {
       await putWithAckGuard(
         '/api/ledgers/openings/' + encodeURIComponent(o.account_id) + '/' + encodeURIComponent(o.symbol),
-        (ack) => ({ shares: fShares.value, avg: fAvg.value, date: fDate.value, ack_oversell: ack }),
+        (ack) => ({ shares: fShares.value, total: fTotal.value, date: fDate.value, ack_oversell: ack }),
         '編輯', ui);
     });
   }

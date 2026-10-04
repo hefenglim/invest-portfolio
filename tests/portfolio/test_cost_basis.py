@@ -3,7 +3,11 @@ from decimal import Decimal
 
 import pytest
 
-from portfolio_dash.portfolio.cost_basis import OversellError, build_book
+from portfolio_dash.portfolio.cost_basis import (
+    OversellError,
+    UnbookableLedgerError,
+    build_book,
+)
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -147,11 +151,14 @@ def test_equivalence_adjusted_total_equals_original_plus_dividends() -> None:
 
 def test_dividend_for_unknown_position_raises() -> None:
     # A dividend with no prior buy/opening must fail loud, not create a ghost position.
+    # CR-02 (2026-10-04): typed (still a ValueError) and in zh, naming the row — the strict
+    # path's half; the dashboard path records it on Book.orphan_dividends instead.
     divs = [Dividend(account_id="a", symbol="AAPL", date=date(2025, 6, 1),
                      type=DividendType.CASH, gross=Decimal("100"),
                      withholding=Decimal("0"), net=Decimal("100"))]
-    with pytest.raises(ValueError, match="unknown position"):
+    with pytest.raises(UnbookableLedgerError, match="AAPL.*2025-06-01.*沒有對應持倉"):
         build_book(LedgerBundle(dividends=divs, instruments=INSTR))
+    assert issubclass(UnbookableLedgerError, ValueError)
 
 
 def test_multi_account_same_symbol_isolated() -> None:
@@ -198,8 +205,10 @@ def test_drip_without_reinvest_shares_raises() -> None:
     divs = [Dividend(account_id="a", symbol="AAPL", date=date(2025, 6, 1),
                      type=DividendType.DRIP, gross=Decimal("100"),
                      withholding=Decimal("30"), net=Decimal("70"))]
-    with pytest.raises(ValueError, match="requires reinvest_shares"):
-        build_book(LedgerBundle(txs, divs, instruments=INSTR))
+    # CR-02 (2026-10-04): typed and in zh on BOTH paths (no door can write this row).
+    for allow in (False, True):
+        with pytest.raises(UnbookableLedgerError, match="reinvest_shares"):
+            build_book(LedgerBundle(txs, divs, instruments=INSTR), allow_oversell=allow)
 
 
 def test_realized_row_carries_sell_date() -> None:

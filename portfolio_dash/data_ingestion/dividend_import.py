@@ -3,6 +3,7 @@
 import csv
 import io
 import sqlite3
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -157,8 +158,16 @@ def _type_cell(raw: dict[str, str]) -> str:
     return value
 
 
-def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPreview:
+def build_dividend_preview(
+    conn: sqlite3.Connection, csv_text: str, *,
+    pending_trades: Mapping[tuple[str, str], date] | None = None,
+) -> ImportPreview:
     """Parse *csv_text* into an :class:`ImportPreview` of dividends rows.
+
+    *pending_trades* (CR-02, 2026-10-04): ``(account, symbol)`` → the earliest date of a trade
+    the SAME submission commits BEFORE these dividends — only the AI door passes it (its kinds
+    commit 交易 → 股利 → 資金), so a buy and its dividend in one paste do not refuse each other
+    at preview. The commit re-previews without it, after the trades are written.
 
     Required columns: account, symbol, date (the PAYMENT date), type, gross — except that
     a ``NET`` (MY single-tier) row may supply ``net`` alone, the manual §6.3 number of
@@ -258,7 +267,8 @@ def build_dividend_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPre
             account_id=account_id, symbol=symbol, div_date=div_date, type=div_type,
             gross=gross, withholding=withholding_override, net=net_override,
             reinvest_shares=reinvest_shares_override,
-            reinvest_price=reinvest_price_override, ex_date=ex_date)))
+            reinvest_price=reinvest_price_override, ex_date=ex_date),
+            pending_trades=pending_trades))
 
         # --- apply dividend model to compute withholding / net / reinvest_shares ---
         amounts = apply_dividend_model(

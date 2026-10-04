@@ -12,12 +12,14 @@ from pydantic import BaseModel, Field
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.results import (
     CombinedView,
+    OversoldPosition,
     RealizedPnL,
     ReturnSummary,
     SectorAllocation,
     UnappliedAction,
 )
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.ledger import Dividend
 
 
 class HoldingRow(BaseModel):
@@ -416,3 +418,14 @@ class DashboardData(BaseModel):
     # a non-empty list always means the dashboard path degraded and the share counts in this
     # payload are 待釐清.
     unapplied_actions: list[UnappliedAction] = Field(default_factory=list)
+    # ``Book.oversold_positions`` / ``Book.orphan_dividends`` (CR-01 / CR-02 / CR-11,
+    # 2026-10-04), carried for IN-PROCESS readers — the drawer (``api/routers/symbol.py``)
+    # names a 賣超 netted back to zero shares and a dividend with no position from these.
+    #
+    # ``exclude=True``: NOT on the dashboard wire, deliberately, so the spec-17 golden payload
+    # is unchanged. The page already shows both, named, where it shows the consequence — the
+    # XIRR reason, the FX-complete reason and the trend's incomplete days all read the same
+    # book — and a dashboard banner for them is a follow-up that would add these keys to the
+    # contract on purpose, not by accident of a model dump.
+    oversold_positions: list[OversoldPosition] = Field(default_factory=list, exclude=True)
+    orphan_dividends: list[Dividend] = Field(default_factory=list, exclude=True)

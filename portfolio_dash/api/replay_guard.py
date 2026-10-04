@@ -43,14 +43,18 @@ from portfolio_dash.data_ingestion.store import (
     StoredDividend,
     StoredOpening,
     StoredTransaction,
+    corporate_action_order_key,
+    dividend_order_key,
     list_cash_movements,
     list_corporate_actions,
     list_dividends,
     list_transactions,
     load_ledger_bundle,
+    opening_order_key,
+    transaction_order_key,
 )
 from portfolio_dash.portfolio.cost_basis import build_book
-from portfolio_dash.portfolio.results import Holding
+from portfolio_dash.portfolio.results import Book, OversoldPosition
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
@@ -69,7 +73,9 @@ class _ReplayBlock(BaseModel):
     code: str  # "oversell" | "orphan"
     message: str
     orphans: list[tuple[str, str]] = Field(default_factory=list)   # (account, symbol)
-    oversold: list[Holding] = Field(default_factory=list)
+    # CR-11: the BOOK's record, not ``Holding`` — a 賣超 netted back to exactly zero shares has
+    # no Holding at all, and it is still a 賣超 the owner must be asked about.
+    oversold: list[OversoldPosition] = Field(default_factory=list)
 
 
 def _to_models(
@@ -86,18 +92,50 @@ def _to_models(
 
     ``actions`` (DEF-049) lets a batch undo replay the ledger WITHOUT the corporate actions it
     is about to remove; ``None`` loads them from the store, exactly as before.
+
+    **Every list handed in is put back into the STORE's order first** (CR-03, 2026-10-04).
+    ``build_book`` books one day's trades in list order — ledger-id order, DEF-012 — and an edit
+    door builds its would-be list by replacing the row IN PLACE, which leaves it at its OLD
+    position. Moving a back-dated buy onto the day of a sell entered before it therefore
+    replayed buy-then-sell here and sell-then-buy in the ledger after the write: 200, no
+    question, and a sticky 賣超. Sorting by the twins of the store's own ``ORDER BY``
+    (``store.*_order_key``) makes the would-be ledger exactly the ledger the next read returns,
+    for every door that comes through here — transaction / dividend / opening / corporate-
+    action edits and deletes, and the import-batch undo. Every row here is a STORED row with
+    its real id (an edit keeps its id), which is what the keys sort on.
     """
     return load_ledger_bundle(
-        conn, transactions=txs, dividends=divs, opening=opening, actions=actions
+        conn,
+        transactions=None if txs is None else sorted(txs, key=transaction_order_key),
+        dividends=None if divs is None else sorted(divs, key=dividend_order_key),
+        opening=None if opening is None else sorted(opening, key=opening_order_key),
+        actions=None if actions is None else sorted(actions, key=corporate_action_order_key),
     ).without_unregistered()
 
 
-def _orphan_keys(bundle: LedgerBundle) -> set[tuple[str, str]]:
-    """(account, symbol) dividend keys with NO buy/sell/opening on-or-before the div date.
+def _replayed(bundle: LedgerBundle) -> Book | None:
+    """The dashboard-path replay of *bundle*, or ``None`` when it cannot be booked at all.
 
-    These are exactly the rows on which ``build_book`` raises ``ValueError`` ('dividend
-    for unknown position') — computing the set directly (rather than catching) lets the
-    caller scope the block to orphans the mutation INTRODUCES (audit H3)."""
+    ``None`` is reached only by a ledger the replay refuses outright — a DRIP / 配股 row with no
+    share count, a negative quantity, an uncomputable value. A 賣超 and a dividend with no
+    position no longer are: since CR-02 / CR-11 both are recorded on the returned BOOK."""
+    try:
+        return build_book(bundle, allow_oversell=True)
+    except (ValueError, KeyError):
+        return None
+
+
+def _orphan_keys(bundle: LedgerBundle, book: Book | None) -> set[tuple[str, str]]:
+    """(account, symbol) of every dividend with no position to book against.
+
+    Read off the REPLAY whenever it ran (CR-02, 2026-10-04): ``Book.orphan_dividends`` is the
+    replay's own answer — a position created by a corporate action counts, and the date is the
+    dividend's EFFECTIVE date — so the guard and the dashboard cannot disagree about which row
+    is stranded. The direct computation below is kept ONLY for a ledger the replay cannot book
+    at all (``book is None``): it is what lets the caller still scope the block to orphans the
+    mutation INTRODUCES (audit H3) when there is no book to read."""
+    if book is not None:
+        return {(d.account_id, d.symbol) for d in book.orphan_dividends}
     orphans: set[tuple[str, str]] = set()
     for dv in bundle.dividends:
         covered = any(
@@ -112,24 +150,27 @@ def _orphan_keys(bundle: LedgerBundle) -> set[tuple[str, str]]:
     return orphans
 
 
-def _oversold_shares(bundle: LedgerBundle) -> dict[tuple[str, str], Holding] | None:
-    """Map of (account, symbol) → the oversold Holding.
+def _oversold_shares(book: Book | None) -> dict[tuple[str, str], OversoldPosition] | None:
+    """Map of (account, symbol) → the 賣超 position, read off ``Book.oversold_positions``.
 
-    The whole Holding, not just ``shares``: the guard is DATE-AWARE, so the position's final
+    The whole record, not just ``shares``: the guard is DATE-AWARE, so the position's final
     net quantity is not evidence of the problem — it can even be positive, since a later buy
     nets it back up without restoring the discarded basis (F-16). ``oversold_on`` /
     ``oversold_sold`` / ``oversold_held`` carry the day that actually broke.
 
-    ``None`` when the ledger is un-bookable (e.g. a pre-existing orphan) — the caller
-    then declines to scope the oversell rather than block an unrelated correction."""
-    try:
-        book = build_book(bundle, allow_oversell=True)
-    except (ValueError, KeyError):
+    CR-01 / CR-11 (2026-10-04): this read ``book.holdings`` and ``build_book`` drops every
+    zero-share position — so a 賣超 that a later buy of the same size netted back to exactly 0
+    was invisible here, and the row delete / edit, the batch undo and both corporate-action
+    doors all answered 200 without asking. The BOOK keeps every one.
+
+    ``None`` when the ledger is un-bookable — the caller then declines to scope the oversell
+    rather than block an unrelated correction."""
+    if book is None:
         return None
-    return {(h.account_id, h.symbol): h for h in book.holdings if h.oversold}
+    return {(p.account_id, p.symbol): p for p in book.oversold_positions}
 
 
-def _oversell_phrase(symbol: str, held: Holding) -> str:
+def _oversell_phrase(symbol: str, held: OversoldPosition) -> str:
     """Name the DAY the ledger broke, not the position's final net quantity.
 
     The date-aware guard exists because a back-dated sell can be uncovered on its own date
@@ -165,8 +206,14 @@ def _replay_block(
     only the first; ``message`` still names the first, so the row doors are unchanged."""
     pre = _to_models(conn)
     post = _to_models(conn, txs, divs, opening, actions)
+    pre_book, post_book = _replayed(pre), _replayed(post)
 
-    introduced_orphans = _orphan_keys(post) - _orphan_keys(pre)
+    # ONE definition on both sides of the difference: the replay's whenever both ledgers can
+    # be booked, the direct computation otherwise — never one of each, which would report a
+    # definitional difference as an orphan this mutation introduced.
+    both = pre_book is not None and post_book is not None
+    introduced_orphans = (_orphan_keys(post, post_book if both else None)
+                          - _orphan_keys(pre, pre_book if both else None))
     if introduced_orphans:
         ordered = sorted(introduced_orphans)
         sym = ordered[0][1]
@@ -178,8 +225,8 @@ def _replay_block(
             orphans=ordered,
         )
 
-    post_over = _oversold_shares(post)
-    pre_over_raw = _oversold_shares(pre)
+    post_over = _oversold_shares(post_book)
+    pre_over_raw = _oversold_shares(pre_book)
     if post_over is None:
         # The would-be ledger cannot be replayed (beyond the orphan-dividend case above,
         # e.g. a DRIP dividend stripped of its reinvest shares). Block hard when THIS
@@ -191,7 +238,7 @@ def _replay_block(
                 message="此更正會使帳本無法重建，請檢查相關股利/期初紀錄")
         return None
     pre_over = pre_over_raw or {}
-    stranded: list[Holding] = []
+    stranded: list[OversoldPosition] = []
     for key, held in post_over.items():
         prev = pre_over.get(key)
         # Compared on `shares` exactly as before — the SCOPE of the block is unchanged; only
@@ -258,12 +305,12 @@ class BatchUndoVerdict:
     acked_negative: bool = False
 
 
-def _stranded_sell(held: Holding) -> str:
+def _stranded_sell(held: OversoldPosition) -> str:
     """One affected sell, account first: a batch can span accounts, a row door cannot."""
     return f"{account_ref(held.account_id)} {_oversell_phrase(held.symbol, held)}"
 
 
-def _stranded_wire(held: Holding) -> dict[str, Any]:
+def _stranded_wire(held: OversoldPosition) -> dict[str, Any]:
     return {
         "kind": "oversell", "account_id": held.account_id, "symbol": held.symbol,
         "date": held.oversold_on.isoformat() if held.oversold_on is not None else None,
@@ -283,7 +330,8 @@ def _named_refusal(block: _ReplayBlock, *, what: str, then: str) -> JSONResponse
     if block.code == "orphan":
         if block.orphans:
             names = "、".join(f"{account_ref(a)} {s}" for a, s in block.orphans)
-            msg = (f"{what}會使 {names} 的股利紀錄失去對應持倉（沒有任何買進或期初能支撐它）"
+            msg = (f"{what}會使 {names} 的股利紀錄失去對應持倉"
+                   "（沒有任何買進、期初或公司行動能支撐它）"
                    f"，請先刪除或更正該股利紀錄，{then}")
         else:
             msg = (f"{what}會使帳本無法重建（有股利或公司行動會失去對應持倉），"

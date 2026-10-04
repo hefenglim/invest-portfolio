@@ -9,6 +9,7 @@ from decimal import Decimal
 from portfolio_dash.portfolio.results import (
     Book,
     Holding,
+    OversoldPosition,
     RealizedPnL,
     RealizedRow,
     UnappliedAction,
@@ -439,6 +440,19 @@ def _uncomputable_message(booking: object | None) -> str:
             "（數值過大或除以零）— 請於交易帳本修正該列後重試")
 
 
+def orphan_dividend_message(ev: Dividend) -> str:
+    """The sentence for a dividend the account never held a position for (CR-02, 2026-10-04).
+
+    Raised on the strict path and quoted by every dashboard surface that names the row, so the
+    two paths explain the refusal in the same words. Dated by the EFFECTIVE date — the day the
+    replay books it (a 配股's ex-date when it has one), which is the day the position had to
+    exist by.
+    """
+    return (f"{ev.symbol}（{account_ref(ev.account_id)}）於 {ev.effective_date.isoformat()} "
+            "有股利紀錄，但此帳戶在該日（含）之前沒有任何買進、期初庫存或公司行動建立的持倉 — "
+            "這筆股利沒有對應持倉，無法入帳。請先補登該日之前的買進或期初庫存，或刪除這筆股利")
+
+
 def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     """Replay the ledger in date order; return open holdings, realized P&L, gross invested.
 
@@ -467,6 +481,12 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     happens leave no holding behind. See :class:`~portfolio_dash.portfolio.results.
     UnappliedAction`; consumers must treat a non-empty list as "the share counts in this
     book are not trustworthy".
+
+    Two more book-level records follow the same rule (CR-01 / CR-02 / CR-11, 2026-10-04):
+    ``Book.oversold_positions`` lists every 賣超 position — a holding netted back to exactly
+    zero is dropped from ``holdings`` but stays here — and ``Book.orphan_dividends`` lists the
+    dividends refused because the account never held the symbol by their date (a payout after
+    a full CLOSE is not one: it books as realized income, owner ruling H2).
     """
 
     def quote_ccy(symbol: str) -> Currency:
@@ -485,6 +505,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     # (returns.xirr_reporting) must skip the EVENT, and a per-position flag cannot say
     # WHICH event. Stays empty on the strict path, which raises instead.
     refused_dividends: list[Dividend] = []
+    # CR-02: the subset of `refused_dividends` refused because no position existed at all.
+    orphan_dividends: list[Dividend] = []
 
     # A stored action row the LOADER could not convert (2026-08-11). It never becomes an
     # event — there is no ratio to apply — but it must not be silent either: a dropped
@@ -761,12 +783,29 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                 key = (ev.account_id, ev.symbol)
                 existing = positions.get(key)
                 if existing is None:
-                    # Fail loud on a dividend for a position with no prior buy/opening:
-                    # silently creating one would discard cash dividends (filtered out at
-                    # 0 shares) or fabricate a $0-cost ghost holding from a DRIP.
-                    raise ValueError(
-                        f"dividend for unknown position {key} (no prior buy/opening inventory)"
-                    )
+                    # No position object exists: nothing in this account — no buy, no opening,
+                    # no corporate action — ever created (account, symbol) by this date. Never
+                    # create one here: that would discard a cash dividend (filtered out at 0
+                    # shares) or fabricate a $0-cost ghost holding from a DRIP.
+                    #
+                    # NOT the post-close case. A position sold down to zero is still in
+                    # `positions`, so `existing is not None` and owner ruling H2 books the payout
+                    # below as realized income. "Never held by its date" ≠ "closed before it".
+                    #
+                    # CR-02 (2026-10-04): this was a bare ValueError on BOTH paths, and
+                    # `build_dashboard` catches only ArithmeticError — one such row, which the
+                    # dividend doors accepted until the same fix, answered 500 on the dashboard
+                    # and on every surface built on it. Now the same split every other refusal
+                    # here makes: TYPED on the strict path (重算 / 試算 / the tax package and
+                    # `api/errors.py` answer 422 with the sentence), and on the dashboard path
+                    # SKIPPED and recorded on the BOOK — there is no position to flag, which is
+                    # exactly why `Book.orphan_dividends` exists. It goes into
+                    # `refused_dividends` as well, so XIRR excludes it like every other refusal.
+                    if not allow_oversell:
+                        raise UnbookableLedgerError(orphan_dividend_message(ev))
+                    orphan_dividends.append(ev)
+                    refused_dividends.append(ev)
+                    continue
                 if existing.short_shares > _ZERO:
                     # A dividend landing on an OPEN SHORT is not representable. A short seller
                     # PAYS the dividend in lieu, and there is no debit row for that — while the
@@ -850,8 +889,20 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     if ev.reinvest_shares is None:
                         # Fail loud: a DRIP/stock dividend without share count would
                         # silently drop the reinvestment instead of coercing to zero.
-                        raise ValueError(
-                            f"{ev.type} dividend for {key} requires reinvest_shares"
+                        #
+                        # LOUD ON BOTH PATHS, and TYPED (CR-02, 2026-10-04) — the negative-
+                        # quantity rule above, for the same reason: no write door can produce
+                        # this row (`validate_dividend` refuses it at the CSV / manual / AI /
+                        # edit doors, the inbox always supplies the count), and skipping it
+                        # would leave the share count short by an unknown amount with no
+                        # refusal channel to say so. It was a bare ValueError, which
+                        # `build_dashboard` did not catch: 500. As an UnbookableLedgerError it
+                        # is a 422 that names the row, on every door.
+                        raise UnbookableLedgerError(
+                            f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+                            f"{ev.date.isoformat()} 的 {ev.type.value} 股利沒有股數"
+                            "（reinvest_shares）— 配股／再投資以股數入帳，缺這個欄位無法重算。"
+                            "請於股利帳本補上股數"
                         )
                     # QA-06 (owner ruling 2026-09-01: 記錄並標記). The long lot is FLAT and a
                     # share-adding dividend is about to reopen it. The three earlier refusals do
@@ -893,6 +944,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     touched.unbookable_action = True
 
         holdings: list[Holding] = []
+        oversold: list[OversoldPosition] = []
         for (account_id, symbol), pos in positions.items():
             # An OPEN declared short is a real position and must be reported, so the quantity is
             # SIGNED: long stays positive, short comes out negative with the received proceeds as
@@ -902,6 +954,19 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             shares = pos.shares - pos.short_shares
             original_total = pos.original_total - pos.short_proceeds
             adjusted_total = pos.adjusted_total - pos.short_proceeds
+            is_oversold = pos.ever_oversold or pos.shares < _ZERO
+            if is_oversold:
+                # CR-11 (2026-10-04): recorded on the BOOK, and BEFORE the zero-share `continue`
+                # below. The sticky flag used to live only on the Holding, so a 賣超 that a later
+                # buy of the same size netted back to exactly 0 was dropped together with its
+                # carrier — invisible to every correction door's replay guard, to the XIRR gate
+                # and to the drawer (CR-01). Same predicate as `Holding.oversold`, so the two
+                # can never disagree about a position both describe.
+                oversold.append(OversoldPosition(
+                    account_id=account_id, symbol=symbol, quote_ccy=pos.quote_ccy,
+                    shares=shares, oversold_on=pos.oversold_on,
+                    oversold_sold=pos.oversold_sold, oversold_held=pos.oversold_held,
+                ))
             if shares == _ZERO:
                 continue
             original_avg = original_total / shares
@@ -927,7 +992,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # 賣超 is now STICKY: an undeclared oversell keeps its warning even after a
                     # later buy nets the position back above zero (that buy does not restore the
                     # basis the oversell discarded).
-                    oversold=pos.ever_oversold or pos.shares < _ZERO,
+                    oversold=is_oversold,
                     oversold_on=pos.oversold_on,
                     oversold_sold=pos.oversold_sold,
                     oversold_held=pos.oversold_held,
@@ -955,6 +1020,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             gross_invested=dict(gross),
             unapplied_actions=unapplied,
             refused_dividends=refused_dividends,
+            oversold_positions=oversold,
+            orphan_dividends=orphan_dividends,
         )
     except ArithmeticError as exc:
         # The CLASS, not one cause. ``ZeroDivisionError`` is in it too, so a non-Decimal

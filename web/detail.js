@@ -327,12 +327,22 @@
       body.appendChild(signalsSection(symbol));
       body.appendChild(adviceSection(symbol));
       const closed = ((detail && detail.activity) || []).length > 0;
+      /* CR-02 (2026-10-04): a THIRD unheld state — no trade, no opening, only dividend rows the
+         book refused because the account never held the symbol. It is not a watchlist name
+         (the ledger has rows for it) and was rendered as one, with its 配息史 — and the line
+         saying why those rows are not booked — dropped. */
+      const orphaned = ((detail && detail.ledger_issues
+        && detail.ledger_issues.orphan_dividends) || []).length > 0;
       if (closed) {
         body.appendChild(el('div', 'sd-empty',
           '此標的目前無持倉（帳本有交易紀錄，部位已結清）— 部位摘要／報酬貢獻拆分／試算需要現有部位，'
           + '故不顯示；以下為已實現損益、配息史與交易明細。'));
         body.appendChild(dividendSection(symbol, detail));
         body.appendChild(realizedSection(symbol, detail));
+      } else if (orphaned) {
+        body.appendChild(el('div', 'sd-empty',
+          '此標的沒有任何持倉紀錄，帳本只有無法入帳的股利紀錄 — 原因列在下方配息史。'));
+        body.appendChild(dividendSection(symbol, detail));
       } else {
         body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
       }
@@ -1004,6 +1014,14 @@
     table.appendChild(tbody);
     wrap.appendChild(table);
     sec.appendChild(wrap);
+    /* CR-02 (2026-10-04): a dividend this account never held the symbol for by its date is
+       listed above — it IS a ledger row — but the book refused it: not income, not a holding,
+       not in 總報酬 or XIRR. Named right under the row, in the server's own sentence (account
+       tokens resolve in the fetch layer). A class carries the colour (DEF-077). */
+    ((detail.ledger_issues && detail.ledger_issues.orphan_dividends) || []).forEach((r) => {
+      sec.appendChild(el('div', 'sd-ledger-issue',
+        '⚠ 股利無對應持倉（' + acctZh(r.account_id) + '）：' + r.reason));
+    });
     return sec;
   }
 
@@ -1344,6 +1362,15 @@
       (issues.negative_side_skipped || []).filter(keep).forEach((d) => {
         lines.push('⚠ 公司行動跳過（' + acctZh(d.account_id)
           + '）：行動當日來源或目標股數為負（放空或賣超），本筆未套用，股數待釐清');
+      });
+      /* CR-01 (2026-10-04): a 賣超 a later buy netted back to exactly zero shares has no holding
+         row — so no 賣超 chip — and its footer reconciles 0 = 0, so the drawer read clean over a
+         discarded basis and a sell with no realized row. The cause is named here, beside the
+         sell it is about. `r.reason` is the server's sentence, rendered verbatim. (A dividend
+         with no position is named under 配息史 instead — see dividendSection.) */
+      const ledger = (detail && detail.ledger_issues) || {};
+      (ledger.oversold_flat || []).filter(keep).forEach((r) => {
+        lines.push('⚠ 賣超待釐清（' + acctZh(r.account_id) + '）：' + r.reason);
       });
       lines.forEach((text) => {
         const row = el('div', 'sd-tx-issue', text);

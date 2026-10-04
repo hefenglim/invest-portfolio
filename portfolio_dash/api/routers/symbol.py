@@ -35,6 +35,10 @@ New in W5 (corporate actions, spec §6.3):
     footer needs beside it (F-17): the replay's refused rows, the depth-capped walks (D31)
     and the negative-side skips (D33).
 
+New in CR-01 / CR-02 (2026-10-04):
+  · ``ledger_issues`` — a 賣超 netted back to zero shares, and a dividend with no position:
+    the two trade / dividend ledger problems no holding row can carry.
+
 ``cost_basis`` binds to the account holding the most shares of the symbol (Q1); ``null`` for
 a non-held / watchlist symbol.
 """
@@ -47,6 +51,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
+
+# The correction doors' own 賣超 sentence (a sibling module of this router, same layer), so the
+# drawer names the day a 賣超 broke in exactly the words the 422 that asked about it used.
+from portfolio_dash.api.replay_guard import _oversell_phrase as oversell_phrase
 from portfolio_dash.data_ingestion.holdings import (
     _shares_until as shares_naive,  # §6.3's second term, by NAME — see _corporate_delta
 )
@@ -63,8 +71,9 @@ from portfolio_dash.data_ingestion.store import (
     list_opening,
     list_transactions,
 )
+from portfolio_dash.portfolio.cost_basis import orphan_dividend_message
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import HoldingRow
+from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
 from portfolio_dash.portfolio.position_aggregate import aggregate_position
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
@@ -420,6 +429,39 @@ def _action_issues(
     }
 
 
+def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
+    """The two ledger problems this symbol can have that NO holding row can show (CR-01 /
+    CR-02 / CR-11, 2026-10-04) — read off the SAME book ``build_dashboard`` built.
+
+    * **``oversold_flat``** — a 賣超 a later buy netted back to exactly zero shares. The
+      position has no holding row, so no 賣超 chip either, and its activity footer reconciles
+      to ✓ (0 = 0) — the drawer looked clean over a discarded basis and a sell with no realized
+      row. A 賣超 that still holds shares is NOT listed: its per-account row carries the chip.
+    * **``orphan_dividends``** — a dividend the account never held the symbol for by its
+      date, refused by the replay (never booked as income, never a ghost holding).
+
+    A separate key rather than two more ``action_issues`` lists, because both are about the
+    trade / dividend ledgers, not corporate actions. ``reason`` is a server sentence the
+    drawer renders verbatim; account references in it are tokens the fetch layer resolves.
+    """
+    def _row(account_id: str, on: date | None, reason: str) -> dict[str, Any]:
+        return {"account_id": account_id, "date": _iso_or_none(on), "reason": reason}
+
+    return {
+        "oversold_flat": [
+            _row(p.account_id, p.oversold_on,
+                 f"{oversell_phrase(p.symbol, p)}，成本基礎已捨棄、這筆賣出沒有已實現損益；"
+                 "之後的買進使部位歸零，所以持倉沒有這一列 — 請補登缺少的買進或期初庫存")
+            for p in data.oversold_positions
+            if p.symbol == symbol and p.shares == _ZERO
+        ],
+        "orphan_dividends": [
+            _row(d.account_id, d.effective_date, orphan_dividend_message(d))
+            for d in data.orphan_dividends if d.symbol == symbol
+        ],
+    }
+
+
 def _reconcile(
     holdings: list[HoldingRow],
     opening: list[OpeningInventory],
@@ -767,6 +809,9 @@ def symbol_detail(
         # W5 / F-17: what the drawer renders BESIDE a ⚠ 對帳不一致 footer. Always present
         # (three empty lists on a clean symbol) so the frontend needs no existence check.
         "action_issues": action_issues,
+        # CR-01 / CR-02: the trade / dividend ledger problems no holding row can carry. Always
+        # present (two empty lists on a clean symbol), for the same reason.
+        "ledger_issues": _ledger_issues(symbol, data),
         "realized_rows": realized_rows,
     }
 

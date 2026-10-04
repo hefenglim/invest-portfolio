@@ -1677,6 +1677,41 @@ def load_ledger_bundle(
 
 
 # ---------------------------------------------------------------------------
+# The store's ledger ORDER, as Python keys (CR-03, 2026-10-04)
+# ---------------------------------------------------------------------------
+# One key per ``list_*`` above, each the exact twin of that function's SQL ``ORDER BY``.
+# They exist because order is DATA to the replay: ``build_book`` books one day's trades in
+# list order, which is ledger-id order (DEF-012). A correction door that builds a WOULD-BE
+# ledger by replacing a row in place keeps that row at its OLD list position — so an edit that
+# moved a row's date replayed a different same-day order than the store would list after the
+# write (pre-merge review CR-03: a back-dated buy moved onto its sell's day booked FIRST in the
+# guard and SECOND in the ledger; the guard asked nothing and the sell went sticky 賣超).
+# ``api/replay_guard._to_models`` sorts every would-be list with these, and
+# ``tests/contract/test_cr03_edit_replays_the_stored_order.py`` pins each key to its SQL.
+# Rows must carry their REAL id — a not-yet-written draft has none to sort by.
+
+
+def transaction_order_key(t: StoredTransaction) -> tuple[date, int]:
+    """``list_transactions``: ``ORDER BY trade_date ASC, id ASC``."""
+    return (t.trade_date, t.id)
+
+
+def dividend_order_key(d: StoredDividend) -> tuple[date, int]:
+    """``list_dividends``: ``ORDER BY date ASC, id ASC``."""
+    return (d.date, d.id)
+
+
+def opening_order_key(o: StoredOpening) -> tuple[str, str]:
+    """``list_opening``: ``ORDER BY account_id, symbol``."""
+    return (o.account_id, o.symbol)
+
+
+def corporate_action_order_key(a: StoredCorporateAction) -> tuple[date, int]:
+    """``list_corporate_actions``: ``ORDER BY date ASC, id ASC``."""
+    return (a.date, a.id)
+
+
+# ---------------------------------------------------------------------------
 # Ledger row corrections: explicit edit / delete (2026-07-02)
 # ---------------------------------------------------------------------------
 # The ledgers stay "append-only in spirit": corrections are EXPLICIT user actions

@@ -38,6 +38,7 @@ from portfolio_dash.data_ingestion.holdings import (
     PendingFlows,
     current_shares,
     load_action_index,
+    position_exists_by,
     shares_before_action_on,
     shares_through,
 )
@@ -76,7 +77,11 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import LedgerBundle, counts_by
+from portfolio_dash.shared.models.ledger import (
+    LedgerBundle,
+    counts_by,
+    dividend_effective_date,
+)
 from portfolio_dash.shared.money import MINOR_UNITS, from_db, quantize_amount
 from portfolio_dash.shared.wire import decimal_str
 
@@ -1424,18 +1429,25 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         add(Issue(kind="short_source",
                   message=(f"{inp.from_symbol} 目前有未回補的放空部位，換股／分拆沒有"
                            "可誠實記錄的分錄。請先回補後再登錄")))
-    if kind is not CorporateActionKind.SPLIT and dest is not None and not same_symbol:
-        if dest.oversold:
-            add(Issue(kind="oversold_destination",
-                      message=(f"目的標的 {inp.to_symbol} 目前是賣超（待釐清）部位。"
-                               "把成本移轉過去會讓已被捨棄的成本基礎「復活」，"
-                               "算出一個看起來正常、實際上沒有依據的均價。"
-                               "請先處理該部位的賣超")))
-        if dest.short_open:
-            add(Issue(kind="short_destination",
-                      message=(f"目的標的 {inp.to_symbol} 目前有未回補的放空部位。"
-                               "多頭與空頭部位在本系統是互斥的，移轉過去會讓兩者混在一起，"
-                               "均價將失去意義。請先回補後再登錄")))
+    # CR-11 (2026-10-04): a 賣超 destination netted back to exactly zero shares has no holding,
+    # so `dest` is None — yet the replay still refuses E22 on it (`_Position.ever_oversold`
+    # survives in its position map). Read the BOOK's record too, or this preview passes a row
+    # the save then books as an unapplied action.
+    dest_oversold = (dest is not None and dest.oversold) or any(
+        (p.account_id, p.symbol) == (inp.account_id, inp.to_symbol)
+        for p in book.oversold_positions)
+    if kind is not CorporateActionKind.SPLIT and not same_symbol and dest_oversold:
+        add(Issue(kind="oversold_destination",
+                  message=(f"目的標的 {inp.to_symbol} 目前是賣超（待釐清）部位。"
+                           "把成本移轉過去會讓已被捨棄的成本基礎「復活」，"
+                           "算出一個看起來正常、實際上沒有依據的均價。"
+                           "請先處理該部位的賣超")))
+    if (kind is not CorporateActionKind.SPLIT and dest is not None and not same_symbol
+            and dest.short_open):
+        add(Issue(kind="short_destination",
+                  message=(f"目的標的 {inp.to_symbol} 目前有未回補的放空部位。"
+                           "多頭與空頭部位在本系統是互斥的，移轉過去會讓兩者混在一起，"
+                           "均價將失去意義。請先回補後再登錄")))
 
     # --- E23 (D22) + N3-price (§6.6): the two findings that read the PRICE table ---
     # Grouped, and placed after every hard check, so the evaluation order §6.5 fixes (E15
@@ -2205,7 +2217,8 @@ _DIVIDEND_TYPES = tuple(t.value for t in DividendType)
 
 
 def validate_dividend(
-    conn: sqlite3.Connection, inp: DividendInput, *, replacing: StoredDividend | None = None
+    conn: sqlite3.Connection, inp: DividendInput, *, replacing: StoredDividend | None = None,
+    pending_trades: Mapping[tuple[str, str], date] | None = None,
 ) -> list[Issue]:
     """Every check a dividend must pass before it is written — the ONE validator the entry
     doors (CSV / manual / AI / broker, all through ``dividend_import.build_dividend_preview``)
@@ -2230,7 +2243,16 @@ def validate_dividend(
     * ``reinvest_shares_required`` (hard) — a DRIP / STOCK row with no share count, which
       the replay (``cost_basis.py``) refuses;
     * ``ex_date_after_pay_date`` (hard, CR-09) — an ex-dividend date later than the payment
-      date, which no distribution has.
+      date, which no distribution has;
+    * ``dividend_without_position`` (hard, CR-02 2026-10-04) — the account had opened no
+      position in the symbol by the dividend's effective date (no opening, no trade, no
+      EXCHANGE / SPINOFF into it). The replay refuses such a row; until this check a door
+      wrote it and ``GET /api/dashboard`` answered 500. A dividend after a full CLOSE passes
+      (owner ruling H2: realized income) — see ``holdings.position_exists_by``.
+
+    *pending_trades* maps ``(account, symbol)`` to the earliest date of a trade the SAME
+    submission writes first (the AI door commits 交易 before 股利), so a buy and its dividend in
+    one paste do not refuse each other. Every other door leaves it ``None``.
 
     *replacing* is the STORED row an edit replaces. As for trades (DEF-042), a HARD finding
     identical — same kind, same sentence — to one the stored row already carries is the
@@ -2242,7 +2264,7 @@ def validate_dividend(
     :func:`_carried_ex_date_issue`) when it keeps the stored ex-date across a change that may
     have invalidated it.
     """
-    post = _dividend_findings(conn, inp)
+    post = _dividend_findings(conn, inp, pending_trades=pending_trades)
     if replacing is None:
         return post
     stored = DividendInput(
@@ -2298,7 +2320,10 @@ def _carried_ex_date_issue(inp: DividendInput, replacing: StoredDividend) -> Iss
     return None
 
 
-def _dividend_findings(conn: sqlite3.Connection, inp: DividendInput) -> list[Issue]:
+def _dividend_findings(
+    conn: sqlite3.Connection, inp: DividendInput, *,
+    pending_trades: Mapping[tuple[str, str], date] | None = None,
+) -> list[Issue]:
     """:func:`validate_dividend`'s checks, unscoped — see that function for every rule."""
     issues: list[Issue] = []
     div_type = inp.type.strip().upper()
@@ -2371,4 +2396,21 @@ def _dividend_findings(conn: sqlite3.Connection, inp: DividendInput) -> list[Iss
             message=(f"除息日（ex_date）{inp.ex_date.isoformat()} 晚於發放日 "
                      f"{inp.div_date.isoformat()}：除息日不會晚於發放日，請確認這兩個日期"),
         ))
+
+    # CR-02 (2026-10-04): mirrors the replay's OTHER refusal — a dividend for a position that
+    # does not exist yet (`cost_basis.py` refuses it; until this check the doors wrote it and
+    # the dashboard answered 500). Dated by the EFFECTIVE date, the day the replay books it.
+    # Only for a known account: an unknown one already carries its own hard finding.
+    if account_known:
+        effective = dividend_effective_date(div_type, inp.div_date, inp.ex_date)
+        pending = (pending_trades or {}).get((inp.account_id, inp.symbol))
+        if not position_exists_by(conn, inp.account_id, inp.symbol, effective,
+                                  pending_from=pending):
+            issues.append(Issue(
+                kind="dividend_without_position",
+                message=(f"{inp.symbol}（{account_ref(inp.account_id)}）在 "
+                         f"{effective.isoformat()}（含）之前沒有任何持倉紀錄（買進、期初庫存或"
+                         "公司行動）— 股利必須對應該帳戶當時的持倉，否則無法入帳。"
+                         "請先補登該日之前的買進或期初庫存"),
+            ))
     return issues

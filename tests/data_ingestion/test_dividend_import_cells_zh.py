@@ -26,6 +26,7 @@ one amounts engine.
 
 import re
 import sqlite3
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -37,9 +38,14 @@ from portfolio_dash.data_ingestion.dividend_import import (
     write_dividend_row,
 )
 from portfolio_dash.data_ingestion.preview import ImportPreview, commit_preview
-from portfolio_dash.data_ingestion.store import list_dividends, upsert_instrument
+from portfolio_dash.data_ingestion.store import (
+    insert_transaction,
+    list_dividends,
+    upsert_instrument,
+)
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.models.enums import Side
 
 _HEADER = ",".join(DIVIDEND_COLUMNS) + "\n"
 _CJK = re.compile(r"[一-鿿]")
@@ -65,6 +71,13 @@ def seeded(conn: sqlite3.Connection) -> sqlite3.Connection:
     upsert_instrument(conn, Instrument(symbol="2330", market=Market.TW,
                                        quote_ccy=Currency.TWD, sector="Semiconductors",
                                        name="TSMC"))
+    # Both positions OPEN before any dividend below (CR-02, 2026-10-04): a dividend for a
+    # position the account never held is a hard finding of its own, and nothing here is
+    # about that check — a clean row must still read as clean.
+    for account, symbol in (("moomoo_my", "5225"), ("tw_broker", "2330")):
+        insert_transaction(conn, account_id=account, symbol=symbol, side=Side.BUY,
+                           quantity=Decimal("100"), price=Decimal("1"), fees=Decimal("0"),
+                           tax=Decimal("0"), trade_date=date(2026, 1, 2))
     conn.commit()
     return conn
 

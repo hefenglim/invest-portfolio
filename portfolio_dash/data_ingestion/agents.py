@@ -661,6 +661,10 @@ def _build_result(
 
     previews: dict[str, ImportPreview] = {}
     csv_texts: dict[str, str] = {}
+    # CR-02 (2026-10-04): (account, symbol) → the earliest trade of THIS paste that can be
+    # written. The page commits 交易 before 股利 (web/input.js AI_KINDS), so a dividend whose buy
+    # is in the same paste is not "a dividend with no position" at preview time.
+    pending_trades: dict[tuple[str, str], date] = {}
 
     if txns:
         # Sibling-aware (C1, extended to this door in W4): the oversell guard counts the
@@ -692,12 +696,17 @@ def _build_result(
             _append_format_warning(conn, row, d)  # FU-D41 soft check — warns, never rewrites
             _append_amount_check(row, d)  # DEF-036 — a contradicted total is flagged, not fixed
             rows.append(row)
+            if not row.has_hard_issue:   # a row that can never be written opens nothing
+                key = (inp.account_id, inp.symbol)
+                pending_trades[key] = min(pending_trades.get(key, inp.trade_date),
+                                          inp.trade_date)
         previews["transactions"] = ImportPreview(rows=rows)
         csv_texts["transactions"] = _txn_csv(txns)
 
     if divs:
         csv_texts["dividends"] = _div_csv(divs)
-        previews["dividends"] = build_dividend_preview(conn, csv_texts["dividends"])
+        previews["dividends"] = build_dividend_preview(
+            conn, csv_texts["dividends"], pending_trades=pending_trades)
 
     if cashs:
         csv_texts["cash"] = _cash_csv(cashs)

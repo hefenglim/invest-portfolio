@@ -2520,6 +2520,9 @@ button[disabled], .btn[disabled] {
 /* DEF-023: the 未套用 mark on a 公司行動 ledger row, and the drawer's link into that row. */
 .ledger-unapplied { margin-left: 4px; vertical-align: middle; }
 .sd-tx-issue-link { color: var(--accent); font-weight: 600; white-space: nowrap; }
+/* CR-02 (2026-10-04): the drawer's 配息史 line for a dividend the book refused (no position in
+   that account by its date) — the error colour of the activity footer's cause lines, as a class. */
+.sd-ledger-issue { margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--up); }
 /* DEF-035 (2026-09-23): the AI draft table's per-row editors — table-height, compact, and a
    flagged box (a typed value that does not parse) keeps its text and turns red (DEF-005). */
 .ai-edit { box-sizing: border-box; width: 100%; min-width: 64px; max-width: 150px; height: 26px;

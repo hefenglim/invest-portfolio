@@ -976,13 +976,21 @@ def remove_fx(
 
 
 class OpeningEditBody(BaseModel):
-    """Opening-inventory correction (A6). The authoritative money of record is
-    ``total`` (原始總成本); ``avg`` is a legacy alias — when ``total`` is omitted the total is
-    derived (avg * shares). One of ``total`` / ``avg`` is required."""
+    """Opening-inventory correction (A6; CR-04, 2026-10-04).
+
+    ``total`` (原始總成本) is the money of record and the ONLY figure this door stores as cost.
+    Omitted = the STORED total is kept: correcting the 股數 or the 建檔日 never rewrites the
+    original cost (CLAUDE.md invariant 7), and the average follows on read (total / shares).
+
+    ``avg`` is still declared so that sending it is REFUSED in words rather than ignored. It
+    used to be the "legacy alias" the total was derived from (``avg × shares``) — and the ledger
+    modal sent it on every edit, echoing the server's own 28-digit quotient: a date-only edit of
+    3 shares / 100,000 stored 99999.99999999999999999999999, and a shares-only edit scaled the
+    original cost with the count (pre-merge review CR-04)."""
 
     shares: Decimal
     total: Decimal | None = None
-    avg: Decimal | None = None  # legacy: total derived = avg * shares when total omitted
+    avg: Decimal | None = None  # refused (CR-04) — see the docstring
     date: date
     ack_oversell: bool = False
 
@@ -998,15 +1006,16 @@ def edit_opening(
     if existing is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"期初 {account_ref(account_id)}／{symbol} 不存在"))
-    # Resolve the authoritative total: prefer the explicit 原始總成本; fall back to the legacy
-    # avg (total = avg * shares). A rounded average is NEVER stored as the authority.
-    if body.total is not None:
-        total = body.total
-    elif body.avg is not None:
-        total = body.avg * body.shares
-    else:
+    # CR-04: the total is the authority and is never derived from an average
+    # (domain-ledger.md — project the totals, divide on read). An explicit 原始總成本 replaces
+    # it; no total keeps the stored one; an average is refused, never multiplied back up.
+    if body.avg is not None:
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", "請提供原始總成本", field="total"))
+            "validation_error",
+            "原始均價不能作為成本依據：均價是「原始總成本 ÷ 股數」的計算結果，由它反推的"
+            "總成本會改寫原始成本 — 請改為提供原始總成本（或不填，保留原值）",
+            field="avg"))
+    total = body.total if body.total is not None else existing.original_cost_total
     if body.shares <= 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "股數必須大於 0", field="shares"))

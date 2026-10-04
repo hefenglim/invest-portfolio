@@ -617,3 +617,49 @@ def held_among(
     """
     idx = _resolve_index(conn, index)
     return {s for s in symbols if holds_position(conn, s, today=today, index=idx)}
+
+
+def position_exists_by(
+    conn: sqlite3.Connection, account_id: str, symbol: str, on: date,
+    *, pending_from: date | None = None,
+) -> bool:
+    """Whether anything in *account_id* had OPENED an (account, symbol) position on or before
+    *on* — the question a dividend has to answer before it can be written (CR-02, 2026-10-04).
+
+    The membership test of ``build_book``'s ``existing is None``: a position object exists from
+    the first opening, the first non-zero trade of EITHER side, or the first EXCHANGE / SPINOFF
+    into it — all of which sort before a same-day dividend (``EventPriority``), so the bound is
+    inclusive. It is NOT "holds shares on *on*": a position sold down to zero still exists, and
+    a cash dividend paid after a full close books as realized income (owner ruling H2).
+
+    Direct SQL on this module's own three ledgers, deliberately — not a replay: the answer is
+    "has a row of these kinds been written by this date", which needs no basis, and every
+    dividend door calls this once per row. A corporate action the replay later REFUSES would
+    still count here; the replay then refuses the dividend too, on the BOOK
+    (``Book.orphan_dividends``), and the dashboard names it — the guard is a door, the replay
+    stays the authority.
+
+    *pending_from* is the earliest date of a not-yet-written trade of the same key that will be
+    committed FIRST in the same submission (the AI door writes 交易 before 股利), so a dividend
+    whose buy is in the same paste is not refused at preview.
+    """
+    if pending_from is not None and pending_from <= on:
+        return True
+    cut = on.isoformat()
+    if conn.execute(
+        "SELECT 1 FROM opening_inventory WHERE account_id=? AND symbol=? AND build_date<=? "
+        "LIMIT 1", (account_id, symbol, cut),
+    ).fetchone() is not None:
+        return True
+    # A zero-quantity row moves nothing and the replay skips it BEFORE creating the position.
+    for r in conn.execute(
+        "SELECT quantity FROM transactions WHERE account_id=? AND symbol=? AND trade_date<=?",
+        (account_id, symbol, cut),
+    ):
+        if Decimal(r["quantity"]) != _ZERO:
+            return True
+    created_by = (CorporateActionKind.EXCHANGE.value, CorporateActionKind.SPINOFF.value)
+    return conn.execute(
+        "SELECT 1 FROM corporate_actions WHERE account_id=? AND to_symbol=? AND date<=? "
+        "AND kind IN (?, ?) LIMIT 1", (account_id, symbol, cut, *created_by),
+    ).fetchone() is not None

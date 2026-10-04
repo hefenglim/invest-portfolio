@@ -28,7 +28,11 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from portfolio_dash.data_ingestion.holdings import load_action_index, shares_on
+from portfolio_dash.data_ingestion.holdings import (
+    load_action_index,
+    position_exists_by,
+    shares_on,
+)
 from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import (
     insert_dividend,
@@ -347,6 +351,19 @@ def detect(
                         account_id, symbol, "cash", ev.ex_date
                     ):
                         gross = ev.cash_amount * held
+                        # CR-02 (2026-10-04): the row is booked on its PAYMENT date, and the
+                        # replay refuses a dividend dated before the account opened the position.
+                        # Holding shares before the ex-date proves the position existed by then,
+                        # so this can only fail on a provider payment date EARLIER than the
+                        # ex-date — but the confirm door writes straight to the ledger, so it
+                        # asks the same question every other dividend door asks, and the item
+                        # says why it cannot be confirmed instead of writing a refused row.
+                        paid_on = ev.pay_date or ev.ex_date
+                        opened = position_exists_by(conn, account_id, symbol, paid_on)
+                        no_position = (
+                            None if opened else
+                            f"付款日 {paid_on.isoformat()} 早於此帳戶在 {symbol} 的第一筆持倉"
+                            "紀錄 — 股利必須對應當時的持倉，無法入帳，請確認日期")
                         if model == "drip_us":
                             wh = gross * _US_WITHHOLDING
                             net = gross - wh
@@ -357,16 +374,19 @@ def detect(
                                 fp, "drip", ev.cash_amount, gross, wh, net,
                                 est_reinvest_price=px,
                                 est_reinvest_shares=(net / px) if px else None,
-                                confirmable=px is not None,
-                                note=(None if px is not None else
+                                confirmable=px is not None and opened,
+                                note=(no_position if no_position is not None
+                                      else None if px is not None else
                                       "缺再投資價（無庫存收盤價）— 請先回補歷史報價再確認"),
                             ))
                         elif model == "cash":
                             out.append(_mk(fp, "net", ev.cash_amount, gross,
-                                           _ZERO, gross, note="馬股單層淨額入帳"))
+                                           _ZERO, gross, confirmable=opened,
+                                           note=no_position or "馬股單層淨額入帳"))
                         else:  # cash_cost_reduction (TW) and any future default
                             out.append(_mk(fp, "cash", ev.cash_amount, gross,
-                                           _ZERO, gross))
+                                           _ZERO, gross, confirmable=opened,
+                                           note=no_position))
 
                 # --- TW stock distribution (配股): separate share-only item ---
                 if (

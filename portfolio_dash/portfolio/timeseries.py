@@ -344,6 +344,14 @@ def daily_value_series(
             # path exactly, with no equal-answer computation that could later drift.
             if book.unapplied_actions:
                 incomplete = True  # 無法套用的公司行動 — 當日估值待釐清
+            # CR-01 / CR-02 / CR-11 (2026-10-04): the same blindness, two more shapes. A 賣超
+            # netted back to exactly zero shares is dropped by the holdings loop below, flag and
+            # all, so the per-holding `h.oversold` test never saw it — and a dividend refused for
+            # having no position has no holding at all. Both stay on the BOOK; read them here.
+            # DATE-SCOPED the same way: `bundle.through(day)` only holds what has happened by
+            # `day`, so the days before the oversell / the refused payout stay complete.
+            if book.oversold_positions or book.orphan_dividends:
+                incomplete = True  # 賣超 / 股利無對應持倉 — 當日估值待釐清
             for h in book.holdings:
                 if h.shares == _ZERO:
                     continue

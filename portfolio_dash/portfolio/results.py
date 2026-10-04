@@ -209,6 +209,33 @@ class UnappliedAction(BaseModel):
     action_id: int | None = None
 
 
+class OversoldPosition(BaseModel):
+    """One (account, symbol) the replay flagged 賣超, recorded at BOOK level (CR-11, 2026-10-04).
+
+    ``Holding.oversold`` cannot be the only record, for the reason ``UnappliedAction`` gives
+    for corporate actions: the flag dies with its carrier. An undeclared oversell discards the
+    basis and the flag is sticky — but a later buy of the same size nets the position back to
+    EXACTLY zero, the holdings loop drops every zero-share position, and the flag went with it
+    (pre-merge review CR-01, measured: buy 1,000 → sell 1,000 → buy 1,000, the first buy
+    deleted — 200, no question, the +100,000 realized row gone, no 賣超 anywhere). Every reader
+    that asks "is there a 賣超 in this book?" reads THIS list: the correction doors' replay guard,
+    the dashboard's XIRR / FX-complete gate, the trend's incomplete flag and the drawer.
+
+    It lists EVERY 賣超 position, not only the dropped ones — a reader must not have to merge
+    two sources to get the whole answer. ``shares`` is the position's final signed net, so
+    ``shares == 0`` is exactly the case no ``Holding`` carries. The three ``oversold_*`` fields
+    are the same detail ``Holding`` carries (the day the ledger broke, not the end state).
+    """
+
+    account_id: str
+    symbol: str
+    quote_ccy: Currency
+    shares: Decimal
+    oversold_on: date | None = None
+    oversold_sold: Decimal | None = None
+    oversold_held: Decimal | None = None
+
+
 class Book(BaseModel):
     """Output of the ledger replay: open holdings, realized, gross capital deployed."""
 
@@ -242,6 +269,19 @@ class Book(BaseModel):
     # ALWAYS EMPTY on the strict path (``allow_oversell=False``), which raises instead. Default
     # empty so every existing consumer and every hand-built ``Book`` keeps working.
     refused_dividends: list[Dividend] = Field(default_factory=list)
+    # Every position the replay flagged 賣超 — including one that netted back to exactly zero
+    # shares, which ``holdings`` drops (CR-11; see :class:`OversoldPosition`). A non-empty list
+    # means some cost basis in this book was discarded, so XIRR has no honest value. ALWAYS
+    # EMPTY on the strict path, which raises ``OversellError`` instead.
+    oversold_positions: list[OversoldPosition] = Field(default_factory=list)
+    # Dividend events refused because the account held NO position in that symbol by the
+    # dividend's effective date (CR-02, 2026-10-04) — no buy, opening or corporate action had
+    # created it. Each is ALSO in ``refused_dividends`` (so XIRR excludes it like every other
+    # refusal); this list says WHICH refusals mean "the ledger is missing the position", the
+    # case with no position to flag. A dividend after a full CLOSE is not one of these: it
+    # books as realized income (owner ruling H2). ALWAYS EMPTY on the strict path, which raises
+    # ``UnbookableLedgerError`` naming the row instead.
+    orphan_dividends: list[Dividend] = Field(default_factory=list)
 
 
 class CurrencyReturn(BaseModel):

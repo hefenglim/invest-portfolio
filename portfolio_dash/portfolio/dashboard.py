@@ -53,6 +53,7 @@ from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.results import (
     CombinedView,
+    OversoldPosition,
     ReturnSummary,
     SectorAllocation,
     UnappliedAction,
@@ -86,6 +87,7 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import (
+    Dividend,
     FXConversion,
     LedgerBundle,
     valued_rows_as_of,
@@ -390,8 +392,8 @@ def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
     Names the ACCOUNT, SYMBOL and DATE of each one (owner requirement 2026-08-10). XIRR is
     the single figure a skipped action blanks portfolio-wide, so the message has to point at
     the one ledger row responsible instead of leaving the owner to hunt for it across a
-    multi-account book. Contrast the 賣超 reason at the call site, which says only that *a*
-    position is 待釐清 — a pre-existing shortfall, not a pattern to copy.
+    multi-account book. The 賣超 reason said only that *a* position was 待釐清 until CR-01
+    (2026-10-04) gave it this same shape (:func:`_oversold_reason`).
 
     The list is capped rather than unbounded: this string renders inside a KPI badge, and a
     20-row ledger problem would push the dashboard sideways (the same overflow class as the
@@ -411,6 +413,44 @@ def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
     )
 
 
+def _oversold_reason(positions: list[OversoldPosition]) -> str:
+    """The XIRR badge's zh explanation when the book carries 賣超 positions (CR-01, 2026-10-04).
+
+    It said only 「帳本中有賣超部位待釐清」, which was enough while every 賣超 had a holdings row
+    wearing the badge. One netted back to exactly zero shares has none — it is listed only on
+    the BOOK — so the sentence now names each position the way the unapplied-action reason
+    does: account (as a token the fetch layer resolves), symbol, the day the sell exceeded the
+    holding, and 「部位已歸零」 when no holdings row will show it. Capped like that reason, the
+    remainder counted, never dropped.
+    """
+    def one(p: OversoldPosition) -> str:
+        when = f"・{p.oversold_on.isoformat()}" if p.oversold_on is not None else ""
+        flat = "，部位已歸零" if p.shares == _ZERO else ""
+        return f"{p.symbol}（{account_ref(p.account_id)}{when}{flat}）"
+
+    named = "、".join(one(p) for p in positions[:_UNAPPLIED_ACTIONS_NAMED])
+    rest = len(positions) - _UNAPPLIED_ACTIONS_NAMED
+    more = f"，另有 {rest} 筆" if rest > 0 else ""
+    return (f"帳本中有賣超部位待釐清：{named}{more}"
+            " — 成本基礎已捨棄、該筆賣出沒有已實現損益，無法計算 XIRR")
+
+
+def _orphan_dividend_reason(dividends: list[Dividend]) -> str:
+    """The XIRR badge's zh explanation when the book refused dividends with no position (CR-02).
+
+    Same shape as the two reasons above: account, symbol and the effective date of each row,
+    capped, the remainder counted.
+    """
+    named = "、".join(
+        f"{d.symbol}（{account_ref(d.account_id)}・{d.effective_date.isoformat()}）"
+        for d in dividends[:_UNAPPLIED_ACTIONS_NAMED]
+    )
+    rest = len(dividends) - _UNAPPLIED_ACTIONS_NAMED
+    more = f"，另有 {rest} 筆" if rest > 0 else ""
+    return (f"帳本中有 {len(dividends)} 筆股利沒有對應持倉（待釐清）：{named}{more}"
+            " — 該帳戶在股利日之前沒有買進或期初庫存，股利未入帳，無法計算 XIRR")
+
+
 @dataclass(frozen=True)
 class FxCompleteOutcome:
     """B of the A · B · B−A decomposition, plus WHY it is absent when it is.
@@ -425,7 +465,8 @@ class FxCompleteOutcome:
 
 
 def fx_complete_return(
-    trend: TrendSeries, *, has_oversold: bool, has_unapplied_action: bool
+    trend: TrendSeries, *, has_oversold: bool, has_unapplied_action: bool,
+    has_orphan_dividend: bool = False,
 ) -> FxCompleteOutcome:
     """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
 
@@ -451,8 +492,12 @@ def fx_complete_return(
         # 有標的缺價」, sending the reader off to check the price feed, while the XIRR row two
         # lines above, reading the same book, said 「帳本中有賣超部位待釐清」. Same ladder order
         # as the XIRR gate, so one book never yields two diagnoses.
+        # CR-02 (2026-10-04) added the third rung, in the XIRR gate's own order. Defaulted to
+        # False only because the cost of a missed argument is a wrong DIAGNOSIS on an already-
+        # blank figure (B is withheld either way) — the one production caller passes it.
         why = ("帳本中有賣超部位待釐清" if has_oversold
                else "帳本中有公司行動無法套用（待釐清）" if has_unapplied_action
+               else "帳本中有股利沒有對應持倉（待釐清）" if has_orphan_dividend
                else "最新一日有標的缺價")
         return FxCompleteOutcome(
             None, f"{why}，含匯兌總損益暫不計算（不以較早日期替代，否則與"
@@ -618,7 +663,16 @@ def build_dashboard(
             "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
             "請於交易帳本修正該列後重試"
         ) from exc
-    has_oversold = any(h.oversold for h in book.holdings)
+    # Read off the BOOK, not off the holdings (CR-01 / CR-11, 2026-10-04): a 賣超 that a later
+    # buy of the same size netted back to exactly zero shares has no holding to inspect —
+    # `any(h.oversold ...)` was False there, and XIRR came out as a confident −67.8% over a
+    # discarded basis (measured on the review's probe). `Book.oversold_positions` lists every
+    # 賣超 position, so this is a strict superset of the old test.
+    oversold_positions = book.oversold_positions
+    has_oversold = bool(oversold_positions)
+    # CR-02: dividends the replay refused because the account never held the symbol by their
+    # date. No position carries a flag for them, so the book's list is the only record.
+    orphan_dividends = book.orphan_dividends
     # Read off the BOOK, not off the holdings: two of the three ways an action goes
     # unapplied leave no holding to inspect — an EXCHANGE that already emptied the source
     # (the flag is dropped with its zero-share carrier), and a source that never existed
@@ -704,7 +758,9 @@ def build_dashboard(
     xirr_reason: str | None = None
     if has_oversold:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
-        xirr_reason = "帳本中有賣超部位待釐清 — 無法計算 XIRR"
+        # Named per position since CR-01 (2026-10-04): a 賣超 netted back to zero shares has no
+        # holdings row to find, so the reason is the one place that says which row broke.
+        xirr_reason = _oversold_reason(oversold_positions)
     elif unapplied_actions:
         # A skipped corporate action is a DIFFERENT problem from 賣超 and says so: the shares
         # are positive and look ordinary, but they are in PRE-action terms while every price
@@ -726,6 +782,12 @@ def build_dashboard(
         # reason string below carries the account, symbol and date precisely so the owner
         # can go straight to the one row that blanked it.
         xirr_reason = _unapplied_action_reason(unapplied_actions)
+    elif orphan_dividends:
+        # CR-02 (2026-10-04). A dividend with no position means the ledger is missing the buy
+        # or opening that earned it. XIRR without both is the return of a DIFFERENT ledger — the
+        # unapplied-action reasoning directly above — so the figure is withheld and the rows
+        # are named, rather than computed with the payout silently left out.
+        xirr_reason = _orphan_dividend_reason(orphan_dividends)
     else:
         try:
             outcome = xirr_reporting(
@@ -985,7 +1047,8 @@ def build_dashboard(
     # other's figure, which is precisely why the discrepancy went unnoticed.
     fx_outcome = fx_complete_return(
         trend, has_oversold=has_oversold,
-        has_unapplied_action=bool(unapplied_actions))
+        has_unapplied_action=bool(unapplied_actions),
+        has_orphan_dividend=bool(orphan_dividends))
     fx_complete = fx_outcome.value
     # AI-D48 made B − A a TWO-term difference, so the third term is subtracted out rather
     # than left inside 「本金匯率效果」 — a residual that quietly absorbs whatever joins B next
@@ -1094,4 +1157,6 @@ def build_dashboard(
         # holdings: this is the ONLY channel that survives an action whose source position
         # was emptied or never existed, and §6.3's red footer needs a cause to name.
         unapplied_actions=unapplied_actions,
+        oversold_positions=oversold_positions,
+        orphan_dividends=orphan_dividends,
     )

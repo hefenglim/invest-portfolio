@@ -24,9 +24,14 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_dash.data_ingestion.store import insert_dividend, upsert_instrument
+from portfolio_dash.data_ingestion.store import (
+    insert_dividend,
+    insert_transaction,
+    upsert_instrument,
+)
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.models.enums import Side
 
 _DAY = "2026-05-04"
 _HEADER = "account,symbol,date,type,gross,withholding,net,reinvest_shares,reinvest_price"
@@ -93,10 +98,21 @@ _BASE_ROW = {
 }
 
 
-def _seed(conn: sqlite3.Connection, account: str, symbol: str) -> int:
+def _hold_1155(conn: sqlite3.Connection) -> None:
+    """moomoo_my must HOLD 1155 before its dividends (CR-02, 2026-10-04): a dividend for a
+    position the account never held is itself a hard finding (``dividend_without_position``),
+    and every MY case here is about a DIFFERENT check. The golden ledger already holds the
+    tw_broker 2330 and schwab AAPL positions the other cases use."""
     upsert_instrument(conn, Instrument(symbol="1155", market=Market.MY,
                                        quote_ccy=Currency.MYR, sector="Financials",
                                        name="Maybank"))
+    insert_transaction(conn, account_id="moomoo_my", symbol="1155", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("9"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 1))
+
+
+def _seed(conn: sqlite3.Connection, account: str, symbol: str) -> int:
+    _hold_1155(conn)
     kind, gross, wh, net, shares, price = _BASE_ROW[(account, symbol)]
     div_id = insert_dividend(
         conn, account_id=account, symbol=symbol, div_date=date(2026, 5, 1),
@@ -175,9 +191,7 @@ def test_a_legacy_rows_own_hard_condition_stays_correctable(
     (booked before §6.3's door refused it) can still have its DATE corrected — the finding is
     the row's own, not the edit's — while an edit that changes the offending figure is
     refused like a new entry."""
-    upsert_instrument(golden_db, Instrument(symbol="1155", market=Market.MY,
-                                            quote_ccy=Currency.MYR, sector="Financials",
-                                            name="Maybank"))
+    _hold_1155(golden_db)
     div_id = insert_dividend(
         golden_db, account_id="moomoo_my", symbol="1155", div_date=date(2026, 5, 1),
         div_type="NET", gross=Decimal("100"), withholding=Decimal("5"), net=Decimal("95"))
