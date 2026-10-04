@@ -43,13 +43,17 @@ def _seed(conn: Any) -> None:
     conn.commit()
 
 
-#: The "model's" answer: a buy of 2454 and its dividend two weeks later, in ONE paste.
+#: The "model's" answer: a buy of 2454 and its dividend two weeks later, in ONE paste, plus an
+#: unrelated 2330 buy (S10, round 3: a malformed SIBLING trade must not drop the 2454 one).
 _DRAFTS: list[dict[str, Any]] = [
     {"kind": "txn", "account_id": "tw_broker", "symbol": "2454", "side": "BUY",
      "date": "2026-05-01", "shares": "1000", "price": "500"},
+    {"kind": "txn", "account_id": "tw_broker", "symbol": "2330", "side": "BUY",
+     "date": "2026-05-02", "shares": "10", "price": "600"},
     {"kind": "div", "account_id": "tw_broker", "symbol": "2454", "date": "2026-05-15",
      "type": "CASH", "gross": "1000"},
 ]
+_CONTEXT_2454 = {"account_id": "tw_broker", "symbol": "2454", "date": "2026-05-01"}
 
 
 @pytest.mark.e2e
@@ -81,6 +85,9 @@ def test_editing_a_dividend_keeps_its_buy_from_the_same_paste(
     expect(tick).to_be_enabled()
     expect(tick).to_be_checked()                     # the first preview: clean
 
+    trades = page.locator("#ai-body-transactions tr")
+    expect(trades).to_have_count(2)
+
     # Edit the dividend's gross: the re-validation must still see the buy of the same paste.
     gross = div_row.locator("input[data-field=gross]")
     with page.expect_response("**/api/input/ai/preview") as answer:
@@ -90,12 +97,43 @@ def test_editing_a_dividend_keeps_its_buy_from_the_same_paste(
     expect(div_row).not_to_contain_text("沒有任何持倉紀錄")
     expect(tick).to_be_enabled()
     expect(tick).to_be_checked()
-    sent_rows = edits[-1]["drafts"]["rows"]
-    assert any(r.get("kind") == "txn" and r.get("symbol") == "2454" for r in sent_rows), sent_rows
+    # S10: a MINIMAL context — the ticked trades' account / symbol / date — and only the
+    # dividend drafts; the trades are not previewed again on every dividend keystroke.
+    sent = edits[-1]
+    assert [r.get("kind") for r in sent["drafts"]["rows"]] == ["div"], sent
+    assert _CONTEXT_2454 in sent["trade_context"], sent
+
+    # S4: UNTICKING the buy takes it out of what will be written, so the dividend is re-judged
+    # without it — the preview must not promise what the commit will refuse.
+    buy_tick = trades.nth(0).locator("input[type=checkbox]")
+    buy_tick.uncheck()
+    expect(div_row).to_contain_text("沒有任何持倉紀錄", timeout=20000)
+    expect(tick).to_be_disabled()
+    assert _CONTEXT_2454 not in edits[-1]["trade_context"], edits[-1]
+    buy_tick.check()
+    expect(div_row).not_to_contain_text("沒有任何持倉紀錄", timeout=20000)
+    expect(tick).to_be_enabled()
+
+    # S10: a typo in the OTHER trade (2330) leaves that row out — and only that row.
+    sibling = trades.nth(1).locator("input[data-field=shares]")
+    sibling.fill("1,000")
+    sibling.press("Tab")
+    expect(trades.nth(1)).to_contain_text("不是有效的數字")
+    gross = div_row.locator("input[data-field=gross]")
+    with page.expect_response("**/api/input/ai/preview"):
+        gross.fill("1300")
+        gross.press("Tab")
+    expect(div_row).not_to_contain_text("沒有任何持倉紀錄")
+    context = edits[-1]["trade_context"]
+    assert context == [_CONTEXT_2454], context
+    sibling = trades.nth(1).locator("input[data-field=shares]")
+    sibling.fill("10")
+    sibling.press("Tab")
+    expect(page.locator("#ai-write-all")).to_be_enabled(timeout=20000)
 
     # Moving the BUY after the dividend strands it — the dividend is re-judged when the trade
     # it depends on changes, not only when it is edited itself.
-    buy_date = page.locator("#ai-body-transactions tr input[data-field=date]")
+    buy_date = trades.nth(0).locator("input[data-field=date]")
     buy_date.fill("2026-05-20")
     buy_date.press("Tab")
     expect(div_row).to_contain_text("沒有任何持倉紀錄", timeout=20000)

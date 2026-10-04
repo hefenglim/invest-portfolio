@@ -236,6 +236,32 @@ class OversoldPosition(BaseModel):
     oversold_held: Decimal | None = None
 
 
+class OpenedPosition(BaseModel):
+    """One (account, symbol) the replay OPENED, whatever its share count now (S1/S9, 2026-10-04).
+
+    The replay creates a position object from an opening, a non-zero trade, or an EXCHANGE /
+    SPINOFF it actually applied — never from a refused action, a zero-quantity row or a
+    dividend with no position. ``holdings`` lists only the non-zero ones, so two facts died
+    with every flat position:
+
+    * that it was opened at all — the drawer told 「部位已結清」 from 「從未持有」 by guessing
+      from activity rows, and a refused action row read as an opening (S9);
+    * its two 待釐清 flags — ``oversold`` (``OversoldPosition`` keeps the detail) and
+      ``unbookable_action``, which is sticky on the position: a flat position a refused
+      action flagged comes back flagged when a later trade reopens it, and the manual preview
+      could not see that before the trade (S1).
+
+    The two flags are exactly ``Holding.oversold`` / ``Holding.unbookable_action`` — the
+    ``_unclear`` pair the input path withholds on.
+    """
+
+    account_id: str
+    symbol: str
+    shares: Decimal
+    oversold: bool = False
+    unbookable_action: bool = False
+
+
 class Book(BaseModel):
     """Output of the ledger replay: open holdings, realized, gross capital deployed."""
 
@@ -274,6 +300,10 @@ class Book(BaseModel):
     # means some cost basis in this book was discarded, so XIRR has no honest value. ALWAYS
     # EMPTY on the strict path, which raises ``OversellError`` instead.
     oversold_positions: list[OversoldPosition] = Field(default_factory=list)
+    # Every position the replay opened, held or flat, with its two 待釐清 flags (S1/S9 — see
+    # :class:`OpenedPosition`). Populated on BOTH paths (the strict path raises on a 賣超, so
+    # there its flags are only ever the action flag). Default empty for hand-built books.
+    opened_positions: list[OpenedPosition] = Field(default_factory=list)
     # Dividend events refused because the account held NO position in that symbol by the
     # dividend's effective date (CR-02, 2026-10-04) — no buy, opening or corporate action had
     # created it. Each is ALSO in ``refused_dividends`` (so XIRR excludes it like every other

@@ -48,6 +48,7 @@ from portfolio_dash.shared.corporate_actions import (
     CorporateActionKind,
     StoredActionRow,
     apply_ratio,
+    convert_stored,
 )
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, DividendType, Side
@@ -634,15 +635,19 @@ def position_exists_by(
 
     Direct SQL on this module's own three ledgers, deliberately — not a replay: the answer is
     "has a row of these kinds been written by this date", which needs no basis, and every
-    dividend door calls this once per row. A corporate action the replay later REFUSES would
-    still count here; the replay then refuses the dividend too, on the BOOK
-    (``Book.orphan_dividends``), and the dashboard names it — the guard is a door, the replay
-    stays the authority.
+    dividend door calls this once per row. An action counts only as the replay READS it: a row
+    ``convert_stored`` cannot convert, or one naming an unregistered symbol at either end, opens
+    nothing (S8).
 
     The SQL form of ONE rule whose bundle form is ``LedgerBundle.position_opened_by`` (the
-    correction doors' fallback, R9 2026-10-04); a change here is a change there, and
-    ``tests/contract/test_r5_r9_orphan_per_dividend.py`` holds the two and the replay to one
-    answer on every dividend of one ledger.
+    correction doors' fallback, R9 2026-10-04). The two forms agree on every row; both differ
+    from the replay in exactly ONE stated place — a readable, registered EXCHANGE / SPINOFF the
+    replay REFUSES (its source was not held) counts here as opening its destination, because
+    deciding a refusal needs the replay. The dividend door then lets the dividend in, the replay
+    refuses it on the BOOK (``Book.orphan_dividends``) and the dashboard names it — the door is
+    a door, the replay stays the authority. ``tests/contract/test_r5_r9_orphan_per_dividend.py``
+    holds the two forms and the replay to one answer on every dividend of one ledger (unreadable
+    and unregistered actions included) and pins the one difference.
 
     *pending_from* is the earliest date of a not-yet-written trade of the same key that will be
     committed FIRST in the same submission (the AI door writes 交易 before 股利), so a dividend
@@ -663,8 +668,19 @@ def position_exists_by(
     ):
         if Decimal(r["quantity"]) != _ZERO:
             return True
-    created_by = (CorporateActionKind.EXCHANGE.value, CorporateActionKind.SPINOFF.value)
-    return conn.execute(
-        "SELECT 1 FROM corporate_actions WHERE account_id=? AND to_symbol=? AND date<=? "
-        "AND kind IN (?, ?) LIMIT 1", (account_id, symbol, cut, *created_by),
-    ).fetchone() is not None
+    # An action counts only as the replay would READ it (S8, 2026-10-04): a row the loader
+    # cannot convert (``convert_stored`` — an unknown kind, a non-positive ratio…) never becomes
+    # an event, and an action naming an UNREGISTERED symbol at either end is dropped with every
+    # other such row (``LedgerBundle.without_unregistered``). Counting those by kind alone let
+    # this check pass a dividend the replay then refused.
+    created_by = {CorporateActionKind.EXCHANGE.value, CorporateActionKind.SPINOFF.value}
+    candidates = [a for a in list_corporate_actions(conn, account_id=account_id, symbol=symbol)
+                  if a.to_symbol == symbol and a.date <= on and a.kind in created_by]
+    if not candidates:
+        return False
+    readable, _unreadable = convert_stored(candidates)
+    names = sorted({a.from_symbol for a in readable} | {symbol})
+    registered = {str(r[0]) for r in conn.execute(
+        f"SELECT symbol FROM instruments WHERE symbol IN ({','.join('?' * len(names))})",  # noqa: S608
+        names)}
+    return any(a.from_symbol in registered and a.to_symbol in registered for a in readable)

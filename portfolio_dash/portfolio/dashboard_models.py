@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.results import (
     CombinedView,
+    OpenedPosition,
     OversoldPosition,
     RealizedPnL,
     ReturnSummary,
@@ -429,3 +430,7 @@ class DashboardData(BaseModel):
     # contract on purpose, not by accident of a model dump.
     oversold_positions: list[OversoldPosition] = Field(default_factory=list, exclude=True)
     orphan_dividends: list[Dividend] = Field(default_factory=list, exclude=True)
+    # ``Book.opened_positions`` (S9, 2026-10-04): the drawer's 「部位已結清」 versus 「從未持有」
+    # is the REPLAY's fact — did it ever open this position — not a reading of activity rows.
+    # Excluded from the wire for the same reason as the two fields above.
+    opened_positions: list[OpenedPosition] = Field(default_factory=list, exclude=True)

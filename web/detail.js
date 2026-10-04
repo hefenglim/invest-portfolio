@@ -314,25 +314,24 @@
       body.appendChild(dividendSection(symbol, detail));
       body.appendChild(realizedSection(symbol, detail));
     } else {
-      /* Unheld — but that is TWO different states and they must not share one sentence
-         (M2-01). `detail.activity` is the ledger's own answer, and it is the SAME predicate
-         txSection already uses to decide whether a symbol has history at all:
-           · activity non-empty → a CLOSED (or fully transferred-out) position. It has no
+      /* Unheld — but that is several different states and they must not share one sentence
+         (M2-01; the opened/never-opened split is S9's, see `closed` below):
+           · a position was opened and is flat → a CLOSED (or fully transferred-out) one. It has no
              部位摘要 / 報酬貢獻拆分 / 試算 (all three need a live position), but its 已實現
              記錄 and 配息史 are money of record and were being DROPPED — while 交易明細 two
              rows below printed the very sale that produced the realized figure, and the
              empty state claimed 「無部位／損益資料」 over a −3,085.63 realized row.
-           · activity empty → a genuine watchlist name, which keeps the original sentence.
+           · never opened, but ledger rows exist (refused dividends / actions) → said so;
+           · no ledger row at all → a genuine watchlist name, which keeps the original sentence.
          The sections below take `detail`, never `pos`, so they render unchanged here. */
       body.appendChild(signalsSection(symbol));
       body.appendChild(adviceSection(symbol));
-      /* R8 (round 2): CLOSED means something OPENED a position — an opening, a trade or a
-         corporate action. A received DRIP / 配股 row is in `activity` too, and on its own it
-         opens nothing: a symbol whose only rows were such dividends (refused by the book, the
-         account never held it) read 「帳本有交易紀錄，部位已結清」 over a position that never
-         existed. The share-adding dividend rows are therefore not evidence of a position. */
-      const closed = ((detail && detail.activity) || []).some(
-        (r) => r.side !== 'drip' && r.side !== 'stock');
+      /* R8 → S9 (round 3): CLOSED means the replay OPENED a position and it is flat now. That
+         is the server's fact (`position_opened`, read off the book), never a reading of the
+         activity rows: a received DRIP / 配股 row, a corporate action the replay REFUSED and a
+         0-share trade are all listed in 交易明細 and opened nothing — a symbol whose only rows
+         were a refused EXCHANGE into it and an orphan 配股 read 「部位已結清」. */
+      const closed = !!(detail && detail.position_opened);
       /* CR-02 (2026-10-04): a THIRD unheld state — nothing opened a position, only dividend
          rows the book refused because the account never held the symbol. It is not a
          watchlist name (the ledger has rows for it) and was rendered as one, with its 配息史 —
@@ -349,6 +348,12 @@
         body.appendChild(el('div', 'sd-empty',
           '此標的沒有任何持倉紀錄，帳本只有無法入帳的股利紀錄 — 原因列在下方配息史。'));
         body.appendChild(dividendSection(symbol, detail));
+      } else if (((detail && detail.activity) || []).length) {
+        /* S9: rows that opened nothing and are not dividends — a corporate action the replay
+           refused, a 0-share trade. Neither 「已結清」 nor a watchlist name: 交易明細 below
+           lists them, with the refusal's own cause line. */
+        body.appendChild(el('div', 'sd-empty',
+          '此標的從未建立持倉，帳本只有未能入帳的紀錄 — 列在下方交易明細。'));
       } else {
         body.appendChild(el('div', 'sd-empty', '此標的不在持倉中（觀察清單標的）— 顯示價格走勢與技術訊號，無部位／損益資料。'));
       }

@@ -823,6 +823,11 @@ def symbol_detail(
         # CR-01 / CR-02: the trade / dividend ledger problems no holding row can carry. Always
         # present (two empty lists on a clean symbol), for the same reason.
         "ledger_issues": _ledger_issues(symbol, data),
+        # S9 (round 3): did the replay ever OPEN a position in this symbol, in any account, by
+        # the valuation day — an opening, a non-zero trade, or a corporate action it APPLIED.
+        # The drawer's 「部位已結清」 rests on this, never on the activity rows: a refused
+        # action and a 0-share row are listed there and opened nothing.
+        "position_opened": any(p.symbol == symbol for p in data.opened_positions),
         "realized_rows": realized_rows,
     }
 

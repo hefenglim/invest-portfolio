@@ -26,7 +26,7 @@ newline and break the line mapping; see the git history of this invariant, W1/AI
 import csv
 import io
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -620,12 +620,33 @@ def ai_agents_input(
     return built
 
 
+class TradeContext(BaseModel):
+    """One trade the SAME submission will write before its dividends — just what a dividend's
+    position check reads: account, symbol, trade date (S4 / S10, 2026-10-04).
+
+    The draft table re-judges an edited dividend without re-sending (and re-previewing) the
+    trades: it sends the TICKED, well-formed trade drafts as this minimal context, and
+    :func:`_build_result` folds them into the same ``pending_trades`` map a first preview
+    builds from the trade rows themselves — so the rule (``validate_dividend(pending_trades=)``
+    → ``holdings.position_exists_by``) keeps exactly one owner, here on the server. A context
+    entry only ever RELAXES a preview; the commit door re-validates every dividend against the
+    ledger after the trades are written.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    symbol: str
+    date: date
+
+
 def revalidate_ai_drafts(
     conn: sqlite3.Connection,
     drafts: AiDraftList,
     *,
     pool: CashPoolFn,
     text: str = "",
+    trade_context: Sequence[TradeContext] = (),
 ) -> AiInputResult:
     """Re-validate EDITED drafts through the same post-parse pipeline — no model call (DEF-035).
 
@@ -643,8 +664,10 @@ def revalidate_ai_drafts(
                 order-preservingly, so row *n* of a kind is still draft *n* of that kind).
         pool:   The cash-pool probe — REQUIRED, exactly as at :func:`ai_agents_input`.
         text:   The original pasted text, for the per-row ``raw`` provenance only.
+        trade_context: The ticked trades of the same paste, when only the dividends are being
+                re-judged (see :class:`TradeContext`).
     """
-    return _build_result(conn, text, drafts, pool=pool)
+    return _build_result(conn, text, drafts, pool=pool, trade_context=trade_context)
 
 
 def _build_result(
@@ -653,6 +676,7 @@ def _build_result(
     result: AiDraftList,
     *,
     pool: CashPoolFn,
+    trade_context: Sequence[TradeContext] = (),
 ) -> AiInputResult:
     """The post-parse pipeline shared by a model parse and an edit re-validation."""
     txns = [r for r in result.rows if isinstance(r, TxnDraft)]
@@ -702,6 +726,10 @@ def _build_result(
                                           inp.trade_date)
         previews["transactions"] = ImportPreview(rows=rows)
         csv_texts["transactions"] = _txn_csv(txns)
+    # S10: the same map from a minimal context, when the trades are not re-sent as drafts.
+    for c in trade_context:
+        key = (c.account_id, c.symbol)
+        pending_trades[key] = min(pending_trades.get(key, c.date), c.date)
 
     if divs:
         csv_texts["dividends"] = _div_csv(divs)

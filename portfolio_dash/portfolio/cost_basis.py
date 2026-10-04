@@ -9,6 +9,7 @@ from decimal import Decimal
 from portfolio_dash.portfolio.results import (
     Book,
     Holding,
+    OpenedPosition,
     OversoldPosition,
     RealizedPnL,
     RealizedRow,
@@ -945,6 +946,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
 
         holdings: list[Holding] = []
         oversold: list[OversoldPosition] = []
+        opened: list[OpenedPosition] = []
         for (account_id, symbol), pos in positions.items():
             # An OPEN declared short is a real position and must be reported, so the quantity is
             # SIGNED: long stays positive, short comes out negative with the received proceeds as
@@ -955,6 +957,12 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             original_total = pos.original_total - pos.short_proceeds
             adjusted_total = pos.adjusted_total - pos.short_proceeds
             is_oversold = pos.ever_oversold or pos.shares < _ZERO
+            # S1/S9 (2026-10-04): every key in `positions` is a position the replay OPENED (a
+            # refused action, a zero-quantity row and an orphan dividend never create one), so
+            # it is recorded — flags and all — before the zero-share `continue` drops it.
+            opened.append(OpenedPosition(
+                account_id=account_id, symbol=symbol, shares=shares,
+                oversold=is_oversold, unbookable_action=pos.unbookable_action))
             if is_oversold:
                 # CR-11 (2026-10-04): recorded on the BOOK, and BEFORE the zero-share `continue`
                 # below. The sticky flag used to live only on the Holding, so a 賣超 that a later
@@ -1022,6 +1030,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             refused_dividends=refused_dividends,
             oversold_positions=oversold,
             orphan_dividends=orphan_dividends,
+            opened_positions=opened,
         )
     except ArithmeticError as exc:
         # The CLASS, not one cause. ``ZeroDivisionError`` is in it too, so a non-Decimal

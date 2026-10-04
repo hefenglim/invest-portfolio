@@ -307,11 +307,17 @@ class LedgerBundle:
 
         ONE rule, two forms: this one over a bundle (the correction doors' fallback when a
         ledger cannot be replayed), and ``data_ingestion.holdings.position_exists_by`` over
-        SQL (the dividend doors' per-row check). Both count a corporate action the replay may
-        later REFUSE; the replay then refuses the dividend on the book. The two forms and the
-        replay are pinned to one answer by ``tests/contract/test_r5_r9_orphan_per_dividend.py``.
+        SQL (the dividend doors' per-row check). They agree on every row: an action counts only
+        as the replay READS it — an unreadable row is not in ``actions`` at all (it is in
+        ``unreadable_actions``), and an action naming an unregistered symbol at either end is
+        skipped here exactly as :meth:`without_unregistered` drops it (S8, 2026-10-04). Both
+        differ from the replay in ONE stated place: a readable, registered EXCHANGE / SPINOFF
+        the replay REFUSES (its source was not held) counts as opening its destination, since
+        deciding a refusal needs the replay; the replay then refuses the dividend on the book.
+        Pinned by ``tests/contract/test_r5_r9_orphan_per_dividend.py``.
         """
         opened_by = (CorporateActionKind.EXCHANGE, CorporateActionKind.SPINOFF)
+        known = self.instruments.keys()
         return (any(o.account_id == account_id and o.symbol == symbol and o.build_date <= day
                     for o in self.opening)
                 or any(t.account_id == account_id and t.symbol == symbol
@@ -319,6 +325,7 @@ class LedgerBundle:
                        for t in self.transactions)
                 or any(a.account_id == account_id and a.to_symbol == symbol
                        and a.date <= day and a.kind in opened_by
+                       and a.from_symbol in known and a.to_symbol in known
                        for a in self.actions))
 
     @property

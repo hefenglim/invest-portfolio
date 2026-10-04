@@ -1991,6 +1991,15 @@
       if (sec) sec.hidden = rows.length === 0;
       renderAiRows(kind, rows);
     });
+    /* S4: the parse judged the dividends against every trade row that CAN be written; the
+       owner writes the TICKED ones, and a 賣超 or contradicted row starts unticked — so when
+       the two differ, the dividends are re-judged at once against what will be written. */
+    const parsedStatus = {};
+    (aiRows.transactions || []).forEach((r) => { parsedStatus[r.n] = r.status; });
+    aiDivContextSent = JSON.stringify((aiDrafts.transactions || [])
+      .filter((d, n) => d && parsedStatus[n] !== 'error')
+      .map((d) => ({ account_id: d.account_id, symbol: d.symbol, date: d.date })));
+    aiRejudgeDividendsIfNeeded();
     refreshAiWriteBtn();
     if (window.toast) {
       /* DEF-083: a failover is not a plain success — the model that answered is not the one
@@ -2066,7 +2075,11 @@
        is remembered on the box and comes back when the value is fixed. */
     if (localErr && r.status !== 'error') cb.dataset.wanted = wanted ? '1' : '0';
     cb.dataset.n = String(r.n || 0);
-    cb.addEventListener('change', refreshAiWriteBtn);
+    cb.addEventListener('change', () => {
+      refreshAiWriteBtn();
+      /* S4: a trade un/ticked changes what will be written — and with it a dividend's position. */
+      if (kind === 'transactions') aiRejudgeDividendsIfNeeded();
+    });
     td.appendChild(cb);
     return td;
   }
@@ -2391,18 +2404,40 @@
     }, 250);
   }
 
-  /* The draft rows a re-validation of `kind` sends (R3, round 2). A dividend is judged against
-     the trades of the SAME paste — the page commits 交易 before 股利, so a buy in the paste is
-     the position its dividend is paid on (CR-02's `dividend_without_position`, which the AI
-     door's first preview already honoured). Sending only the edited kind's drafts left the
-     server with no trades, so editing a dividend's gross turned it into a hard refusal: unticked,
-     untickable, unwritable with its own buy. The trades go along as CONTEXT only — the answer
-     is read for `kind` alone. A trade kind holding a typed value that does not parse is left
-     out (its rows cannot be written until fixed, and its fix re-judges the dividends below). */
-  function aiRevalidateRows(kind) {
-    const rows = aiDrafts[kind] || [];
-    if (kind !== 'dividends' || aiKindHasFieldErr('transactions')) return rows;
-    return (aiDrafts.transactions || []).concat(rows);
+  /* The trades a dividend is judged against (R3 → S4 / S10, round 3). A dividend in the paste
+     is paid on a buy in the SAME paste — the page commits 交易 before 股利 — so re-judging an
+     edited dividend needs those trades; but only the ones that WILL be written: the TICKED rows,
+     each skipped on its own while it holds a typed value that does not parse. R3 sent every
+     trade draft (an unticked buy kept its dividend "clean" until the commit refused it) and
+     dropped them all over one typo. Only account / symbol / date go: the server folds them into
+     the same `pending_trades` a first preview builds (`agents.TradeContext`), so the rule stays
+     on the server and an edited dividend no longer re-previews every trade. */
+  function aiTradeContext() {
+    const body = $('#ai-body-transactions');
+    const out = [];
+    (aiDrafts.transactions || []).forEach((d, n) => {
+      if (!d || aiRowErr('transactions', n)) return;
+      const cb = body && body.querySelector('input[type=checkbox][data-n="' + n + '"]');
+      if (!cb || !cb.checked) return;
+      out.push({ account_id: d.account_id, symbol: d.symbol, date: d.date });
+    });
+    return out;
+  }
+  /* The context the dividends were last judged with, so a trade edit or a tick re-judges them
+     only when what they depend on actually moved (a price edit does not). */
+  let aiDivContextSent = '';
+  /* The extra request fields a re-validation of `kind` carries: the trade context for the
+     dividends (remembered, so the next trade change can tell whether it moved), none else. */
+  function aiRevalidateExtras(kind) {
+    if (kind !== 'dividends') return {};
+    const ctx = aiTradeContext();
+    aiDivContextSent = JSON.stringify(ctx);
+    return { trade_context: ctx };
+  }
+  function aiRejudgeDividendsIfNeeded() {
+    if (!(aiDrafts.dividends || []).length || aiKindHasFieldErr('dividends')) return;
+    if (JSON.stringify(aiTradeContext()) === aiDivContextSent) return;
+    scheduleAiRevalidate('dividends');
   }
 
   /* Send `kind`'s drafts back through the AI door (no model call) and re-render from the
@@ -2414,7 +2449,8 @@
     refreshAiWriteBtn();
     let resp;
     try {
-      resp = await api.post('/api/input/ai/preview', { drafts: { rows: aiRevalidateRows(kind) } });
+      resp = await api.post('/api/input/ai/preview', {
+        drafts: { rows: aiDrafts[kind] || [] }, ...aiRevalidateExtras(kind) });
     } catch (err) {
       if (seq !== aiRevalSeq[kind]) return;
       aiPending[kind] = false;
@@ -2451,13 +2487,11 @@
     if (sec) sec.hidden = rows.length === 0;
     renderAiRows(kind, rows, prev);
     refreshAiWriteBtn();
-    /* R3: the dividends' verdict depends on the trades (a buy moved after its dividend strands
-       it), so a trade re-validation re-judges the dividends too. Not on a partial-commit refresh
-       (`fresh`): the written trades are in the ledger by then and the dividends commit next. */
-    if (kind === 'transactions' && !fresh && (aiDrafts.dividends || []).length
-        && !aiKindHasFieldErr('dividends')) {
-      scheduleAiRevalidate('dividends');
-    }
+    /* R3 / S10: the dividends' verdict depends on the trades (a buy moved after its dividend
+       strands it), so a trade re-validation re-judges them — when, and only when, the ticked
+       trades' account / symbol / date moved. Not on a partial-commit refresh (`fresh`): the
+       written trades are in the ledger by then and the dividends commit next. */
+    if (kind === 'transactions' && !fresh) aiRejudgeDividendsIfNeeded();
   }
 
   /* Rebuild ONE KIND's committed csv from ONLY its checked rows (header + their source

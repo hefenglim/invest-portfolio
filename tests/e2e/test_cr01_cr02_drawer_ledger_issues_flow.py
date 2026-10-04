@@ -21,12 +21,14 @@ from playwright.sync_api import Page, expect
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.store import (
+    insert_corporate_action,
     insert_dividend,
     insert_transaction,
     upsert_instrument,
 )
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -118,10 +120,17 @@ def test_the_drawer_names_a_flat_oversell_and_an_orphan_dividend(
 
 
 def _seed_orphan_reinvest(conn: sqlite3.Connection) -> None:
-    """Golden + tw_broker 2317: ONLY a 配股 row — 50 shares — for a symbol never held there."""
+    """Golden + tw_broker 2317: ONLY a 配股 row — 50 shares — for a symbol never held there,
+    and (S9, round 3) a REFUSED exchange into it from 2454, which was never held either: an
+    ``action`` row in 交易明細 that opened nothing."""
     _seed_golden(conn)
-    upsert_instrument(conn, Instrument(symbol="2317", market=Market.TW, quote_ccy=Currency.TWD,
-                                       sector="Electronics", name="Hon Hai", board="TWSE"))
+    for sym, name in (("2317", "Hon Hai"), ("2454", "MediaTek")):
+        upsert_instrument(conn, Instrument(symbol=sym, market=Market.TW,
+                                           quote_ccy=Currency.TWD, sector="Electronics",
+                                           name=name, board="TWSE"))
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 1),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2454",
+                            to_symbol="2317", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
     insert_dividend(conn, account_id="tw_broker", symbol="2317", div_date=date(2026, 4, 1),
                     div_type="STOCK", gross=Decimal("0"), withholding=Decimal("0"),
                     net=Decimal("0"), reinvest_shares=Decimal("50"))

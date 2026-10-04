@@ -195,17 +195,59 @@ def test_replay_fallback_and_door_check_agree_on_every_dividend() -> None:
         insert_dividend(conn, account_id="tw_broker", symbol="2603", div_date=pay,
                         div_type="STOCK", gross=Decimal("0"), withholding=Decimal("0"),
                         net=Decimal("0"), reinvest_shares=Decimal("5"), ex_date=ex)
-    bundle = load_ledger_bundle(conn)
+    # S8 (round 3): an UNREADABLE action row (a non-positive ratio) and an action whose source
+    # symbol is UNREGISTERED. The replay applies neither — the first never becomes an event,
+    # the second is dropped with every row naming an unregistered symbol — so neither opens a
+    # position, in any of the four readers.
+    for to_symbol in ("2609", "2610"):
+        upsert_instrument(conn, Instrument(symbol=to_symbol, market=Market.TW,
+                                           quote_ccy=Currency.TWD, sector="Shipping",
+                                           name=to_symbol, board="TWSE"))
+    _buy(conn, "9999", date(2025, 6, 1))
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2025, 7, 1),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="9999",
+                            to_symbol="2609", ratio_to=Decimal("0"), ratio_from=Decimal("1"))
+    _cash(conn, "2609", date(2025, 7, 15))                # unreadable exchange → orphan
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2025, 7, 1),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="NOPE",
+                            to_symbol="2610", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+    _cash(conn, "2610", date(2025, 7, 15))                # unregistered source → orphan
+    bundle = load_ledger_bundle(conn).without_unregistered()   # as every replay reads it
     book = build_book(bundle, allow_oversell=True)
     from_replay = _orphan_triples(bundle, book)
     from_fallback = _orphan_triples(bundle, None)
     assert from_replay == from_fallback
     assert {(s, d) for _a, s, d in from_replay} == {
-        ("2454", date(2025, 1, 15)), ("2317", date(2025, 3, 31)), ("2603", date(2025, 5, 5))}
+        ("2454", date(2025, 1, 15)), ("2317", date(2025, 3, 31)), ("2603", date(2025, 5, 5)),
+        ("2609", date(2025, 7, 15)), ("2610", date(2025, 7, 15))}
     for dv in bundle.dividends:
         triple = (dv.account_id, dv.symbol, dv.effective_date)
         opened = bundle.position_opened_by(dv.account_id, dv.symbol, dv.effective_date)
         door = position_exists_by(conn, dv.account_id, dv.symbol, dv.effective_date)
         assert (triple not in from_replay) == opened == door, (triple, opened, door)
-    assert len(list_dividends(conn)) == 6
+    assert len(list_dividends(conn)) == 8
+    conn.close()
+
+
+def test_the_one_stated_difference_a_readable_action_the_replay_refuses() -> None:
+    """Where the two forms deliberately differ from the replay, and agree with each other: an
+    EXCHANGE that is readable and registered but REFUSED (its source was never held) counts as
+    opening its destination in both forms, while the replay opens nothing — the dividend door
+    therefore lets the dividend in, and the replay refuses it on the book (``Book.orphan_
+    dividends``), named on the dashboard. Pinned so the difference stays the stated one."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_golden_base(conn)
+    _instruments(conn)
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2025, 4, 1),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="2317", ratio_to=Decimal("1"), ratio_from=Decimal("1"))
+    _cash(conn, "2317", date(2025, 5, 1))
+    bundle = load_ledger_bundle(conn).without_unregistered()
+    (dv,) = bundle.dividends
+    assert bundle.position_opened_by(dv.account_id, dv.symbol, dv.effective_date) is True
+    assert position_exists_by(conn, dv.account_id, dv.symbol, dv.effective_date) is True
+    book = build_book(bundle, allow_oversell=True)
+    assert [d.symbol for d in book.orphan_dividends] == ["2317"]
+    assert [u.from_symbol for u in book.unapplied_actions] == ["2330"]
     conn.close()

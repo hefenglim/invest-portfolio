@@ -1167,4 +1167,5 @@ def build_dashboard(
         unapplied_actions=unapplied_actions,
         oversold_positions=oversold_positions,
         orphan_dividends=orphan_dividends,
+        opened_positions=book.opened_positions,
     )

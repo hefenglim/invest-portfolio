@@ -35,6 +35,7 @@ from portfolio_dash.api.wire import (
 from portfolio_dash.data_ingestion.agents import (
     AiDraftList,
     AiInputResult,
+    TradeContext,
     ai_agents_input,
     cash_kind_vocabulary,
     revalidate_ai_drafts,
@@ -224,20 +225,28 @@ def _unclear(h: Holding) -> bool:
     return h.oversold or h.unbookable_action
 
 
-def _withheld(book: Book, key: tuple[str, str]) -> bool:
-    """True when *book*'s position at *key* is 待釐清 — held OR flat (R4, 2026-10-04).
+def _withheld(book: Book, key: tuple[str, str], *, count_oversold: bool = True) -> bool:
+    """True when the replay marks *book*'s position at *key* 待釐清 — held OR flat — on either
+    of :func:`_unclear`'s two flags (R4 → S1, 2026-10-04).
 
-    :func:`_unclear` answers for a ``Holding``, and ``Book.holdings`` drops every zero-share
-    position: a 賣超 that a later buy netted back to exactly 0 had no holding to ask, so the
-    preview read it as "never held" and the BUY branch quoted a fresh-looking average over a
-    basis the replay had discarded (the dashboard then flagged the written row 賣超待釐清).
-    ``Book.oversold_positions`` keeps every 賣超 position, so both shapes withhold, for the one
-    reason :func:`_unclear` states.
+    ONE source: ``Book.opened_positions``, the replay's record of every position it opened with
+    its ``oversold`` / ``unbookable_action`` flags, whatever its share count. ``Book.holdings``
+    drops every flat position, so two shapes went unseen: a 賣超 a later buy netted back to 0
+    (R4), and a FLAT position a refused corporate action flagged (S1) — measured: a declared
+    short of 100 on it previewed ``remain_shares -100 / new_original_avg 597.35`` and the
+    written row came back −100 and 待釐清. The flag is sticky on the position, so a trade that
+    reopens it inherits it, which is exactly what this answers BEFORE the trade.
+
+    ``count_oversold=False`` is for the book WITH the draft: a 賣超 there that the trade-date
+    book did not have is the draft's own undeclared oversell — a branch the SELL arm projects as
+    the replay books it — while an action flag there is not the draft's doing (an unreadable
+    action row flags every position it names once the replay ends, including the one the draft
+    opens) and still withholds.
     """
-    held = next((h for h in book.holdings if (h.account_id, h.symbol) == key), None)
-    if held is not None and _unclear(held):
-        return True
-    return any((p.account_id, p.symbol) == key for p in book.oversold_positions)
+    rec = next((p for p in book.opened_positions if (p.account_id, p.symbol) == key), None)
+    if rec is None:
+        return False
+    return rec.unbookable_action or (count_oversold and rec.oversold)
 
 
 def _book_of(bundle: LedgerBundle) -> Book | None:
@@ -763,8 +772,9 @@ def _position_preview(
         key = (body.account_id, body.symbol)
         held = next((h for h in book.holdings if (h.account_id, h.symbol) == key), None)
         if _withheld(book, key):
-            # (R4, 2026-10-04: `_withheld` also covers the FLAT 賣超 — a position netted back
-            # to 0 has no holding, and this guard used to see "never held".)
+            # (R4 / S1, 2026-10-04: `_withheld` reads the replay's record of every position it
+            # opened, so a FLAT 待釐清 position — a 賣超 netted back to 0, or one a refused action
+            # flagged — is caught here too; this guard used to see "never held".)
             # HELD, but 待釐清 — and this branch is why the exclusion in
             # :func:`_holdings_or_none` is only HALF a fix. Dropping the key makes the SELL
             # side hide (it already returns None for "not held"), but the BUY side reads a
@@ -812,9 +822,12 @@ def _position_preview(
         # the replay holds it right AFTER the draft on the same date (the 「新」 side). Before
         # M4-01 both were the end-state ``Holding``; until DEF-048 the new side still was.
         prior = next((h for h in before.holdings if (h.account_id, h.symbol) == key), None)
-        if _withheld(before, key):
+        if _withheld(before, key) or _withheld(at_date, key, count_oversold=False):
             # The trade-date position is 待釐清 even if today's is not — same withholding, for
-            # the same reason as ``held`` above: its totals and share count disagree.
+            # the same reason as ``held`` above: its totals and share count disagree. And the
+            # position the replay holds right AFTER the draft, for every branch alike (S5): an
+            # action flag there was not put there by the draft (see `_withheld`), and no
+            # projected column may be quoted over a position the ledger will flag.
             return None
         prior_shares = prior.shares if prior is not None else _ZERO
         final = next((h for h in at_date.holdings if (h.account_id, h.symbol) == key), None)
@@ -902,12 +915,6 @@ def _position_preview(
                 **_old_position_fields(prior),
                 **dated,
             }
-        if final is not None and _unclear(final):
-            # A BUY cannot create a 待釐清 position, so a flagged result means the position
-            # was one already — both guards above withhold that. Kept as the BRANCH the
-            # replay has (a preview mirrors every branch, for every projected column): never
-            # quote ``new_*_avg`` over a basis the ledger will flag as discarded.
-            return None
         if prior_shares < _ZERO:
             # A buy against an open short COVERS it first (cost_basis.py, owner rule
             # 2026-07-31); it does not average into a long lot. The cover's realized figure
@@ -1946,6 +1953,11 @@ class AiBody(BaseModel):
     # DEF-035: the draft table's EDITED drafts. Present -> re-validate them through the same
     # post-parse pipeline with NO model call (text/images/model_alias are then ignored).
     drafts: AiDraftList | None = None
+    # S4 / S10 (round 3): with ``drafts``, the TICKED trades of the same paste as a minimal
+    # context (account / symbol / date) — sent when only the dividends are being re-judged, so
+    # a dividend whose buy is in the paste keeps that buy as its position without the trades
+    # being re-previewed. See ``agents.TradeContext``.
+    trade_context: list[TradeContext] | None = None
 
 
 @router.post("/input/ai/preview")
@@ -1957,7 +1969,8 @@ def ai_preview(
     if body.drafts is not None:
         # DEF-035: an edit, not a parse — no LLM call, so no budget/activation gate applies.
         return _ai_wire(revalidate_ai_drafts(
-            conn, body.drafts, pool=cash_pool_fn(conn), text=body.text))
+            conn, body.drafts, pool=cash_pool_fn(conn), text=body.text,
+            trade_context=body.trade_context or ()))
     images, bad = _decode_ai_images(body.images or [])
     if bad is not None:
         return bad
