@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -1791,18 +1792,32 @@ def update_dividend(
     net: Decimal,
     reinvest_shares: Decimal | None = None,
     reinvest_price: Decimal | None = None,
+    ex_date: date | None | Literal["keep"] = "keep",
 ) -> bool:
-    """Full-row dividend correction; returns False when the id does not exist."""
+    """Full-row dividend correction; returns False when the id does not exist.
+
+    ``ex_date`` (CR-09): a date sets it, ``None`` clears it, and the default ``"keep"`` leaves
+    the stored value alone — an explicit sentinel rather than a ``None`` default, because a
+    default that CLEARS is how a caller that never heard of the column would silently erase
+    every 配股's effective date.
+    """
     prior = _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,))
     _write_audit(conn, "dividends", str(div_id), "update", prior)
+    ex_sql = ""
+    ex_params: tuple[str | None, ...] = ()
+    if ex_date != "keep":
+        ex_sql = ", ex_date=?"
+        ex_params = (ex_date.isoformat() if ex_date is not None else None,)
     cur = conn.execute(
-        """UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
-               withholding=?, net=?, reinvest_shares=?, reinvest_price=? WHERE id=?""",
+        f"""UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
+               withholding=?, net=?, reinvest_shares=?, reinvest_price=?{ex_sql}
+            WHERE id=?""",
         (
             account_id, symbol, div_date.isoformat(), div_type, to_db(gross),
             to_db(withholding), to_db(net),
             to_db(reinvest_shares) if reinvest_shares is not None else None,
             to_db(reinvest_price) if reinvest_price is not None else None,
+            *ex_params,
             div_id,
         ),
     )

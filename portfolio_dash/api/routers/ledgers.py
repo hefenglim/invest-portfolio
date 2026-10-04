@@ -189,6 +189,10 @@ router = APIRouter()
 
 _ZERO = Decimal("0")
 
+#: Alias for :class:`datetime.date`: a body field NAMED ``date`` shadows the type for every
+#: later annotation in that class (``DivEditBody.ex_date``) — the alias ``store.py`` uses too.
+Date = date
+
 
 def _names(conn: sqlite3.Connection) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     accts = {a.account_id: a.name for a in list_accounts(conn)}
@@ -728,6 +732,21 @@ class DivPreviewBody(BaseModel):
     net: Decimal | None = None
     reinvest_shares: Decimal | None = None
     reinvest_price: Decimal | None = None
+    #: CR-09 — see :class:`DivEditBody`.
+    ex_date: Date | None = None
+
+
+def _edited_ex_date(body: "DivEditBody | DivPreviewBody",
+                    existing: StoredDividend) -> Date | None:
+    """The ex-date the correction saves (CR-09): the body's when it NAMES the field — a date
+    sets it, ``null`` clears it — and the stored one when the body leaves it out, so a caller
+    written before the dialog could show the field neither erases nor invents one.
+
+    The edit dialog always sends the field, prefilled with the stored value, so what the
+    owner sees is what is saved. Whether a value KEPT across a symbol change or a 配股's
+    type / payment-date change is still right is asked by ``validate_dividend(replacing=)``
+    (``ex_date_carried_over``); an ex-date after the payment date is refused there too."""
+    return body.ex_date if "ex_date" in body.model_fields_set else existing.ex_date
 
 
 def _dividend_input(body: "DivEditBody | DivPreviewBody",
@@ -737,7 +756,7 @@ def _dividend_input(body: "DivEditBody | DivPreviewBody",
         account_id=body.account_id, symbol=body.symbol, div_date=body.date, type=body.type,
         gross=body.gross, withholding=body.withhold, net=body.net,
         reinvest_shares=body.reinvest_shares, reinvest_price=body.reinvest_price,
-        ex_date=existing.ex_date)
+        ex_date=_edited_ex_date(body, existing))
 
 
 @router.post("/ledgers/dividends/preview")
@@ -771,6 +790,11 @@ class DivEditBody(BaseModel):
     net: Decimal | None = None
     reinvest_shares: Decimal | None = None
     reinvest_price: Decimal | None = None
+    #: CR-09 — the ex-dividend date. LEFT OUT of the body = keep the stored one (callers
+    #: written before the dialog showed it); ``null`` = clear; a date = set. A 配股 counts
+    #: from it (``Dividend.effective_date``), so the correction door must be able to change
+    #: it — it carried the stored value through every edit while nothing could show it.
+    ex_date: Date | None = None
     ack_oversell: bool = False
 
 
@@ -818,11 +842,14 @@ def edit_dividend(
     amounts = apply_dividend_model(
         div_type, gross=body.gross, withholding=body.withhold, net=body.net,
         reinvest_shares=body.reinvest_shares, reinvest_price=body.reinvest_price)
+    # CR-09: the ex-date the correction saves — the SAME value the validator just judged, and
+    # the one the replay guard replays (a 配股's effective date follows it).
+    ex_date = _edited_ex_date(body, existing)
     edited = existing.model_copy(update={
         "account_id": body.account_id, "symbol": body.symbol, "date": body.date,
         "type": div_type, "gross": amounts.gross, "withholding": amounts.withholding,
         "net": amounts.net, "reinvest_shares": amounts.reinvest_shares,
-        "reinvest_price": amounts.reinvest_price,
+        "reinvest_price": amounts.reinvest_price, "ex_date": ex_date,
     })
     would_be = [edited if d.id == div_id else d for d in list_dividends(conn)]
     blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, divs=would_be)
@@ -833,6 +860,7 @@ def edit_dividend(
         div_date=body.date, div_type=div_type, gross=amounts.gross,
         withholding=amounts.withholding, net=amounts.net,
         reinvest_shares=amounts.reinvest_shares, reinvest_price=amounts.reinvest_price,
+        ex_date=ex_date,
     )
     return {"ok": True, "id": div_id, "issues": [issue_wire(i) for i in findings]}
 

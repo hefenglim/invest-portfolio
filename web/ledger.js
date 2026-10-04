@@ -673,6 +673,13 @@
     const fNet = inp(d.net, 'number', 'any');
     const fReSh = inp(d.reinvest_shares, 'number', 'any');
     const fRePx = inp(d.reinvest_price, 'number', 'any');
+    /* CR-09: the ex-dividend date, shown and editable. A 配股 counts from it (the server's
+       Dividend.effective_date), and this dialog used to carry the stored value through every
+       edit without showing it — re-keying a row or turning it into a 配股 moved its effective
+       date onto someone else's day. Always sent: prefilled with the stored value, blank =
+       null = clear. Whether a KEPT value still fits a changed row is the server's question
+       (ex_date_carried_over), ticked below like every other warning. */
+    const fEx = inp(d.ex_date || '', 'date');
     /* DEF-061: the correction runs the entry doors' ONE validator (validate_dividend), so the
        dialog shows its findings live and — the ⑪a contract, as the trade dialog does — holds
        儲存 until every warning is ticked; hard findings are refused by the PUT itself.
@@ -684,6 +691,7 @@
       type: fType.value, gross: fGross.value || '0',
       withhold: blankNull(fWh), net: blankNull(fNet),
       reinvest_shares: blankNull(fReSh), reinvest_price: blankNull(fRePx),
+      ex_date: blankNull(fEx),
       ack_oversell: ack,
     });
     const issueBox = el('div', 'issues div-edit-issues');
@@ -718,11 +726,12 @@
       gate();
     }
     [fGross, fWh, fNet, fReSh, fRePx, fSym].forEach((n) => n.addEventListener('input', recompute));
-    [fAcc, fType, fDate].forEach((n) => n.addEventListener('change', recompute));
+    [fAcc, fType, fDate, fEx].forEach((n) => n.addEventListener('change', recompute));
     ui0 = editModal('編輯股利 #' + d.id + ' — ' + d.symbol, [
-      ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['類型', fType],
+      ['發放日', fDate], ['帳戶', fAcc], ['代號', fSym], ['類型', fType],
       ['總額', fGross], ['預扣', fWh], ['淨額', fNet],
       ['再投資股數（DRIP／配股）', fReSh], ['再投資價格（DRIP）', fRePx],
+      ['除息日（配股從此日起計入；留空＝以發放日計）', fEx],
       ['', issueBox],
     ], async (ui) => {
       await putWithAckGuard('/api/ledgers/dividends/' + d.id, bodyOf, '編輯', ui);

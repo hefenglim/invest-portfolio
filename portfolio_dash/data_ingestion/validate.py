@@ -2228,7 +2228,9 @@ def validate_dividend(
     * ``net_dividend_withholding`` (hard) — a NET (single-tier) row with a withholding;
     * ``dividend_amounts`` (hard) — :func:`check_amounts` on the model's amounts;
     * ``reinvest_shares_required`` (hard) — a DRIP / STOCK row with no share count, which
-      the replay (``cost_basis.py``) refuses.
+      the replay (``cost_basis.py``) refuses;
+    * ``ex_date_after_pay_date`` (hard, CR-09) — an ex-dividend date later than the payment
+      date, which no distribution has.
 
     *replacing* is the STORED row an edit replaces. As for trades (DEF-042), a HARD finding
     identical — same kind, same sentence — to one the stored row already carries is the
@@ -2236,7 +2238,9 @@ def validate_dividend(
     account) while an edit that changes the offending figures changes the sentence and is
     refused like a new entry. Soft findings are always kept: they are facts about the row the
     owner is about to save. No dividend check reads OTHER dividend rows, so there is no
-    self-duplicate to exclude.
+    self-duplicate to exclude. An edit also gets ``ex_date_carried_over`` (soft, CR-09 —
+    :func:`_carried_ex_date_issue`) when it keeps the stored ex-date across a change that may
+    have invalidated it.
     """
     post = _dividend_findings(conn, inp)
     if replacing is None:
@@ -2248,8 +2252,50 @@ def validate_dividend(
         reinvest_price=replacing.reinvest_price, ex_date=replacing.ex_date)
     carried = {(i.kind, i.message) for i in _dividend_findings(conn, stored)
                if not i.needs_confirm}
-    return [i for i in post
+    kept = [i for i in post
             if i.needs_confirm or (i.kind, i.message) not in carried]
+    if (stale := _carried_ex_date_issue(inp, replacing)) is not None:
+        kept.append(stale)
+    return kept
+
+
+def _carried_ex_date_issue(inp: DividendInput, replacing: StoredDividend) -> Issue | None:
+    """CR-09: the edit keeps the stored ex-date across a change that may have invalidated it.
+
+    ``ex_date`` decides when a 配股 counts (``Dividend.effective_date``: replay order,
+    valuation cuts, the 「未來日期」 badge), and the correction door used to carry the stored
+    value through every edit while the dialog neither showed it nor could change it. An
+    inbox-confirmed CASH row with ex 07-10 corrected to STOCK, or re-keyed to another symbol,
+    silently moved its effective date to that unrelated 07-10. The dialog now shows the field
+    (and this door accepts it), so the remaining question is whether a KEPT value is still
+    right — which only the owner can answer, so it is asked, never decided:
+
+    * the symbol changed — the date belonged to another security's distribution (asked for
+      every type: the inbox matches a recorded payout by symbol + ex-date, so a stale one can
+      also hide the new symbol's real event);
+    * the row is a STOCK dividend and its type or payment date changed — the ex-date is now
+      the date the 配股 shares count from.
+
+    Not asked when nothing was carried (no stored ex-date, or the edit states a different
+    one), when only the account changed (an ex-date is the security's, not the account's), or
+    on a non-STOCK row whose ex-date nothing reads. Soft: the value may well be right.
+    """
+    ex = inp.ex_date
+    if ex is None or ex != replacing.ex_date:
+        return None
+    new_type = inp.type.strip().upper()
+    clear_hint = "不確定可清空（清空後以發放日計）"
+    if inp.symbol != replacing.symbol:
+        return Issue(kind="ex_date_carried_over", needs_confirm=True, message=(
+            f"除息日 {ex.isoformat()} 是原本 {replacing.symbol} 那筆股利的日期；"
+            f"代號改成 {inp.symbol} 後，請確認這個除息日仍正確，{clear_hint}"))
+    if new_type == DividendType.STOCK.value and (
+            replacing.type.strip().upper() != new_type or inp.div_date != replacing.date):
+        return Issue(kind="ex_date_carried_over", needs_confirm=True, message=(
+            f"配股從除息日起計入持股：這筆會從 {ex.isoformat()} 起計入，"
+            f"不是發放日 {inp.div_date.isoformat()}。除息日沿用自原本的紀錄，"
+            f"類型或發放日改了之後，請確認它仍正確，{clear_hint}"))
+    return None
 
 
 def _dividend_findings(conn: sqlite3.Connection, inp: DividendInput) -> list[Issue]:
@@ -2312,5 +2358,17 @@ def _dividend_findings(conn: sqlite3.Connection, inp: DividendInput) -> list[Iss
             kind="reinvest_shares_required",
             message=(f"{div_type} 股利必須有股數（reinvest_shares）"
                      "——配股／再投資是以股數入帳，缺這個欄位重算會失敗"),
+        ))
+
+    # CR-09: no distribution goes ex AFTER it pays — the ex-date is fixed first and the
+    # payment follows it. Hard, on every door, because a 配股 counts from its ex-date
+    # (``Dividend.effective_date``): an ex-date past the payment date books the shares after
+    # they were paid, and on any other type it is a date nothing could have produced. The
+    # same date on both is allowed (a source that knows only one date stores it in both).
+    if inp.ex_date is not None and inp.ex_date > inp.div_date:
+        issues.append(Issue(
+            kind="ex_date_after_pay_date",
+            message=(f"除息日（ex_date）{inp.ex_date.isoformat()} 晚於發放日 "
+                     f"{inp.div_date.isoformat()}：除息日不會晚於發放日，請確認這兩個日期"),
         ))
     return issues
