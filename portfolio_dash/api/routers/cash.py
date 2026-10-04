@@ -148,14 +148,30 @@ class CashLedgers:
     instruments: dict[str, Instrument]
 
 
-def load_cash_ledgers(conn: sqlite3.Connection) -> CashLedgers:
-    """The ONE read of the five pool ledgers a request makes (CR-12)."""
+def load_cash_ledgers(
+    conn: sqlite3.Connection,
+    *,
+    movements: Sequence[StoredCashMovement] | None = None,
+    transactions: Sequence[StoredTransaction] | None = None,
+    dividends: Sequence[StoredDividend] | None = None,
+    instruments: dict[str, Instrument] | None = None,
+) -> CashLedgers:
+    """The ONE read of the five pool ledgers a request makes (CR-12).
+
+    A ledger the caller has ALREADY read in this request is passed in and not read again
+    (R10, 2026-10-04): the replay guards (``api/replay_guard.py``) read the trades, dividends
+    and instrument registry for their equity replay, and ``action_change_guard`` reads the cash
+    movements to find a corporate action's linked fee, before either needs a pool snapshot. The
+    rows must be the STORED rows, in the store's order — what this function would have read.
+    """
     return CashLedgers(
-        movements=tuple(list_cash_movements(conn)),
+        movements=tuple(movements if movements is not None else list_cash_movements(conn)),
         fx=tuple(list_fx_conversions(conn)),
-        transactions=tuple(list_transactions(conn)),
-        dividends=tuple(list_dividends(conn)),
-        instruments={i.symbol: i for i in list_instruments(conn)},
+        transactions=tuple(transactions if transactions is not None
+                           else list_transactions(conn)),
+        dividends=tuple(dividends if dividends is not None else list_dividends(conn)),
+        instruments=(instruments if instruments is not None
+                     else {i.symbol: i for i in list_instruments(conn)}),
     )
 
 
@@ -721,7 +737,7 @@ def _synthetic_movement(body: MovementBody, kind: str) -> StoredCashMovement:
 
 def movement_guard(
     conn: sqlite3.Connection, body: MovementBody, *, exclude_id: int | None = None,
-    ledgers: CashLedgers | None = None,
+    ledgers: CashLedgers | None = None, accounts: dict[str, Account] | None = None,
 ) -> JSONResponse | None:
     """Run the shared cash-movement guard for one wire body; ``None`` when it is clean.
 
@@ -735,15 +751,17 @@ def movement_guard(
     :class:`~data_ingestion.validate.CashPoolFn`.
 
     ``ledgers`` (CR-12): the request's snapshot when the door runs the ack-able check over the
-    same pools afterwards (:func:`edit_movement`); ``None`` reads it here.
+    same pools afterwards (:func:`edit_movement`); ``None`` reads it here. ``accounts`` (R10-b):
+    the account registry, when the door reads it once for this guard and
+    :func:`_resolved_acq`; ``None`` reads it here.
     """
     pool = bind_cash_pool(ledgers) if ledgers is not None else cash_pool_fn(conn)
     return _movement_error(validate_cash_movement(
-        conn, _movement_input(body), pool=pool,
-        exclude_id=exclude_id, accounts=_accounts(conn)))
+        conn, _movement_input(body), pool=pool, exclude_id=exclude_id,
+        accounts=accounts if accounts is not None else _accounts(conn)))
 
 
-def _resolved_acq(conn: sqlite3.Connection, inp: CashMovementInput) -> Decimal | None:
+def _resolved_acq(accounts: dict[str, Account], inp: CashMovementInput) -> Decimal | None:
     """The home-currency acquisition cost to persist, AFTER validation has passed.
 
     Calls :func:`resolve_acq_home_amount` a second time purely for its VALUE — the issue it
@@ -751,7 +769,7 @@ def _resolved_acq(conn: sqlite3.Connection, inp: CashMovementInput) -> Decimal |
     pure, so the second call is free; the alternative is a validator that returns a value
     beside its issues, which would make it the only one of the four with that shape.
     """
-    account = _accounts(conn)[inp.account_id]  # exists (validation passed)
+    account = accounts[inp.account_id]  # exists (validation passed)
     amount, _issue = resolve_acq_home_amount(inp, funding_ccy=account.funding_ccy)
     return amount
 
@@ -765,13 +783,14 @@ def add_movement(
     # and FU-D43a's HARD withdraw block (``ack_negative`` does NOT bypass it; deposit /
     # opening / rebate credits need no balance guard on the way in).
     inp = _movement_input(body)
-    bad = movement_guard(conn, body)
+    accounts = _accounts(conn)   # R10-b: one read for the guard and the acquisition cost
+    bad = movement_guard(conn, body, accounts=accounts)
     if bad is not None:
         return bad
     move_id = insert_cash_movement(
         conn, account_id=body.account_id, move_date=body.date,
         kind=cash_movement_kind(body.kind), ccy=body.ccy, amount=body.amount,
-        note=body.note, acq_home_amount=_resolved_acq(conn, inp))
+        note=body.note, acq_home_amount=_resolved_acq(accounts, inp))
     return {"id": move_id}
 
 
@@ -832,11 +851,12 @@ def edit_movement(
         return moved
     inp = _movement_input(body)
     ledgers = load_cash_ledgers(conn)   # CR-12: ONE read for the hard and the ack-able guard
-    bad = movement_guard(conn, body, exclude_id=move_id, ledgers=ledgers)
+    accounts = _accounts(conn)          # R10-b: one read for the guard and the acquisition cost
+    bad = movement_guard(conn, body, exclude_id=move_id, ledgers=ledgers, accounts=accounts)
     if bad is not None:
         return bad
     kind = cash_movement_kind(body.kind)
-    acq = _resolved_acq(conn, inp)
+    acq = _resolved_acq(accounts, inp)
     if not body.ack_negative:
         edited = _synthetic_movement(body, kind)
         would_be = [edited if m.id == move_id else m for m in ledgers.movements]

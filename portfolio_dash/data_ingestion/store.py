@@ -1276,22 +1276,28 @@ def list_fx_conversions(
         where = " WHERE account_id=?"
         params = [account_id]
     rows = conn.execute(
-        f"SELECT id, account_id, date, from_ccy, from_amount, to_ccy, to_amount "
-        f"FROM fx_conversions{where} ORDER BY date ASC, id ASC",
+        f"{_FX_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredFxConversion(
-            id=r["id"],
-            account_id=r["account_id"],
-            date=date.fromisoformat(r["date"]),
-            from_ccy=Currency(r["from_ccy"]),
-            from_amount=from_db(r["from_amount"]),
-            to_ccy=Currency(r["to_ccy"]),
-            to_amount=from_db(r["to_amount"]),
-        )
-        for r in rows
-    ]
+    return [_fx_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``fx_conversions`` (R10-a, 2026-10-04): the list and
+# the by-id lookup read through both, so they cannot return two shapes of one row.
+_FX_SELECT = ("SELECT id, account_id, date, from_ccy, from_amount, to_ccy, to_amount "
+              "FROM fx_conversions")
+
+
+def _fx_row(r: sqlite3.Row) -> StoredFxConversion:
+    return StoredFxConversion(
+        id=r["id"],
+        account_id=r["account_id"],
+        date=date.fromisoformat(r["date"]),
+        from_ccy=Currency(r["from_ccy"]),
+        from_amount=from_db(r["from_amount"]),
+        to_ccy=Currency(r["to_ccy"]),
+        to_amount=from_db(r["to_amount"]),
+    )
 
 
 def list_transactions(
@@ -1625,6 +1631,7 @@ def load_ledger_bundle(
     dividends: list[StoredDividend] | None = None,
     opening: list[StoredOpening] | None = None,
     actions: list[StoredCorporateAction] | None = None,
+    instruments: dict[str, Instrument] | None = None,
 ) -> LedgerBundle:
     """Load every ledger a replay reads as ONE bundle (``Stored*`` rows -> ledger models).
 
@@ -1633,7 +1640,10 @@ def load_ledger_bundle(
     of them and a new LEDGER reached none. One loader, one bundle, one signature.
 
     Pass a pre-built ``Stored*`` list to replay a MUTATED ledger (the ledger-edit preview
-    swaps in the would-be rows); anything not passed is read from the store.
+    swaps in the would-be rows); anything not passed is read from the store. ``instruments``
+    likewise (R10, 2026-10-04): a caller building two bundles from rows it already read — the
+    replay guard's "before" and "after" — passes the registry it read too, rather than having
+    each bundle read it again.
 
     Rows whose symbol has no ``instruments`` entry are KEPT. The bundle exposes them via
     :attr:`~portfolio_dash.shared.models.ledger.LedgerBundle.unregistered_symbols` and
@@ -1672,7 +1682,8 @@ def load_ledger_bundle(
         # of degrading to 待釐清. Measured 2026-08-11.
         actions=good_actions,
         unreadable_actions=bad_actions,
-        instruments={i.symbol: i for i in list_instruments(conn)},
+        instruments=(instruments if instruments is not None
+                     else {i.symbol: i for i in list_instruments(conn)}),
     )
 
 
@@ -1876,11 +1887,13 @@ def delete_dividend(
 
 
 def get_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> StoredFxConversion | None:
-    """Return one fx_conversions row by id, or None."""
-    for c in list_fx_conversions(conn):
-        if c.id == fx_id:
-            return c
-    return None
+    """Return one fx_conversions row by id, or None.
+
+    One ``WHERE id=?`` row (R10-a, 2026-10-04) — it listed the whole table and filtered in
+    Python, a second full read on every FX edit / delete door beside the guards' snapshot.
+    """
+    r = conn.execute(f"{_FX_SELECT} WHERE id=?", (fx_id,)).fetchone()
+    return None if r is None else _fx_row(r)
 
 
 def update_fx_conversion(
@@ -2028,33 +2041,37 @@ def list_cash_movements(
         where = " WHERE account_id=?"
         params = [account_id]
     rows = conn.execute(
-        f"SELECT id, account_id, date, kind, ccy, amount, note, acq_home_amount, "
-        f"corporate_action_id, rebate_period FROM cash_movements{where} "
-        f"ORDER BY date ASC, id ASC",
+        f"{_MOVEMENT_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredCashMovement(
-            id=r["id"], account_id=r["account_id"],
-            date=date.fromisoformat(r["date"]), kind=r["kind"],
-            ccy=Currency(r["ccy"]), amount=from_db(r["amount"]), note=r["note"],
-            acq_home_amount=(None if r["acq_home_amount"] is None
-                             else from_db(r["acq_home_amount"])),
-            corporate_action_id=(None if r["corporate_action_id"] is None
-                                 else int(r["corporate_action_id"])),
-            rebate_period=r["rebate_period"],
-        )
-        for r in rows
-    ]
+    return [_movement_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``cash_movements`` (R10-a) — see ``_FX_SELECT``.
+_MOVEMENT_SELECT = ("SELECT id, account_id, date, kind, ccy, amount, note, acq_home_amount, "
+                    "corporate_action_id, rebate_period FROM cash_movements")
+
+
+def _movement_row(r: sqlite3.Row) -> StoredCashMovement:
+    return StoredCashMovement(
+        id=r["id"], account_id=r["account_id"],
+        date=date.fromisoformat(r["date"]), kind=r["kind"],
+        ccy=Currency(r["ccy"]), amount=from_db(r["amount"]), note=r["note"],
+        acq_home_amount=(None if r["acq_home_amount"] is None
+                         else from_db(r["acq_home_amount"])),
+        corporate_action_id=(None if r["corporate_action_id"] is None
+                             else int(r["corporate_action_id"])),
+        rebate_period=r["rebate_period"],
+    )
 
 
 def get_cash_movement(
     conn: sqlite3.Connection, move_id: int
 ) -> StoredCashMovement | None:
-    for m in list_cash_movements(conn):
-        if m.id == move_id:
-            return m
-    return None
+    """Return one cash_movements row by id, or None — one ``WHERE id=?`` row (R10-a), as
+    :func:`get_fx_conversion`."""
+    r = conn.execute(f"{_MOVEMENT_SELECT} WHERE id=?", (move_id,)).fetchone()
+    return None if r is None else _movement_row(r)
 
 
 def update_cash_movement(
