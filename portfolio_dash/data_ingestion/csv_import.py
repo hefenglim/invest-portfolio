@@ -20,6 +20,7 @@ from decimal import Decimal, InvalidOperation
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_column
 from portfolio_dash.data_ingestion.fees import (
+    ETF_FLAG_UNKNOWN_MESSAGE,
     FeeComputationError,
     compute_fees,
     etf_flag_issue_applies,
@@ -357,8 +358,7 @@ def txn_preview_row(
                 # single-row form, nor a noisier one).
                 issues.append(Issue(
                     kind="etf_flag_unknown", needs_confirm=True,
-                    message="無法判定是否為 ETF，賣出稅率待確認"
-                            "（暫以現股稅率試算，請至標的管理設定）"))
+                    message=ETF_FLAG_UNKNOWN_MESSAGE))
             if fee is None:
                 fee = fr.fee
             if tax is None:

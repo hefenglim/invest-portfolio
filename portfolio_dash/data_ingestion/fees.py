@@ -84,6 +84,13 @@ def resolve_etf_flag(
     return input_flag, True
 
 
+#: The ``etf_flag_unknown`` finding's sentence — ONE spelling for every door that computes a
+#: fee: the manual door, the CSV door and the ledger 更正 door (CR-08). A third copy is how
+#: one door's wording drifts from the others while the condition stays identical.
+ETF_FLAG_UNKNOWN_MESSAGE = ("無法判定是否為 ETF，賣出稅率待確認"
+                            "（暫以現股稅率試算，請至標的管理設定）")
+
+
 def etf_flag_issue_applies(rules: FeeRuleSet, side: Side, unknown: bool) -> bool:
     """Is the unresolved ETF flag actually CHANGING the tax on this trade?
 

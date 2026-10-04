@@ -71,7 +71,13 @@ from portfolio_dash.api.routers.cash import (
 from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
-from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fees import (
+    ETF_FLAG_UNKNOWN_MESSAGE,
+    FeeComputationError,
+    compute_fees,
+    etf_flag_issue_applies,
+    resolve_etf_flag,
+)
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import load_action_index, shares_through
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
@@ -510,12 +516,22 @@ class TxEditBody(BaseModel):
     short_sale: bool | None = None
 
 
+class _EditFees(NamedTuple):
+    """What a transaction edit persists for its fee/tax, and what it must disclose about it."""
+
+    fee: Decimal
+    tax: Decimal
+    snapshot: dict[str, str] | None
+    #: Findings the fee computation itself raises — today only ``etf_flag_unknown`` (CR-08).
+    issues: list[Issue]
+
+
 def _recompute_edit_fees(
     conn: sqlite3.Connection,
     body: TxEditBody,
     existing: StoredTransaction,
     daytrade: bool,
-) -> tuple[Decimal, Decimal, dict[str, str] | None] | JSONResponse:
+) -> _EditFees | JSONResponse:
     """Resolve the fee/tax + snapshot to persist for a transaction edit (audit M6).
 
     Recomputes from the new account's rule set when a core field changed and the user
@@ -525,6 +541,17 @@ def _recompute_edit_fees(
     ``daytrade`` is the effective flag (preserved-or-changed); a change to it is a core
     change (it governs the TW sell-side tax rate) and it is fed into ``compute_fees`` so a
     recompute reproduces the day-trade rate instead of silently reverting to 現股 (MED-1).
+
+    **The ETF flag is resolved exactly as the entry doors resolve it** (CR-08, AI-D40):
+    ``fees.resolve_etf_flag`` reads the registry's THREE states, and when the flag is
+    unanswered a recompute (a) raises ``etf_flag_unknown`` wherever
+    ``fees.etf_flag_issue_applies`` says it moves the tax — the manual and CSV doors' finding,
+    same sentence — and (b) stamps ``snapshot["etf_flag"] = "unknown"``. This door passed
+    ``is_etf=inst.is_etf`` and did neither, so a TW sell edited on an unanswered instrument was
+    taxed at the 現股 rate with no finding and a snapshot that read as a fact — "an unknown
+    rate is disclosed, never defaulted in silence" (``markets-and-fees.md``). The number is
+    unchanged (the entry doors compute with ``False`` too); what changes is that it is said.
+    No recompute → nothing was assumed → nothing to say.
     """
     side = parse_side(body.side)
     core_changed = (
@@ -538,9 +565,14 @@ def _recompute_edit_fees(
     )
     fee, tax = body.fee, body.tax
     snapshot: dict[str, str] | None = None
+    issues: list[Issue] = []
     recompute = core_changed and not (body.fee_overridden and body.tax_overridden)
     if recompute:
         inst = get_instrument(conn, body.symbol)
+        # The entry doors' ONE definition (registry-authoritative, three-state). An edit has no
+        # per-trade ETF input, so the input flag is the unanswered default — exactly what an
+        # unregistered symbol resolves to at the manual door.
+        is_etf, etf_unknown = resolve_etf_flag(inst, False)
         if inst is not None:
             # Batch B: (account, market)-bound fee rule set; single-market -> account scalar.
             fee_rule_set: str | None = fee_rule_for(conn, body.account_id, inst.market)
@@ -558,13 +590,17 @@ def _recompute_edit_fees(
             try:
                 fr = compute_fees(
                     rules, side, body.shares, body.price,
-                    is_etf=inst.is_etf if inst is not None else False,
-                    daytrade=daytrade, stamp_fx=stamp_fx,
+                    is_etf=is_etf, daytrade=daytrade, stamp_fx=stamp_fx,
                 )
             except FeeComputationError as exc:
                 return JSONResponse(status_code=400, content=error_body(
                     "validation_error", str(exc), field="shares"))
+            if etf_flag_issue_applies(rules, side, etf_unknown):
+                issues.append(Issue(kind="etf_flag_unknown", needs_confirm=True,
+                                    message=ETF_FLAG_UNKNOWN_MESSAGE))
             snapshot = dict(fr.snapshot)
+            if etf_unknown:
+                snapshot["etf_flag"] = "unknown"   # the manual / CSV doors' provenance mark
             if not body.fee_overridden:
                 fee = fr.fee
             if not body.tax_overridden:
@@ -573,7 +609,7 @@ def _recompute_edit_fees(
         base = snapshot if snapshot is not None else dict(existing.fee_rule_snapshot or {})
         base["override"] = "true"
         snapshot = base
-    return fee, tax, snapshot
+    return _EditFees(fee, tax, snapshot, issues)
 
 
 @router.put("/ledgers/transactions/{txn_id}")
@@ -619,7 +655,7 @@ def edit_transaction(
     resolved = _recompute_edit_fees(conn, body, existing, effective_daytrade)
     if isinstance(resolved, JSONResponse):
         return resolved
-    fee, tax, snapshot = resolved
+    fee, tax, snapshot, fee_issues = resolved
     side = parse_side(body.side)
     edited = existing.model_copy(update={
         "account_id": body.account_id, "symbol": body.symbol,
@@ -636,7 +672,7 @@ def edit_transaction(
                  quantity=edited.quantity, price=edited.price, trade_date=edited.trade_date,
                  fee=fee, tax=tax, daytrade=edited.daytrade, short_sale=edited.short_sale,
                  note=edited.note),
-        today=now.date(), replacing=existing)
+        today=now.date(), replacing=existing) + fee_issues   # CR-08: the fee seam's own finding
     hard = [i for i in findings if not i.needs_confirm]
     if hard:
         return JSONResponse(status_code=400, content=error_body(
