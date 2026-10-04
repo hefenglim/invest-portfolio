@@ -123,6 +123,11 @@ class _Position:
     # something, and this position is about to be dropped by the holdings loop (zero shares —
     # audit F-47 case 2, where a flag is discarded with its carrier). The successor is the
     # position the owner still holds and the only one they will look at.
+    #
+    # It describes the position's CURRENT life, so whatever puts the position back in play —
+    # a trade, an opening, or an action that lands shares on it (a reverse EXCHANGE) — clears
+    # it (`_reopen`, CR-06). Left standing, a reopened ticker refused every later dividend as
+    # 「已換股」 and `_follow_exchange_chain` flagged the position the owner no longer holds.
     vacated_to: str | None = None
     # M1-03 / D21 (owner-approved 2026-08-09, grill Q9; implemented 2026-09-06). WHERE this
     # position's dividend portion came from, when a SPINOFF carved it in. §4.3 scales both
@@ -159,6 +164,26 @@ def _clear_payback_provenance(pos: _Position) -> None:
     pos.payback_from = None
     pos.payback_carried = _ZERO
     pos.payback_own = _ZERO
+
+
+def _reopen(pos: _Position) -> None:
+    """CR-06: an event is moving shares on *pos*, so it is no longer an EXCHANGE-vacated ticker.
+
+    E24 (D32) refuses a dividend on a position an EXCHANGE moved away, keyed on
+    ``vacated_to`` — and that marker was set by the EXCHANGE and never cleared. A later buy or
+    opening on the old ticker, or a reverse EXCHANGE back onto it, reopens the position, yet
+    every later dividend on it was still refused: ``UnbookableLedgerError`` on the strict path
+    (重算 / tax package / 試算), and on the dashboard the payout fell out of cost basis and
+    XIRR while ``_follow_exchange_chain`` hung the 待釐清 flag on the position the owner no
+    longer holds. E24's two harms — income on a dead ticker, a $0-cost resurrection nothing
+    will ever price — are both about a ticker with no live position, which this one now has.
+
+    Called by every event that moves this position's shares: an opening, any non-zero trade
+    (a sell from zero is a 賣超 and carries its own sticky flag), and an EXCHANGE / SPINOFF
+    that lands shares on it as the destination. Never by a dividend: a refused one does not
+    reach the share-adding branch, and a booked one already found the position live.
+    """
+    pos.vacated_to = None
 
 
 class _SkipAction(Exception):  # noqa: N818 - control flow, not an error surfaced to a caller
@@ -317,6 +342,9 @@ def _apply_action(
         else:
             dest = positions.setdefault(dst_key, _Position(quote_ccy(action.to_symbol)))
 
+        # CR-06: shares are about to land on the destination, so it is live from here on —
+        # including a reverse EXCHANGE back onto a ticker an earlier one vacated.
+        _reopen(dest)
         carried_shares = apply_ratio(source.shares, action)
         if action.kind is CorporateActionKind.EXCHANGE:
             # §4.2. The whole position moves. If Q already holds shares the two merge by
@@ -531,6 +559,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                 assert isinstance(ev, OpeningInventory)
                 key = (ev.account_id, ev.symbol)
                 pos = positions.setdefault(key, _Position(quote_ccy(ev.symbol)))
+                _reopen(pos)                                  # CR-06
                 pos.shares += ev.shares
                 pos.original_total += ev.original_cost_total
                 pos.adjusted_total += ev.original_cost_total
@@ -608,6 +637,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     continue
                 key = (ev.account_id, ev.symbol)
                 pos = positions.setdefault(key, _Position(ccy))
+                _reopen(pos)                                  # CR-06
                 if ev.side is Side.BUY:
                     # A buy COVERS an open declared short before it adds to the long lot. The
                     # cover settles at THIS buy's all-in per-share cost and the leftover shares

@@ -317,8 +317,11 @@ _SPEC_4_4_FIELDS = (
     # tests/portfolio/test_qa06_revived_by_dividend.py, one replay test per action kind.
     "revived_by_dividend",
     # E24 (D32), 2026-08-11 — added only after §4.4 gained its row, which is what this
-    # assertion is for. Transfer rule: written by EXCHANGE (`P.vacated_to := to_symbol`),
-    # untouched by SPLIT and SPINOFF. Pinned by tests/portfolio/test_dividend_after_exchange.py.
+    # assertion is for. Transfer rule: written by EXCHANGE (`P.vacated_to := to_symbol`) and
+    # CLEARED on the destination by EXCHANGE and SPINOFF (`Q.vacated_to := None` — shares land
+    # on Q, so Q is live; CR-06), untouched by SPLIT. Also cleared by any trade or opening on
+    # the position. Pinned by tests/portfolio/test_dividend_after_exchange.py and
+    # tests/portfolio/test_cr06_reopened_position_books_its_dividends.py.
     "vacated_to",
     # M1-03 / D21, 2026-09-06 — whose dividends a SPINOFF child's payback ratio is built on.
     # Transfer rule: SPINOFF writes the CHILD (`Q.payback_from := P` if unset;
