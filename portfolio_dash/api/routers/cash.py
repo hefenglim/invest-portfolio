@@ -78,6 +78,7 @@ from portfolio_dash.portfolio.cash import (
     running_low,
 )
 from portfolio_dash.pricing.store import get_fx, get_fx_on
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_dip import Dip, caused_dip
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
@@ -774,6 +775,38 @@ def add_movement(
     return {"id": move_id}
 
 
+def _linked_rebate_move_refusal(
+    existing: StoredCashMovement, body: MovementBody
+) -> JSONResponse | None:
+    """CR-10: a credit LINKED to a rebate month keeps its account — the account is half of
+    the link.
+
+    DEF-009 freed date / kind / amount / note by moving the inbox's "already credited" key off
+    those fields onto ``(account_id, rebate_period)`` (``api/rebates._confirmed_months``). The
+    account half of that key stayed editable here, so moving the credit to another account
+    re-opened the original account's month as pending, and confirming it again credited the
+    same refund twice — the F2d/F12 double credit the link exists to prevent (measured:
+    PUT → 200, the month back in the inbox, a second confirm → 200).
+
+    Refused rather than re-keyed, because the move is ambiguous and both readings have a
+    correct path that is not this one: if the refund belonged to ANOTHER account's trades,
+    that account's month is still pending and must be confirmed there (and this row deleted,
+    which re-opens this month honestly); if the money merely landed in another pool, the
+    link's month is still this account's. The cash page's dialog never offers the change —
+    it always posts the row's own account — so no owner flow is narrowed; only the API hole
+    closes. An unlinked row (hand-entered, CSV) has no link, and its account stays a field.
+    """
+    if existing.rebate_period is None or body.account_id == existing.account_id:
+        return None
+    return JSONResponse(status_code=400, content=error_body(
+        "validation_error",
+        f"此筆是 {account_ref(existing.account_id)} {existing.rebate_period} 月份的折讓款入帳，"
+        "帳戶不能改：入帳月份是跟著這個帳戶記錄的，改到其他帳戶會讓該月份重新出現在"
+        "待確認退款，再確認一次就會重複入帳。若這筆退款其實屬於另一個帳戶，請刪除此筆，"
+        "再到「待確認退款」確認那個帳戶的月份；日期、類型、金額、備註仍可直接修改",
+        field="account_id"))
+
+
 @router.put("/cash/movements/{move_id}")
 def edit_movement(
     move_id: int,
@@ -795,6 +828,8 @@ def edit_movement(
     # edited row's own prior effect is stripped from the pool first (self-exclusion), so
     # raising a withdrawal within the headroom its OLD amount already consumed is not
     # falsely blocked — and no ack overrides what the withdrawal itself consumes (FU-D43a).
+    if (moved := _linked_rebate_move_refusal(existing, body)) is not None:
+        return moved
     inp = _movement_input(body)
     ledgers = load_cash_ledgers(conn)   # CR-12: ONE read for the hard and the ack-able guard
     bad = movement_guard(conn, body, exclude_id=move_id, ledgers=ledgers)
