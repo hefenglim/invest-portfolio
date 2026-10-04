@@ -1100,6 +1100,13 @@ def reconcile_split_prices(conn: sqlite3.Connection, symbols: Iterable[str]) -> 
     return reconcile_price_basis(conn, wanted)
 
 
+class AckedWarning(BaseModel):
+    """One warning as the form showed it when the owner ticked 「我已確認上述警告」 (CR-07)."""
+
+    code: str
+    text: str
+
+
 class ActionBody(BaseModel):
     """One corporate action as the form posts it.
 
@@ -1119,6 +1126,12 @@ class ActionBody(BaseModel):
     cost_carry: str | None = None
     note: str | None = None
     ack_warnings: bool = False
+    #: CR-07 — the warnings ``ack_warnings`` acknowledges, as ``(code, text)`` pairs exactly as
+    #: the preview rendered them. When present the acknowledgement is BOUND to them: a save
+    #: whose current warnings include one that is not in this list is refused
+    #: (``warnings_changed``) — see :func:`_ack_refusal`. ``None`` keeps the bare flag's
+    #: meaning for callers that never saw a preview (scripts, the stress audit, older tabs).
+    acked_warnings: list[AckedWarning] | None = None
     #: DEF-049 — PUT only: the owner confirmed the 賣超 the edited ledger would create (the
     #: replay guard's ack, the same flag the transaction edit carries). Ignored by the POST.
     ack_oversell: bool = False
@@ -1446,6 +1459,47 @@ def _unblocked_sells(
                           "date": t.trade_date.isoformat(),
                           "shares": decimal_str(t.quantity)})
     return found
+
+
+def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | None:
+    """The soft-warning gate of both corporate-action write doors (POST and PUT).
+
+    Unchanged rule first: soft findings block until ``ack_warnings`` (422
+    ``warnings_unacknowledged``, the 賣超 tier).
+
+    CR-07 — an acknowledgement is bound to the warnings it acknowledged. The form used to
+    keep its 「我已確認上述警告」 tick across ANY later edit of symbol, ratio, date or cost
+    carry, re-render the next preview pre-ticked and post ``ack_warnings=true`` for warnings
+    the owner never saw; a slow preview could also overwrite a newer one. The form now resets
+    the tick whenever the warnings change and sequences its previews, and it sends what it
+    showed (``acked_warnings``). This is the half no browser fix can provide: a save whose
+    CURRENT warnings — recomputed here from the body actually posted — include any
+    ``(code, text)`` the owner did not acknowledge is refused with ``warnings_changed`` and the
+    current list, so a race between typing and the save, or a stale tab, cannot acknowledge a
+    sentence it never displayed. The key is the code AND the sentence, the convention the
+    ledger edit dialog already uses (「a re-worded warning is a warning not yet read」): the
+    sentences carry the ratio, date and symbols, so a changed input is a changed warning.
+
+    ``acked_warnings is None`` keeps the bare flag for API callers that never rendered a
+    preview — they acknowledge whatever the server finds, exactly as before.
+    """
+    if not issues:
+        return None
+    wires = _issue_wires(issues)
+    if not body.ack_warnings:
+        return JSONResponse(status_code=422, content=error_body(
+            "warnings_unacknowledged", issues[0].message, issues=wires))
+    if body.acked_warnings is None:
+        return None
+    acked = {(w.code, w.text) for w in body.acked_warnings}
+    unseen = [w for w in wires if (str(w["code"]), str(w["text"])) not in acked]
+    if not unseen:
+        return None
+    return JSONResponse(status_code=422, content=error_body(
+        "warnings_changed",
+        "警告內容已經改變（例如改了代號、比例或日期），你確認的不是目前這幾則警告；"
+        f"請重新閱讀並勾選後再存檔。未確認的警告：{unseen[0]['text']}",
+        issues=wires))
 
 
 def _issue_wires(issues: Sequence[Issue]) -> list[dict[str, Any]]:
@@ -1900,9 +1954,8 @@ def add_corporate_action(
     if hard:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", hard[0].message, issues=_issue_wires(issues)))
-    if issues and not body.ack_warnings:
-        return JSONResponse(status_code=422, content=error_body(
-            "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
+    if (unacked := _ack_refusal(issues, body)) is not None:   # CR-07: bound to what was seen
+        return unacked
     # DEF-020: the reorganisation fee is validated BEFORE anything is written, through the
     # same guard the cash door runs, so a refused fee refuses the whole request — no action
     # without its fee, no fee without its action.
@@ -2240,9 +2293,8 @@ def edit_corporate_action(
     if hard:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", hard[0].message, issues=_issue_wires(issues)))
-    if issues and not body.ack_warnings:
-        return JSONResponse(status_code=422, content=error_body(
-            "warnings_unacknowledged", issues[0].message, issues=_issue_wires(issues)))
+    if (unacked := _ack_refusal(issues, body)) is not None:   # CR-07: bound to what was seen
+        return unacked
     # DEF-049: the edited ledger is REPLAYED like every other correction door — a new date,
     # ratio, symbol or kind can strand a later sell (a 10:1 split edited to 2:1 under a sell
     # of 5,000) or a dividend. Same decision as the transaction edit; the ack rides the body.

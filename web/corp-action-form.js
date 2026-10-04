@@ -182,6 +182,20 @@
 
   /* ------------------------------------------------------------------ the preview */
 
+  /* CR-07: what 「我已確認上述警告」 acknowledges — the preview's non-error findings, as the
+     (code, text) pairs the owner read. The key is the code AND the sentence (the ledger edit
+     dialog's rule: a re-worded warning is a warning not yet read); the sentences carry the
+     ratio, date and symbols, so a changed input is a changed warning. The same list is sent
+     with the save (`acked_warnings`) and the server refuses `warnings_changed` when the
+     warnings it recomputes from the posted body are not all in it. */
+  function ackItems(p) {
+    return ((p && p.issues) || []).filter((i) => i.sev !== 'error')
+      .map((i) => ({ code: i.code, text: i.text }));
+  }
+  function ackKey(p) {
+    return ackItems(p).map((i) => i.code + '\n' + i.text).sort().join('\u0000');
+  }
+
   /* Renders the conservation law, made visible (§6.7). Three jobs: show the resulting
      share count so the owner can check it against the statement, show the average
      correcting itself, and state 成本不變 explicitly. Every value is a server string. */
@@ -353,8 +367,13 @@
       const lab = el('label');
       const cb = el('input');
       cb.type = 'checkbox';
-      cb.checked = !!state.acked;
-      cb.addEventListener('change', () => { state.acked = cb.checked; state.sync(); });
+      /* CR-07: the tick belongs to THESE warnings (ackKey), never to the form — see open(). */
+      const key = ackKey(data);
+      cb.checked = state.ackedFor !== null && state.ackedFor === key;
+      cb.addEventListener('change', () => {
+        state.ackedFor = cb.checked ? key : null;
+        state.sync();
+      });
       lab.appendChild(cb);
       lab.appendChild(el('span', null, ' 我已確認上述警告，仍要登錄這筆公司行動。'));
       wrap.appendChild(lab);
@@ -474,8 +493,14 @@
   function open(prefill) {
     prefill = prefill || {};
     if (!api()) return;
-    const state = { kind: prefill.kind || 'SPLIT', acked: false, preview: null,
-                    sync: () => {} };
+    /* CR-07: `ackedFor` is the ackKey of the warnings the owner ticked, or null. It used to be
+       a bare `acked` boolean that only applyFix reset, so a tick survived any later edit of
+       symbol, ratio, date or cost carry: the next preview rendered pre-ticked and the save
+       posted ack_warnings=true for warnings nobody read. `pending` is true from the first
+       keystroke until the preview of those values is on screen — 儲存 waits for it (the
+       ledger dialog's rule), so a save can never outrun the warning its own values raise. */
+    const state = { kind: prefill.kind || 'SPLIT', ackedFor: null, pending: false,
+                    preview: null, sync: () => {} };
 
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal ca-modal');
@@ -684,9 +709,12 @@
       return !(state.kind !== 'SPLIT' && !b.to_symbol);
     }
 
+    function acked(p) {
+      return !!p && state.ackedFor !== null && state.ackedFor === ackKey(p);
+    }
     function syncSave() {
       const p = state.preview;
-      save.disabled = !p || p.blocking || (p.needs_confirm && !state.acked);
+      save.disabled = !p || state.pending || p.blocking || (p.needs_confirm && !acked(p));
     }
     state.sync = syncSave;
 
@@ -713,7 +741,7 @@
       /* The acknowledgement belonged to the EXCHANGE's warning. The converted row is a
          different row and must earn its own — and the save button stays disabled until
          its preview comes back, not merely until the click is over. */
-      state.acked = false;
+      state.ackedFor = null;
       state.preview = null;
       syncSave();
       applyKind();
@@ -725,10 +753,19 @@
     let timer = null;
     function schedule() {
       if (timer) clearTimeout(timer);
+      /* CR-07: from this keystroke the preview on screen no longer describes the fields. */
+      state.pending = true;
+      syncSave();
       timer = setTimeout(runPreview, 250);
     }
+    /* CR-07: previews can land out of order (a slow response for an older value after a fast
+       one for the newer value), so each request takes a ticket and only the LATEST may paint
+       — the ledger dialog's `previewSeq` / the input page's AbortController, here. */
+    let previewSeq = 0;
     async function runPreview() {
+      const seq = ++previewSeq;
       if (!ready()) {
+        state.pending = false;
         state.preview = null;
         renderPreview(previewHost, null, state);
         if (!ratioErr.hidden) {
@@ -738,10 +775,14 @@
         syncSave();
         return;
       }
+      state.pending = true;
+      syncSave();
+      let data;
       try {
-        state.preview = await api().post(
-          '/api/ledgers/corporate-actions/preview', requestBody());
+        data = await api().post('/api/ledgers/corporate-actions/preview', requestBody());
       } catch (err) {
+        if (seq !== previewSeq) return;
+        state.pending = false;
         state.preview = null;
         previewHost.replaceChildren();
         previewHost.appendChild(el('div', 'ca-issue ca-issue-error',
@@ -749,7 +790,13 @@
         syncSave();
         return;
       }
-      renderPreview(previewHost, state.preview, state);
+      if (seq !== previewSeq) return;          // a newer preview owns the screen
+      state.pending = false;
+      state.preview = data;
+      /* CR-07: different warnings, a fresh question — even when the values come back to ones
+         ticked earlier, the owner ticks again for what is on screen now. */
+      if (state.ackedFor !== ackKey(data)) state.ackedFor = null;
+      renderPreview(previewHost, data, state);
       syncSave();
     }
 
@@ -760,7 +807,10 @@
 
     save.addEventListener('click', async () => {
       const body = requestBody();
-      body.ack_warnings = !!state.acked;
+      body.ack_warnings = acked(state.preview);
+      /* CR-07: the acknowledgement names what it acknowledged; the server refuses the save
+         (`warnings_changed`) if the warnings of THIS body are not all among them. */
+      if (body.ack_warnings) body.acked_warnings = ackItems(state.preview);
       const restatePreview = state.restateWanted ? state.preview : null;
       const restore = window.pdBusy ? window.pdBusy(save, '寫入中…') : () => {};
       try {
@@ -781,6 +831,11 @@
       } catch (err) {
         restore();
         if (window.toast) window.toast((err && err.message) || '登錄失敗', 'fail', err && err.code);
+        if (err && err.code === 'warnings_changed') {
+          /* The server found warnings the tick did not cover: show them and ask again. */
+          state.ackedFor = null;
+          runPreview();
+        }
       }
     });
 
