@@ -5,7 +5,8 @@ Before: a 422 ``warnings_unacknowledged`` opened 「公司行動警告確認」 
 FIRST warning only — and 「我了解，仍要儲存」 re-sent a bare ``ack_warnings=true``, so the owner
 acknowledged every other warning without reading it, and the server could not tell. Now the
 dialog lists every warning the server found and the re-send names the (code, text) pairs it
-showed (``acked_warnings``), which ``_ack_refusal`` checks against what it recomputes.
+showed (``acked_keys`` — the server's own per-issue ``ack_key``, R1), which ``_ack_refusal``
+checks against what it recomputes.
 
 The warning used is D44's (a target band set before the split), as in the form's CR-07 flow.
 """
@@ -67,8 +68,7 @@ def test_cr07_edit_dialog_lists_every_warning_and_acks_what_it_showed(
         modal.locator("button", has_text="儲存").click()
     refused = first.value.json()["error"]
     assert first.value.status == 422 and refused["code"] == "warnings_unacknowledged", refused
-    shown = [{"code": i["code"], "text": i["text"]}
-             for i in refused.get("issues") or [] if i["sev"] != "error"]
+    shown = [i for i in refused.get("issues") or [] if i["sev"] != "error"]
     assert shown, refused
 
     warn = page.locator(".modal-backdrop .modal", has_text="公司行動警告確認")
@@ -81,7 +81,8 @@ def test_cr07_edit_dialog_lists_every_warning_and_acks_what_it_showed(
     assert second.value.status == 200, second.value.text()
     assert len(sent) == 2, sent
     assert sent[1]["ack_warnings"] is True
-    assert sent[1].get("acked_warnings") == shown, sent[1]   # pre-fix: absent (bare flag)
+    # pre-fix: absent (a bare flag); R1: the server's own keys, not the resolved text
+    assert sent[1].get("acked_keys") == [i["ack_key"] for i in shown], sent[1]
     page.wait_for_function(
         "async () => (await window.pdApi.get('/api/ledgers/corporate-actions'))"
         ".rows[0].ratio_to === '4'")

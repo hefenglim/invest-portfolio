@@ -5,9 +5,11 @@ The form (``web/corp-action-form.js``) kept its 「我已確認上述警告」 t
 of symbol, ratio, date or cost carry, re-rendered the next preview pre-ticked and saved with
 ``ack_warnings=true`` — for warnings the owner never read. The browser half is fixed in the
 form (and pinned by ``tests/e2e/test_cr07_corporate_action_ack_flow.py``); this is the half a
-browser fix cannot give: the form now sends the ``(code, text)`` pairs it showed
-(``acked_warnings``), and a save whose CURRENT warnings — recomputed from the body actually
-posted — include one the owner did not acknowledge is refused with ``warnings_changed``.
+browser fix cannot give: the form now sends the ``ack_key`` of each warning it showed
+(``acked_keys``; R1 replaced the ``(code, text)`` pairs, which an account-naming warning could
+never match once ``web/api.js`` had resolved its account token), and a save whose CURRENT
+warnings — recomputed from the body actually posted — include one the owner did not
+acknowledge is refused with ``warnings_changed``.
 
 The warning used is D44's (a target band set before the split): its sentence carries the
 ratio, so a 1→2 split and a 1→4 split are two different warnings.
@@ -57,13 +59,13 @@ def _split(ratio_to: str, **over: Any) -> dict[str, Any]:
     return body
 
 
-def _shown(client: TestClient, body: dict[str, Any]) -> list[dict[str, str]]:
-    """What the form rendered for *body* and would send as ``acked_warnings``."""
+def _shown(client: TestClient, body: dict[str, Any]) -> list[str]:
+    """The ``ack_key`` of every warning the form rendered for *body* — what it sends back as
+    ``acked_keys`` (R1: an opaque per-issue key, not the text the browser holds)."""
     p = client.post("/api/ledgers/corporate-actions/preview", json=body)
     assert p.status_code == 200, p.json()
     assert p.json()["needs_confirm"] is True and p.json()["blocking"] is False
-    return [{"code": i["code"], "text": i["text"]} for i in p.json()["issues"]
-            if i["sev"] != "error"]
+    return [str(i["ack_key"]) for i in p.json()["issues"] if i["sev"] != "error"]
 
 
 def test_an_ack_for_other_warnings_is_refused_and_the_current_ones_are_named(
@@ -75,17 +77,16 @@ def test_an_ack_for_other_warnings_is_refused_and_the_current_ones_are_named(
     assert seen_for_2 != seen_for_4                      # the sentence carries the ratio
 
     stale = client.post("/api/ledgers/corporate-actions", json={
-        **_split("4"), "ack_warnings": True, "acked_warnings": seen_for_2})
+        **_split("4"), "ack_warnings": True, "acked_keys": seen_for_2})
     assert stale.status_code == 422, stale.json()
     err = stale.json()["error"]
     assert err["code"] == "warnings_changed"
-    assert [(i["code"], i["text"]) for i in err["issues"]] == [
-        (w["code"], w["text"]) for w in seen_for_4]
+    assert [i["ack_key"] for i in err["issues"]] == seen_for_4
     rows = client.get("/api/ledgers/corporate-actions").json()["rows"]
     assert rows == []                                    # nothing written
 
     ok = client.post("/api/ledgers/corporate-actions", json={
-        **_split("4"), "ack_warnings": True, "acked_warnings": seen_for_4})
+        **_split("4"), "ack_warnings": True, "acked_keys": seen_for_4})
     assert ok.status_code == 201, ok.json()
 
 
@@ -94,7 +95,7 @@ def test_an_empty_ack_list_acknowledges_nothing(
 ) -> None:
     client = dashboard_client_factory(_seed)
     r = client.post("/api/ledgers/corporate-actions", json={
-        **_split("2"), "ack_warnings": True, "acked_warnings": []})
+        **_split("2"), "ack_warnings": True, "acked_keys": []})
     assert r.status_code == 422 and r.json()["error"]["code"] == "warnings_changed"
 
 
@@ -118,11 +119,11 @@ def test_the_edit_door_binds_the_same_way(
     client = dashboard_client_factory(_seed)
     seen_for_2 = _shown(client, _split("2"))
     made = client.post("/api/ledgers/corporate-actions", json={
-        **_split("2"), "ack_warnings": True, "acked_warnings": seen_for_2})
+        **_split("2"), "ack_warnings": True, "acked_keys": seen_for_2})
     assert made.status_code == 201, made.json()
     action_id = made.json()["ids"][0]
     stale = client.put(f"/api/ledgers/corporate-actions/{action_id}", json={
-        **_split("4"), "ack_warnings": True, "acked_warnings": seen_for_2})
+        **_split("4"), "ack_warnings": True, "acked_keys": seen_for_2})
     assert stale.status_code == 422, stale.json()
     assert stale.json()["error"]["code"] == "warnings_changed"
     rows = client.get("/api/ledgers/corporate-actions").json()["rows"]

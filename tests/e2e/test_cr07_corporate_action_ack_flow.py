@@ -85,10 +85,9 @@ def test_cr07_a_tick_does_not_survive_a_change_of_the_warnings(
     assert saved.value.status == 201, saved.value.text()
     posted = json.loads(sent.value.post_data or "{}")
     assert posted["ack_warnings"] is True
-    acked = {(w["code"], w["text"]) for w in posted["acked_warnings"]}
-    shown = {(i["code"], i["text"]) for i in prev2.value.json()["issues"]
-             if i["sev"] != "error"}
-    assert acked == shown                                     # exactly what was on screen
+    # R1: the server's own per-issue keys, echoed verbatim — exactly what was on screen.
+    shown = {i["ack_key"] for i in prev2.value.json()["issues"] if i["sev"] != "error"}
+    assert set(posted["acked_keys"]) == shown
 
 
 @pytest.mark.e2e

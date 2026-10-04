@@ -27,6 +27,7 @@ and all three are audit findings, not preferences:
   the CRUD commits — both ends on a symbol-change edit.
 """
 
+import hashlib
 import sqlite3
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime
@@ -1109,13 +1110,6 @@ def reconcile_split_prices(conn: sqlite3.Connection, symbols: Iterable[str]) -> 
     return reconcile_price_basis(conn, wanted)
 
 
-class AckedWarning(BaseModel):
-    """One warning as the form showed it when the owner ticked 「我已確認上述警告」 (CR-07)."""
-
-    code: str
-    text: str
-
-
 class ActionBody(BaseModel):
     """One corporate action as the form posts it.
 
@@ -1135,12 +1129,12 @@ class ActionBody(BaseModel):
     cost_carry: str | None = None
     note: str | None = None
     ack_warnings: bool = False
-    #: CR-07 — the warnings ``ack_warnings`` acknowledges, as ``(code, text)`` pairs exactly as
-    #: the preview rendered them. When present the acknowledgement is BOUND to them: a save
-    #: whose current warnings include one that is not in this list is refused
+    #: CR-07 / R1 — the warnings ``ack_warnings`` acknowledges, as the ``ack_key`` of each issue
+    #: the client showed, sent back VERBATIM. When present the acknowledgement is BOUND to them:
+    #: a save whose current warnings include one whose key is not in this list is refused
     #: (``warnings_changed``) — see :func:`_ack_refusal`. ``None`` keeps the bare flag's
-    #: meaning for callers that never saw a preview (scripts, the stress audit, older tabs).
-    acked_warnings: list[AckedWarning] | None = None
+    #: meaning for callers that never saw a preview (scripts, the stress audit).
+    acked_keys: list[str] | None = None
     #: DEF-049 — PUT only: the owner confirmed the 賣超 the edited ledger would create (the
     #: replay guard's ack, the same flag the transaction edit carries). Ignored by the POST.
     ack_oversell: bool = False
@@ -1481,16 +1475,25 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
     carry, re-render the next preview pre-ticked and post ``ack_warnings=true`` for warnings
     the owner never saw; a slow preview could also overwrite a newer one. The form now resets
     the tick whenever the warnings change and sequences its previews, and it sends what it
-    showed (``acked_warnings``). This is the half no browser fix can provide: a save whose
-    CURRENT warnings — recomputed here from the body actually posted — include any
-    ``(code, text)`` the owner did not acknowledge is refused with ``warnings_changed`` and the
-    current list, so a race between typing and the save, or a stale tab, cannot acknowledge a
-    sentence it never displayed. The key is the code AND the sentence, the convention the
-    ledger edit dialog already uses (「a re-worded warning is a warning not yet read」): the
-    sentences carry the ratio, date and symbols, so a changed input is a changed warning.
+    showed (``acked_keys``). This is the half no browser fix can provide: a save whose
+    CURRENT warnings — recomputed here from the body actually posted — include one the owner
+    did not acknowledge is refused with ``warnings_changed`` and the current list, so a race
+    between typing and the save, or a stale tab, cannot acknowledge a sentence it never
+    displayed.
 
-    ``acked_warnings is None`` keeps the bare flag for API callers that never rendered a
-    preview — they acknowledge whatever the server finds, exactly as before.
+    R1 — what is compared is each issue's ``ack_key`` (:func:`_ack_key`), never its text. The
+    first version compared ``(code, text)``, and the text the browser holds is NOT the text the
+    server wrote: ``web/api.js`` ``_resolveRefs`` rewrites every ``{account:<id>}`` token into
+    the account's display name in every response, and the backend cannot reproduce that name
+    (``web/names.js`` is the one naming authority). So any warning that names an account —
+    ``opening_on_action_date``, 「{account:tw_broker} 在 …」 — could never be acknowledged and
+    the owner looped on ``warnings_changed``. The key is a hash of the code and the RAW
+    sentence: the resolver only touches strings containing ``{account:``, which a hex key never
+    does, and the key still changes whenever the sentence does (the sentences carry the ratio,
+    date and symbols, so a changed input is a changed warning).
+
+    ``acked_keys is None`` keeps the bare flag for API callers that never rendered a preview —
+    they acknowledge whatever the server finds, exactly as before.
     """
     if not issues:
         return None
@@ -1498,10 +1501,10 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
     if not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", issues[0].message, issues=wires))
-    if body.acked_warnings is None:
+    if body.acked_keys is None:
         return None
-    acked = {(w.code, w.text) for w in body.acked_warnings}
-    unseen = [w for w in wires if (str(w["code"]), str(w["text"])) not in acked]
+    acked = set(body.acked_keys)
+    unseen = [w for w in wires if w["ack_key"] not in acked]
     if not unseen:
         return None
     return JSONResponse(status_code=422, content=error_body(
@@ -1511,8 +1514,23 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
         issues=wires))
 
 
+def _ack_key(code: str, text: str) -> str:
+    """R1: the opaque identity of one finding, for binding an acknowledgement to it.
+
+    A hash of the code and the server's RAW sentence (``{account:<id>}`` tokens and all), in
+    lowercase hex — so ``web/api.js``'s token resolver, which rewrites only strings containing
+    ``{account:``, can never alter it on the way to the browser and back. Same sentence, same
+    key; any change to the sentence, a new key. Not a secret and not a security boundary:
+    it is an identity, so a 64-bit prefix is plenty for the handful of findings one action has.
+    """
+    return hashlib.sha256(f"{code}\x00{text}".encode()).hexdigest()[:16]
+
+
 def _issue_wires(issues: Sequence[Issue]) -> list[dict[str, Any]]:
-    """Issue wires, de-duplicated by (code, text) — N accounts repeat the same finding."""
+    """Issue wires, de-duplicated by (code, text) — N accounts repeat the same finding.
+
+    Each wire carries ``ack_key`` (R1, :func:`_ack_key`): what a client echoes back in
+    ``acked_keys`` to acknowledge exactly the warnings it displayed."""
     seen: set[tuple[str, str]] = set()
     unique: list[dict[str, Any]] = []
     for i in issues:
@@ -1520,6 +1538,7 @@ def _issue_wires(issues: Sequence[Issue]) -> list[dict[str, Any]]:
         key = (str(wire["code"]), str(wire["text"]))
         if key not in seen:
             seen.add(key)
+            wire["ack_key"] = _ack_key(*key)
             unique.append(wire)
     return unique
 

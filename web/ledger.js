@@ -1044,22 +1044,33 @@
       /* DEF-049: the edit is REPLAYED server-side like every other correction — a 422
          `oversell` (a later sell the old ratio/date covered) opens the shared ackConfirm;
          確認 sets the ack in the BODY (like ack_warnings) and re-sends. */
+      /* ONE error handler for the first save AND every re-send (R2): a re-send after 我了解
+         can itself be refused — `warnings_changed` (the warnings moved under the dialog) or
+         `oversell` (the replay, which runs after the warnings gate) — and each answer must
+         reopen its own question. The re-send used to carry `replayAck` alone, which knows only
+         ACK_CODES, so a `warnings_changed` there was merely toasted and the owner was left with
+         no way to read the new warnings short of reopening the row. `prog` is set on a re-send
+         (runMutation), absent on the first save (saveFromModal): it decides what the dialog
+         closes first — the progress toast, or the edit modal. */
+      const onErr = (err, prog) => replayAck(err, prog)
+        || warnAck(err, prog ? prog.drop : ui.dismiss);
       const replayAck = (err, prog) => ackConfirm(err, '儲存', (param) => {
         body[param] = true;
-        runMutation('編輯', put, replayAck);
+        runMutation('編輯', put, onErr);
       }, prog ? prog.drop : ui.dismiss);
-      await saveFromModal(ui, '編輯', put, (err) => {
-        if (replayAck(err)) return true;
+      /* CR-07 / R1 (the form's twin): the dialog lists EVERY warning the server found — it
+         showed only the first, so 確認 acknowledged sentences nobody read — and the re-send
+         names them by the server's own keys (window.pdActionAckKeys, corp-action-form.js: the
+         ONE helper both doors use), so the server refuses `warnings_changed` if what it
+         recomputes is not what the owner read. Keys, not text: the text here is api.js's
+         RESOLVED copy, which an account-naming warning never matches (R1). */
+      function warnAck(err, before) {
         if (!(err && err.status === 422 && (err.code === 'warnings_unacknowledged'
           || err.code === 'warnings_changed'))) return false;
-        ui.dismiss();
-        /* CR-07 (the form's twin, corp-action-form.js ackItems): the dialog lists EVERY
-           warning the server found — it showed only the first, so 確認 acknowledged sentences
-           nobody read — and the save names the (code, text) pairs it showed, so the server
-           refuses `warnings_changed` if what it recomputes is not what the owner read. */
-        const items = (err.issues || []).filter((i) => i.sev !== 'error')
-          .map((i) => ({ code: i.code, text: i.text }));
-        const texts = items.length ? items.map((i) => i.text) : [err.message];
+        before();
+        const shown = (err.issues || []).filter((i) => i.sev !== 'error');
+        const keys = window.pdActionAckKeys(err.issues);
+        const texts = shown.length ? shown.map((i) => i.text) : [err.message];
         const lead = err.code === 'warnings_changed' ? '警告內容已經改變，請重新閱讀：' : '';
         window.confirmDialog({
           title: '公司行動警告確認',
@@ -1070,12 +1081,13 @@
           confirmLabel: '我了解，仍要儲存', danger: true,
           onConfirm: () => {
             body.ack_warnings = true;
-            if (items.length) body.acked_warnings = items;
-            runMutation('編輯', put, replayAck);
+            if (keys.length) body.acked_keys = keys; else delete body.acked_keys;
+            runMutation('編輯', put, onErr);
           },
         });
         return true;
-      });
+      }
+      await saveFromModal(ui, '編輯', put, (err) => onErr(err));
     });
   }
 

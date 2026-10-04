@@ -182,18 +182,28 @@
 
   /* ------------------------------------------------------------------ the preview */
 
-  /* CR-07: what 「我已確認上述警告」 acknowledges — the preview's non-error findings, as the
-     (code, text) pairs the owner read. The key is the code AND the sentence (the ledger edit
-     dialog's rule: a re-worded warning is a warning not yet read); the sentences carry the
-     ratio, date and symbols, so a changed input is a changed warning. The same list is sent
-     with the save (`acked_warnings`) and the server refuses `warnings_changed` when the
-     warnings it recomputes from the posted body are not all in it. */
-  function ackItems(p) {
-    return ((p && p.issues) || []).filter((i) => i.sev !== 'error')
-      .map((i) => ({ code: i.code, text: i.text }));
+  /* CR-07 / R1: what 「我已確認上述警告」 acknowledges — the `ack_key` of every non-error
+     finding on screen. The SERVER computes each key from the code and its raw sentence
+     (ledgers.py `_ack_key`); this file never builds one. R1: the first version keyed on the
+     (code, text) the browser held, but api.js `_resolveRefs` has already turned every
+     `{account:<id>}` token into a display name by then, so an account-naming warning could
+     never match the server's sentence and the save looped on `warnings_changed`. A hex key
+     carries no token, so the resolver leaves it alone, and it still changes whenever the
+     sentence does (the sentences carry the ratio, date and symbols).
+
+     ONE helper for both doors that acknowledge corporate-action warnings — this form and the
+     公司行動 ledger tab's edit dialog (ledger.js editAction), which calls it as
+     window.pdActionAckKeys; trades.html loads this file before ledger.js
+     (tests/contract/test_r12_action_ack_keys_one_helper.py). The list is what the save sends
+     as `acked_keys`; the server refuses `warnings_changed` when the warnings it recomputes
+     from the posted body are not all among them. */
+  function ackKeys(issues) {
+    return (issues || []).filter((i) => i.sev !== 'error').map((i) => String(i.ack_key));
   }
+  window.pdActionAckKeys = ackKeys;
+  /* The identity of a preview's warning set, for the tick (order-free). */
   function ackKey(p) {
-    return ackItems(p).map((i) => i.code + '\n' + i.text).sort().join('\u0000');
+    return ackKeys(p && p.issues).slice().sort().join(',');
   }
 
   /* Renders the conservation law, made visible (§6.7). Three jobs: show the resulting
@@ -808,9 +818,10 @@
     save.addEventListener('click', async () => {
       const body = requestBody();
       body.ack_warnings = acked(state.preview);
-      /* CR-07: the acknowledgement names what it acknowledged; the server refuses the save
-         (`warnings_changed`) if the warnings of THIS body are not all among them. */
-      if (body.ack_warnings) body.acked_warnings = ackItems(state.preview);
+      /* CR-07 / R1: the acknowledgement names what it acknowledged, by the server's own keys;
+         the server refuses the save (`warnings_changed`) if the warnings of THIS body are not
+         all among them. */
+      if (body.ack_warnings) body.acked_keys = ackKeys(state.preview.issues);
       const restatePreview = state.restateWanted ? state.preview : null;
       const restore = window.pdBusy ? window.pdBusy(save, '寫入中…') : () => {};
       try {
