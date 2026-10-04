@@ -9,6 +9,102 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Pre-merge code review fixes (CR-01..CR-14, 2026-10-04).** An xhigh code review of
+`feat/corporate-actions` before the merge into `main` found 14 issues (five reproduced by probe);
+three parallel fixers (A: data correctness, B: rules and edges, C: efficiency) fixed them, each
+with a test that fails on the code before the fix. A final review of the merged tree then found
+12 more (R1..R12, incl. one regression of the CR-07 fix), fixed in the same round.
+
+- **CR-01 / CR-11 — a 賣超 that nets back to exactly zero is still a 賣超.** `build_book` dropped
+  every 0-share position together with its `ever_oversold` fact, so deleting the first buy of
+  buy 1,000 → sell 1,000 → buy 1,000 answered 200 with no question and the holding and its
+  +100,000 realized row vanished with no flag anywhere. The book now records every 賣超 position
+  before the zero-share skip (`Book.oversold_positions`, `results.OversoldPosition`), and
+  `replay_guard._oversold_shares` reads it: row delete / edit, batch undo, corporate-action
+  delete / edit all ask; the XIRR / B gate names the position (「部位已歸零」), the trend marks
+  the days incomplete, the drawer names the cause, the E22 preview sees it.
+- **CR-02 — a dividend with no position is refused at the door and never 500s the dashboard.**
+  `validate_dividend` gains a hard `dividend_without_position` (no opening, trade or
+  EXCHANGE / SPINOFF into the symbol in that account by the dividend's EFFECTIVE date;
+  `holdings.position_exists_by`) on the CSV, manual, AI (same-paste buys count), preview and edit
+  doors; an inbox item for such a position is not confirmable. A stored one raises a typed
+  `UnbookableLedgerError` on the strict path and on the dashboard path is skipped, recorded in
+  `Book.orphan_dividends` + `refused_dividends`, and named (XIRR / B withheld). A DRIP / STOCK row
+  with no share count answers 422 naming the row instead of a bare `ValueError` → 500. A payout
+  after a full close still books as realized income (H2).
+- **CR-03 — a correction door replays the order the ledger will have.** The would-be lists
+  replaced the edited row in place, so an edit that moved a row's date replayed a different
+  same-day order than the stored ledger (ids, DEF-012): a back-dated buy moved onto its sell's day
+  passed with no question and the sell then booked first (sticky 賣超, 500 shares on a 500,000
+  basis). `replay_guard._to_models` sorts every would-be list with `store.*_order_key`, each the
+  Python twin of its `list_*` ORDER BY (pinned by a test).
+- **CR-04 — editing a 期初 never rewrites its original cost.** The dialog sent the server's own
+  28-digit average and the door stored `avg × shares` (a date-only edit stored
+  99999.99999999999999999999999). The dialog now edits 原始總成本; the door takes `total` or
+  keeps the stored one and refuses `avg` (400, zh).
+- **CR-05 — every share counter dates a 配股 by its ex-date** (the holdings walker, the naive
+  sum, `_later_event_dates`), so the sell guard agrees with the replay between the ex-date and
+  the payment date.
+- **CR-06 — a reopened ticker is live again.** `vacated_to` (set by an EXCHANGE) is cleared when
+  a trade, an opening or an EXCHANGE / SPINOFF lands shares on the position, so its dividends book
+  and the 待釐清 flag follows the live position.
+- **CR-07 — a corporate-action warning acknowledgement is bound to the warnings it read.** The
+  form resets the tick whenever the warnings change, sequences its previews, disables 儲存 while
+  one is pending and sends `acked_warnings`; the server refuses `warnings_changed` when the
+  warnings it recomputes from the posted body are not all acknowledged. The ledger tab's EDIT
+  dialog lists every warning (it showed the first) and acknowledges what it showed.
+- **CR-08 — the ledger 更正 door discloses an unknown ETF flag** (`etf_flag_unknown`, snapshot
+  `etf_flag=unknown`) like the manual and CSV doors; the sentence has one spelling
+  (`fees.ETF_FLAG_UNKNOWN_MESSAGE`).
+- **CR-09 — a dividend correction owns its ex-date.** The dialog shows and edits 除息日 (blank =
+  clear); an ex-date after the payment date is refused on every door; a kept ex-date across a
+  symbol change, or a 配股's type / payment-date change, asks first (`ex_date_carried_over`).
+- **CR-10 — a linked 折讓款 credit keeps its account** (400 on an account change): moving it
+  reopened the original month in the inbox and a second confirm credited the refund twice.
+- **CR-12 — the cash and FX correction doors read the pool ledgers once per request**
+  (`load_cash_ledgers` snapshot shared by the hard and the ack-able guard): golden ledger, FX edit
+  17 → 6 full-table SELECTs (cross-account 27 → 6), movement edit 13 → 6; answers unchanged.
+- **CR-13 — one copy of the scoped dip rule** (`cash._pool_dip`, called by the batch undo and the
+  corporate-action delete).
+- **CR-14 — a derived cross-rate row is written only when it changed.** Still derived over the
+  whole history (pre-M1 provider rows and seed series sit on dates no run touches), but unchanged
+  days keep their row and `fetched_at`: a one-day refresh on 30 days writes 3 rows, not 33; a
+  repeat run writes 0. `pricing/store.stored_rate_text` owns the stored-rate TEXT.
+
+Final-review follow-ups (R1..R12, same round):
+
+- **R1 / R12 — a warning acknowledgement echoes the server's opaque key, never the text.**
+  `web/api.js` rewrites every `{account:<id>}` token into the account's name in every response,
+  so the CR-07 text binding could never match a warning that names an account (an opening on
+  the action date → `warnings_changed` forever, on the form and the edit dialog). Each issue wire
+  now carries `ack_key` (sha256 of code + raw sentence, 16 hex) and clients send `acked_keys`
+  (replacing `acked_warnings`); a bare `ack_warnings` keeps its meaning for API callers. One
+  helper builds the list for both doors (`window.pdActionAckKeys`).
+- **R2 —** the ledger edit dialog reopens 「公司行動警告確認」 when its confirmed re-send is answered
+  `warnings_changed`, instead of only toasting it.
+- **R3 —** re-validating an edited AI dividend draft also sends the paste's trade drafts, so a
+  same-paste buy still counts as its position (CR-02 had turned it into a hard
+  `dividend_without_position`); editing a trade draft re-judges the dividends.
+- **R4 —** the manual-entry preview withholds position math on a 賣超 netted back to zero
+  (`Book.oversold_positions`), exactly as on a held one.
+- **R5 / R9 —** correction doors compare stranded dividends per ROW, so a legacy orphan on the
+  same (account, symbol) no longer masks a new one; the unreplayable-ledger fallback uses the
+  replay's own rule (`LedgerBundle.position_opened_by`, the bundle twin of
+  `holdings.position_exists_by`: effective date, EXCHANGE / SPINOFF destinations count).
+- **R6 —** 股利總覽 counts only dividends the book booked; ones refused for no position, an open
+  short or an exchanged-away ticker are excluded, as from 總報酬 and XIRR.
+- **R7 —** clearing 原始總成本 in the 期初 edit dialog keeps the stored original cost (the key is
+  omitted; the door also reads a blank as not stated).
+- **R8 —** the drawer no longer calls a symbol whose only rows are refused reinvest dividends
+  「部位已結清」, and its red footer names the cause.
+- **R10 —** every replay guard reads each ledger once per call (batch undo: trades / dividends /
+  instruments 3 → 1); `get_fx_conversion` / `get_cash_movement` fetch one row by id; the
+  movement doors read the account registry once.
+- **R11 —** one helper formats the capped XIRR-reason lists (no output change).
+- **The dividend inbox confirm runs `validate_dividend`** (an event paid before its ex-date is not
+  confirmable, and says why), and **the drawer's 交易明細 lists a 配股 at its ex-date**, where the
+  replay books it.
+
 **Pre-prod R13 fixes (the verifier's full rerun on 830056c, 2026-10-01; owner rulings 1C /
 2B / 3A / 4A).** R13 found three defects and two specification questions; the owner ruled the
 two in chat.

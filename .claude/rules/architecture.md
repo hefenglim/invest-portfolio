@@ -83,6 +83,16 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   legs ± trade settlements + cash dividends with a credits-before-debits ordering rule, so
   re-deriving it makes `data_ingestion` a second owner of the balance definition) and **leaving the
   guard in `api/`** (legal, but then the bulk door ships a weaker guard than the single-row form).
+  **Read once, hand the snapshot to every guard** (CR-12 / CR-13 / R10, 2026-10-04): a door that
+  runs more than one cash guard over the same pools loads the pool ledgers once
+  (`api/routers/cash.py::load_cash_ledgers`) and passes that snapshot to each — `bind_cash_pool`
+  for the hard probe, `_pool_dip` for the ack-able check; the scoped `caused_dip` comparison has
+  ONE home, `_pool_dip`, which `api/replay_guard.py` reaches for the batch undo and the
+  corporate-action delete. A replay guard reads the stored ledgers once per call
+  (`replay_guard._read_ledgers`) and builds its before, its after and any cash snapshot from that
+  read; a by-id store lookup asks `WHERE id=?`, it never lists the table. Measured before: one
+  cross-account FX edit issued 27 full-table SELECTs; a batch undo read the trades 3 times.
+  `tests/contract/test_cr12_cash_guards_read_the_ledgers_once.py` pins the ceilings.
 - **`data_ingestion → portfolio`: exactly four imports are authorised** (recorded 2026-08-12, in
   D39's form, after the edge was found undocumented). `data_ingestion/validate.py` and
   `data_ingestion/corporate_action_import.py` may import `portfolio.cost_basis.build_book` and
@@ -189,6 +199,13 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   The few safe inline sites are reviewed entries in
   `tests/contract/test_def077_state_colour_is_a_class.py`; a colour a user sees is tested with
   `getComputedStyle`, never `element.style`.
+  **An acknowledgement of server warnings echoes the server's per-issue `ack_key`, never the
+  displayed text** (CR-07 / R1, 2026-10-04): `api.js` rewrites every `{account:<id>}` token in
+  every response, so the text the browser holds is not the text the server wrote, and a
+  text-bound ack of an account-naming warning could never match. The corporate-action doors
+  send `acked_keys` (one helper, `window.pdActionAckKeys`), reset the tick whenever the warnings
+  change, and the server refuses `warnings_changed` when its recomputed warnings are not all
+  acknowledged.
 - **scheduler/** — APScheduler job definitions only. Triggers pricing refresh, insight,
   alert, digest and backup runs. Holds no business logic itself. **A job that can finish
   without raising yet lose part of its work returns a `JobOutcome`** (DEF-067, 2026-09-26):

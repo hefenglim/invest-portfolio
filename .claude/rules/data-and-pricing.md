@@ -24,7 +24,14 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   2026-09-16, demo audit M1 option (b)).** `USD/TWD` and `USD/MYR` are the two pairs with a
   liquid direct market and are fetched; `MYR/TWD` is `USD/TWD ÷ USD/MYR`, written by
   `pricing/cross.py` right after every FX write (latest refresh and history backfill alike,
-  over the whole stored history) with `source = "derived:USD"`. Measured before the rule: the
+  derived over the whole stored history) with `source = "derived:USD"`. A day's row is WRITTEN
+  only when it differs from the derivation of its legs — compared on the TEXT the write seam
+  would store (`pricing/store.stored_rate_text`) and on the source: a day whose leg the run
+  wrote or changed, a gap, or a row another writer left (a pre-M1 provider row, a seed's fixed
+  series, a hand edit). An unchanged day keeps its row and its `fetched_at`, and a repeat run
+  writes nothing (CR-14, 2026-10-04: every FX write had re-upserted and restamped ~1,800 rows,
+  three quote jobs a day). Do not narrow the derivation to "the dates this run touched": the
+  foreign rows sit on dates no run touches. Measured before the rule: the
   three independently fetched rates, all dated 2026-09-15 and none stale, disagreed by
   +0.0690% (USD/MYR × MYR/TWD = 31.856972 vs USD/TWD 31.834999), and a 4,000 MYR spot
   conversion moved the report-currency total by 40.88 TWD with no ledger change — the
@@ -47,7 +54,10 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   stored row and the used rate would differ — two truths).
 - **Average cost** — never stored as an authoritative rounded value. Store
   `total_cost` + `shares`; compute `average = total_cost / shares` on read
-  (see `domain-ledger.md`).
+  (see `domain-ledger.md`). A correction never derives a total from an average: the 期初 edit
+  door takes `total` or keeps the stored one, and refuses `avg` (CR-04, 2026-10-04 — the dialog
+  sent the server's own 28-digit quotient back and a date-only edit stored
+  99999.99999999999999999999999 for 100000).
 
 ### The stored price basis — as-traded, in two columns (2026-08-10, owner D30)
 
@@ -163,7 +173,11 @@ Canonical tables (names indicative; finalize in the spec phase):
   number that does not match the money that actually left the account, which is the wrong kind
   of correct.
 - `dividends` — account, instrument, date, type (cash / stock / DRIP), gross,
-  withholding, net, reinvest shares + price (see dividend models in `domain-ledger.md`).
+  withholding, net, reinvest shares + price (see dividend models in `domain-ledger.md`), and
+  `ex_date` (≤ `date`, refused otherwise on every door). Every door that writes a dividend runs
+  `validate_dividend` — the inbox confirm included — and the correction door edits `ex_date`
+  (absent = keep, null = clear; a kept ex-date across a symbol change or a 配股's type / pay-date
+  change asks first) (CR-09, 2026-10-04).
 - `fx_conversions` — account, date, from_ccy, from_amount, to_ccy, to_amount (Q12).
 - `opening_inventory` — account, instrument, shares, original avg cost, original cost
   total, **build date** (not a trade flow, but feeds XIRR).

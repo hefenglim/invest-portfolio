@@ -39,7 +39,10 @@ the structures below are the schema; exact rates are filled/verified at setup.
   SPINOFF child (`register.py::spinoff_child_draft`, NEW-21 2026-09-06) — and the fee engine
   meeting `unknown` **on a TW SELL** computes with `False` but raises a soft issue
   `etf_flag_unknown`「無法判定是否為 ETF，賣出稅率待確認」(`fees.py::resolve_etf_flag` returns the
-  `(is_etf, unknown)` pair). A BUY carries no TW tax, so it stays silent. This is the same red
+  `(is_etf, unknown)` pair) — on EVERY door that computes a fee, the ledger 更正 door included
+  (CR-08, 2026-10-04: it passed `inst.is_etf` straight through, so an edited sell was taxed at
+  現股 0.3% with no finding and no `etf_flag=unknown` in its snapshot; the sentence now has one
+  spelling, `fees.ETF_FLAG_UNKNOWN_MESSAGE`). A BUY carries no TW tax, so it stays silent. This is the same red
   line as "a stale price is labelled, never guessed": **an unknown rate is disclosed, never
   defaulted in silence.** Existing rows were migrated in as `etf_flag_unknown=0` (KNOWN) and are
   never rewritten — only future auto-registrations land unknown.
@@ -64,6 +67,10 @@ the structures below are the schema; exact rates are filled/verified at setup.
   **FORECAST-ONLY** — it NEVER enters cost basis, P&L, or `compute_fees`; it is surfaced
   as a preview hint + a pending-confirmation inbox item, booked as a cash credit only when
   the owner confirms the actual refund (`rebate_rate` lives in config for the forecaster).
+  The booked credit's `rebate_period` + ACCOUNT are its inbox link: DEF-009 made the row's date,
+  kind, amount and note editable, but not its account (CR-10, 2026-10-04 — moving it reopened
+  the original account's month and a second confirm credited the refund twice). To book it
+  elsewhere, delete the row and confirm the other account's month.
 - ⚠ **`discount` and `rebate_rate` express the SAME broker benefit two different ways** —
   charge less now, or charge full and refund later. Setting `discount < 1` **and**
   `rebate_rate > 0` applies it twice, and since fees are part of `original_total` that

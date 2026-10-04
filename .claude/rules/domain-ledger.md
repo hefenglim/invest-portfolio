@@ -191,7 +191,11 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   — a file with the sell above its buy is a 賣超 in both the preview and the replay, not a
   clean preview followed by a discarded basis; **(3)** a broker statement listed newest-first
   must be re-ordered chronologically WITHIN the day by its converter, or its ids encode the
-  reverse of what happened; **(4)** the stress-audit oracle keeps its own transcription. Demo
+  reverse of what happened; **(4)** the stress-audit oracle keeps its own transcription;
+  **(5)** every correction door re-sorts its would-be ledger with `store.*_order_key` (each
+  the Python twin of its `list_*` ORDER BY) before replaying it (CR-03, 2026-10-04): an edit
+  replaced its row IN PLACE, so moving a back-dated buy onto its sell's day replayed
+  buy-then-sell in the guard and sell-then-buy after the write — no question, sticky 賣超. Demo
   data is unaffected: the one same-day buy+sell pair on the demo ledger (tw_broker 2603
   2026-07-02) already had the buy's id below the sell's.
 - **Every row counts from its OWN date** (DEF-016 for dividends; widened to trades, openings,
@@ -213,7 +217,11 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   delegates to the same cut) already cut this way. VALIDATION replays (重算, correction-door
   replay guards, corporate-action reachability, the date-aware sell guard, the draft preview
   which replays as of the trade date since DEF-048) keep the WHOLE ledger — they check what
-  will be stored, not what has happened. A ledger row dated after the SERVER's today carries
+  will be stored, not what has happened. The validation SHARE path
+  (`data_ingestion/holdings.py`: the walker, the naive sum, `_later_event_dates`) dates a 配股
+  by the same `effective_date` (CR-05, 2026-10-04 — it used the payment date, so a sale between
+  ex-date and pay date was refused as 賣超 while the replay booked it): one dating rule for every
+  share counter. A ledger row dated after the SERVER's today carries
   `counts_from` and reads 「未來日期：YYYY-MM-DD 起計入」 on EVERY surface that lists it — the
   ledger tabs, the cash page's lists, the 現金收支明細 statement (which also draws the printed
   report's cut line and marks each future running balance 投影, because newest-first puts
@@ -245,7 +253,27 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
 - **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —
-  it is raised on "was ever negative", not on the final sign.
+  it is raised on "was ever negative", not on the final sign. It is recorded on the BOOK
+  (`Book.oversold_positions`, CR-11 2026-10-04), because `build_book` drops a 0-share position
+  from `holdings`: a 賣超 netted back to exactly zero was invisible to every correction door,
+  the XIRR gate and the drawer, and deleting its first buy erased the holding and its realized
+  row with no question. Every reader of "is this position 賣超" reads the book's record, and a
+  preview withholds its position math on such a position exactly as on a held one (R4).
+- **A dividend needs a position that exists by its effective date** (CR-02, 2026-10-04). Every
+  door refuses one without it (`dividend_without_position`: no opening, non-zero trade or
+  EXCHANGE / SPINOFF into the symbol in that account by then); a stored one is refused on the
+  book (`Book.orphan_dividends`, also in `refused_dividends`), named, and withholds XIRR — it is
+  never income and never a ghost holding, and it never answers 500 (it did: `build_dashboard`
+  caught only `ArithmeticError`). A payout after a full close still books as realized income
+  (H2). One rule, two forms: `holdings.position_exists_by` (SQL, the doors) and
+  `LedgerBundle.position_opened_by` (the replay guard's fallback). Correction doors compare
+  stranded dividends per ROW, never per (account, symbol) — a legacy orphan on the key masked a
+  new one (R5) — and 股利總覽 skips every dividend the book refuses (R6), so one payout never
+  gets three answers.
+- **An EXCHANGE's `vacated_to` describes the position's CURRENT life** (CR-06, 2026-10-04). A
+  trade, an opening, or an EXCHANGE / SPINOFF landing shares on a vacated ticker clears it, so
+  a reused ticker's dividends book; while it stays vacated, a dividend on it is still refused
+  (E24) and flagged on the live successor.
 - **A PREVIEW MUST MIRROR THE REPLAY'S BRANCHES, LITERALLY** (audit 2026-08-24, review §1.3).
   Every "what would this trade do" surface — the manual sell preview
   (`api/routers/input_center.py`), the drawer 試算 (`strategy/whatif.py`) — reproduces

@@ -2098,3 +2098,57 @@ name check accepted any two-character leading part, so 「長榮 (2618)」 passe
    edit door next to it inspected one leg: a smaller 換入金額 drained the TO-pool with no
    question (DEF-093, R15). When one door of a row is fixed, read its siblings' guards against
    the same sentence.
+
+## 2026-10-04 — the pre-merge code review: what a closed black-box manual could not see
+
+**Context.** The day after the functional-test workbook closed (120 cases, three-party
+sign-off on d9f1c68), an xhigh code review of `feat/corporate-actions` before the merge into
+`main` found 14 issues (CR-01..CR-14), five reproduced by probe: a 賣超 netted back to zero
+vanished on delete; one dividend CSV row for a never-held symbol took the dashboard to 500; an
+edit that moved a row's date replayed a different same-day order than the ledger would have; a
+期初 edit rewrote the original cost. Three parallel fixers closed them; a final review of the
+merged tree then found 12 more (R1..R12), one of them a regression of a fix.
+
+**Why the manual missed them** (investigated against the workbook's 120 cases and 93 defects):
+(a) cases are one per feature door on a clean path, while all 11 functional findings need a
+specific prior HISTORY plus a correction (edit / delete / undo); (b) every delete / undo case
+deletes a row the tester had just created (B-14 「刪除自建交易」, I-08 after I-07, D-10, J-03),
+which nothing depends on and is therefore always safe — the one time a test deleted a row with
+dependents (DEF-049, found in passing) it found a defect; (c) 2 of 6 ledgers have edit cases
+(trades, cash) — none for 期初, dividends, FX or corporate actions, hence CR-04 / CR-09 had no
+case at all; (d) class scans followed the axis of the reported defect: DEF-042's root-cause
+line IS CR-03's line (`would_be = [edited if t.id == txn_id else t …]`), fixed for the missing
+date warnings while DEF-012 fixed same-day order at the ENTRY doors; DEF-049 made the batch undo
+call the oversell guard without asking whether the guard sees a zero-net position; DEF-061
+unified four type checks, not "what makes `build_book` raise"; DEF-009 freed date / type /
+amount / note while the account was the other half of the inbox link (CR-10); (e) the manual's
+own R13 rule told the tester to use another holding after D-06 had vacated 2884 — routing around
+CR-06; (f) CR-04's symptom is 10⁻²³ — invisible at two decimals.
+
+**And in the fix round.** (g) CR-07 bound a warning acknowledgement to the warning's TEXT; its
+tests used a warning that names no account, and `web/api.js` rewrites every `{account:<id>}`
+token in every response — so any account-naming warning could never be acknowledged (R1, found
+by the final review, not by the fixer's green e2e). (h) The `isolation: "worktree"` agents came
+up on `main` (v0.1.28, 170 commits behind), not on the branch. (i) Merging the fixers' work, A's
+orphan fix re-read the dividends that C had just made a one-read; C's count test caught it.
+(j) I started the full gates while the final review was still running; its findings changed the
+tree and ~1 h of gates had to be re-run.
+
+**Rules.**
+1. **Test a correction door against a history, not a fresh row.** The dangerous inputs are an
+   OLD row with dependents, a date moved across a same-day sibling, a position that nets to
+   zero, a ticker reused after an exchange. A contract matrix (history shape × correction door,
+   asserting "the guard's would-be replay = the replay after the write" and "the dashboard never
+   500s") covers what scripted manual cases cannot.
+2. **A class scan includes every function the defect's line lives in, along every axis.** When a
+   root cause names a line, list the other questions that line answers (order, completeness,
+   dating) and check each.
+3. **Bind a client's acknowledgement to an opaque server key, never to text the client may have
+   rewritten.** Any transport that resolves tokens, localises or trims makes text equality a
+   coin toss; and a fix's test must use data that goes through that transport (an
+   account-naming warning).
+4. **A mutation test proves a fix is load-bearing, not that the guard is complete.** Also ask
+   which inputs the guard never sees.
+5. **Worktree agents: check the base first** (`git log -1`, reset to the target sha, report the
+   merge-base) and re-run every count / contract test of the seams after merging parallel work.
+6. **The final review belongs to the round.** Merge → review → fix → THEN the heavy gates once.
