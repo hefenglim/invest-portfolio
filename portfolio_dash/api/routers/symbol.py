@@ -736,8 +736,15 @@ def symbol_detail(
     for d in received_divs:
         dt = DividendType(d.type)
         if dt in _REINVEST_TYPES and d.reinvest_shares is not None:
-            aev.append((d.date, int(EventPriority.DIVIDEND), {
-                "date": d.date.isoformat(),
+            # Keyed AND labelled by the date the replay books it (round 2 (b), CR-05's class):
+            # a 配股 with an ex-date moves the share count ON the ex-date
+            # (``Dividend.effective_date``), so a sale between the ex-date and the payment date
+            # sells shares it already holds. Keyed by the payment date, the list put that sale
+            # ABOVE the shares it sold — an oversell on screen over a correct book. A DRIP, and
+            # a 配股 with no ex-date, are unchanged: their effective date is the payment date.
+            booked_on = dividend_effective_date(d.type, d.date, d.ex_date)
+            aev.append((booked_on, int(EventPriority.DIVIDEND), {
+                "date": booked_on.isoformat(),
                 "account_id": d.account_id,
                 "account": acct_names.get(d.account_id, d.account_id),
                 "side": "drip" if dt is DividendType.DRIP else "stock",
