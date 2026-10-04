@@ -24,6 +24,7 @@ discipline.
 
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -41,7 +42,9 @@ from portfolio_dash.data_ingestion.fx_import import (
 )
 from portfolio_dash.data_ingestion.store import (
     StoredCashMovement,
+    StoredDividend,
     StoredFxConversion,
+    StoredTransaction,
     delete_cash_movement,
     get_cash_movement,
     insert_cash_movement,
@@ -78,7 +81,7 @@ from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.cash_dip import Dip, caused_dip
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
-from portfolio_dash.shared.models.assets import Account
+from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.ledger import counts_by, pending_from
 from portfolio_dash.shared.wire import decimal_str
 
@@ -123,36 +126,77 @@ def _balances(
     )
 
 
+@dataclass(frozen=True)
+class CashLedgers:
+    """The five ledgers a pool timeline is built from, read ONCE per request (CR-12).
+
+    Exactly :func:`~portfolio.cash.pool_lines`' inputs. A door loads it with
+    :func:`load_cash_ledgers` and hands the SAME snapshot to every guard it runs — the hard
+    pool probe (:func:`bind_cash_pool`) and the ack-able scoped check (:func:`_pool_dip`) —
+    so one FX edit no longer reads the five tables once per pool it asks about: measured on
+    the golden ledger before CR-12, a cross-account FX edit issued 27 full-table SELECTs over
+    these tables and a same-account one 17. Tuples, so a guard cannot alter the snapshot the
+    next guard reads. Safe for the same reason :func:`cash_pool_fn`'s bind-time snapshot is:
+    every door validates before it writes.
+    """
+
+    movements: tuple[StoredCashMovement, ...]
+    fx: tuple[StoredFxConversion, ...]
+    transactions: tuple[StoredTransaction, ...]
+    dividends: tuple[StoredDividend, ...]
+    instruments: dict[str, Instrument]
+
+
+def load_cash_ledgers(conn: sqlite3.Connection) -> CashLedgers:
+    """The ONE read of the five pool ledgers a request makes (CR-12)."""
+    return CashLedgers(
+        movements=tuple(list_cash_movements(conn)),
+        fx=tuple(list_fx_conversions(conn)),
+        transactions=tuple(list_transactions(conn)),
+        dividends=tuple(list_dividends(conn)),
+        instruments={i.symbol: i for i in list_instruments(conn)},
+    )
+
+
 def _pool_dip(
-    conn: sqlite3.Connection,
+    ledgers: CashLedgers,
     account_id: str,
     ccy: Currency,
     *,
-    movements: list[StoredCashMovement] | None = None,
-    fx: list[StoredFxConversion] | None = None,
+    movements: Sequence[StoredCashMovement] | None = None,
+    fx: Sequence[StoredFxConversion] | None = None,
+    transactions: Sequence[StoredTransaction] | None = None,
+    dividends: Sequence[StoredDividend] | None = None,
 ) -> Dip | None:
     """The dip a correction CAUSES in one pool (audit C3, scoped by DEF-092): the first short
     day and the lowest point with its day (DEF-091, owner ruling 2B). ``None`` when the
     change turns no day negative and pushes none below the pool's old lowest point.
 
-    Callers pass the WOULD-BE movement/fx list; the stored ledger is the "before", and an
-    unspecified would-be ledger loads from store. Compared day by day by
-    ``shared/cash_dip.py::caused_dip`` — the rule the import-batch undo already used. Owner
-    ruling A (2026-10-02, the verifier's R14 observation): these doors reported ANY dip in
-    the would-be pool and called it 「此筆會使…」, so deleting a withdrawal from the Schwab TWD
-    pool — which only raises balances — read 「此筆會使…於 2026-01-12 降至 −220,000」, a dip
-    that sat there before and has nothing to do with the row. The timeline is never
-    date-bounded — see ``portfolio/cash.py``.
+    *ledgers* is the "before"; callers pass the WOULD-BE rows of whichever ledgers the change
+    rewrites, and an unspecified one is the snapshot's own. Compared day by day by
+    ``shared/cash_dip.py::caused_dip``. Owner ruling A (2026-10-02, the verifier's R14
+    observation): these doors reported ANY dip in the would-be pool and called it 「此筆會使…」,
+    so deleting a withdrawal from the Schwab TWD pool — which only raises balances — read
+    「此筆會使…於 2026-01-12 降至 −220,000」, a dip that sat there before and has nothing to do
+    with the row. The timeline is never date-bounded — see ``portfolio/cash.py``.
+
+    **The ONE copy of the scoped rule** (CR-13). Every ack-able ``negative_cash`` door calls
+    it: the single-row movement edit / delete and FX edit / delete here, and the import-batch
+    undo and corporate-action delete (``api/replay_guard.py::_pool_refusal``), which is why it
+    takes would-be trades and dividends too — a batch removes those, and their own row doors do
+    not ask this question. It lives here rather than in ``shared/`` (``shared/cash_dip.py`` may
+    not import ``portfolio/``'s :func:`pool_lines`) and is reached from ``replay_guard`` over an
+    edge that already existed (it imports :func:`_negative_response` from here; nothing here
+    imports it, so there is no cycle). Pure: no connection, the snapshot is the input.
     """
-    stored_moves = list_cash_movements(conn)
-    stored_fx = list_fx_conversions(conn)
-    txns = list_transactions(conn)
-    divs = list_dividends(conn)
-    insts = {i.symbol: i for i in list_instruments(conn)}
-    before = pool_lines(account_id, ccy, stored_moves, stored_fx, txns, divs, insts)
+    before = pool_lines(account_id, ccy, ledgers.movements, ledgers.fx,
+                        ledgers.transactions, ledgers.dividends, ledgers.instruments)
     after = pool_lines(account_id, ccy,
-                       movements if movements is not None else stored_moves,
-                       fx if fx is not None else stored_fx, txns, divs, insts)
+                       movements if movements is not None else ledgers.movements,
+                       fx if fx is not None else ledgers.fx,
+                       transactions if transactions is not None else ledgers.transactions,
+                       dividends if dividends is not None else ledgers.dividends,
+                       ledgers.instruments)
     return caused_dip(running_eod(before), running_eod(after))
 
 
@@ -196,12 +240,21 @@ def cash_pool_fn(
     a movement — the protocol's ``include``/``exclude_id`` speak movement rows, and widening
     them would change the guard every movement door shares in order to serve one that is not
     a movement at all.
+
+    A door that runs a SECOND guard over the same pools (the FX and movement edit doors) loads
+    :func:`load_cash_ledgers` itself and binds :func:`bind_cash_pool` over it, so both guards
+    read one snapshot (CR-12).
     """
-    movements = list_cash_movements(conn)
-    fx = [f for f in list_fx_conversions(conn) if f.id != exclude_fx_id]
-    txns = list_transactions(conn)
-    divs = list_dividends(conn)
-    insts = {i.symbol: i for i in list_instruments(conn)}
+    return bind_cash_pool(load_cash_ledgers(conn), exclude_fx_id=exclude_fx_id)
+
+
+def bind_cash_pool(ledgers: CashLedgers, *, exclude_fx_id: int | None = None) -> CashPoolFn:
+    """:func:`cash_pool_fn`'s probe over a snapshot the door already holds (CR-12) — pure."""
+    movements = ledgers.movements
+    fx = [f for f in ledgers.fx if f.id != exclude_fx_id]
+    txns = ledgers.transactions
+    divs = ledgers.dividends
+    insts = ledgers.instruments
 
     def probe(
         account_id: str,
@@ -290,6 +343,7 @@ def fx_change_guard(
     to_ccy: Currency,
     to_amt: Decimal,
     exclude_fx_id: int | None = None,
+    ledgers: CashLedgers | None = None,
 ) -> JSONResponse | None:
     """The 換匯 write guard EVERY door runs; ``None`` when the conversion is acceptable.
 
@@ -308,6 +362,12 @@ def fx_change_guard(
     ``exclude_fx_id`` is the edited row's own id, stripped from the pool snapshot first
     (self-exclusion) so a correction inside the headroom the row already consumes is not
     refused; the guard's other branch is what stops that correction growing past it.
+
+    ``ledgers`` (CR-12): the request's snapshot, when the door runs another guard over the same
+    pools (the edit door's :func:`fx_edit_negative_guard`); ``None`` reads it here, at the
+    point the pool is first needed. A data argument, not a seam — leaving it out costs a
+    second read of the same rows, never a different answer, since no door writes before its
+    guards have run.
     """
     # M5-05: structural, needs no ledger, so it comes first — and it is the same
     # ``fx_amount_issues`` the CSV door runs, so the three doors cannot disagree about size.
@@ -331,7 +391,8 @@ def fx_change_guard(
     balance_issues = fx_balance_issues(
         account=acct, on=on, from_ccy=from_ccy, from_amount=from_amt,
         to_ccy=to_ccy, to_amount=to_amt,
-        pool=cash_pool_fn(conn, exclude_fx_id=exclude_fx_id))
+        pool=bind_cash_pool(ledgers if ledgers is not None else load_cash_ledgers(conn),
+                            exclude_fx_id=exclude_fx_id))
     if balance_issues:
         return JSONResponse(status_code=422, content=error_body(
             "fx_insufficient_balance", balance_issues[0].message, field="from_amt"))
@@ -355,9 +416,10 @@ def fx_delete_guard(
     """
     if ack_negative:
         return None
-    would_be = [f for f in list_fx_conversions(conn) if f.id != existing.id]
+    ledgers = load_cash_ledgers(conn)   # CR-12: one read for both legs
+    would_be = [f for f in ledgers.fx if f.id != existing.id]
     for ccy in (existing.to_ccy, existing.from_ccy):
-        dip = _pool_dip(conn, existing.account_id, ccy, fx=would_be)
+        dip = _pool_dip(ledgers, existing.account_id, ccy, fx=would_be)
         if dip is not None:
             return _negative_response(existing.account_id, ccy, dip)
     return None
@@ -365,7 +427,7 @@ def fx_delete_guard(
 
 def fx_edit_negative_guard(
     conn: sqlite3.Connection, existing: StoredFxConversion, edited: StoredFxConversion,
-    *, ack_negative: bool,
+    *, ack_negative: bool, ledgers: CashLedgers | None = None,
 ) -> JSONResponse | None:
     """The ack-able ``negative_cash`` check for EDITING a conversion; ``None`` when clean.
 
@@ -379,14 +441,18 @@ def fx_edit_negative_guard(
     turns negative, or pushes below the pool's old low). Ack-able, like the delete: this is
     a correction door. The from-pool's hard rule runs first and is unchanged; a from-pool
     that passes it can never show a dip here.
+
+    ``ledgers`` (CR-12): the snapshot :func:`fx_change_guard` already read in this request;
+    every pool is asked of it, so four pools cost one read, not four. ``None`` reads it here.
     """
     if ack_negative:
         return None
-    would_be = [edited if f.id == existing.id else f for f in list_fx_conversions(conn)]
+    snapshot = ledgers if ledgers is not None else load_cash_ledgers(conn)
+    would_be = [edited if f.id == existing.id else f for f in snapshot.fx]
     pools = {(existing.account_id, existing.to_ccy), (existing.account_id, existing.from_ccy),
              (edited.account_id, edited.to_ccy), (edited.account_id, edited.from_ccy)}
     for account_id, ccy in sorted(pools, key=lambda p: (p[0], p[1].value)):
-        dip = _pool_dip(conn, account_id, ccy, fx=would_be)
+        dip = _pool_dip(snapshot, account_id, ccy, fx=would_be)
         if dip is not None:
             return _negative_response(account_id, ccy, dip)
     return None
@@ -653,7 +719,8 @@ def _synthetic_movement(body: MovementBody, kind: str) -> StoredCashMovement:
 
 
 def movement_guard(
-    conn: sqlite3.Connection, body: MovementBody, *, exclude_id: int | None = None
+    conn: sqlite3.Connection, body: MovementBody, *, exclude_id: int | None = None,
+    ledgers: CashLedgers | None = None,
 ) -> JSONResponse | None:
     """Run the shared cash-movement guard for one wire body; ``None`` when it is clean.
 
@@ -665,9 +732,13 @@ def movement_guard(
 
     ``exclude_id`` is the edited row's own id on a PUT (self-exclusion) — see
     :class:`~data_ingestion.validate.CashPoolFn`.
+
+    ``ledgers`` (CR-12): the request's snapshot when the door runs the ack-able check over the
+    same pools afterwards (:func:`edit_movement`); ``None`` reads it here.
     """
+    pool = bind_cash_pool(ledgers) if ledgers is not None else cash_pool_fn(conn)
     return _movement_error(validate_cash_movement(
-        conn, _movement_input(body), pool=cash_pool_fn(conn),
+        conn, _movement_input(body), pool=pool,
         exclude_id=exclude_id, accounts=_accounts(conn)))
 
 
@@ -725,15 +796,16 @@ def edit_movement(
     # raising a withdrawal within the headroom its OLD amount already consumed is not
     # falsely blocked — and no ack overrides what the withdrawal itself consumes (FU-D43a).
     inp = _movement_input(body)
-    bad = movement_guard(conn, body, exclude_id=move_id)
+    ledgers = load_cash_ledgers(conn)   # CR-12: ONE read for the hard and the ack-able guard
+    bad = movement_guard(conn, body, exclude_id=move_id, ledgers=ledgers)
     if bad is not None:
         return bad
     kind = cash_movement_kind(body.kind)
     acq = _resolved_acq(conn, inp)
     if not body.ack_negative:
         edited = _synthetic_movement(body, kind)
-        would_be = [edited if m.id == move_id else m for m in list_cash_movements(conn)]
-        without = [m for m in list_cash_movements(conn) if m.id != move_id]
+        would_be = [edited if m.id == move_id else m for m in ledgers.movements]
+        without = [m for m in ledgers.movements if m.id != move_id]
         # Any pool the edit touches (old or new account/ccy) must stay non-negative.
         for account_id, ccy in {
             (existing.account_id, existing.ccy), (body.account_id, body.ccy)
@@ -743,9 +815,9 @@ def edit_movement(
                 # must never resurface as an ack-able warning. What remains ack-able here
                 # is only the effect of REMOVING the old row (e.g. a deposit edited into
                 # a withdraw stranding later flows) — deposit-side semantics, untouched.
-                dip = _pool_dip(conn, account_id, ccy, movements=without)
+                dip = _pool_dip(ledgers, account_id, ccy, movements=without)
             else:
-                dip = _pool_dip(conn, account_id, ccy, movements=would_be)
+                dip = _pool_dip(ledgers, account_id, ccy, movements=would_be)
             if dip is not None:
                 return _negative_response(account_id, ccy, dip)
     update_cash_movement(
@@ -766,8 +838,9 @@ def remove_movement(
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"紀錄 #{move_id} 不存在"))
     if not ack_negative:
-        would_be = [m for m in list_cash_movements(conn) if m.id != move_id]
-        dip = _pool_dip(conn, existing.account_id, existing.ccy, movements=would_be)
+        ledgers = load_cash_ledgers(conn)
+        would_be = [m for m in ledgers.movements if m.id != move_id]
+        dip = _pool_dip(ledgers, existing.account_id, existing.ccy, movements=would_be)
         if dip is not None:
             return _negative_response(existing.account_id, existing.ccy, dip)
     delete_cash_movement(conn, move_id)

@@ -66,6 +66,7 @@ from portfolio_dash.api.routers.cash import (
     fx_change_guard,
     fx_delete_guard,
     fx_edit_negative_guard,
+    load_cash_ledgers,
 )
 from portfolio_dash.api.wire import issue_wire, parse_side
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
@@ -859,10 +860,12 @@ def edit_fx(
     # ``exclude_fx_id``: the edited row's own prior effect is stripped from the pool first, so
     # a correction WITHIN the headroom the old amounts already consumed is not falsely
     # blocked — the ``exclude_id`` pattern ``edit_movement`` proved on the movement door.
+    # CR-12: both guards below read ONE snapshot of the pool ledgers.
+    ledgers = load_cash_ledgers(conn)
     bad = fx_change_guard(
         conn, account_id=body.account_id, on=body.date, from_ccy=body.from_ccy,
         from_amt=body.from_amt, to_ccy=body.to_ccy, to_amt=body.to_amt,
-        exclude_fx_id=fx_id)
+        exclude_fx_id=fx_id, ledgers=ledgers)
     if bad is not None:
         return bad
     # DEF-093: the guard above reads the FROM-pool only; the money this edit takes out of
@@ -871,7 +874,8 @@ def edit_fx(
     edited = existing.model_copy(update={
         "account_id": body.account_id, "date": body.date, "from_ccy": body.from_ccy,
         "from_amount": body.from_amt, "to_ccy": body.to_ccy, "to_amount": body.to_amt})
-    asked = fx_edit_negative_guard(conn, existing, edited, ack_negative=body.ack_negative)
+    asked = fx_edit_negative_guard(conn, existing, edited, ack_negative=body.ack_negative,
+                                   ledgers=ledgers)
     if asked is not None:
         return asked
     update_fx_conversion(

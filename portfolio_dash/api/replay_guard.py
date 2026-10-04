@@ -27,10 +27,16 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.api.errors import error_body
 
-# The cash doors' own ``negative_cash`` sentence (a sibling router, same layer — the shape
-# ``ledgers.py`` already uses for ``fx_delete_guard``), so the batch undo cannot word the
-# overdraft differently from the 刪除 button beside each of its rows.
-from portfolio_dash.api.routers.cash import _negative_response
+# The cash doors' own ``negative_cash`` sentence and scoped dip rule (a sibling router, same
+# layer — the shape ``ledgers.py`` already uses for ``fx_delete_guard``; ``cash`` imports
+# nothing from here, so no cycle), so the batch undo can neither word the overdraft
+# differently from the 刪除 button beside each of its rows nor decide it differently (CR-13).
+from portfolio_dash.api.routers.cash import (
+    CashLedgers,
+    _negative_response,
+    _pool_dip,
+    load_cash_ledgers,
+)
 from portfolio_dash.data_ingestion.provenance import BatchRows
 from portfolio_dash.data_ingestion.store import (
     StoredCorporateAction,
@@ -40,16 +46,12 @@ from portfolio_dash.data_ingestion.store import (
     list_cash_movements,
     list_corporate_actions,
     list_dividends,
-    list_fx_conversions,
-    list_instruments,
     list_transactions,
     load_ledger_bundle,
 )
-from portfolio_dash.portfolio.cash import pool_lines, running_eod
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.account_ref import account_ref
-from portfolio_dash.shared.cash_dip import caused_dip
 from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
 
@@ -301,12 +303,12 @@ def _batch_refusal(block: _ReplayBlock) -> JSONResponse:
 
 
 def _pool_refusal(
-    conn: sqlite3.Connection,
+    ledgers: CashLedgers,
     *,
     leaving: set[int],
     gone_fx: frozenset[int],
-    would_txs: list[StoredTransaction],
-    would_divs: list[StoredDividend],
+    would_txs: Sequence[StoredTransaction],
+    would_divs: Sequence[StoredDividend],
 ) -> JSONResponse | None:
     """The cash doors' ack-able ``negative_cash`` check, over the pools the leaving cash
     movements (*leaving*) and FX conversions (*gone_fx*) fed — the check
@@ -316,33 +318,30 @@ def _pool_refusal(
     own row doors are not.
 
     ⚠ SCOPED like the replay block above — and, since DEF-092 (owner ruling A, 2026-10-02),
-    like the single-row cash doors, which share the rule (``api/routers/cash.py::_pool_dip``):
-    a pool is refused only when the mutation makes a day negative that was not, or pushes a
-    day below the pool's old lowest point (``shared/cash_dip.py::caused_dip``, compared DAY BY DAY —
-    DEF-090: comparing only the two timelines' lowest points let a new, shallower negative
-    stretch through beside an older, deeper one). A pool that is already short for reasons
-    that have nothing to do with the mutation — the golden ledger's TWD pool sits at −500,000
-    from its first buy, and a 1,000 deposit undone months later funds nothing — must not ask
-    the owner to acknowledge a dip the mutation did not cause (audit H3/H8's rule, applied to
-    cash).
+    like the single-row cash doors: a pool is refused only when the mutation makes a day
+    negative that was not, or pushes a day below the pool's old lowest point, compared DAY BY
+    DAY (DEF-090: comparing only the two timelines' lowest points let a new, shallower
+    negative stretch through beside an older, deeper one). A pool that is already short for
+    reasons that have nothing to do with the mutation — the golden ledger's TWD pool sits at
+    −500,000 from its first buy, and a 1,000 deposit undone months later funds nothing — must
+    not ask the owner to acknowledge a dip the mutation did not cause (audit H3/H8's rule,
+    applied to cash).
+
+    The rule itself is NOT restated here (CR-13): it is ``api/routers/cash.py::_pool_dip`` —
+    the one copy every ack-able cash door calls — asked with this mutation's would-be movements,
+    conversions, trades and dividends. *ledgers* is the request's one read of the pool ledgers
+    (CR-12) and the "before".
     """
-    movements = list_cash_movements(conn)
-    fxs = list_fx_conversions(conn)
-    pools = ({(m.account_id, m.ccy) for m in movements if m.id in leaving}
-             | {(f.account_id, c) for f in fxs if f.id in gone_fx
+    pools = ({(m.account_id, m.ccy) for m in ledgers.movements if m.id in leaving}
+             | {(f.account_id, c) for f in ledgers.fx if f.id in gone_fx
                 for c in (f.to_ccy, f.from_ccy)})
     if not pools:
         return None
-    would_moves = [m for m in movements if m.id not in leaving]
-    would_fx = [f for f in fxs if f.id not in gone_fx]
-    all_txs = list_transactions(conn)
-    all_divs = list_dividends(conn)
-    insts = {i.symbol: i for i in list_instruments(conn)}
+    would_moves = [m for m in ledgers.movements if m.id not in leaving]
+    would_fx = [f for f in ledgers.fx if f.id not in gone_fx]
     for account_id, ccy in sorted(pools, key=lambda p: (p[0], p[1].value)):
-        dip = caused_dip(
-            running_eod(pool_lines(account_id, ccy, movements, fxs, all_txs, all_divs, insts)),
-            running_eod(pool_lines(
-                account_id, ccy, would_moves, would_fx, would_txs, would_divs, insts)))
+        dip = _pool_dip(ledgers, account_id, ccy, movements=would_moves, fx=would_fx,
+                        transactions=would_txs, dividends=would_divs)
         if dip is not None:
             return _negative_response(account_id, ccy, dip)
     return None
@@ -355,12 +354,18 @@ def _batch_cash_refusal(
     would_divs: list[StoredDividend],
 ) -> JSONResponse | None:
     """:func:`_pool_refusal` over the batch's cash / FX rows. A corporate action takes its
-    linked fee with it (DEF-020), so that movement leaves the would-be pool too."""
+    linked fee with it (DEF-020), so that movement leaves the would-be pool too.
+
+    A batch that owns no cash movement, conversion or corporate action can feed no pool, so it
+    reads nothing (CR-12); otherwise the pool ledgers are read once, here."""
     action_ids = rows.of("corporate_actions")
-    leaving = {m.id for m in list_cash_movements(conn)
+    if not (rows.of("cash_movements") or rows.of("fx_conversions") or action_ids):
+        return None
+    ledgers = load_cash_ledgers(conn)
+    leaving = {m.id for m in ledgers.movements
                if m.id in rows.of("cash_movements")
                or (m.corporate_action_id is not None and m.corporate_action_id in action_ids)}
-    return _pool_refusal(conn, leaving=leaving, gone_fx=rows.of("fx_conversions"),
+    return _pool_refusal(ledgers, leaving=leaving, gone_fx=rows.of("fx_conversions"),
                          would_txs=would_txs, would_divs=would_divs)
 
 
@@ -446,7 +451,8 @@ def action_change_guard(
         fees = {m.id for m in list_cash_movements(conn)
                 if m.corporate_action_id is not None and m.corporate_action_id in ids}
         if fees:
-            return _pool_refusal(conn, leaving=fees, gone_fx=frozenset(),
-                                 would_txs=list_transactions(conn),
-                                 would_divs=list_dividends(conn))
+            ledgers = load_cash_ledgers(conn)
+            return _pool_refusal(ledgers, leaving=fees, gone_fx=frozenset(),
+                                 would_txs=ledgers.transactions,
+                                 would_divs=ledgers.dividends)
     return None
