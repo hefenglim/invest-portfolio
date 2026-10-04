@@ -28,11 +28,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from portfolio_dash.data_ingestion.holdings import (
-    load_action_index,
-    position_exists_by,
-    shares_on,
-)
+from portfolio_dash.data_ingestion.holdings import load_action_index, shares_on
 from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import (
     insert_dividend,
@@ -304,21 +300,26 @@ def _validated(conn: sqlite3.Connection, p: PendingDividend) -> PendingDividend:
     :func:`confirm` would write; a HARD finding makes the item non-confirmable with that
     sentence, and since :func:`confirm` recomputes :func:`detect` it cannot be forced.
 
-    An item that is ALREADY non-confirmable keeps its own reason (CR-02's no-position
-    sentence, 缺再投資價) — that is the more specific answer and the one to act on first. A
-    soft finding is appended to the note: confirming the item is the owner's acknowledgement
-    of what the item shows, so what it shows must include it.
+    S11 (round 3): this is also where CR-02's no-position refusal comes from — the
+    validator's ``dividend_without_position``, the one rule and the one sentence. The
+    detection loop kept its own copy (a second ``position_exists_by`` per item, worded
+    differently) and let it REPLACE every other reason, so an item paid before its ex-date and
+    missing a reinvest price named only one of its three problems.
+
+    So the note names EVERY reason, hard ones first: the hard findings, then the item's own
+    note (缺再投資價, 馬股單層淨額入帳), then the soft findings — confirming the item is the
+    owner's acknowledgement of what the item shows, so what it shows must include them. One
+    finding is dropped as a restatement: an item already blocked by its missing reinvest price
+    has no share count, and ``reinvest_shares_required`` would say the same thing as a
+    rebuild failure.
     """
-    if not p.confirmable:
-        return p
     findings = validate_dividend(conn, _row_input(p))
-    hard = [i for i in findings if not i.needs_confirm]
-    if hard:
-        return p.model_copy(update={"confirmable": False, "note": hard[0].message})
-    soft = [i.message for i in findings if not i.info]
-    if soft:
-        return p.model_copy(update={"note": "；".join([*([p.note] if p.note else []), *soft])})
-    return p
+    hard = [i.message for i in findings if not i.needs_confirm
+            and not (not p.confirmable and i.kind == "reinvest_shares_required")]
+    soft = [i.message for i in findings if i.needs_confirm and not i.info]
+    notes = [*hard, *([p.note] if p.note else []), *soft]
+    return p.model_copy(update={"confirmable": p.confirmable and not hard,
+                                "note": "；".join(notes) if notes else None})
 
 
 def detect(
@@ -397,19 +398,11 @@ def detect(
                         account_id, symbol, "cash", ev.ex_date
                     ):
                         gross = ev.cash_amount * held
-                        # CR-02 (2026-10-04): the row is booked on its PAYMENT date, and the
-                        # replay refuses a dividend dated before the account opened the position.
-                        # Holding shares before the ex-date proves the position existed by then,
-                        # so this can only fail on a provider payment date EARLIER than the
-                        # ex-date — but the confirm door writes straight to the ledger, so it
-                        # asks the same question every other dividend door asks, and the item
-                        # says why it cannot be confirmed instead of writing a refused row.
-                        paid_on = ev.pay_date or ev.ex_date
-                        opened = position_exists_by(conn, account_id, symbol, paid_on)
-                        no_position = (
-                            None if opened else
-                            f"付款日 {paid_on.isoformat()} 早於此帳戶在 {symbol} 的第一筆持倉"
-                            "紀錄 — 股利必須對應當時的持倉，無法入帳，請確認日期")
+                        # CR-02's question — does the account hold a position on the day the
+                        # row is booked? — is asked by `_validated`, through the validator every
+                        # dividend door runs (`dividend_without_position`). S11: this loop kept
+                        # its own copy (a second `position_exists_by` per item, in its own
+                        # words), so one rule had two answers to drift apart.
                         if model == "drip_us":
                             wh = gross * _US_WITHHOLDING
                             net = gross - wh
@@ -420,19 +413,16 @@ def detect(
                                 fp, "drip", ev.cash_amount, gross, wh, net,
                                 est_reinvest_price=px,
                                 est_reinvest_shares=(net / px) if px else None,
-                                confirmable=px is not None and opened,
-                                note=(no_position if no_position is not None
-                                      else None if px is not None else
+                                confirmable=px is not None,
+                                note=(None if px is not None else
                                       "缺再投資價（無庫存收盤價）— 請先回補歷史報價再確認"),
                             ))
                         elif model == "cash":
                             out.append(_mk(fp, "net", ev.cash_amount, gross,
-                                           _ZERO, gross, confirmable=opened,
-                                           note=no_position or "馬股單層淨額入帳"))
+                                           _ZERO, gross, note="馬股單層淨額入帳"))
                         else:  # cash_cost_reduction (TW) and any future default
                             out.append(_mk(fp, "cash", ev.cash_amount, gross,
-                                           _ZERO, gross, confirmable=opened,
-                                           note=no_position))
+                                           _ZERO, gross))
 
                 # --- TW stock distribution (配股): separate share-only item ---
                 if (

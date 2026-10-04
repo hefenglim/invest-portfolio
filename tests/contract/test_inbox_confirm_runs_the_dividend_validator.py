@@ -10,7 +10,11 @@ its own payment.
 
 Now ``detect`` asks the validator about the exact row ``confirm`` would write; an item with a
 hard finding is not confirmable and says why (and ``confirm`` recomputes ``detect``, so it
-cannot be forced). Fixer A's no-position refusal (CR-02) keeps its own sentence.
+cannot be forced).
+
+S11 (round 3): the inbox's own copy of the CR-02 no-position check — a second ``position_exists_by``
+call per item with its own wording — is gone; the validator's `dividend_without_position` is
+the one rule and the one sentence, joined with every other hard reason the row carries.
 """
 
 import sqlite3
@@ -21,6 +25,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from portfolio_dash.api import dividend_inbox
 from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.pricing.results import DividendEvent
 from portfolio_dash.pricing.store import upsert_dividend_events
@@ -94,12 +99,11 @@ def test_a_well_dated_event_still_confirms(
     assert r.json()["written"] == 2
 
 
-def test_the_no_position_refusal_keeps_its_own_sentence(
-    api_client: TestClient, golden_db: sqlite3.Connection,
-) -> None:
-    """CR-02 (Fixer A): a payment dated before the account's first row of the symbol is
-    refused with that reason — the validator's date-order sentence does not replace it."""
-    # moomoo_my, not schwab: the golden ledger already holds AAPL at schwab since January.
+def _late_aapl(api_client: TestClient, golden_db: sqlite3.Connection) -> list[dict[str, Any]]:
+    """moomoo_my opens AAPL on 05-05; the provider's event goes ex 05-20 but "pays" 05-01 —
+    before the position existed. (moomoo_my, not schwab: the golden ledger already holds
+    AAPL at schwab since January.) No stored close near 05-01, so the DRIP estimate has no
+    reinvest price either: three reasons on one item."""
     insert_transaction(golden_db, account_id="moomoo_my", symbol="AAPL", side=Side.BUY,
                        quantity=Decimal("5"), price=Decimal("100"), fees=Decimal("0"),
                        tax=Decimal("0"), trade_date=ddate(2026, 5, 5))
@@ -107,7 +111,33 @@ def test_the_no_position_refusal_keeps_its_own_sentence(
         instrument="AAPL", market=Market.US, ex_date=ddate(2026, 5, 20),
         pay_date=ddate(2026, 5, 1), cash_amount=Decimal("0.25"), currency=Currency.USD,
         source="yfinance")], fetched_at=_NOW)
-    rows = [x for x in _rows(api_client)
+    return [x for x in _rows(api_client)
             if x["account_id"] == "moomoo_my" and x["ex_date"] == "2026-05-20"]
-    late = [x for x in rows if "早於此帳戶" in str(x["note"])]
-    assert late and all(x["confirmable"] is False for x in late), rows
+
+
+def test_the_no_position_refusal_is_the_validators_and_names_every_reason(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """S11: the no-position reason now comes from ``validate_dividend``'s
+    ``dividend_without_position`` (the wording legitimately changes from the inbox's own
+    「付款日 … 早於此帳戶在 … 的第一筆持倉紀錄」 to the validator's sentence), and an item that
+    was already blocked by a missing reinvest price still names it — every reason is shown,
+    none replaces another."""
+    rows = _late_aapl(api_client, golden_db)
+    assert len(rows) == 1, rows
+    item = rows[0]
+    note = str(item["note"])
+    assert item["confirmable"] is False
+    assert "沒有任何持倉紀錄" in note          # the validator's CR-02 sentence
+    assert "晚於發放日" in note                # the validator's CR-09 sentence
+    assert "缺再投資價" in note                # the item's own reason, kept
+    assert "早於此帳戶在" not in note          # the bespoke copy is gone
+    assert "必須有股數" not in note            # …and the price reason is not restated as a hard one
+    r = api_client.post("/api/dividend-inbox/confirm",
+                        json={"fingerprints": [item["fingerprint"]]})
+    assert r.json()["written"] == 0
+
+
+def test_the_inbox_keeps_no_copy_of_the_position_rule() -> None:
+    """One rule, one copy: the position question is asked by the validator, once per item."""
+    assert not hasattr(dividend_inbox, "position_exists_by")
