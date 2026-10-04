@@ -51,6 +51,7 @@ from portfolio_dash.shared.corporate_actions import (
 )
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, DividendType, Side
+from portfolio_dash.shared.models.ledger import dividend_effective_date
 
 _ZERO = Decimal("0")
 
@@ -63,6 +64,36 @@ _ZERO = Decimal("0")
 # excluded until somebody classifies it, rather than silently admitted by a ``!=``.
 _REINVEST_DIVIDEND_TYPES = frozenset(DividendType) - CASH_DIVIDEND_TYPES
 _REINVEST_TYPES_SQL = ", ".join(f"'{t.value}'" for t in sorted(_REINVEST_DIVIDEND_TYPES))
+
+#: Every share-adding dividend row of one position, with the THREE columns its effective date
+#: is derived from. Read by both share paths, unbounded — see :func:`_dividend_counts_on`.
+_REINVEST_SQL = (
+    "SELECT date, ex_date, type, reinvest_shares FROM dividends "
+    "WHERE account_id=? AND symbol=? "
+    f"AND type IN ({_REINVEST_TYPES_SQL}) AND reinvest_shares IS NOT NULL"
+)
+
+
+def _dividend_counts_on(row: sqlite3.Row) -> date:
+    """The date a stored share-adding dividend row moves the share count (CR-05).
+
+    ``Dividend.effective_date``'s rule — ONE home, :func:`dividend_effective_date` — applied
+    to the raw columns: a STOCK dividend (配股) with a known ex-date counts from the ex-date,
+    every other row from its payment ``date``. ``build_book`` orders the event there,
+    ``LedgerBundle``'s cuts and the trend cut there, so this path must too. Reading the
+    payment date instead made the sell guard and the replay disagree for every sale between
+    the two dates: the replay held the 配股 shares, the guard did not, and the owner was asked
+    to accept a discarded cost basis for a sale that was covered (measured: opening 1,000,
+    STOCK +100 ex 03-10 / paid 04-05, SELL 1,100 on 03-20 → 「超過當日持有的 1000 股」).
+
+    A blank ``ex_date`` is ``None``, exactly as ``store.list_dividends`` reads it.
+    """
+    ex_raw = row["ex_date"]
+    return dividend_effective_date(
+        row["type"],
+        date.fromisoformat(row["date"]),
+        date.fromisoformat(ex_raw) if ex_raw else None,
+    )
 
 # Insurance, not the termination mechanism (D23, trap #20). The walk descends strictly in
 # the (date, priority) order and D15 forbids two same-date actions whose symbol sets
@@ -116,20 +147,19 @@ def _shares_until(
     filter this function applies to its own three ledgers — a naive path that ordered its
     pending rows more precisely than its stored ones would be neither the old number nor the
     new one. The default is empty, so every pre-existing caller is byte-identical.
+
+    A share-adding dividend counts from its EFFECTIVE date (:func:`_dividend_counts_on`) —
+    a 配股's ex-date when it has one — not from its payment date (CR-05). The date filter
+    for dividends therefore runs in Python, over the one shared rule, instead of in SQL.
     """
     cut = before.isoformat() if before is not None else None
     total = _ZERO
     opening_sql = "SELECT shares FROM opening_inventory WHERE account_id=? AND symbol=?"
     tx_sql = "SELECT side, quantity FROM transactions WHERE account_id=? AND symbol=?"
-    div_sql = (
-        "SELECT reinvest_shares FROM dividends WHERE account_id=? AND symbol=? "
-        f"AND type IN ({_REINVEST_TYPES_SQL}) AND reinvest_shares IS NOT NULL"
-    )
     params: tuple[str, ...] = (account_id, symbol)
     if cut is not None:
         opening_sql += " AND build_date < ?"
         tx_sql += " AND trade_date < ?"
-        div_sql += " AND date < ?"
         params = (account_id, symbol, cut)
     opening = conn.execute(opening_sql, params).fetchone()
     if opening is not None:
@@ -137,8 +167,9 @@ def _shares_until(
     for r in conn.execute(tx_sql, params):
         q = Decimal(r["quantity"])
         total += q if r["side"] == Side.BUY.value else -q
-    for r in conn.execute(div_sql, params):
-        total += Decimal(r["reinvest_shares"])
+    for r in conn.execute(_REINVEST_SQL, (account_id, symbol)):
+        if before is None or _dividend_counts_on(r) < before:
+            total += Decimal(r["reinvest_shares"])
     for when, _priority, qty in pending.get((account_id, symbol), ()):
         if before is None or when < before:
             total += qty
@@ -240,13 +271,10 @@ class _Walk:
                  int(EventPriority.BUY if is_buy else EventPriority.SELL),
                  qty if is_buy else -qty)
             )
-        for r in self.conn.execute(
-            "SELECT date, reinvest_shares FROM dividends WHERE account_id=? AND symbol=? "
-            f"AND type IN ({_REINVEST_TYPES_SQL}) AND reinvest_shares IS NOT NULL",
-            params,
-        ):
+        for r in self.conn.execute(_REINVEST_SQL, params):
+            # The replay's own key: (effective date, DIVIDEND) — a 配股's ex-date (CR-05).
             rows.append(
-                (date.fromisoformat(r["date"]),
+                (_dividend_counts_on(r),
                  int(EventPriority.DIVIDEND),
                  Decimal(r["reinvest_shares"]))
             )
@@ -515,16 +543,19 @@ def _later_event_dates(conn: sqlite3.Connection, symbol: str, *, after: date) ->
     dividend, or a corporate action it is the source or destination of (a chain reaches it
     through the action that names it) — so the count at these dates plus *after* itself is
     every value the position takes from *after* on. A superset is harmless (it only costs a
-    query); the dividend date is the column :func:`_shares_until` counts by.
+    query), so a dividend contributes BOTH dates a share counter can date it by — the payment
+    date and the ex-date (CR-05: a 配股 counts from its ex-date, :func:`_dividend_counts_on`).
     """
     cut = after.isoformat()
     rows = conn.execute(
         "SELECT trade_date FROM transactions WHERE symbol=? AND trade_date > ? "
         "UNION SELECT build_date FROM opening_inventory WHERE symbol=? AND build_date > ? "
         "UNION SELECT date FROM dividends WHERE symbol=? AND date > ? "
+        "UNION SELECT ex_date FROM dividends "
+        "WHERE symbol=? AND ex_date IS NOT NULL AND ex_date > ? "
         "UNION SELECT date FROM corporate_actions "
         "WHERE (from_symbol=? OR to_symbol=?) AND date > ?",
-        (symbol, cut, symbol, cut, symbol, cut, symbol, symbol, cut),
+        (symbol, cut, symbol, cut, symbol, cut, symbol, cut, symbol, symbol, cut),
     ).fetchall()
     return {date.fromisoformat(str(r[0])[:10]) for r in rows}
 
