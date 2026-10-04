@@ -1050,12 +1050,29 @@
       }, prog ? prog.drop : ui.dismiss);
       await saveFromModal(ui, '編輯', put, (err) => {
         if (replayAck(err)) return true;
-        if (!(err && err.status === 422 && err.code === 'warnings_unacknowledged')) return false;
+        if (!(err && err.status === 422 && (err.code === 'warnings_unacknowledged'
+          || err.code === 'warnings_changed'))) return false;
         ui.dismiss();
+        /* CR-07 (the form's twin, corp-action-form.js ackItems): the dialog lists EVERY
+           warning the server found — it showed only the first, so 確認 acknowledged sentences
+           nobody read — and the save names the (code, text) pairs it showed, so the server
+           refuses `warnings_changed` if what it recomputes is not what the owner read. */
+        const items = (err.issues || []).filter((i) => i.sev !== 'error')
+          .map((i) => ({ code: i.code, text: i.text }));
+        const texts = items.length ? items.map((i) => i.text) : [err.message];
+        const lead = err.code === 'warnings_changed' ? '警告內容已經改變，請重新閱讀：' : '';
         window.confirmDialog({
-          title: '公司行動警告確認', body: err.message,
+          title: '公司行動警告確認',
+          body: lead + (texts.length > 1
+            ? '共 ' + texts.length + ' 則警告：'
+              + texts.map((t, i) => '（' + (i + 1) + '）' + t).join('')
+            : texts[0]),
           confirmLabel: '我了解，仍要儲存', danger: true,
-          onConfirm: () => { body.ack_warnings = true; runMutation('編輯', put, replayAck); },
+          onConfirm: () => {
+            body.ack_warnings = true;
+            if (items.length) body.acked_warnings = items;
+            runMutation('編輯', put, replayAck);
+          },
         });
         return true;
       });
