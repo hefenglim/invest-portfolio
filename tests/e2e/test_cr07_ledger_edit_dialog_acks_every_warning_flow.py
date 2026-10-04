@@ -52,8 +52,13 @@ def test_cr07_edit_dialog_lists_every_warning_and_acks_what_it_showed(
     row = page.locator("#action-body tr", has_text="2330")
     expect(row).to_have_count(1)
 
-    sent: list[dict[str, Any]] = []
-    page.on("request", lambda r: sent.append(r.post_data_json) if _is_action_put(r) else None)
+    sent: list[Any] = []
+
+    def _record(req: Request) -> None:
+        if _is_action_put(req):
+            sent.append(req.post_data_json)
+
+    page.on("request", _record)
 
     row.locator("button", has_text="編輯").click()
     modal = page.locator(".modal-backdrop .modal", has_text="編輯公司行動")
