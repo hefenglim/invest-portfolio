@@ -13,7 +13,8 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 `feat/corporate-actions` before the merge into `main` found 14 issues (five reproduced by probe);
 three parallel fixers (A: data correctness, B: rules and edges, C: efficiency) fixed them, each
 with a test that fails on the code before the fix. A final review of the merged tree then found
-12 more (R1..R12, incl. one regression of the CR-07 fix), fixed in the same round.
+12 more (R1..R12, incl. one regression of the CR-07 fix), and a focused review of those fixes 11
+more (S1..S11); all were fixed in the same round, and the heavy gates ran once, at the end.
 
 - **CR-01 / CR-11 — a 賣超 that nets back to exactly zero is still a 賣超.** `build_book` dropped
   every 0-share position together with its `ever_oversold` fact, so deleting the first buy of
@@ -104,6 +105,40 @@ Final-review follow-ups (R1..R12, same round):
 - **The dividend inbox confirm runs `validate_dividend`** (an event paid before its ex-date is not
   confirmable, and says why), and **the drawer's 交易明細 lists a 配股 at its ex-date**, where the
   replay books it.
+
+Second focused review of R1..R12 (S1..S11, same round):
+
+- **S1 / S5 — the manual-entry preview withholds on EVERY 待釐清 position, held or flat.** R4
+  read only `Book.holdings` + `Book.oversold_positions`, so a FLAT position a refused corporate
+  action had flagged (`unbookable_action`, sticky) still projected a declared short
+  (`remain_shares -100 / new_original_avg 597.35`) that the dashboard then flagged. The replay
+  now records every position it opened, flat included, with both flags
+  (`Book.opened_positions`, `results.OpenedPosition`); `_withheld` reads it on today's book, the
+  trade-date book and the book with the draft, for every branch (the BUY-only special case is
+  gone).
+- **S2 / S3 —** a corporate-action save from a tab still running pre-R1 JavaScript (it sends
+  `acked_warnings`) is refused `client_outdated` with a reload sentence instead of falling to the
+  bare-flag path; the edit dialog checks for the ack helper BEFORE closing anything and keeps the
+  owner's values when it is missing.
+- **S4 / S10 —** re-judging an edited AI dividend sends only the TICKED, well-formed trades, as a
+  minimal context (`agents.TradeContext`: account / symbol / date) the server folds into the same
+  `pending_trades`, instead of re-previewing every trade; the dividends are re-judged only when
+  that context moves.
+- **S6 —** every row correction door (trade / dividend / opening edit and delete) and the
+  corporate-action doors read each ledger once per request (corporate-action edit:
+  corporate_actions 6 → 1); `get_transaction` / `get_dividend` / `get_corporate_action` /
+  `linked_cash_movements` fetch by `WHERE`.
+- **S8 —** `holdings.position_exists_by` and `LedgerBundle.position_opened_by` count an action
+  only as the replay reads it (convertible, both symbols registered); their one stated difference
+  from the replay is a readable action the replay refuses.
+- **S9 —** the drawer says 「部位已結清」 only when a position was actually opened
+  (`position_opened`, from `Book.opened_positions`); rows that opened nothing get their own
+  sentence.
+- **S11 —** the dividend inbox asks the position question once, through `validate_dividend`, and
+  a blocked item names every reason.
+
+Gates on `a49c46d`: ruff clean; `mypy --strict` (cold cache) 1,018 files, 0 errors; pytest
+non-e2e 7,013 passed + 5 skipped = the 7,018 collected (6 batches); e2e 335 passed in 32 chunks.
 
 **Pre-prod R13 fixes (the verifier's full rerun on 830056c, 2026-10-01; owner rulings 1C /
 2B / 3A / 4A).** R13 found three defects and two specification questions; the owner ruled the

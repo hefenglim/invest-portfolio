@@ -257,8 +257,12 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   (`Book.oversold_positions`, CR-11 2026-10-04), because `build_book` drops a 0-share position
   from `holdings`: a 賣超 netted back to exactly zero was invisible to every correction door,
   the XIRR gate and the drawer, and deleting its first buy erased the holding and its realized
-  row with no question. Every reader of "is this position 賣超" reads the book's record, and a
-  preview withholds its position math on such a position exactly as on a held one (R4).
+  row with no question. Every reader of "is this position 賣超" reads the book's record. The
+  book also records every position it OPENED, flat included, with both 待釐清 flags
+  (`Book.opened_positions`: `oversold`, and the sticky `unbookable_action` a refused corporate
+  action sets); the manual preview withholds its position math whenever that record flags the
+  position — on today's book, the trade-date book and the book with the draft, for every branch
+  (R4 / S1) — and the drawer tells 「部位已結清」 from 「從未持有」 by it (S9).
 - **A dividend needs a position that exists by its effective date** (CR-02, 2026-10-04). Every
   door refuses one without it (`dividend_without_position`: no opening, non-zero trade or
   EXCHANGE / SPINOFF into the symbol in that account by then); a stored one is refused on the
@@ -266,7 +270,9 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   never income and never a ghost holding, and it never answers 500 (it did: `build_dashboard`
   caught only `ArithmeticError`). A payout after a full close still books as realized income
   (H2). One rule, two forms: `holdings.position_exists_by` (SQL, the doors) and
-  `LedgerBundle.position_opened_by` (the replay guard's fallback). Correction doors compare
+  `LedgerBundle.position_opened_by` (the replay guard's fallback); both count an action only as
+  the replay reads it (convertible, both symbols registered), and their one stated difference
+  from the replay is a readable action the replay refuses (S8). Correction doors compare
   stranded dividends per ROW, never per (account, symbol) — a legacy orphan on the key masked a
   new one (R5) — and 股利總覽 skips every dividend the book refuses (R6), so one payout never
   gets three answers.

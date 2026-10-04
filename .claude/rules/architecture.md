@@ -90,7 +90,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   ONE home, `_pool_dip`, which `api/replay_guard.py` reaches for the batch undo and the
   corporate-action delete. A replay guard reads the stored ledgers once per call
   (`replay_guard._read_ledgers`) and builds its before, its after and any cash snapshot from that
-  read; a by-id store lookup asks `WHERE id=?`, it never lists the table. Measured before: one
+  read; a correction door builds its would-be list from that same read and hands it to its
+  validators and to the guard (`_replay_guard` / `action_change_guard` `read=`, S6); a by-id
+  store lookup asks `WHERE id=?`, it never lists the table. Measured before: one
   cross-account FX edit issued 27 full-table SELECTs; a batch undo read the trades 3 times.
   `tests/contract/test_cr12_cash_guards_read_the_ledgers_once.py` pins the ceilings.
 - **`data_ingestion → portfolio`: exactly four imports are authorised** (recorded 2026-08-12, in
