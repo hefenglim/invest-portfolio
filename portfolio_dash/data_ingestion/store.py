@@ -1143,34 +1143,39 @@ def list_dividends(
         params.append(symbol)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        f"SELECT id, account_id, symbol, date, type, gross, withholding, net, "
-        f"reinvest_shares, reinvest_price, ex_date FROM dividends{where} "
-        f"ORDER BY date ASC, id ASC",
+        f"{_DIV_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredDividend(
-            id=r["id"],
-            account_id=r["account_id"],
-            symbol=r["symbol"],
-            date=date.fromisoformat(r["date"]),
-            ex_date=(
-                date.fromisoformat(r["ex_date"])
-                if "ex_date" in r.keys() and r["ex_date"] else None
-            ),
-            type=r["type"],
-            gross=from_db(r["gross"]),
-            withholding=from_db(r["withholding"]),
-            net=from_db(r["net"]),
-            reinvest_shares=(
-                from_db(r["reinvest_shares"]) if r["reinvest_shares"] is not None else None
-            ),
-            reinvest_price=(
-                from_db(r["reinvest_price"]) if r["reinvest_price"] is not None else None
-            ),
-        )
-        for r in rows
-    ]
+    return [_div_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``dividends`` (S6, 2026-10-04): the list and the by-id
+# lookup read through both, so they cannot return two shapes of one row (as ``_FX_SELECT``).
+_DIV_SELECT = ("SELECT id, account_id, symbol, date, type, gross, withholding, net, "
+               "reinvest_shares, reinvest_price, ex_date FROM dividends")
+
+
+def _div_row(r: sqlite3.Row) -> StoredDividend:
+    return StoredDividend(
+        id=r["id"],
+        account_id=r["account_id"],
+        symbol=r["symbol"],
+        date=date.fromisoformat(r["date"]),
+        ex_date=(
+            date.fromisoformat(r["ex_date"])
+            if "ex_date" in r.keys() and r["ex_date"] else None
+        ),
+        type=r["type"],
+        gross=from_db(r["gross"]),
+        withholding=from_db(r["withholding"]),
+        net=from_db(r["net"]),
+        reinvest_shares=(
+            from_db(r["reinvest_shares"]) if r["reinvest_shares"] is not None else None
+        ),
+        reinvest_price=(
+            from_db(r["reinvest_price"]) if r["reinvest_price"] is not None else None
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1320,29 +1325,33 @@ def list_transactions(
         params.append(symbol)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        f"SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
-        f"fee_rule_snapshot, note, daytrade, short_sale FROM transactions{where} "
-        f"ORDER BY trade_date ASC, id ASC",
+        f"{_TXN_SELECT}{where} ORDER BY trade_date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredTransaction(
-            id=r["id"],
-            account_id=r["account_id"],
-            symbol=r["symbol"],
-            side=Side(r["side"]),
-            quantity=from_db(r["quantity"]),
-            price=from_db(r["price"]),
-            fees=from_db(r["fees"]),
-            tax=from_db(r["tax"]),
-            trade_date=date.fromisoformat(r["trade_date"]),
-            fee_rule_snapshot=json.loads(r["fee_rule_snapshot"] or "{}"),
-            note=r["note"],
-            daytrade=bool(r["daytrade"]),
-            short_sale=bool(r["short_sale"]),
-        )
-        for r in rows
-    ]
+    return [_txn_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``transactions`` (S6) — see ``_DIV_SELECT``.
+_TXN_SELECT = ("SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
+               "fee_rule_snapshot, note, daytrade, short_sale FROM transactions")
+
+
+def _txn_row(r: sqlite3.Row) -> StoredTransaction:
+    return StoredTransaction(
+        id=r["id"],
+        account_id=r["account_id"],
+        symbol=r["symbol"],
+        side=Side(r["side"]),
+        quantity=from_db(r["quantity"]),
+        price=from_db(r["price"]),
+        fees=from_db(r["fees"]),
+        tax=from_db(r["tax"]),
+        trade_date=date.fromisoformat(r["trade_date"]),
+        fee_rule_snapshot=json.loads(r["fee_rule_snapshot"] or "{}"),
+        note=r["note"],
+        daytrade=bool(r["daytrade"]),
+        short_sale=bool(r["short_sale"]),
+    )
 
 
 #: ``(child symbol, day, expected close)`` — the seed price slot a SPINOFF row owns
@@ -1478,7 +1487,8 @@ def list_corporate_actions(
 
     Optionally filter by *account_id* and/or *symbol* (matching EITHER end of the action —
     a symbol's history includes the actions that created it as well as those that consumed
-    it). **Every** consumer loads through here; no module writes its own SELECT.
+    it). **Every** consumer loads through here (or through :func:`get_corporate_action`, which
+    shares its column list and row shape); no module writes its own SELECT.
     """
     clauses: list[str] = []
     params: list[str] = []
@@ -1490,39 +1500,43 @@ def list_corporate_actions(
         params.extend([symbol, symbol])
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        f"SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, ratio_from, "
-        f"cost_carry, note, band_move_json, weight_move_json, child_seed_json "
-        f"FROM corporate_actions{where} ORDER BY date ASC, id ASC",
+        f"{_ACTION_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredCorporateAction(
-            id=r["id"],
-            account_id=r["account_id"],
-            date=date.fromisoformat(r["date"]),
-            kind=r["kind"],
-            from_symbol=r["from_symbol"],
-            to_symbol=r["to_symbol"],
-            ratio_to=from_db(r["ratio_to"]),
-            ratio_from=from_db(r["ratio_from"]),
-            cost_carry=None if r["cost_carry"] is None else from_db(r["cost_carry"]),
-            note=r["note"],
-            band_move=band_move_from_json(r["band_move_json"]),
-            weight_move=weight_move_from_json(r["weight_move_json"]),
-            child_seed=child_seed_from_json(r["child_seed_json"]),
-        )
-        for r in rows
-    ]
+    return [_action_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``corporate_actions`` (S6) — see ``_DIV_SELECT``.
+_ACTION_SELECT = ("SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, "
+                  "ratio_from, cost_carry, note, band_move_json, weight_move_json, "
+                  "child_seed_json FROM corporate_actions")
+
+
+def _action_row(r: sqlite3.Row) -> StoredCorporateAction:
+    return StoredCorporateAction(
+        id=r["id"],
+        account_id=r["account_id"],
+        date=date.fromisoformat(r["date"]),
+        kind=r["kind"],
+        from_symbol=r["from_symbol"],
+        to_symbol=r["to_symbol"],
+        ratio_to=from_db(r["ratio_to"]),
+        ratio_from=from_db(r["ratio_from"]),
+        cost_carry=None if r["cost_carry"] is None else from_db(r["cost_carry"]),
+        note=r["note"],
+        band_move=band_move_from_json(r["band_move_json"]),
+        weight_move=weight_move_from_json(r["weight_move_json"]),
+        child_seed=child_seed_from_json(r["child_seed_json"]),
+    )
 
 
 def get_corporate_action(
     conn: sqlite3.Connection, action_id: int
 ) -> StoredCorporateAction | None:
-    """Return one corporate action by id, or None."""
-    for a in list_corporate_actions(conn):
-        if a.id == action_id:
-            return a
-    return None
+    """Return one corporate action by id, or None — one ``WHERE id=?`` row (S6; it listed the
+    whole table, once more on every corporate-action edit / delete)."""
+    r = conn.execute(f"{_ACTION_SELECT} WHERE id=?", (action_id,)).fetchone()
+    return None if r is None else _action_row(r)
 
 
 _CA_CAPTURE = (
@@ -1591,8 +1605,15 @@ def linked_cash_movements(
 ) -> "list[StoredCashMovement]":
     """The cash movements written FOR this corporate action (DEF-020 — today, at most the
     reorganisation-fee WITHDRAW). Read before a delete so the response can say what went
-    with the row, and by the ledger list so the delete confirm can say it beforehand."""
-    return [m for m in list_cash_movements(conn) if m.corporate_action_id == action_id]
+    with the row, and by the ledger list so the delete confirm can say it beforehand.
+
+    ``WHERE corporate_action_id=?`` in the list's own order (S6): it listed every movement and
+    filtered in Python — called per action, so an N-row set delete read the table N times."""
+    rows = conn.execute(
+        f"{_MOVEMENT_SELECT} WHERE corporate_action_id=? ORDER BY date ASC, id ASC",
+        (action_id,),
+    ).fetchall()
+    return [_movement_row(r) for r in rows]
 
 
 def delete_corporate_action(
@@ -1682,7 +1703,10 @@ def load_ledger_bundle(
         # of degrading to 待釐清. Measured 2026-08-11.
         actions=good_actions,
         unreadable_actions=bad_actions,
-        instruments=(instruments if instruments is not None
+        # A COPY of a caller's registry: a bundle's ``instruments`` is mutable (the spinoff
+        # preview adds its draft child to its post bundle), and two bundles built from one
+        # read must not see each other's additions.
+        instruments=(dict(instruments) if instruments is not None
                      else {i.symbol: i for i in list_instruments(conn)}),
     )
 
@@ -1732,11 +1756,10 @@ def corporate_action_order_key(a: StoredCorporateAction) -> tuple[date, int]:
 
 
 def get_transaction(conn: sqlite3.Connection, txn_id: int) -> StoredTransaction | None:
-    """Return one transaction by id, or None."""
-    for t in list_transactions(conn):
-        if t.id == txn_id:
-            return t
-    return None
+    """Return one transaction by id, or None — one ``WHERE id=?`` row (S6; it listed the
+    whole table and filtered in Python, a second full read on every trade edit / delete)."""
+    r = conn.execute(f"{_TXN_SELECT} WHERE id=?", (txn_id,)).fetchone()
+    return None if r is None else _txn_row(r)
 
 
 def update_transaction(
@@ -1818,11 +1841,10 @@ def delete_transaction(
 
 
 def get_dividend(conn: sqlite3.Connection, div_id: int) -> StoredDividend | None:
-    """Return one dividend by id, or None."""
-    for d in list_dividends(conn):
-        if d.id == div_id:
-            return d
-    return None
+    """Return one dividend by id, or None — one ``WHERE id=?`` row (S6; it listed the whole
+    table and filtered in Python, a second full read on every dividend edit / delete)."""
+    r = conn.execute(f"{_DIV_SELECT} WHERE id=?", (div_id,)).fetchone()
+    return None if r is None else _div_row(r)
 
 
 def update_dividend(

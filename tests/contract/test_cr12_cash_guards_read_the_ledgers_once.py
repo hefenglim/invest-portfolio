@@ -47,12 +47,18 @@ from fastapi.testclient import TestClient
 from portfolio_dash.data_ingestion.provenance import batch_rows
 from portfolio_dash.data_ingestion.store import (
     get_cash_movement,
+    get_corporate_action,
+    get_dividend,
     get_fx_conversion,
+    get_transaction,
     insert_cash_movement,
+    linked_cash_movements,
     list_cash_movements,
     list_corporate_actions,
+    list_dividends,
     list_fx_conversions,
     list_transactions,
+    upsert_opening,
 )
 from portfolio_dash.shared.enums import Currency
 
@@ -65,13 +71,24 @@ _PKG = Path(__file__).resolve().parents[2] / "portfolio_dash"
 
 def _full_reads(
     conn: sqlite3.Connection, call: Callable[[], Any], tables: tuple[str, ...] = _LEDGERS,
+    *, until_write: bool = False,
 ) -> tuple[Any, Counter[str]]:
-    """Run *call* and count the full-table SELECTs it issues per table in *tables*."""
+    """Run *call* and count the full-table SELECTs it issues per table in *tables*.
+
+    ``until_write`` (S6) stops counting at the request's first INSERT / UPDATE / DELETE: what
+    is pinned then is the DECISION — validation and guards, which must not re-read — and not a
+    door's post-write work, which reads the NEW ledger on purpose (a corporate-action door
+    restates split prices from the actions as they now stand)."""
     seen: Counter[str] = Counter()
+    wrote = False
 
     def trace(sql: str) -> None:
+        nonlocal wrote
         stmt = " ".join(sql.split())
-        if not stmt.upper().startswith("SELECT") or " WHERE " in stmt.upper():
+        head = stmt.split(" ", 1)[0].upper()
+        if until_write and head in {"INSERT", "UPDATE", "DELETE", "REPLACE"}:
+            wrote = True
+        if wrote or head != "SELECT" or " WHERE " in stmt.upper():
             return
         m = _FROM.search(stmt)
         if m is not None and m.group(1) in tables:
@@ -89,6 +106,19 @@ def _at_most_once(seen: Counter[str]) -> None:
     """Every counted table read at most once (R10-a: the by-id lookups no longer list)."""
     over = {t: n for t, n in seen.items() if n > 1}
     assert not over, f"ledgers re-read in one request: {dict(seen)} (ceiling 1 each)"
+
+
+#: What a replay guard must read — exactly once each, so a door that stopped counting early
+#: (or skipped its guard) cannot pass by reading nothing.
+_REPLAY_READS = ("transactions", "dividends", "opening_inventory", "corporate_actions",
+                 "instruments")
+
+
+def _replayed_once(seen: Counter[str]) -> None:
+    """The decision read every replay ledger exactly once, and nothing else twice (S6)."""
+    _at_most_once(seen)
+    missing = [t for t in _REPLAY_READS if seen[t] != 1]
+    assert not missing, f"replay ledgers not read exactly once: {dict(seen)}"
 
 
 def _golden_fx(client: TestClient) -> dict[str, Any]:
@@ -409,3 +439,148 @@ def test_the_scoped_dip_rule_has_exactly_one_copy() -> None:
     both ``cash.py::_pool_dip`` and ``replay_guard.py::_pool_refusal`` called ``caused_dip``."""
     assert _callers_of("caused_dip") == ["api/routers/cash.py::_pool_dip"]
     assert "api/replay_guard.py::_pool_refusal" in _callers_of("_pool_dip")
+
+
+# ------------------------------------------------------------------ S6: the row correction doors
+#
+# Each door below, up to its first write: the door's own by-id lookup, its would-be list, its
+# validation and the replay guard together read every ledger ONCE. Before S6 each door read
+# its own ledger to build the would-be list, its by-id lookup listed the table, and the guard
+# read all five again (measured on 3f36562: transactions 3 on a trade edit / delete, dividends
+# 3 on a dividend edit / delete, opening_inventory 2 on an opening edit / delete).
+
+_TXN_EDIT = {"account_id": "tw_broker", "symbol": "2330", "side": "BUY", "shares": "1000",
+             "price": "510", "date": "2026-01-05", "fee": "0", "tax": "0"}
+
+
+def test_a_trade_edit_and_delete_read_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    (buy,) = [t for t in list_transactions(golden_db) if t.symbol == "2330"]
+    r, seen = _full_reads(golden_db, lambda: api_client.put(
+        f"/api/ledgers/transactions/{buy.id}", json=_TXN_EDIT), _REPLAY_LEDGERS,
+        until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+    (aapl,) = [t for t in list_transactions(golden_db) if t.symbol == "AAPL"]
+    r, seen = _full_reads(golden_db, lambda: api_client.delete(
+        f"/api/ledgers/transactions/{aapl.id}"), _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+
+
+def test_a_refused_trade_delete_reads_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """The 2330 buy carries the golden dividend: deleting it strands it — 422, no write at all,
+    so this is the WHOLE request."""
+    (buy,) = [t for t in list_transactions(golden_db) if t.symbol == "2330"]
+    r, seen = _full_reads(golden_db, lambda: api_client.delete(
+        f"/api/ledgers/transactions/{buy.id}"), _REPLAY_LEDGERS)
+    assert r.status_code == 422 and r.json()["error"]["code"] == "orphan_correction", r.json()
+    _replayed_once(seen)
+
+
+def test_a_dividend_edit_and_delete_read_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    (div,) = list_dividends(golden_db)
+    r, seen = _full_reads(golden_db, lambda: api_client.put(
+        f"/api/ledgers/dividends/{div.id}", json={
+            "account_id": "tw_broker", "symbol": "2330", "date": "2026-03-01", "type": "CASH",
+            "gross": "5100"}), _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+    r, seen = _full_reads(golden_db, lambda: api_client.delete(
+        f"/api/ledgers/dividends/{div.id}"), _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+
+
+def test_an_opening_edit_and_delete_read_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    upsert_opening(golden_db, account_id="tw_broker", symbol="2330", shares=Decimal("100"),
+                   original_cost_total=Decimal("40000"), build_date=date(2026, 1, 2))
+    golden_db.commit()
+    r, seen = _full_reads(golden_db, lambda: api_client.put(
+        "/api/ledgers/openings/tw_broker/2330", json={"shares": "120", "date": "2026-01-02"}),
+        _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+    r, seen = _full_reads(golden_db, lambda: api_client.delete(
+        "/api/ledgers/openings/tw_broker/2330"), _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+
+
+# ------------------------------------------------------------------ S6: the corporate-action doors
+#
+# Before S6 (3f36562), up to the first write: the PUT read corporate_actions 6 times (the
+# by-id lookup, the change guard, the sibling list, the per-row validator, the would-be list,
+# the replay) and the other replay ledgers twice (the sibling bundle, then the replay); the
+# DELETE read corporate_actions 4 times and cash_movements twice (the guard's fee lookup, then
+# ``_delete_actions``' ``linked_cash_movements``, which listed the table).
+
+
+def test_a_corporate_action_edit_reads_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    action_id = _action_with_fee(api_client, golden_db)
+    r, seen = _full_reads(golden_db, lambda: api_client.put(
+        f"/api/ledgers/corporate-actions/{action_id}", json={
+            "account_id": "tw_broker", "date": "2026-06-10", "kind": "SPLIT",
+            "from_symbol": "2330", "to_symbol": "2330", "ratio_to": "5", "ratio_from": "1",
+            "ack_oversell": True}), _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+
+
+def test_a_corporate_action_delete_reads_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    action_id = _action_with_fee(api_client, golden_db)
+    r, seen = _full_reads(golden_db, lambda: api_client.delete(
+        f"/api/ledgers/corporate-actions/{action_id}"), _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+    assert seen["cash_movements"] == 1   # the linked fee's pool check ran, from one read
+
+
+def test_a_corporate_action_set_delete_reads_each_ledger_once(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    _action_with_fee(api_client, golden_db)
+    r, seen = _full_reads(golden_db, lambda: api_client.delete(
+        "/api/ledgers/corporate-actions/set",
+        params={"from_symbol": "2330", "date": "2026-06-10", "kind": "SPLIT"}),
+        _REPLAY_LEDGERS, until_write=True)
+    assert r.status_code == 200, r.json()
+    _replayed_once(seen)
+
+
+def test_every_by_id_lookup_asks_for_its_rows_and_returns_what_the_list_returns(
+    api_client: TestClient, golden_db: sqlite3.Connection,
+) -> None:
+    """S6: ``get_transaction`` / ``get_dividend`` / ``get_corporate_action`` and
+    ``linked_cash_movements`` listed the whole table and filtered in Python, like the two cash
+    lookups R10-a fixed. Each is now one ``WHERE`` query returning the same models."""
+    action_id = _action_with_fee(api_client, golden_db)
+    txs, divs = list_transactions(golden_db), list_dividends(golden_db)
+    acts, moves = list_corporate_actions(golden_db), list_cash_movements(golden_db)
+    statements: list[str] = []
+    golden_db.set_trace_callback(statements.append)
+    try:
+        got = ([get_transaction(golden_db, t.id) for t in txs],
+               [get_dividend(golden_db, d.id) for d in divs],
+               [get_corporate_action(golden_db, a.id) for a in acts],
+               linked_cash_movements(golden_db, action_id))
+        missing = (get_transaction(golden_db, 10**9), get_dividend(golden_db, 10**9),
+                   get_corporate_action(golden_db, 10**9), linked_cash_movements(golden_db, 10**9))
+    finally:
+        golden_db.set_trace_callback(None)
+    assert got == (txs, divs, acts, [m for m in moves if m.corporate_action_id == action_id])
+    assert got[3], "the fixture's linked fee"
+    assert missing == (None, None, None, [])
+    assert len(statements) == len(txs) + len(divs) + len(acts) + 1 + 4
+    assert all(" WHERE " in " ".join(st.split()) for st in statements), statements

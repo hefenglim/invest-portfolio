@@ -49,6 +49,9 @@ from portfolio_dash.api.replay_guard import (
     _oversell_response as _oversell_response,
 )
 from portfolio_dash.api.replay_guard import (
+    _read_ledgers as _read_ledgers,
+)
+from portfolio_dash.api.replay_guard import (
     _replay_block as _replay_block,
 )
 from portfolio_dash.api.replay_guard import (
@@ -683,8 +686,9 @@ def edit_transaction(
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", hard[0].message,
             issues=[issue_wire(i) for i in findings]))
-    would_be = [edited if t.id == txn_id else t for t in list_transactions(conn)]
-    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, txs=would_be)
+    read = _read_ledgers(conn)   # S6: the would-be list and the replay share ONE read
+    would_be = [edited if t.id == txn_id else t for t in read.transactions]
+    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, txs=would_be, read=read)
     if blocked is not None:
         return blocked
     own = next((i for i in findings if i.kind == "sell_exceeds_holdings"), None)
@@ -711,8 +715,9 @@ def remove_transaction(
     if get_transaction(conn, txn_id) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"交易 #{txn_id} 不存在"))
-    would_be = [t for t in list_transactions(conn) if t.id != txn_id]
-    blocked = _replay_guard(conn, ack_oversell=ack_oversell, txs=would_be)
+    read = _read_ledgers(conn)   # S6
+    would_be = [t for t in read.transactions if t.id != txn_id]
+    blocked = _replay_guard(conn, ack_oversell=ack_oversell, txs=would_be, read=read)
     if blocked is not None:
         return blocked
     delete_transaction(conn, txn_id)
@@ -852,8 +857,9 @@ def edit_dividend(
         "net": amounts.net, "reinvest_shares": amounts.reinvest_shares,
         "reinvest_price": amounts.reinvest_price, "ex_date": ex_date,
     })
-    would_be = [edited if d.id == div_id else d for d in list_dividends(conn)]
-    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, divs=would_be)
+    read = _read_ledgers(conn)   # S6: the would-be list and the replay share ONE read
+    would_be = [edited if d.id == div_id else d for d in read.dividends]
+    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, divs=would_be, read=read)
     if blocked is not None:
         return blocked
     update_dividend(
@@ -875,8 +881,9 @@ def remove_dividend(
     if get_dividend(conn, div_id) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"股利 #{div_id} 不存在"))
-    would_be = [d for d in list_dividends(conn) if d.id != div_id]
-    blocked = _replay_guard(conn, ack_oversell=ack_oversell, divs=would_be)
+    read = _read_ledgers(conn)   # S6
+    would_be = [d for d in read.dividends if d.id != div_id]
+    blocked = _replay_guard(conn, ack_oversell=ack_oversell, divs=would_be, read=read)
     if blocked is not None:
         return blocked
     delete_dividend(conn, div_id)
@@ -1042,9 +1049,10 @@ def edit_opening(
         "shares": body.shares,
         "original_cost_total": total, "build_date": body.date,
     })
+    read = _read_ledgers(conn)   # S6: the would-be list and the replay share ONE read
     would_be = [edited if (o.account_id == account_id and o.symbol == symbol) else o
-                for o in list_opening(conn)]
-    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, opening=would_be)
+                for o in read.opening]
+    blocked = _replay_guard(conn, ack_oversell=body.ack_oversell, opening=would_be, read=read)
     if blocked is not None:
         return blocked
     upsert_opening(
@@ -1064,9 +1072,10 @@ def remove_opening(
     if get_opening(conn, account_id, symbol) is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"期初 {account_ref(account_id)}／{symbol} 不存在"))
-    would_be = [o for o in list_opening(conn)
+    read = _read_ledgers(conn)   # S6
+    would_be = [o for o in read.opening
                 if not (o.account_id == account_id and o.symbol == symbol)]
-    blocked = _replay_guard(conn, ack_oversell=ack_oversell, opening=would_be)
+    blocked = _replay_guard(conn, ack_oversell=ack_oversell, opening=would_be, read=read)
     if blocked is not None:
         return blocked
     delete_opening(conn, account_id, symbol)
@@ -2310,16 +2319,21 @@ def edit_corporate_action(
     # unusable one, is refused LOUDLY rather than dropped (the PUT used to ignore the field).
     if (bad := _child_price_refusal(replacement.kind, body.to_symbol_price)) is not None:
         return bad
-    blocked = _change_block(
-        validate_corporate_action_change(conn, action_id, replacement=replacement))
+    # S6: ONE read of the ledgers for the change guard, the sibling replay, the per-row
+    # validator and the replay guard below — each used to read its own copy.
+    read = _read_ledgers(conn)
+    blocked = _change_block(validate_corporate_action_change(
+        conn, action_id, replacement=replacement, stored_actions=read.actions))
     if blocked is not None:
         return blocked
     # Re-validate the row's own §5 rules against the ledger WITHOUT it, so an edit that
     # leaves a field alone is not rejected as a duplicate of itself.
-    siblings = [a for a in list_corporate_actions(conn) if a.id != action_id]
+    siblings = [a for a in read.actions if a.id != action_id]
     index = ActionIndex.from_stored(siblings)
     try:
-        sibling_bundle = load_ledger_bundle(conn, actions=siblings)
+        sibling_bundle = load_ledger_bundle(
+            conn, transactions=read.transactions, dividends=read.dividends,
+            opening=read.opening, actions=siblings, instruments=read.instruments)
         build_book(sibling_bundle, allow_oversell=True)   # reachability check only
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=422, content=error_body(
@@ -2327,7 +2341,7 @@ def edit_corporate_action(
     issues = [
         i for i in validate_corporate_action(
             conn, replacement, batch=[replacement], bundle=sibling_bundle,
-            book_cache={}, index=index)
+            book_cache={}, index=index, stored_actions=read.actions)
         # Three rules must be dropped, and E13 must NOT be. `validate_corporate_action`
         # reads the STORED ledger, which still holds the row being edited — so a no-op
         # edit matches itself and would be refused as its own duplicate, its own same-date
@@ -2354,8 +2368,8 @@ def edit_corporate_action(
     # of 5,000) or a dividend. Same decision as the transaction edit; the ack rides the body.
     replayed = action_change_guard(
         conn, would_be=[_stored_from(replacement, action_id) if a.id == action_id else a
-                        for a in list_corporate_actions(conn)],
-        ack_oversell=body.ack_oversell, what="此更正", then="再修改這筆公司行動")
+                        for a in read.actions],
+        ack_oversell=body.ack_oversell, what="此更正", then="再修改這筆公司行動", read=read)
     if replayed is not None:
         return replayed
     # DEF-020: the linked fee follows the row. `reorg_fee` absent (None) = leave it alone;
@@ -2557,7 +2571,8 @@ def remove_corporate_action_set(
     except ValueError:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"日期格式無效：{on}", field="date"))
-    rows = [a for a in list_corporate_actions(conn)
+    read = _read_ledgers(conn)   # S6: the set, the would-be ledger and the replay — ONE read
+    rows = [a for a in read.actions
             if a.from_symbol == from_symbol and a.date == action_date
             and a.kind == wanted]
     if not rows:
@@ -2565,9 +2580,9 @@ def remove_corporate_action_set(
             "not_found", f"找不到 {from_symbol} 在 {on} 的{KIND_ZH.get(wanted, wanted)}"))
     leaving = {a.id for a in rows}
     replayed = action_change_guard(
-        conn, would_be=[a for a in list_corporate_actions(conn) if a.id not in leaving],
+        conn, would_be=[a for a in read.actions if a.id not in leaving],
         leaving=rows, ack_oversell=ack_oversell, ack_negative=ack_negative,
-        what="此刪除", then="再刪除這組公司行動")
+        what="此刪除", then="再刪除這組公司行動", read=read)
     if replayed is not None:
         return replayed
     symbols = {a.from_symbol for a in rows} | {a.to_symbol for a in rows}
@@ -2742,13 +2757,15 @@ def remove_corporate_action(
     if existing is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"公司行動 #{action_id} 不存在"))
-    blocked = _change_block(validate_corporate_action_change(conn, action_id))
+    read = _read_ledgers(conn)   # S6: the change guard and the replay share ONE read
+    blocked = _change_block(validate_corporate_action_change(
+        conn, action_id, stored_actions=read.actions))
     if blocked is not None:
         return blocked
     replayed = action_change_guard(
-        conn, would_be=[a for a in list_corporate_actions(conn) if a.id != action_id],
+        conn, would_be=[a for a in read.actions if a.id != action_id],
         leaving=[existing], ack_oversell=ack_oversell, ack_negative=ack_negative,
-        what="此刪除", then="再刪除這筆公司行動")
+        what="此刪除", then="再刪除這筆公司行動", read=read)
     if replayed is not None:
         return replayed
     outcome = _delete_actions(conn, [existing], now=now)

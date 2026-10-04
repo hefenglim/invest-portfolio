@@ -334,13 +334,19 @@ def _replay_guard(
     divs: list[StoredDividend] | None = None,
     opening: list[StoredOpening] | None = None,
     actions: list[StoredCorporateAction] | None = None,
+    read: _LedgerRead | None = None,
 ) -> JSONResponse | None:
     """Replay the would-be ledger; 422 the caller when THIS mutation strands a record
     (orphan — hard) or introduces/worsens an oversell (soft, ack-bypassable).
 
     ``actions`` (DEF-049, additive): the would-be corporate-action ledger, for a door that
-    removes or rewrites corporate actions; ``None`` replays the stored ones, as before."""
-    block = _replay_block(conn, txs=txs, divs=divs, opening=opening, actions=actions)
+    removes or rewrites corporate actions; ``None`` replays the stored ones, as before.
+
+    ``read`` (S6, 2026-10-04): the door's own :func:`_read_ledgers`, from which it built its
+    would-be list — so the row doors read each ledger ONCE, not once for the list and again
+    here. ``None`` reads it here."""
+    block = _replay_block(conn, txs=txs, divs=divs, opening=opening, actions=actions,
+                          read=read)
     if block is None:
         return None
     if block.code == "orphan":
@@ -541,6 +547,7 @@ def action_change_guard(
     ack_negative: bool = False,
     what: str,
     then: str,
+    read: _LedgerRead | None = None,
 ) -> JSONResponse | None:
     """Judge a corporate-action DELETE or EDIT before anything is written (DEF-049).
 
@@ -562,8 +569,12 @@ def action_change_guard(
     scoped ``negative_cash`` check (:func:`_pool_refusal`) — today the linked fee is always a
     WITHDRAW, whose removal can only raise a pool, so the check cannot fire; it is run anyway
     so a future credit-type link is not the first unguarded one.
+
+    *read* (S6): the door's own :func:`_read_ledgers` — it built *would_be* from it and ran
+    its validators over it; ``None`` reads it here.
     """
-    read = _read_ledgers(conn)   # R10: the replay and the fee's pool check share ONE read
+    if read is None:
+        read = _read_ledgers(conn)   # R10: the replay and the fee's pool check share ONE read
     block = _replay_block(conn, actions=would_be, read=read)
     if block is not None and (block.code == "orphan" or not ack_oversell):
         return _named_refusal(block, what=what, then=then)

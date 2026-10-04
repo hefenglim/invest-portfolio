@@ -46,6 +46,7 @@ from portfolio_dash.data_ingestion.markets import CCY_MARKET, MARKET_ZH
 from portfolio_dash.data_ingestion.resolve import ResolutionStatus, resolve
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, dividend_model_for
 from portfolio_dash.data_ingestion.store import (
+    StoredCorporateAction,
     StoredDividend,
     StoredTransaction,
     get_instrument,
@@ -1094,6 +1095,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     bundle: LedgerBundle | None = None,
     book_cache: dict[date, Book] | None = None,
     index: ActionIndex | None = None,
+    stored_actions: Sequence[StoredCorporateAction] | None = None,
 ) -> list[Issue]:
     """Validate one corporate action against the ledger (spec §5 edge matrix).
 
@@ -1126,6 +1128,11 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
 
     *index* is the batch's :class:`ActionIndex`; built here when omitted. Every share query
     below threads it, which is what makes E1a and E13 see the SAME position the replay does.
+
+    *stored_actions* (S6, 2026-10-04): the stored corporate-action ledger, when the caller has
+    already read it for another step of the same request (the edit door's replay guard);
+    read here when omitted. It must be the WHOLE stored ledger, as ``list_corporate_actions``
+    returns it.
 
     Hard issues (``needs_confirm=False``) make the row uncommittable; soft issues
     (``needs_confirm=True``) block until acknowledged and then commit — the 賣超 tier.
@@ -1280,7 +1287,8 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                            "若您填的股數已經是行動之後的數字，"
                            "請把期初庫存的建立日期改成行動的隔天，否則會換算兩次")))
 
-    stored = list_corporate_actions(conn)
+    stored = (list(stored_actions) if stored_actions is not None
+              else list_corporate_actions(conn))
     siblings = [b for b in batch if b is not inp]
 
     # --- E15, HARD (D29): an EXACT duplicate of a stored row. Hard rather than a soft
@@ -1665,10 +1673,13 @@ def validate_corporate_action_change(
     action_id: int,
     *,
     replacement: CorporateActionInput | None = None,
+    stored_actions: Sequence[StoredCorporateAction] | None = None,
 ) -> list[Issue]:
     """E13 on the way OUT: deleting or re-accounting one row of an N-row set (audit F-32).
 
     ``replacement=None`` validates a DELETE; otherwise it validates an UPDATE to that shape.
+    ``stored_actions`` (S6): the whole stored corporate-action ledger, when the door has read
+    it already for its replay guard; read here when omitted.
 
     E13 was enforced at INSERT only. ``store.delete_corporate_action`` performs no
     re-validation and ``store.py`` contains zero references to E13, so an N-row set could be
@@ -1693,7 +1704,8 @@ def validate_corporate_action_change(
     see the W4 report.
     """
     issues: list[Issue] = []
-    stored = list_corporate_actions(conn)
+    stored = (list(stored_actions) if stored_actions is not None
+              else list_corporate_actions(conn))
     row = next((s for s in stored if s.id == action_id), None)
     if row is None:
         return [Issue(kind="unknown_action", message=f"找不到編號 {action_id} 的公司行動")]
