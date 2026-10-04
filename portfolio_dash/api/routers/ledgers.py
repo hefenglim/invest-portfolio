@@ -1144,6 +1144,12 @@ class ActionBody(BaseModel):
     #: (``warnings_changed``) — see :func:`_ack_refusal`. ``None`` keeps the bare flag's
     #: meaning for callers that never saw a preview (scripts, the stress audit).
     acked_keys: list[str] | None = None
+    #: S2 — the PRE-R1 spelling of ``acked_keys`` (``(code, text)`` pairs), declared ONLY so it
+    #: is refused (``client_outdated``, :func:`_ack_refusal`) — the ``OpeningEditBody.avg``
+    #: pattern. Undeclared, Pydantic's default ``extra='ignore'`` dropped it, and a long-open
+    #: tab on the old JavaScript fell to the bare-flag path and acknowledged warnings it never
+    #: displayed. ``Any`` on purpose: a type error here would answer in Pydantic's English.
+    acked_warnings: list[Any] | None = None
     #: DEF-049 — PUT only: the owner confirmed the 賣超 the edited ledger would create (the
     #: replay guard's ack, the same flag the transaction edit carries). Ignored by the POST.
     ack_oversell: bool = False
@@ -1510,6 +1516,17 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
     if not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", issues[0].message, issues=wires))
+    if body.acked_warnings is not None:
+        # S2: a tab still running the pre-R1 JavaScript. Its list cannot be checked (it is
+        # the resolved TEXT R1 stopped trusting) and must not fall to the bare-flag path below,
+        # so it is refused. A code of its own, not `warnings_changed`: both pre-R1 clients
+        # toast an unrecognised code's message, while the pre-R1 edit dialog answered
+        # `warnings_changed` by reopening its warning list without the message — a loop the
+        # owner could not leave, and the one sentence that says how is this one.
+        return JSONResponse(status_code=422, content=error_body(
+            "client_outdated",
+            "這個頁面載入的是舊版程式，警告確認的方式已經更新；為了不把沒有讀過的警告一併確認，"
+            "這次沒有存檔。請重新整理頁面後再登錄一次"))
     if body.acked_keys is None:
         return None
     acked = set(body.acked_keys)
