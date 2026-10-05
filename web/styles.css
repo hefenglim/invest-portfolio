@@ -2523,6 +2523,10 @@ button[disabled], .btn[disabled] {
 /* CR-02 (2026-10-04): the drawer's 配息史 line for a dividend the book refused (no position in
    that account by its date) — the error colour of the activity footer's cause lines, as a class. */
 .sd-ledger-issue { margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--up); }
+/* K1 (2026-10-05): the remedy for each cause of a red 交易明細 footer, under its cause lines —
+   guidance, not a state, so it reads in the body text colour; its links are the issue links. */
+.sd-tx-remedy { margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--text-2); }
+.sd-tx-remedy .sd-tx-issue-link + .sd-tx-issue-link { margin-left: 8px; }
 /* DEF-035 (2026-09-23): the AI draft table's per-row editors — table-height, compact, and a
    flagged box (a typed value that does not parse) keeps its text and turns red (DEF-005). */
 .ai-edit { box-sizing: border-box; width: 100%; min-width: 64px; max-width: 150px; height: 26px;

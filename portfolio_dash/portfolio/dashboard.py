@@ -57,6 +57,7 @@ from portfolio_dash.portfolio.results import (
     ReturnSummary,
     SectorAllocation,
     UnappliedAction,
+    UnbookableDividend,
 )
 from portfolio_dash.portfolio.returns import (
     CashMovementFlow,
@@ -450,6 +451,26 @@ def _orphan_dividend_reason(dividends: list[Dividend]) -> str:
             " — 該帳戶在股利日之前沒有買進或期初庫存，股利未入帳，無法計算 XIRR")
 
 
+#: The cause word each ``UnbookableDividend.cause`` reads as inside a reason sentence.
+_UNBOOKABLE_CAUSE_ZH = {"short": "放空中", "vacated": "已換股"}
+
+
+def _unbookable_dividend_why(dividends: Sequence[UnbookableDividend]) -> str:
+    """The FX-complete reason's rung for dividends refused on a position that existed (K3).
+
+    Named per row — account, symbol, effective date and the cause — because nothing else on
+    the dashboard names them: XIRR is not withheld for these (it excludes the payout and
+    computes, review R2 ⑤), so when the carrier is flat this sentence is the dashboard's ONLY
+    pointer to the row. Capped by :func:`_named_capped`.
+    """
+    named = _named_capped(
+        dividends,
+        lambda u: (f"{u.dividend.symbol}（{account_ref(u.dividend.account_id)}・"
+                   f"{u.dividend.effective_date.isoformat()}・"
+                   f"{_UNBOOKABLE_CAUSE_ZH[u.cause]}）"))
+    return f"帳本中有 {len(dividends)} 筆股利無法入帳（待釐清）：{named}"
+
+
 @dataclass(frozen=True)
 class FxCompleteOutcome:
     """B of the A · B · B−A decomposition, plus WHY it is absent when it is.
@@ -466,6 +487,7 @@ class FxCompleteOutcome:
 def fx_complete_return(
     trend: TrendSeries, *, has_oversold: bool, has_unapplied_action: bool,
     has_orphan_dividend: bool = False,
+    unbookable_dividends: Sequence[UnbookableDividend] = (),
 ) -> FxCompleteOutcome:
     """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
 
@@ -494,9 +516,14 @@ def fx_complete_return(
         # CR-02 (2026-10-04) added the third rung, in the XIRR gate's own order. Defaulted to
         # False only because the cost of a missed argument is a wrong DIAGNOSIS on an already-
         # blank figure (B is withheld either way) — the one production caller passes it.
+        # K3 (2026-10-05) added the fourth: a payout refused on an open short or a vacated
+        # ticker. The trend marked those days (held carrier) yet this ladder had no rung for it
+        # and fell through to 「缺價」 over a priced position — F-13's misdiagnosis, again. It
+        # sits after the three XIRR rungs because XIRR itself is not withheld for it.
         why = ("帳本中有賣超部位待釐清" if has_oversold
                else "帳本中有公司行動無法套用（待釐清）" if has_unapplied_action
                else "帳本中有股利沒有對應持倉（待釐清）" if has_orphan_dividend
+               else _unbookable_dividend_why(unbookable_dividends) if unbookable_dividends
                else "最新一日有標的缺價")
         return FxCompleteOutcome(
             None, f"{why}，含匯兌總損益暫不計算（不以較早日期替代，否則與"
@@ -1056,7 +1083,8 @@ def build_dashboard(
     fx_outcome = fx_complete_return(
         trend, has_oversold=has_oversold,
         has_unapplied_action=bool(unapplied_actions),
-        has_orphan_dividend=bool(orphan_dividends))
+        has_orphan_dividend=bool(orphan_dividends),
+        unbookable_dividends=book.unbookable_dividends)
     fx_complete = fx_outcome.value
     # AI-D48 made B − A a TWO-term difference, so the third term is subtracted out rather
     # than left inside 「本金匯率效果」 — a residual that quietly absorbs whatever joins B next
@@ -1168,4 +1196,5 @@ def build_dashboard(
         oversold_positions=oversold_positions,
         orphan_dividends=orphan_dividends,
         opened_positions=book.opened_positions,
+        unbookable_dividends=book.unbookable_dividends,
     )

@@ -507,7 +507,14 @@ def _day_incomplete(res_d, day: date) -> bool:
 
     FX is not a cause: the fixture seeds every needed pair at ``EARLY_ASOF``, which precedes
     the first ledger event, so an on-or-before rate always resolves.
+
+    K3 (owner ruling 2026-10-05) adds a fourth, independent of what is held: a dividend
+    refused by ``day`` because it landed on an open short. The 2609 lifecycle covers that short
+    back to exactly zero, so after the cover no holding carries ``unbookable_dividend`` — and
+    the ruling is that the 待釐清 must not die with a flat carrier. The days stay incomplete.
     """
+    if res_d.refused_dividends:
+        return True
     for h in res_d.holdings.values():
         if h.shares == O.ZERO:
             continue

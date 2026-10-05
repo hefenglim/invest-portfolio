@@ -350,8 +350,12 @@ def daily_value_series(
             # having no position has no holding at all. Both stay on the BOOK; read them here.
             # DATE-SCOPED the same way: `bundle.through(day)` only holds what has happened by
             # `day`, so the days before the oversell / the refused payout stay complete.
-            if book.oversold_positions or book.orphan_dividends:
-                incomplete = True  # 賣超 / 股利無對應持倉 — 當日估值待釐清
+            # K3 (2026-10-05): the third shape — a payout refused on an open short or on a
+            # ticker an EXCHANGE vacated flags its carrier, and a FLAT carrier (successor sold
+            # out, short covered to 0) is dropped below with that flag. The held one was always
+            # caught by `h.unbookable_dividend`; this makes the flat one agree with it.
+            if book.oversold_positions or book.orphan_dividends or book.unbookable_dividends:
+                incomplete = True  # 賣超 / 股利無對應持倉 / 股利無法入帳 — 當日估值待釐清
             for h in book.holdings:
                 if h.shares == _ZERO:
                     continue

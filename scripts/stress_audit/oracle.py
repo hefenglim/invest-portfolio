@@ -536,6 +536,12 @@ class OracleResult:
     # (edge-code, scope) for every corporate action the replay REFUSED to apply — the
     # oracle's own §5 refusal matrix, surfaced so the evidence trail says WHICH rule fired.
     action_refusals: list[tuple[str, str]] = field(default_factory=list)
+    # (account, symbol, pay date) for every dividend skipped because it landed on an OPEN
+    # SHORT (K3, owner ruling 2026-10-05). Recorded on the RESULT, not only as the position's
+    # `unbookable_dividend`: a later cover of exactly the short's size nets the position to 0,
+    # the emit loop drops it, and the flag went with it. The ruling is that the 待釐清 must not
+    # die with a flat carrier — so a day by which such a dividend was refused stays incomplete.
+    refused_dividends: list[tuple[str, str, date]] = field(default_factory=list)
 
 
 class EventPriority(IntEnum):
@@ -861,6 +867,7 @@ def replay(facts: Facts) -> OracleResult:
     positions: dict[tuple[str, str], _Pos] = {}
     realized_rows: list[RealizedRow] = []
     refusals: list[tuple[str, str]] = []
+    refused_dividends: list[tuple[str, str, date]] = []   # K3 — see OracleResult
 
     for _d, _p, _seq, kind, ev in events:
         if kind == "corp":
@@ -961,6 +968,7 @@ def replay(facts: Facts) -> OracleResult:
                 # positive net (income) or DRIP shares (breaks long/short exclusivity)
                 # would be money-of-record errors — skip the event, flag the position.
                 pos2.unbookable_dividend = True
+                refused_dividends.append((ev.account_id, ev.symbol, ev.d))   # K3
                 continue
             if ev.type in CASH_DIVIDEND_TYPES:
                 if pos2.shares == ZERO:
@@ -1000,7 +1008,8 @@ def replay(facts: Facts) -> OracleResult:
     fx_avg, fx_real, fx_fcash, fx_cov = _fx_pools(facts)
 
     return OracleResult(holdings, realized_rows, dict(realized_by_ccy), cash,
-                        fx_avg, fx_real, fx_fcash, fx_cov, refusals)
+                        fx_avg, fx_real, fx_fcash, fx_cov, refusals,
+                        refused_dividends=refused_dividends)
 
 
 def facts_through(facts: Facts, day: date) -> Facts:

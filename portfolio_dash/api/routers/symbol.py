@@ -84,6 +84,7 @@ from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.ledger import (
+    Dividend,
     OpeningInventory,
     Transaction,
     counts_by,
@@ -430,8 +431,8 @@ def _action_issues(
 
 
 def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
-    """The two ledger problems this symbol can have that NO holding row can show (CR-01 /
-    CR-02 / CR-11, 2026-10-04) — read off the SAME book ``build_dashboard`` built.
+    """The ledger problems this symbol can have that NO holding row can show (CR-01 / CR-02 /
+    CR-11, 2026-10-04; K3, 2026-10-05) — read off the SAME book ``build_dashboard`` built.
 
     * **``oversold_flat``** — a 賣超 a later buy netted back to exactly zero shares. The
       position has no holding row, so no 賣超 chip either, and its activity footer reconciles
@@ -442,8 +443,14 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
       carries ``reinvest`` (R8, round 2): a DRIP / 配股 row ADDS shares on the SQL share path
       that the book does not hold, so it turns the 交易明細 footer red and the drawer names it
       beside the footer as well — a red footer never renders without its cause.
+    * **``unbookable_dividends``** (K3) — a dividend refused on a position that DID exist: an
+      open declared short (``cause: "short"``) or a ticker an EXCHANGE had moved away
+      (``"vacated"``). Listed on the dividend's own symbol (``role: "own"`` — its 配息史 row and,
+      for a DRIP / 配股, its red footer) AND on the position that carries the flag
+      (``role: "carrier"``). That carrier may be flat, and a flat position has no holding row
+      and so no 股利待釐清 chip: before K3 this refusal was shown nowhere. ``reinvest`` as above.
 
-    A separate key rather than two more ``action_issues`` lists, because both are about the
+    A separate key rather than more ``action_issues`` lists, because all three are about the
     trade / dividend ledgers, not corporate actions. ``reason`` is a server sentence the
     drawer renders verbatim; account references in it are tokens the fetch layer resolves.
     """
@@ -463,7 +470,26 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
              "reinvest": DividendType(d.type) in _REINVEST_TYPES}
             for d in data.orphan_dividends if d.symbol == symbol
         ],
+        "unbookable_dividends": [
+            {**_row(u.dividend.account_id, u.dividend.effective_date, u.reason),
+             "symbol": u.dividend.symbol,
+             "carrier_symbol": u.carrier_symbol,
+             "cause": u.cause,
+             "role": "own" if u.dividend.symbol == symbol else "carrier",
+             "reinvest": DividendType(u.dividend.type) in _REINVEST_TYPES}
+            for u in data.unbookable_dividends
+            if symbol in (u.dividend.symbol, u.carrier_symbol)
+        ],
     }
+
+
+def _refused_dividends(symbol: str, data: DashboardData) -> list[Dividend]:
+    """Every dividend on *symbol* the book refused that the reconciliation footer counts: the
+    orphans (CR-02) and the ones refused on an open short or a vacated ticker (K3). Both lists
+    come from the book ``build_dashboard`` cut at the valuation day, so they are a subset of the
+    footer's own received dividends by the same predicate."""
+    return ([d for d in data.orphan_dividends if d.symbol == symbol]
+            + [u.dividend for u in data.unbookable_dividends if u.dividend.symbol == symbol])
 
 
 def _reconcile(
@@ -472,6 +498,8 @@ def _reconcile(
     txs: list[Transaction],
     divs: list[Any],
     corporate_delta: Decimal,
+    *,
+    refused: list[Dividend],
 ) -> dict[str, Any]:
     """The 期初＋買−賣(＋配股/DRIP)(＋公司行動)＝部位摘要 share identity, computed server-side.
 
@@ -494,6 +522,13 @@ def _reconcile(
     genuinely does not reconcile — reporting ⚠ 對帳不一致 on it is the correct answer, not a
     false alarm." The drawer shows the cause beside the mismatch (``action_issues`` +
     the ``oversold`` / ``unbookable_*`` chips) instead of forcing the number green.
+
+    *refused* (K1, 2026-10-05) is this slice's dividends the BOOK refused (no position, an open
+    short, a vacated ticker). A refused DRIP / 配股 still adds its shares on the ledger path
+    above, so the footer goes red by exactly those shares — and the drawer must then offer that
+    dividend's remedy, not 補登公司行動. ``gap_is_refused_dividends`` says whether the WHOLE gap
+    is those shares, so the drawer chooses its remedies from a server fact rather than from a
+    reading of the activity rows; any other share of the gap keeps the corporate-action door.
     """
     opening_sh = _sum([o.shares for o in opening])
     buy_sh = _sum([t.quantity for t in txs if t.side is Side.BUY])
@@ -506,6 +541,11 @@ def _reconcile(
     book_sh = _sum([h.shares for h in holdings])
     net = opening_sh + buy_sh - sell_sh + reinvest_sh + corporate_delta
     diff = net - book_sh
+    refused_sh = _sum([
+        d.reinvest_shares
+        for d in refused
+        if DividendType(d.type) in _REINVEST_TYPES and d.reinvest_shares is not None
+    ])
     return {
         "opening_shares": decimal_str(opening_sh),
         "buy_shares": decimal_str(buy_sh),
@@ -523,6 +563,11 @@ def _reconcile(
         # break without its size is unactionable.
         "diff_shares": decimal_str(diff),
         "balances": abs(diff) < _SHARE_EPS,
+        # K1: the reinvest shares of the refused dividends above (a term of `net_shares` the
+        # book does not hold), and whether they are the whole of a non-zero gap.
+        "refused_reinvest_shares": decimal_str(refused_sh),
+        "gap_is_refused_dividends": (abs(diff) >= _SHARE_EPS and refused_sh != _ZERO
+                                     and abs(diff - refused_sh) < _SHARE_EPS),
     }
 
 
@@ -777,9 +822,10 @@ def symbol_detail(
     # aggregate/detail pairs have drifted three times before.
     deltas = {aid: _corporate_delta(conn, action_index, aid, symbol, as_of=as_of)
               for aid in acct_ids}
+    refused = _refused_dividends(symbol, data)
     activity_reconcile = {
         "total": _reconcile(sym_holdings, act_opening, act_txs, received_divs,
-                            _sum(list(deltas.values()))),
+                            _sum(list(deltas.values())), refused=refused),
         "by_account": {
             aid: _reconcile(
                 [h for h in sym_holdings if h.account_id == aid],
@@ -787,6 +833,7 @@ def symbol_detail(
                 [t for t in act_txs if t.account_id == aid],
                 [d for d in received_divs if d.account_id == aid],
                 deltas[aid],
+                refused=[d for d in refused if d.account_id == aid],
             )
             for aid in acct_ids
         },

@@ -221,6 +221,14 @@ def _unclear(h: Holding) -> bool:
     NOT ``unbookable_dividend`` (shares and the share-derived math are right; only the cost
     is short one payout) and NOT ``short_open`` (a real position with a signed quantity) —
     the same call ``pnl.py`` documents, made against the same question.
+
+    K3 (2026-10-05) re-asked it for a FLAT carrier (``Book.unbookable_dividends``: the successor
+    of a vacated ticker sold out, a short covered to 0) and the answer stands, held or flat. The
+    flag says a payout was refused, not that the carrier's shares or totals are undefined: they
+    are exactly what the replay holds, and the projection reads them off the replay itself
+    (``before`` / ``at_date`` in :func:`_position_preview`), so it shows what the written row
+    books. Withholding would hide a correct projection, not a wrong one. Pinned by
+    ``tests/contract/test_k3_unbookable_dividend_reaches_every_reader.py``.
     """
     return h.oversold or h.unbookable_action
 

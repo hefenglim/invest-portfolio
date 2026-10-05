@@ -14,6 +14,7 @@ from portfolio_dash.portfolio.results import (
     RealizedPnL,
     RealizedRow,
     UnappliedAction,
+    UnbookableDividend,
 )
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import (
@@ -193,26 +194,32 @@ class _SkipAction(Exception):  # noqa: N818 - control flow, not an error surface
 
 
 def _follow_exchange_chain(
-    positions: dict[tuple[str, str], _Position], account_id: str, start: _Position
-) -> _Position:
-    """The live successor of a vacated position — a de-SPAC later renamed is the real case.
+    positions: dict[tuple[str, str], _Position], account_id: str, symbol: str,
+    start: _Position,
+) -> tuple[str, _Position]:
+    """The live successor of a vacated position, and its symbol — a de-SPAC later renamed is the
+    real case.
 
     §6.2's own example: the from-side of one action is the to-side of an earlier one, so the
     lookup is **transitive**. Bounded by the number of positions rather than trusting D15 to
     have made a cycle unreachable — a walk that cannot terminate is not worth the one line it
     saves, and this one runs inside the replay's hot loop.
 
-    Falls back to *start* if the chain dead-ends (nothing to flag is better than raising).
+    Falls back to the last node reached if the chain dead-ends (nothing to flag is better than
+    raising). Either way the carrier may be FLAT — the successor sold out, or a dead end at a
+    vacated, zero-share node — and the holdings loop drops a flat position with its flag. That
+    is why the caller ALSO records the refusal on the book (``Book.unbookable_dividends``, K3)
+    and needs the carrier's symbol for it.
     """
     seen: set[str] = set()
-    node = start
+    node_symbol, node = symbol, start
     while node.vacated_to is not None and node.vacated_to not in seen:
         seen.add(node.vacated_to)
         nxt = positions.get((account_id, node.vacated_to))
         if nxt is None:
             break
-        node = nxt
-    return node
+        node_symbol, node = node.vacated_to, nxt
+    return node_symbol, node
 
 
 def _reject(
@@ -454,6 +461,27 @@ def orphan_dividend_message(ev: Dividend) -> str:
             "這筆股利沒有對應持倉，無法入帳。請先補登該日之前的買進或期初庫存，或刪除這筆股利")
 
 
+def _short_dividend_message(ev: Dividend) -> str:
+    """The sentence for a dividend that landed on an open declared short — raised on the strict
+    path and recorded as ``UnbookableDividend.reason`` on the dashboard path (K3), so the two
+    explain the refusal in the same words."""
+    return (f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+            f"{ev.date.isoformat()} 有股利紀錄，"
+            "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
+            "請刪除該筆股利，或改以現金收支登錄。")
+
+
+def _vacated_dividend_message(ev: Dividend, vacated_to: str) -> str:
+    """The sentence for a dividend on a ticker an EXCHANGE had already moved away (E24 / D32) —
+    the strict path's error and the dashboard path's ``UnbookableDividend.reason`` (K3)."""
+    return (f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+            f"{ev.date.isoformat()} 有股利紀錄，"
+            f"但該部位已於此之前換股為 {vacated_to} — "
+            "已換出的標的不再有持倉可歸屬這筆配息，"
+            "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"
+            "請刪除該筆股利，或改以現金收支登錄。")
+
+
 def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     """Replay the ledger in date order; return open holdings, realized P&L, gross invested.
 
@@ -487,7 +515,10 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     ``Book.oversold_positions`` lists every 賣超 position — a holding netted back to exactly
     zero is dropped from ``holdings`` but stays here — and ``Book.orphan_dividends`` lists the
     dividends refused because the account never held the symbol by their date (a payout after
-    a full CLOSE is not one: it books as realized income, owner ruling H2).
+    a full CLOSE is not one: it books as realized income, owner ruling H2). K3 (2026-10-05)
+    added the third: ``Book.unbookable_dividends``, every dividend refused on a position that
+    DID exist (an open short, a ticker an EXCHANGE vacated), with the position carrying the
+    flag — which may be flat and so absent from ``holdings``.
     """
 
     def quote_ccy(symbol: str) -> Currency:
@@ -508,6 +539,9 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     refused_dividends: list[Dividend] = []
     # CR-02: the subset of `refused_dividends` refused because no position existed at all.
     orphan_dividends: list[Dividend] = []
+    # K3: the subset refused on a position that DID exist (an open short, a vacated ticker),
+    # with the position that carries the flag — which may be flat, and then has no Holding.
+    unbookable_dividends: list[UnbookableDividend] = []
 
     # A stored action row the LOADER could not convert (2026-08-11). It never becomes an
     # event — there is no ratio to apply — but it must not be silent either: a dropped
@@ -819,13 +853,13 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # strict path, and on the dashboard path skip the event and flag the position
                     # rather than crash (the same posture as the oversell degradation).
                     if not allow_oversell:
-                        raise UnbookableLedgerError(
-                            f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
-                            f"{ev.date.isoformat()} 有股利紀錄，"
-                            "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
-                            "請刪除該筆股利，或改以現金收支登錄。"
-                        )
+                        raise UnbookableLedgerError(_short_dividend_message(ev))
                     existing.unbookable_dividend = True
+                    # K3 (2026-10-05): ALSO on the book — a later cover of exactly the short's
+                    # size nets this position to 0 and the holdings loop drops it, flag and all.
+                    unbookable_dividends.append(UnbookableDividend(
+                        dividend=ev, cause="short", carrier_symbol=ev.symbol,
+                        reason=_short_dividend_message(ev)))
                     refused_dividends.append(ev)
                     continue
                 if existing.vacated_to is not None:
@@ -841,17 +875,18 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # The second is why this is not cosmetic: the damage is portfolio-wide.
                     # The owner records such a payment as a cash movement instead — the same
                     # remedy `domain-ledger.md` already gives for a dividend on an open short.
-                    successor = _follow_exchange_chain(positions, ev.account_id, existing)
+                    message = _vacated_dividend_message(ev, existing.vacated_to)
                     if not allow_oversell:
-                        raise UnbookableLedgerError(
-                            f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
-                            f"{ev.date.isoformat()} 有股利紀錄，"
-                            f"但該部位已於此之前換股為 {existing.vacated_to} — "
-                            "已換出的標的不再有持倉可歸屬這筆配息，"
-                            "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"
-                            "請刪除該筆股利，或改以現金收支登錄。"
-                        )
+                        raise UnbookableLedgerError(message)
+                    carrier, successor = _follow_exchange_chain(
+                        positions, ev.account_id, ev.symbol, existing)
                     successor.unbookable_dividend = True
+                    # K3 (2026-10-05): ALSO on the book. The successor may be flat already (sold
+                    # out) or become flat later, and the holdings loop drops a flat position
+                    # with its flag — the CR-11 class, which left this refusal shown nowhere.
+                    unbookable_dividends.append(UnbookableDividend(
+                        dividend=ev, cause="vacated", carrier_symbol=carrier,
+                        vacated_to=existing.vacated_to, reason=message))
                     refused_dividends.append(ev)
                     continue
                 if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
@@ -1031,6 +1066,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             oversold_positions=oversold,
             orphan_dividends=orphan_dividends,
             opened_positions=opened,
+            unbookable_dividends=unbookable_dividends,
         )
     except ArithmeticError as exc:
         # The CLASS, not one cause. ``ZeroDivisionError`` is in it too, so a non-Decimal

@@ -86,9 +86,10 @@ class Holding(BaseModel):
     # meaningful — unlike `oversold`, this is a real, priced position, not an unresolved
     # data problem. Covering it books realized P&L at the covering buy's per-share cost.
     short_open: bool = False
-    # A dividend row landed while this position was short. It was NOT booked (a short pays
-    # the dividend in lieu — see cost_basis.build_book), so the position's figures are
-    # incomplete by exactly that payout and the consumer must say so.
+    # A dividend row landed while this position was short, or on a ticker an EXCHANGE moved
+    # to this position (E24). It was NOT booked (see cost_basis.build_book), so the consumer
+    # must say so. The refused ROW is on the book (`Book.unbookable_dividends`, K3), because a
+    # flat carrier has no Holding to wear this flag.
     unbookable_dividend: bool = False
     # A corporate action could not be applied to this position and was SKIPPED on the
     # dashboard path (the strict path raises instead). The share count is therefore in
@@ -252,7 +253,9 @@ class OpenedPosition(BaseModel):
       could not see that before the trade (S1).
 
     The two flags are exactly ``Holding.oversold`` / ``Holding.unbookable_action`` — the
-    ``_unclear`` pair the input path withholds on.
+    ``_unclear`` pair the input path withholds on. ``Holding.unbookable_dividend`` is not here
+    on purpose (K3, 2026-10-05): it does not withhold anything (the shares and the totals are
+    right), and its readers need the refused ROW, not a bit — :class:`UnbookableDividend`.
     """
 
     account_id: str
@@ -260,6 +263,41 @@ class OpenedPosition(BaseModel):
     shares: Decimal
     oversold: bool = False
     unbookable_action: bool = False
+
+
+class UnbookableDividend(BaseModel):
+    """One dividend the replay refused on a position it HAD opened (K3, owner ruling 2026-10-05).
+
+    Two shapes, both with a position to flag — which is exactly why they were flag-only:
+
+    * ``"short"`` — it landed while the position was an open declared short. A short seller
+      pays the dividend in lieu, and this ledger has no debit row for that.
+    * ``"vacated"`` — an EXCHANGE had moved the ticker away (E24 / D32). The flag goes on the
+      live successor (``cost_basis._follow_exchange_chain``), the position the owner holds.
+
+    The carrier can be FLAT — the successor sold out, the short covered back to exactly zero —
+    and the holdings loop drops a flat position together with its ``unbookable_dividend``: the
+    CR-11 class (:class:`OversoldPosition`), one flag over. So the refusal is ALSO recorded
+    here, and every reader that shows its 待釐清 — the trend's incomplete days, the FX-complete
+    reason, the drawer — reads this list, held carrier or flat.
+
+    A dividend refused because no position ever existed is NOT one of these: that is
+    ``Book.orphan_dividends`` (CR-02), with its own remedy. Every row here is also in
+    ``Book.refused_dividends``, so XIRR and 股利總覽 exclude it through the one channel they read.
+    """
+
+    dividend: Dividend
+    cause: Literal["short", "vacated"]
+    #: The position the replay set ``unbookable_dividend`` on when it refused the row: the
+    #: short itself, or the end of the EXCHANGE chain. A later EXCHANGE / SPINOFF carries the
+    #: flag on (E19); this names where it was put, not every position it travelled to.
+    carrier_symbol: str
+    #: ``"vacated"`` only: the symbol the EXCHANGE moved the dividend's ticker to (the chain's
+    #: first hop). ``None`` for ``"short"``.
+    vacated_to: str | None = None
+    #: The zh sentence the strict path raises for the same row, verbatim — both paths explain
+    #: the refusal in the same words, remedy included.
+    reason: str
 
 
 class Book(BaseModel):
@@ -312,6 +350,12 @@ class Book(BaseModel):
     # books as realized income (owner ruling H2). ALWAYS EMPTY on the strict path, which raises
     # ``UnbookableLedgerError`` naming the row instead.
     orphan_dividends: list[Dividend] = Field(default_factory=list)
+    # Dividends refused on a position the replay HAD opened — an open short, or a ticker an
+    # EXCHANGE vacated — with the position that carries the flag (K3, 2026-10-05; see
+    # :class:`UnbookableDividend`). The carrier may be flat and so absent from ``holdings``;
+    # this list is the whole answer either way. Each is ALSO in ``refused_dividends``. ALWAYS
+    # EMPTY on the strict path, which raises ``UnbookableLedgerError`` with the same ``reason``.
+    unbookable_dividends: list[UnbookableDividend] = Field(default_factory=list)
 
 
 class CurrencyReturn(BaseModel):

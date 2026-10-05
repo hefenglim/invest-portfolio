@@ -585,9 +585,11 @@
         '公司行動未套用：股數仍是行動前的數字，價格卻已是行動後的，'
         + '市值與未實現損益因此失真（請修正該筆公司行動或補齊持倉紀錄）');
     } else if (h.unbookable_dividend) {
+      /* Two causes set this flag (K3): a payout on an open short, and one on a ticker an
+         EXCHANGE moved to this position — the text named only the first. */
       add('badge-missing', '股利待釐清',
-        '放空期間有股利紀錄：放空方需支付股利，此筆未列入計算，'
-        + '本列數字少計該筆金額（請改以現金收支登錄）');
+        '有股利紀錄無法入帳：放空期間的股利（放空方需支付股利），或已換股標的在換股後的股利，'
+        + '此筆未列入計算（請改以現金收支登錄，並刪除該筆股利；原因列在下方配息史）');
     } else if (h.revived_by_dividend) {
       add('badge-revived', '配息復活',
         '此部位原本已清空，是配股／DRIP 再投入才重新有股數，成本基礎為零，'
@@ -989,6 +991,9 @@
     sec.appendChild(secHead('配息史', '帳本 dividends・' + rows.length + ' 筆', exportBtn));
     if (!rows.length) {
       sec.appendChild(el('div', 'sd-empty', '尚無配息紀錄'));
+      /* K3: a CARRIER has no dividend rows of its own — the refused row lives on the ticker it
+         was exchanged from — yet the 待釐清 flag is its, so the line renders here too. */
+      appendRefusedDividendLines(sec, detail);
       return sec;
     }
     const wrap = el('div', 'table-wrap');
@@ -1029,11 +1034,28 @@
        listed above — it IS a ledger row — but the book refused it: not income, not a holding,
        not in 總報酬 or XIRR. Named right under the row, in the server's own sentence (account
        tokens resolve in the fetch layer). A class carries the colour (DEF-077). */
-    ((detail.ledger_issues && detail.ledger_issues.orphan_dividends) || []).forEach((r) => {
+    appendRefusedDividendLines(sec, detail);
+    return sec;
+  }
+
+  /* The 配息史 lines for every dividend the book refused that this drawer is about. */
+  function appendRefusedDividendLines(sec, detail) {
+    const ledger = (detail && detail.ledger_issues) || {};
+    (ledger.orphan_dividends || []).forEach((r) => {
       sec.appendChild(el('div', 'sd-ledger-issue',
         '⚠ 股利無對應持倉（' + acctZh(r.account_id) + '）：' + r.reason));
     });
-    return sec;
+    /* K3 (2026-10-05): a dividend refused on a position that DID exist — an open short, or a
+       ticker an EXCHANGE had moved away — named on the dividend's own symbol (`role: 'own'`)
+       AND on the position carrying its 待釐清 flag (`'carrier'`). That carrier can be flat —
+       the successor sold out, the short covered to 0 — and then it has no 部位摘要 and no
+       股利待釐清 chip, which is how this refusal used to be shown nowhere. Server sentence;
+       the colour is the class's (DEF-077). */
+    (ledger.unbookable_dividends || []).forEach((r) => {
+      sec.appendChild(el('div', 'sd-ledger-issue', (r.role === 'carrier'
+        ? '⚠ 股利待釐清（' + acctZh(r.account_id) + '・此部位由 ' + r.symbol + ' 換股承接）：'
+        : '⚠ 股利無法入帳（' + acctZh(r.account_id) + '）：') + r.reason));
+    });
   }
 
   function realizedSection(symbol, detail) {
@@ -1279,8 +1301,58 @@
       if (!rec.balances && rec.diff_shares != null) {
         footHost.appendChild(el('span', null, '（差額 ' + f.shares(rec.diff_shares) + ' 股）'));
       }
-      renderRepairDoor(!rec.balances);
-      renderActionIssues();
+      const remedies = renderRemedies(rec);   // the corporate-action door renders inline here
+      renderActionIssues();                   // the causes…
+      remedies.forEach((row) => footHost.appendChild(row));   // …then what to do about each
+    }
+
+    /* K1 (owner ruling 2026-10-05) — the RIGHT remedy for each cause of a red footer. Door 2
+       used to offer 補登公司行動 beside every mismatch, but a DRIP / 配股 the book refused (no
+       position by its date, an open short, a ticker an EXCHANGE had vacated) adds shares on the
+       ledger path that the book does not hold: the footer is red and a corporate action is
+       not the repair. Every cause the server names gets its own remedy, and mixed causes show
+       each one. 補登公司行動 stays for what it repairs: a corporate-action issue in this slice
+       (the cause lines' three channels), or a gap the refused dividends do NOT explain —
+       `gap_is_refused_dividends` is the server's fact, never a reading of the activity rows.
+       Returns the remedy rows; the caller appends them under the cause lines. */
+    function renderRemedies(rec) {
+      if (rec.balances) return [];
+      const keep = (r) => !filterAcct || r.account_id === filterAcct;
+      const ledger = (detail && detail.ledger_issues) || {};
+      const issues = (detail && detail.action_issues) || {};
+      const actionCause = ['unapplied', 'depth_capped', 'negative_side_skipped']
+        .some((k) => (issues[k] || []).filter(keep).length > 0);
+      if (actionCause || !rec.gap_is_refused_dividends) renderRepairDoor(true);
+      const refused = (ledger.unbookable_dividends || []).filter(keep)
+        .filter((r) => r.role === 'own' && r.reinvest);
+      const toCash = [['前往資金收支', 'cash.html'], ['前往股利帳本', 'trades.html?ledger=div']];
+      const remedies = [];
+      if ((ledger.orphan_dividends || []).filter(keep).some((r) => r.reinvest)) {
+        remedies.push(['orphan', '股利無對應持倉',
+          '補登該日（含）之前的買進或期初庫存，或刪除該筆股利',
+          [['前往股利帳本', 'trades.html?ledger=div']]]);
+      }
+      /* E24 (domain-ledger.md): a payout on a ticker an EXCHANGE vacated is recorded as a cash
+         movement, and the dividend row deleted — the same remedy as a payout on an open short. */
+      if (refused.some((r) => r.cause === 'vacated')) {
+        remedies.push(['vacated', '已換股標的的股利', '改以現金收支登錄這筆配息，並刪除該筆股利',
+          toCash]);
+      }
+      if (refused.some((r) => r.cause === 'short')) {
+        remedies.push(['short', '放空期間的股利', '改以現金收支登錄這筆配息，並刪除該筆股利',
+          toCash]);
+      }
+      return remedies.map(([cause, label, text, links]) => {
+        const row = el('div', 'sd-tx-remedy');
+        row.dataset.cause = cause;
+        row.appendChild(el('span', null, '修正方式（' + label + '）：' + text + ' '));
+        links.forEach(([name, href]) => {
+          const a = el('a', 'sd-tx-issue-link', name);
+          a.href = href;
+          row.appendChild(a);
+        });
+        return row;
+      });
     }
 
     /* DOOR 2 (§6.7) — the repair offered where the owner is already looking at the evidence.
@@ -1290,7 +1362,9 @@
        `pdCorpActionForm` is the shared component doors 1 and 3 use, loaded by index.html —
        so this is a call, not a fourth implementation of the form. If the script is absent the
        button simply does not render, because a door that opens onto nothing is worse than no
-       door: the owner would conclude the repair is unavailable rather than that it is broken. */
+       door: the owner would conclude the repair is unavailable rather than that it is broken.
+       K1 (2026-10-05): called by `renderRemedies` only when a corporate action is a cause —
+       a red footer made only of refused dividends gets those dividends' remedies instead. */
     /* DEF-072 — WHICH account the repair is for. The drawer's filter when one is set (its
        footer is that account's, and it is the red one, or no door would render); else the
        ONE account whose own footer is red (`activity_reconcile.by_account[id].balances`, the
@@ -1389,6 +1463,12 @@
       (ledger.orphan_dividends || []).filter(keep).filter((r) => r.reinvest).forEach((r) => {
         lines.push('⚠ 股利無對應持倉（' + acctZh(r.account_id) + '）：' + r.reason);
       });
+      /* K3: the same for a DRIP / 配股 refused on an open short or a vacated ticker — its
+         shares are on the ledger path of THIS symbol (`role: 'own'`), not the carrier's. */
+      (ledger.unbookable_dividends || []).filter(keep)
+        .filter((r) => r.role === 'own' && r.reinvest).forEach((r) => {
+          lines.push('⚠ 股利無法入帳（' + acctZh(r.account_id) + '）：' + r.reason);
+        });
       lines.forEach((text) => {
         const row = el('div', 'sd-tx-issue', text);
         row.style.cssText = 'margin-top:4px;color:var(--up)';

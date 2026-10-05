@@ -18,6 +18,7 @@ from portfolio_dash.portfolio.results import (
     ReturnSummary,
     SectorAllocation,
     UnappliedAction,
+    UnbookableDividend,
 )
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.ledger import Dividend
@@ -434,3 +435,9 @@ class DashboardData(BaseModel):
     # is the REPLAY's fact — did it ever open this position — not a reading of activity rows.
     # Excluded from the wire for the same reason as the two fields above.
     opened_positions: list[OpenedPosition] = Field(default_factory=list, exclude=True)
+    # ``Book.unbookable_dividends`` (K3, 2026-10-05): dividends refused on an open short or a
+    # vacated ticker, with the position carrying the flag — which may be flat and so have no
+    # holding row. The drawer names each one (on the dividend's symbol and on the carrier) and
+    # the reconciliation footer reads them; excluded from the wire like the fields above (the
+    # dashboard names them through the FX-complete reason and the trend's incomplete days).
+    unbookable_dividends: list[UnbookableDividend] = Field(default_factory=list, exclude=True)
