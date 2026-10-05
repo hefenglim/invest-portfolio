@@ -11,7 +11,7 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -61,6 +61,8 @@ from portfolio_dash.portfolio.results import (
 )
 from portfolio_dash.portfolio.returns import (
     CashMovementFlow,
+    DividendIdentity,
+    booked_dividends,
     dividend_key,
     total_return,
     xirr_reporting,
@@ -544,6 +546,7 @@ def _benchmark_comparison(
     actions: ActionIndex,
     fx_complete: Decimal | None,
     cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
 ) -> BenchmarkComparison:
     """R4 / AI-D43 — spend the portfolio's own flows on each market's index instead.
 
@@ -561,8 +564,10 @@ def _benchmark_comparison(
     is correct the moment such an action IS recorded, and because one raw series read is how
     the next reader concludes the re-expression rule is optional.
     """
+    # K2: the stream B is built from — a payout the replay refused is no flow on either leg.
     flows = build_reporting_flows(bundle, fx_history, reporting,
-                                  cash_movements=cash_movements)
+                                  cash_movements=cash_movements,
+                                  refused_dividends=refused_dividends)
     if flows is None:
         return BenchmarkComparison(
             available=False,
@@ -867,7 +872,10 @@ def build_dashboard(
         # `as_of` is the SAME day `GET /api/cash` bounds its balances to (M5-06), so the FX
         # pool and the funds view are asked for the same day — the manual's
         # `fx.pool_equals_funds` (§8.3) is an identity only under that condition (X8b).
-        fx_summary = compute_fx_summary(accounts, instruments, txs, divs, convs,
+        # ⑪: the FX pool's foreign cash counts the payouts the BOOK booked — the same rows
+        # `GET /api/cash` counts, or `fx.pool_equals_funds` (§8.3) breaks by a refused one.
+        fx_summary = compute_fx_summary(accounts, instruments, txs,
+                                        booked_dividends(divs, book.refused_dividends), convs,
                                         exposure, resolver.rate, reporting,
                                         cash_movements, as_of=as_of)
     except KeyError as exc:
@@ -1036,7 +1044,11 @@ def build_dashboard(
             # exactly as there), converted at carry-forward FX per day. Display-only
             # attribution — no money-of-record path is touched.
             cash_txs = list_transactions(conn)
-            cash_divs = list_dividends(conn)
+            # ⑪ (owner ruling 2026-10-05): only the payouts the replay booked, exactly as
+            # `GET /api/cash` — a refused dividend raised the net-worth line by a payout
+            # 總報酬, XIRR and 股利總覽 all left out. `book` is this request's replay; it cuts at
+            # `as_of`, which is where this series ends.
+            cash_divs = booked_dividends(list_dividends(conn), book.refused_dividends)
             cash_convs = list_fx_conversions(conn)
             cash_ccys = {
                 ccy for _acct, ccy in cash_balances(
@@ -1102,6 +1114,7 @@ def build_dashboard(
         # place the cash flows (they carry no market), so the costs land on the portfolio leg
         # only — one stream, one place that decides what can be spent on an index.
         cash_movements=cash_movements,
+        refused_dividends=book.refused_dividends,
     )
     kpis = KpiSummary(
         reporting_currency=reporting,

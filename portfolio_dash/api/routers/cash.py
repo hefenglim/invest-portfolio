@@ -55,6 +55,7 @@ from portfolio_dash.data_ingestion.store import (
     list_fx_conversions,
     list_instruments,
     list_transactions,
+    load_ledger_bundle,
     update_cash_movement,
 )
 from portfolio_dash.data_ingestion.validate import (
@@ -70,12 +71,20 @@ from portfolio_dash.data_ingestion.validate import (
     validate_cash_movement,
 )
 from portfolio_dash.portfolio.cash import (
+    UNBOOKED_DIVIDEND_NOTE,
+    UNBOOKED_DIVIDEND_REASON,
     CashLine,
     account_statement,
     cash_balances,
     pool_lines,
     running_eod,
     running_low,
+)
+from portfolio_dash.portfolio.returns import (
+    DividendIdentity,
+    booked_dividends,
+    replay_refusals,
+    unbooked_dividends,
 )
 from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.account_ref import account_ref
@@ -108,25 +117,6 @@ def _allowed_ccys(account: Account) -> set[Currency]:
     return {account.settlement_ccy, account.funding_ccy}
 
 
-def _balances(
-    conn: sqlite3.Connection,
-    *,
-    as_of: date,
-    movements: list[StoredCashMovement] | None = None,
-) -> dict[tuple[str, Currency], Decimal]:
-    """Pool balances as of ``as_of`` (M5-06 — the request clock's day, never
-    ``date.today()``); ``movements`` overrides the stored movement ledger (would-be /
-    excluding-a-row reads for the withdraw guard, FU-D43a)."""
-    return cash_balances(
-        movements if movements is not None else list_cash_movements(conn),
-        list_fx_conversions(conn),
-        list_transactions(conn),
-        list_dividends(conn),
-        {i.symbol: i for i in list_instruments(conn)},
-        as_of=as_of,
-    )
-
-
 @dataclass(frozen=True)
 class CashLedgers:
     """The five ledgers a pool timeline is built from, read ONCE per request (CR-12).
@@ -139,6 +129,13 @@ class CashLedgers:
     these tables and a same-account one 17. Tuples, so a guard cannot alter the snapshot the
     next guard reads. Safe for the same reason :func:`cash_pool_fn`'s bind-time snapshot is:
     every door validates before it writes.
+
+    ⑪ (owner ruling 2026-10-05): ``dividends`` are the stored rows the replay BOOKED, and
+    ``unbooked`` the ones it refused (no position by the effective date, an open declared
+    short, a ticker an EXCHANGE vacated). Every balance, every guard and every statement on
+    this page is built from this one snapshot, so the pool the page shows and the pool a
+    withdrawal is judged against are the same pool: a refused payout counts in neither, and a
+    statement lists it with the balance it did not move (``unbooked``).
     """
 
     movements: tuple[StoredCashMovement, ...]
@@ -146,6 +143,7 @@ class CashLedgers:
     transactions: tuple[StoredTransaction, ...]
     dividends: tuple[StoredDividend, ...]
     instruments: dict[str, Instrument]
+    unbooked: tuple[StoredDividend, ...] = ()
 
 
 def load_cash_ledgers(
@@ -155,6 +153,7 @@ def load_cash_ledgers(
     transactions: Sequence[StoredTransaction] | None = None,
     dividends: Sequence[StoredDividend] | None = None,
     instruments: dict[str, Instrument] | None = None,
+    refused: Sequence[DividendIdentity] | None = None,
 ) -> CashLedgers:
     """The ONE read of the five pool ledgers a request makes (CR-12).
 
@@ -163,16 +162,38 @@ def load_cash_ledgers(
     and instrument registry for their equity replay, and ``action_change_guard`` reads the cash
     movements to find a corporate action's linked fee, before either needs a pool snapshot. The
     rows must be the STORED rows, in the store's order — what this function would have read.
+
+    ⑪: the stored dividends are split by the replay's own refusal
+    (``portfolio/returns.py::booked_dividends``). ``refused`` is that refusal when the caller
+    already replayed THIS ledger (the replay guards pass their "before" book's); ``None``
+    replays it here — ONE ``build_book`` per snapshot, never per row or per pool, over the
+    rows above plus the openings and corporate actions (one read each), which is why a probe
+    bound over the snapshot (:func:`bind_cash_pool`) still takes no connection.
     """
+    txs = list(transactions) if transactions is not None else list_transactions(conn)
+    divs = list(dividends) if dividends is not None else list_dividends(conn)
+    insts = (instruments if instruments is not None
+             else {i.symbol: i for i in list_instruments(conn)})
+    if refused is None:
+        refused = replay_refusals(load_ledger_bundle(
+            conn, transactions=txs, dividends=divs, instruments=insts))
     return CashLedgers(
         movements=tuple(movements if movements is not None else list_cash_movements(conn)),
         fx=tuple(list_fx_conversions(conn)),
-        transactions=tuple(transactions if transactions is not None
-                           else list_transactions(conn)),
-        dividends=tuple(dividends if dividends is not None else list_dividends(conn)),
-        instruments=(instruments if instruments is not None
-                     else {i.symbol: i for i in list_instruments(conn)}),
+        transactions=tuple(txs),
+        dividends=tuple(booked_dividends(divs, refused)),
+        instruments=insts,
+        unbooked=tuple(unbooked_dividends(divs, refused)),
     )
+
+
+def pool_balances(ledgers: CashLedgers, *, as_of: date) -> dict[tuple[str, Currency], Decimal]:
+    """Every (account, ccy) pool balance as of ``as_of`` (M5-06 — the request clock's day,
+    never ``date.today()``), over one snapshot: the figure ``GET /api/cash`` serves and the
+    manual-entry draft's 帳戶現金 line quotes (``input_center``), so the two cannot differ —
+    by a future-dated row (X8a) or by a refused payout (⑪)."""
+    return cash_balances(ledgers.movements, ledgers.fx, ledgers.transactions,
+                         ledgers.dividends, ledgers.instruments, as_of=as_of)
 
 
 def _pool_dip(
@@ -190,7 +211,10 @@ def _pool_dip(
     change turns no day negative and pushes none below the pool's old lowest point.
 
     *ledgers* is the "before"; callers pass the WOULD-BE rows of whichever ledgers the change
-    rewrites, and an unspecified one is the snapshot's own. Compared day by day by
+    rewrites, and an unspecified one is the snapshot's own. Would-be ``dividends`` are the rows
+    that BOOK on the would-be ledger (⑪ — ``returns.booked_dividends`` over the would-be
+    replay's refusals: removing a cover can strand a payout on an open short), exactly as the
+    snapshot's own are the rows that book now. Compared day by day by
     ``shared/cash_dip.py::caused_dip``. Owner ruling A (2026-10-02, the verifier's R14
     observation): these doors reported ANY dip in the would-be pool and called it 「此筆會使…」,
     so deleting a withdrawal from the Schwab TWD pool — which only raises balances — read
@@ -487,7 +511,10 @@ def cash_overview(
     # M5-06: today's balance counts what has happened by today. ``now`` is the injected
     # app clock (Asia/Taipei), so the frozen test clock and prod read the same rule.
     as_of = now.date()
-    bal = _balances(conn, as_of=as_of)
+    # ⑪: the snapshot every guard on this page reads, so the balance shown and the balance a
+    # withdrawal is judged against are one figure (a refused payout counts in neither).
+    ledgers = load_cash_ledgers(conn)
+    bal = pool_balances(ledgers, as_of=as_of)
     rows = [
         {
             "account_id": account_id,
@@ -536,7 +563,7 @@ def cash_overview(
     )
     # WPE (2026-07-07): the movements ledger pages via limit/offset (additive — same
     # shape, total_count still counts the WHOLE ledger; balances untouched).
-    movements = list(reversed(list_cash_movements(conn)))
+    movements = list(reversed(ledgers.movements))   # the snapshot's rows — no second read
     page = movements[offset:offset + limit]
     return {
         "as_of": as_of.isoformat(),
@@ -591,7 +618,10 @@ def _stmt_row_wire(
     ``as_of``, so its running ``balance`` is a projection past today's ``current_balance``)
     + ``counts_from`` (DEF-056 R5: the day it starts to count, the ledger lists' flag — the
     same :func:`pending_from` answer, so the statement row and the 出金入金 row badge alike)
-    + the OPTIONAL structured detail keys (null when the field does not apply to the kind).
+    + the OPTIONAL structured detail keys (null when the field does not apply to the kind)
+    + ``booked`` / ``unbooked_note`` / ``unbooked_reason`` (⑪: ``booked`` is false only on a
+    dividend the replay refused — listed, its ``delta`` the net it records, its ``balance``
+    the running balance it did NOT move; the two texts are null on every other row).
     Every Decimal is a wire STRING."""
     def _d(value: Decimal | None) -> str | None:
         return decimal_str(value) if value is not None else None
@@ -604,6 +634,9 @@ def _stmt_row_wire(
         "ref": ln.ref,
         "delta": decimal_str(ln.delta),
         "balance": decimal_str(bal),
+        "booked": ln.booked,
+        "unbooked_note": None if ln.booked else UNBOOKED_DIVIDEND_NOTE,
+        "unbooked_reason": None if ln.booked else UNBOOKED_DIVIDEND_REASON,
         "future": counts_from is not None,
         "counts_from": _iso_or_none(counts_from),
         "symbol": ln.symbol,
@@ -641,17 +674,24 @@ def cash_statement(
     a row dated after it carries ``future: true`` so the page can draw the line between the
     balance and the projection past it. ``future_count`` (DEF-056 R5) counts those rows over
     the WHOLE scope, not the page, so the header can say what the balance leaves out exactly
-    as the printed report's section title does."""
+    as the printed report's section title does.
+
+    ⑪ (owner ruling 2026-10-05): a dividend the replay refused is LISTED — it is in the ledger,
+    and a statement the owner reconciles must not lose it — but it moves no balance
+    (``booked: false``); ``unbooked_count`` counts those rows over the whole scope, like
+    ``future_count``. Built from the snapshot every guard on the page reads
+    (:func:`load_cash_ledgers`), so 目前餘額 here, the pool card and the withdraw guard are one
+    figure."""
     accounts = _accounts(conn)
     acct = accounts.get(account)
     if acct is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", unknown_account_message(account), field="account"))
     as_of = now.date()
+    ledgers = load_cash_ledgers(conn)
     statements = account_statement(
-        account, list_cash_movements(conn), list_fx_conversions(conn),
-        list_transactions(conn), list_dividends(conn),
-        {i.symbol: i for i in list_instruments(conn)}, ccy=ccy,
+        account, ledgers.movements, ledgers.fx, ledgers.transactions, ledgers.dividends,
+        ledgers.instruments, ccy=ccy, unbooked_dividends=ledgers.unbooked,
     )
 
     def _as_of_balance(stmt: list[tuple[CashLine, Decimal]]) -> Decimal:
@@ -693,6 +733,7 @@ def cash_statement(
         "rows": [_stmt_row_wire(c, ln, bal, as_of=as_of) for c, ln, bal in page],
         "total_count": len(flat),
         "future_count": sum(1 for _, ln, _ in flat if not counts_by(ln.date, as_of)),
+        "unbooked_count": sum(1 for _, ln, _ in flat if not ln.booked),
     }
 
 

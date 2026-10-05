@@ -400,6 +400,12 @@
       if (resp.future_count) {
         sub.textContent += '（截至 ' + resp.as_of + '，不含 ' + resp.future_count + ' 筆未來日期）';
       }
+      /* ⑪ (owner ruling 2026-10-05): dividends the replay refused are listed below but move no
+         balance — the printed report's section title says the same sentence. The count is the
+         server's, over the whole scope. */
+      if (resp.unbooked_count) {
+        sub.textContent += '（另有 ' + resp.unbooked_count + ' 筆股利未入帳，不計入餘額）';
+      }
     }
     const ccyTh = $('#cash-stmt-ccy-th');
     if (ccyTh) ccyTh.hidden = !combined;
@@ -422,15 +428,30 @@
       if (r.future) seenFuture += 1;
       const tr = el('tr', r.future
         ? 'stmt-future' + (seenFuture === futureOnPage ? ' stmt-future-last' : '') : undefined);
+      /* ⑪: a dividend the replay refused (`booked: false`) is listed with the amount it records,
+         struck through, and the server's 「未入帳（待釐清）」 beside its description; its running
+         balance is the one it did not move. Every mark is a class (DEF-077), never a style. */
+      const unbooked = r.booked === false;
+      if (unbooked) tr.classList.add('stmt-unbooked');
       tr.appendChild(dateCell(r.date, r.counts_from));
       const tdKind = el('td', 'col-text');
       tdKind.appendChild(el('span', 'stmt-chip', KIND_LABEL[r.kind] || r.kind));
       tr.appendChild(tdKind);
       if (combined) tr.appendChild(el('td', 'num col-ccy', rowCcy));
-      tr.appendChild(el('td', 'col-text', describe(r)));
+      const tdText = el('td', 'col-text', describe(r));
+      if (unbooked) {
+        const tag = el('span', 'stmt-unbooked-tag', r.unbooked_note || '');
+        tag.title = r.unbooked_reason || '';
+        tdText.appendChild(tag);
+      }
+      tr.appendChild(tdText);
       const tdDelta = el('td', 'num');
       tdDelta.textContent = f.signed(r.delta, rowCcy);
       if (String(r.delta).indexOf('-') === 0) tdDelta.classList.add('sign-down');
+      if (unbooked) {
+        tdDelta.classList.add('stmt-unbooked-amt');
+        tdDelta.title = r.unbooked_reason || '';
+      }
       tr.appendChild(tdDelta);
       const tdBal = el('td', 'num');
       tdBal.textContent = f.money(r.balance, rowCcy);

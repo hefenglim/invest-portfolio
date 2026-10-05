@@ -58,9 +58,14 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, OversoldPosition
+from portfolio_dash.portfolio.returns import booked_dividends
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.ledger import LedgerBundle, dividend_effective_date
+from portfolio_dash.shared.models.ledger import (
+    Dividend,
+    LedgerBundle,
+    dividend_effective_date,
+)
 from portfolio_dash.shared.wire import decimal_str
 
 
@@ -162,6 +167,52 @@ def _replayed(bundle: LedgerBundle) -> Book | None:
         return None
 
 
+@dataclass(frozen=True)
+class _Replays:
+    """The "before" and "after" replays of one correction, built ONCE per guard call.
+
+    :func:`_replay_block` judges the equity side from them; since ⑪ (owner ruling 2026-10-05)
+    the batch undo's and the corporate-action delete's cash check reads their refusals too —
+    a refused payout funds no pool on EITHER side of the change (the "before" pool books what
+    the current ledger books, the "after" pool what the would-be ledger books: removing a
+    cover leaves a later payout on an open short). Handing the books on costs nothing;
+    replaying again for the cash check would be two more ``build_book``s.
+    """
+
+    pre: LedgerBundle
+    post: LedgerBundle
+    pre_book: Book | None
+    post_book: Book | None
+
+
+def _replays(
+    conn: sqlite3.Connection,
+    *,
+    txs: list[StoredTransaction] | None = None,
+    divs: list[StoredDividend] | None = None,
+    opening: list[StoredOpening] | None = None,
+    actions: list[StoredCorporateAction] | None = None,
+    read: _LedgerRead,
+) -> _Replays:
+    """Replay the stored ledger (*read*) and the would-be one (*read* with the given lists
+    swapped in), each through :func:`_to_models` — the store's order — and :func:`_replayed`."""
+    pre = _to_models(conn, read.transactions, read.dividends, read.opening, read.actions,
+                     instruments=read.instruments)
+    post = _to_models(conn,
+                      txs if txs is not None else read.transactions,
+                      divs if divs is not None else read.dividends,
+                      opening if opening is not None else read.opening,
+                      actions if actions is not None else read.actions,
+                      instruments=read.instruments)
+    return _Replays(pre=pre, post=post, pre_book=_replayed(pre), post_book=_replayed(post))
+
+
+def _refused(book: Book | None) -> list[Dividend]:
+    """The dividends *book* refused (⑪); none when the ledger could not be booked at all —
+    the same answer ``returns.replay_refusals`` gives the cash snapshot for such a ledger."""
+    return book.refused_dividends if book is not None else []
+
+
 #: A dividend's ORPHAN identity: (account, symbol, effective date). Exact, not an
 #: approximation: whether a position exists when a dividend books depends on nothing else —
 #: every event that can open one (opening, trade, corporate action) sorts BEFORE a same-day
@@ -251,6 +302,7 @@ def _replay_block(
     opening: list[StoredOpening] | None = None,
     actions: list[StoredCorporateAction] | None = None,
     read: _LedgerRead | None = None,
+    replays: _Replays | None = None,
 ) -> _ReplayBlock | None:
     """Compare the CURRENT ledger to the WOULD-BE ledger; block only what this mutation
     introduces — a newly stranded dividend/opening (orphan, hard) or a new/worsened
@@ -261,17 +313,17 @@ def _replay_block(
     only the first; ``message`` still names the first, so the row doors are unchanged.
 
     *read* (R10): the stored ledgers, when the caller has read them for another step too;
-    ``None`` reads them here — once, for both the "before" and the "after"."""
+    ``None`` reads them here — once, for both the "before" and the "after".
+
+    *replays* (⑪): the two replays, when the caller built them with :func:`_replays` (from
+    the same *read* and the same would-be lists) because its cash check reads them too;
+    ``None`` builds them here."""
     base = read if read is not None else _read_ledgers(conn)
-    pre = _to_models(conn, base.transactions, base.dividends, base.opening, base.actions,
-                     instruments=base.instruments)
-    post = _to_models(conn,
-                      txs if txs is not None else base.transactions,
-                      divs if divs is not None else base.dividends,
-                      opening if opening is not None else base.opening,
-                      actions if actions is not None else base.actions,
-                      instruments=base.instruments)
-    pre_book, post_book = _replayed(pre), _replayed(post)
+    if replays is None:
+        replays = _replays(conn, txs=txs, divs=divs, opening=opening, actions=actions,
+                           read=base)
+    pre, post = replays.pre, replays.post
+    pre_book, post_book = replays.pre_book, replays.post_book
 
     # ONE source on both sides of the difference: the replay's whenever both ledgers can be
     # booked, the fallback otherwise — never one of each. (Since R9 the two agree, so this is
@@ -476,23 +528,31 @@ def _batch_cash_refusal(
     would_divs: list[StoredDividend],
     *,
     read: _LedgerRead,
+    replays: _Replays,
 ) -> JSONResponse | None:
     """:func:`_pool_refusal` over the batch's cash / FX rows. A corporate action takes its
     linked fee with it (DEF-020), so that movement leaves the would-be pool too.
 
     A batch that owns no cash movement, conversion or corporate action can feed no pool, so it
     reads nothing (CR-12); otherwise it reads the two cash ledgers, once, and takes the trades,
-    dividends and registry from *read* — the guard's own read (R10)."""
+    dividends and registry from *read* — the guard's own read (R10).
+
+    ⑪: each side counts the payouts ITS replay booked — the "before" pool the current
+    ledger's (*replays*' ``pre_book``), the "after" pool the would-be ledger's (``post_book``)
+    — through ``returns.booked_dividends``, so this check and the 資金 page after the undo read
+    one pool. No replay of its own: the guard's two are handed in."""
     action_ids = rows.of("corporate_actions")
     if not (rows.of("cash_movements") or rows.of("fx_conversions") or action_ids):
         return None
     ledgers = load_cash_ledgers(conn, transactions=read.transactions, dividends=read.dividends,
-                                instruments=read.instruments)
+                                instruments=read.instruments,
+                                refused=_refused(replays.pre_book))
     leaving = {m.id for m in ledgers.movements
                if m.id in rows.of("cash_movements")
                or (m.corporate_action_id is not None and m.corporate_action_id in action_ids)}
     return _pool_refusal(ledgers, leaving=leaving, gone_fx=rows.of("fx_conversions"),
-                         would_txs=would_txs, would_divs=would_divs)
+                         would_txs=would_txs,
+                         would_divs=booked_dividends(would_divs, _refused(replays.post_book)))
 
 
 def batch_undo_guard(
@@ -518,14 +578,18 @@ def batch_undo_guard(
     would_divs = [d for d in read.dividends if d.id not in rows.of("dividends")]
     would_acts = [a for a in read.actions if a.id not in rows.of("corporate_actions")]
     verdict = BatchUndoVerdict()
-    block = _replay_block(conn, txs=would_txs, divs=would_divs, actions=would_acts, read=read)
+    # ⑪: ONE pair of replays for the equity judgement and the cash check alike.
+    replays = _replays(conn, txs=would_txs, divs=would_divs, actions=would_acts, read=read)
+    block = _replay_block(conn, txs=would_txs, divs=would_divs, actions=would_acts, read=read,
+                          replays=replays)
     if block is not None:
         if block.code == "orphan" or not ack_oversell:
             return BatchUndoVerdict(
                 refusal=_batch_refusal(block),
                 code="orphan_correction" if block.code == "orphan" else "oversell")
         verdict.acked_oversell = True
-    negative = _batch_cash_refusal(conn, rows, would_txs, would_divs, read=read)
+    negative = _batch_cash_refusal(conn, rows, would_txs, would_divs, read=read,
+                                   replays=replays)
     if negative is not None:
         if not ack_negative:
             return BatchUndoVerdict(refusal=negative, code="negative_cash")
@@ -575,7 +639,8 @@ def action_change_guard(
     """
     if read is None:
         read = _read_ledgers(conn)   # R10: the replay and the fee's pool check share ONE read
-    block = _replay_block(conn, actions=would_be, read=read)
+    replays = _replays(conn, actions=would_be, read=read)   # ⑪: shared with the fee check
+    block = _replay_block(conn, actions=would_be, read=read, replays=replays)
     if block is not None and (block.code == "orphan" or not ack_oversell):
         return _named_refusal(block, what=what, then=then)
     if leaving and not ack_negative:
@@ -584,11 +649,16 @@ def action_change_guard(
         fees = {m.id for m in movements
                 if m.corporate_action_id is not None and m.corporate_action_id in ids}
         if fees:
+            # ⑪: "before" books what the current ledger books, "after" what the ledger
+            # without these actions books (deleting an EXCHANGE re-opens its old ticker, whose
+            # later payouts then book) — the two replays above, not two more.
             ledgers = load_cash_ledgers(conn, movements=movements,
                                         transactions=read.transactions,
                                         dividends=read.dividends,
-                                        instruments=read.instruments)
+                                        instruments=read.instruments,
+                                        refused=_refused(replays.pre_book))
             return _pool_refusal(ledgers, leaving=fees, gone_fx=frozenset(),
                                  would_txs=ledgers.transactions,
-                                 would_divs=ledgers.dividends)
+                                 would_divs=booked_dividends(
+                                     read.dividends, _refused(replays.post_book)))
     return None

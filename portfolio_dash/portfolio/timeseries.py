@@ -26,7 +26,7 @@ defect this one was: fixed once, believed general.
 """
 
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -41,7 +41,13 @@ from portfolio_dash.portfolio.price_basis import price_in
 
 # ONE definition of both, shared with the metric that already takes these kinds: an oracle
 # of B that re-derived either would be free to disagree with XIRR about which flows exist.
-from portfolio_dash.portfolio.returns import XIRR_CASH_KINDS, CashMovementFlow
+from portfolio_dash.portfolio.returns import (
+    XIRR_CASH_KINDS,
+    CashMovementFlow,
+    DividendIdentity,
+    booked_dividends,
+    replay_refusals,
+)
 from portfolio_dash.shared.cash_kinds import movement_sign
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
@@ -106,6 +112,7 @@ def build_reporting_flows(
     reporting: Currency,
     *,
     cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
 ) -> list[ReportingFlow] | None:
     """Every net-invested flow, in the reporting currency at its OWN trade-date FX.
 
@@ -146,6 +153,16 @@ def build_reporting_flows(
     index. Sign: the movement's ``credit`` from the shared table, NEGATED like every other
     flow here — a fee (debit) therefore RAISES ``net_invested`` exactly as a buy-side fee
     always has, and a rebate lowers it.
+
+    **A dividend the replay REFUSED is not a flow here** (K2, owner ruling 2026-10-05, with ⑪):
+    ``refused_dividends`` is ``Book.refused_dividends`` of the replay over *bundle*, taken
+    through ``returns.booked_dividends`` — the same rows XIRR skips (``xirr_reporting``'s own
+    ``refused_dividends``). B (``total_value − net_invested``) was withheld only while the
+    trend's last day was ``incomplete``, and two refusals leave it complete: a short covered
+    after the payout landed on it, and a vacated ticker whose successor is flat — B then
+    counted a payout 總報酬 and XIRR left out, and the index counterfactual was handed the
+    same phantom withdrawal. Required with no default, like ``cash_movements``: a default
+    would ship the old figure in silence.
     """
     def quote_ccy(symbol: str) -> Currency:
         inst = bundle.instruments.get(symbol)
@@ -185,7 +202,7 @@ def build_reporting_flows(
                 raw.append((t.trade_date, t.symbol, gross + t.fees + t.tax, t))
             else:
                 raw.append((t.trade_date, t.symbol, -(gross - t.fees - t.tax), t))
-        for dv in bundle.dividends:
+        for dv in booked_dividends(bundle.dividends, refused_dividends):
             if dv.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY) — one definition
                 booking = dv
                 raw.append((dv.date, dv.symbol, -dv.net, dv))
@@ -306,8 +323,14 @@ def daily_value_series(
         # per-day rebuild would be the same answer at hundreds of times the cost.
         actions = ActionIndex.build(bundle.actions)
 
+        # K2 (2026-10-05): the payouts the replay refused are not money put in or taken out.
+        # One whole-bundle replay, taken here rather than from the caller so this function's
+        # signature (and every caller's) is unchanged; it costs one replay beside the
+        # per-day ones below. A refusal is decided from the events BEFORE the dividend, so the
+        # whole bundle refuses exactly the rows each day's `bundle.through(day)` refuses.
         reporting_flows = build_reporting_flows(bundle, fx_history, reporting,
-                                                cash_movements=cash_movements)
+                                                cash_movements=cash_movements,
+                                                refused_dividends=replay_refusals(bundle))
         if reporting_flows is None:
             return TrendSeries(points=[], reporting_currency=reporting, available=False)
         converted: list[tuple[date, Decimal]] = [(f.on, f.amount) for f in reporting_flows]

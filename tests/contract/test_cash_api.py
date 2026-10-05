@@ -333,9 +333,12 @@ def test_export_cash_statement_csv(api_client: TestClient) -> None:
     assert r.headers["content-type"].startswith("text/csv")
     assert "cash_statement_tw_broker_TWD" in r.headers["content-disposition"]
     reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    # ⑪ (2026-10-05) inserted ``unbooked`` after ``balance`` — the column it explains, marking a
+    # dividend the replay refused — leaving ``counts_from`` last (DEF-056's readers key on it)
+    # and every earlier column at its index.
     assert reader[0] == [
         "date", "ccy", "kind", "symbol", "name", "qty", "price", "fee", "tax",
-        "note_ref", "delta", "balance", "counts_from",
+        "note_ref", "delta", "balance", "unbooked", "counts_from",
     ]
     data = [row for row in reader[1:] if row and not row[0].startswith("#")]
     buy = next(row for row in data if row[2] == "buy" and row[3] == "2330")

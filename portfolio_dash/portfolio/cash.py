@@ -6,6 +6,20 @@ Balance of one (account, currency) pool =
   − Σ buy settlements (qty×price + fees + tax)       (transactions, quote ccy)
   + Σ sell proceeds  (qty×price − fees − tax)
   + Σ cash-family dividend nets (CASH / NET)         (DRIP/STOCK are share events)
+    — of the dividends the replay BOOKED only (⑪, below)
+
+**⑪ (owner ruling 2026-10-05): a dividend the replay refuses moves no cash.** The ``dividends``
+every function here takes are the rows that BOOK — ``portfolio/returns.py::booked_dividends``
+over the replay's ``refused_dividends`` (no position by the effective date, an open declared
+short, a ticker an EXCHANGE vacated). 總報酬, XIRR and 股利總覽 already left those out; the pool
+added them, so one payout had two answers and a guard could pass a withdrawal against money
+no other figure contained. The functions stay pure and take no book: the CALLER filters, at
+one seam per layer (``api/routers/cash.py::load_cash_ledgers``, the dashboard's own book, the
+statement exports), and ``tests/contract/test_ruling11_refused_dividends_move_no_cash.py``
+holds the set of callers to those seams. A surface that LISTS rows hands the refused ones to
+:func:`pool_lines` separately (``unbooked_dividends``): they are listed, marked
+``booked=False``, and move no running balance — a payout must not vanish from a statement the
+owner reconciles, nor move a balance no other surface shows.
 
 Opening inventory deliberately does NOT touch cash: its funding predates the
 tracked history — record an initial DEPOSIT (or the ``opening`` 期初資金 movement)
@@ -116,6 +130,9 @@ def cash_balances(
 
     Rows whose symbol is unregistered are skipped (same degradation rule as the
     dashboard) — an un-bookable row must not crash the cash view either.
+
+    ``dividends`` are the rows the replay BOOKED (⑪ — see the module docstring); a refused
+    payout is never handed here.
     """
     bal: dict[tuple[str, Currency], Decimal] = {}
 
@@ -173,6 +190,12 @@ class CashLine:
       PAIRED leg as ``counter_ccy`` + ``counter_amount`` signed by ITS pool's effect
       (fx_in: the from-pool lost money → negative; fx_out: the to-pool gained → positive).
     * movements (deposit/withdraw/opening/rebate) — no structured detail; ``ref`` is the note.
+
+    ``booked`` (⑪): ``False`` only on a ``dividend`` line the replay REFUSED, which a listing
+    shows so the payout does not vanish from the statement. ``delta`` is still the net the row
+    records, but :func:`_effect` reads it as zero, so the line moves no running balance in any
+    of this module's views — a refused line that reached a guard's timeline could not move it
+    either.
     """
 
     date: date
@@ -189,6 +212,22 @@ class CashLine:
     fx_rate: Decimal | None = None
     counter_ccy: str | None = None
     counter_amount: Decimal | None = None
+    booked: bool = True
+
+
+#: ⑪ — how every listing marks a ``booked=False`` line: the 現金收支明細 screen (sent on the
+#: statement wire), its printed report and its reconciliation CSV. One spelling, here.
+UNBOOKED_DIVIDEND_NOTE = "未入帳（待釐清）"
+#: …and why, for the screen's hover and the printed report's note.
+UNBOOKED_DIVIDEND_REASON = (
+    "帳本重算時這筆股利無法入帳（該帳戶當時沒有對應持倉、落在放空部位，或標的已換股），"
+    "不計入任何餘額"
+)
+
+
+def _effect(ln: CashLine) -> Decimal:
+    """What *ln* does to its pool's balance: its ``delta``, or nothing for a refused line (⑪)."""
+    return ln.delta if ln.booked else _ZERO
 
 
 def pool_lines(
@@ -199,13 +238,19 @@ def pool_lines(
     transactions: Sequence[_TxRow],
     dividends: Sequence[_DivRow],
     instruments: dict[str, Instrument],
+    *,
+    unbooked_dividends: Sequence[_DivRow] = (),
 ) -> list[CashLine]:
     """Every dated flow into ONE (account, ccy) pool (movements + fx legs + trade
     settlements + cash dividends). Unsorted; use :func:`running_statement`/`running_min`.
 
     Each line also carries structured detail (symbol/name/qty/price/fee/tax for trades,
     symbol/name for dividends, fx_rate/counter_* for fx legs) drawn from the same in-scope
-    rows — the ``delta`` and ordering math is UNCHANGED (detail is additive)."""
+    rows — the ``delta`` and ordering math is UNCHANGED (detail is additive).
+
+    ``dividends`` are the rows that BOOK (⑪). ``unbooked_dividends`` — the rows the replay
+    refused — are for a LISTING only: each becomes a ``booked=False`` line that the statement
+    shows and no balance counts. A guard or a balance never passes them."""
     lines: list[CashLine] = []
     for m in movements:
         if m.account_id != account_id or m.ccy != ccy:
@@ -236,13 +281,14 @@ def pool_lines(
         lines.append(CashLine(t.trade_date, kind, t.symbol, delta, symbol=t.symbol,
                               name=inst.name, qty=t.quantity, price=t.price,
                               fee=t.fees, tax=t.tax))
-    for d in dividends:
-        inst = instruments.get(d.symbol)
-        if inst is None or d.account_id != account_id or inst.quote_ccy != ccy:
-            continue
-        if d.type in CASH_DIVIDEND_TYPES:
-            lines.append(CashLine(d.date, "dividend", d.symbol, d.net,
-                                  symbol=d.symbol, name=inst.name))
+    for booked, rows in ((True, dividends), (False, unbooked_dividends)):
+        for d in rows:
+            inst = instruments.get(d.symbol)
+            if inst is None or d.account_id != account_id or inst.quote_ccy != ccy:
+                continue
+            if d.type in CASH_DIVIDEND_TYPES:
+                lines.append(CashLine(d.date, "dividend", d.symbol, d.net,
+                                      symbol=d.symbol, name=inst.name, booked=booked))
     return lines
 
 
@@ -263,7 +309,7 @@ def running_low(lines: Sequence[CashLine]) -> tuple[Decimal, date | None]:
     mn = _ZERO
     on: date | None = None
     for ln in _ordered(lines):
-        bal += ln.delta
+        bal += _effect(ln)
         if bal < mn:
             mn, on = bal, ln.date
     return mn, on
@@ -278,7 +324,7 @@ def running_eod(lines: Sequence[CashLine]) -> tuple[tuple[date, Decimal], ...]:
     out: dict[date, Decimal] = {}
     bal = _ZERO
     for ln in _ordered(lines):
-        bal += ln.delta
+        bal += _effect(ln)
         out[ln.date] = bal
     return tuple(out.items())
 
@@ -296,7 +342,7 @@ def running_statement(lines: Sequence[CashLine]) -> list[tuple[CashLine, Decimal
     out: list[tuple[CashLine, Decimal]] = []
     bal = _ZERO
     for ln in _ordered(lines):
-        bal += ln.delta
+        bal += _effect(ln)
         out.append((ln, bal))
     return out
 
@@ -310,6 +356,7 @@ def account_statement(
     instruments: dict[str, Instrument],
     *,
     ccy: Currency | None = None,
+    unbooked_dividends: Sequence[_DivRow] = (),
 ) -> list[tuple[Currency, list[tuple[CashLine, Decimal]]]]:
     """Per-(account, ccy) running statements for one account.
 
@@ -320,12 +367,15 @@ def account_statement(
     * ``ccy`` None → every currency the account has activity in (empty pools dropped).
 
     The one shared source for the single-pool statement, the account-wide combined view,
-    and the CSV/report exports (so all three read identical numbers)."""
+    and the CSV/report exports (so all three read identical numbers). ``dividends`` /
+    ``unbooked_dividends`` as in :func:`pool_lines` (⑪): a refused payout is listed, with the
+    running balance it did not move."""
     candidates = [ccy] if ccy is not None else list(Currency)
     result: list[tuple[Currency, list[tuple[CashLine, Decimal]]]] = []
     for c in candidates:
         stmt = running_statement(pool_lines(
-            account_id, c, movements, fx_conversions, transactions, dividends, instruments))
+            account_id, c, movements, fx_conversions, transactions, dividends, instruments,
+            unbooked_dividends=unbooked_dividends))
         if ccy is None and not stmt:
             continue  # skip currencies this account never touched
         result.append((c, stmt))

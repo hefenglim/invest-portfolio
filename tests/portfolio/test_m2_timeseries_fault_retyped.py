@@ -100,7 +100,8 @@ def test_a_decimal_fault_building_the_flows_becomes_an_unbookable_ledger(
     tx = _OVERSIZED_SELL if side is Side.SELL else _OVERSIZED_BUY
     with pytest.raises(UnbookableLedgerError):
         build_reporting_flows(_bundle(_ORDINARY_BUY, tx), {}, Currency.TWD,
-                              cash_movements=[])
+                              cash_movements=[],
+                              refused_dividends=[])
 
 
 def test_the_raw_arithmetic_error_never_escapes_the_flow_builder() -> None:
@@ -108,7 +109,8 @@ def test_the_raw_arithmetic_error_never_escapes_the_flow_builder() -> None:
     raw ``decimal.Overflow``, which is a SIBLING of ``InvalidOperation``, not a subclass."""
     try:
         build_reporting_flows(_bundle(_ORDINARY_BUY, _OVERSIZED_SELL), {}, Currency.TWD,
-                              cash_movements=[])
+                              cash_movements=[],
+                              refused_dividends=[])
     except UnbookableLedgerError:
         pass
     except ArithmeticError:  # pragma: no cover - the regression this test exists to catch
@@ -120,7 +122,8 @@ def test_the_flow_builder_names_the_offending_row_and_speaks_zh() -> None:
     the whole of what the owner gets — and it must point at the row they have to edit."""
     with pytest.raises(UnbookableLedgerError) as exc:
         build_reporting_flows(_bundle(_ORDINARY_BUY, _OVERSIZED_SELL), {}, Currency.TWD,
-                              cash_movements=[])
+                              cash_movements=[],
+                              refused_dividends=[])
     message = str(exc.value)
     assert "2330" in message and "tw_broker" in message and "2026-02-01" in message
     assert _zh(message), message
@@ -130,7 +133,8 @@ def test_the_original_fault_is_kept_as_the_cause() -> None:
     """``from exc``: only the sentence is replaced, never the diagnosis."""
     with pytest.raises(UnbookableLedgerError) as exc:
         build_reporting_flows(_bundle(_ORDINARY_BUY, _OVERSIZED_SELL), {}, Currency.TWD,
-                              cash_movements=[])
+                              cash_movements=[],
+                              refused_dividends=[])
     assert isinstance(exc.value.__cause__, Overflow)
 
 
@@ -139,7 +143,8 @@ def test_the_refusal_lands_on_the_value_error_channel() -> None:
     ``except (ValueError, KeyError)`` degradation site inherits this for free."""
     with pytest.raises(UnbookableLedgerError) as exc:
         build_reporting_flows(_bundle(_ORDINARY_BUY, _OVERSIZED_SELL), {}, Currency.TWD,
-                              cash_movements=[])
+                              cash_movements=[],
+                              refused_dividends=[])
     assert isinstance(exc.value, ValueError)
 
 
@@ -195,7 +200,8 @@ def test_the_trading_cost_builder_re_types_the_fault_too() -> None:
 def test_an_ordinary_ledger_is_completely_unaffected() -> None:
     """The wrap adds no branch to the happy path: one buy of 1,000 @500 = 500,000 in."""
     flows = build_reporting_flows(_bundle(_ORDINARY_BUY), {}, Currency.TWD,
-                                  cash_movements=[])
+                                  cash_movements=[],
+                                  refused_dividends=[])
     assert flows is not None
     (flow,) = flows
     assert flow.amount == Decimal("500000")
@@ -211,7 +217,8 @@ def test_a_missing_rate_still_returns_none_rather_than_raising() -> None:
                                   quantity=Decimal("10"), price=Decimal("100"),
                                   fees=_ZERO, tax=_ZERO, trade_date=date(2026, 1, 5))],
         instruments=usd)
-    assert build_reporting_flows(bundle, {}, Currency.TWD, cash_movements=[]) is None
+    assert build_reporting_flows(bundle, {}, Currency.TWD, cash_movements=[],
+                                 refused_dividends=[]) is None
 
 
 def test_the_trend_still_builds_for_a_clean_ledger() -> None:

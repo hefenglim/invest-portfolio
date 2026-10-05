@@ -1,7 +1,7 @@
 """Returns: per-currency total return + blended reporting total, and reporting XIRR."""
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -10,6 +10,7 @@ from typing import Protocol
 from pyxirr import InvalidPaymentsError
 from pyxirr import xirr as _xirr
 
+from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import (
     Book,
     CurrencyReturn,
@@ -21,7 +22,12 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
-from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
+from portfolio_dash.shared.models.ledger import (
+    Dividend,
+    LedgerBundle,
+    OpeningInventory,
+    Transaction,
+)
 from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
@@ -139,7 +145,30 @@ class CashMovementFlow(Protocol):
     def amount(self) -> Decimal: ...
 
 
-def dividend_key(dv: Dividend) -> tuple[object, ...]:
+class DividendIdentity(Protocol):
+    """The six fields :func:`dividend_key` reads.
+
+    A Protocol rather than the ledger model because ⑪ (owner ruling 2026-10-05) matches the
+    STORED rows the cash pool is built from (``data_ingestion.store.StoredDividend``, whose
+    ``type`` is the raw TEXT) against the replay's refusals (ledger ``Dividend``s, whose
+    ``type`` is the ``DividendType`` StrEnum — equal to, and hashing like, its TEXT).
+    """
+
+    @property
+    def account_id(self) -> str: ...
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def date(self) -> date: ...
+    @property
+    def type(self) -> str: ...
+    @property
+    def gross(self) -> Decimal: ...
+    @property
+    def net(self) -> Decimal: ...
+
+
+def dividend_key(dv: DividendIdentity) -> tuple[object, ...]:
     """Value identity for a dividend row, so a REFUSED one can be matched and skipped.
 
     By value rather than by object identity: the caller may have re-loaded the bundle between
@@ -151,6 +180,60 @@ def dividend_key(dv: Dividend) -> tuple[object, ...]:
     XIRR does, through this same key, so the two cannot disagree about which payout was booked.
     """
     return (dv.account_id, dv.symbol, dv.date, dv.type, str(dv.gross), str(dv.net))
+
+
+def booked_dividends[D: DividendIdentity](
+    rows: Iterable[D], refused: Iterable[DividendIdentity]
+) -> list[D]:
+    """The rows of *rows* the replay BOOKED — every one whose :func:`dividend_key` is not
+    among *refused* (``Book.refused_dividends``), in their own order.
+
+    ⑪ (owner ruling 2026-10-05): **a dividend the replay refuses is excluded from EVERY cash
+    figure**, so one payout has one answer. The replay refuses three kinds — no position by
+    the effective date (CR-02), an open declared short (the short PAYS it), a ticker an
+    EXCHANGE vacated (E24) — and 總報酬, XIRR and 股利總覽 already left them out while the
+    cash pool, the net-worth series, the FX pool and B (the trend's ``net_invested``) still
+    added them. This is the ONE place that turns the replay's answer into "the dividends that
+    book"; every one of those readers takes its dividends through it (or through
+    :func:`unbooked_dividends`, its complement, for a list that shows the refused rows), and
+    none re-derives a refusal rule.
+    """
+    keys = {dividend_key(dv) for dv in refused}
+    return [r for r in rows if dividend_key(r) not in keys]
+
+
+def unbooked_dividends[D: DividendIdentity](
+    rows: Iterable[D], refused: Iterable[DividendIdentity]
+) -> list[D]:
+    """The complement of :func:`booked_dividends`: the rows of *rows* the replay REFUSED.
+
+    For a surface that LISTS dividend rows (the 現金收支明細 statement, its CSV and its printed
+    report): a refused row is still listed — a payout must never vanish from a list the owner
+    reconciles against a broker statement — but it moves no balance (⑪)."""
+    keys = {dividend_key(dv) for dv in refused}
+    return [r for r in rows if dividend_key(r) in keys]
+
+
+def replay_refusals(bundle: LedgerBundle) -> list[Dividend]:
+    """``Book.refused_dividends`` of the dashboard-path replay of *bundle* (⑪).
+
+    For a reader that holds the ledgers but not a book — the cash API's one snapshot
+    (``api/routers/cash.py::load_cash_ledgers``), the 現金收支明細 exports, the trend. A
+    reader that already replayed the same bundle passes its own ``book.refused_dividends`` to
+    :func:`booked_dividends` instead and pays for no second replay.
+
+    The replay is run exactly as ``build_dashboard`` runs it: unregistered rows dropped first
+    (they cannot be booked, and ``cash_balances`` skips them too), ``allow_oversell=True`` so a
+    賣超 or a refused dividend is recorded on the book rather than raised. A ledger the replay
+    refuses OUTRIGHT (a DRIP row with no share count, an uncomputable value — the dashboard
+    answers 422 naming the row) yields ``[]``: there is no refusal to read, so every payout
+    counts, as it did before ⑪, on every cash surface and every guard alike, because they all
+    read this one answer.
+    """
+    try:
+        return build_book(bundle.without_unregistered(), allow_oversell=True).refused_dividends
+    except (ValueError, KeyError, ArithmeticError):
+        return []
 
 
 def xirr_reporting(

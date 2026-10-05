@@ -19,7 +19,7 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body, llm_refusal_message
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
 from portfolio_dash.api.replay_guard import BatchUndoVerdict, batch_undo_guard
-from portfolio_dash.api.routers.cash import cash_pool_fn
+from portfolio_dash.api.routers.cash import cash_pool_fn, load_cash_ledgers, pool_balances
 from portfolio_dash.api.routers.ledgers import (
     _delete_actions,
     _to_models,
@@ -107,12 +107,8 @@ from portfolio_dash.data_ingestion.store import (
     StoredTransaction,
     get_transaction,
     list_accounts,
-    list_cash_movements,
     list_corporate_actions,
-    list_dividends,
-    list_fx_conversions,
     list_instruments,
-    list_transactions,
 )
 from portfolio_dash.data_ingestion.validate import (
     Issue,
@@ -121,10 +117,9 @@ from portfolio_dash.data_ingestion.validate import (
     unknown_account_message,
 )
 from portfolio_dash.export.artifact import content_disposition
-from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
-from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Market
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
 from portfolio_dash.shared.image_types import is_supported_image
 from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.llm_config import get_model
@@ -543,20 +538,40 @@ def _issue_wire_manual(
     return issue_wire(issue)
 
 
+#: Today's pool balances, read at most ONCE per request (⑪): the snapshot is a replay as
+#: well as five reads, and the draft's overdraft warning and its 帳戶現金 line quote the same
+#: figure — so they share one :func:`~api.routers.cash.load_cash_ledgers`.
+TodayPools = Callable[[], dict[tuple[str, Currency], Decimal]]
+
+
+def _today_pools(conn: sqlite3.Connection, *, as_of: date) -> TodayPools:
+    """A lazy, memoised ``GET /api/cash`` balance read as of ``as_of`` (the request clock's
+    day): nothing is read until a caller asks, and the second ask re-uses the first."""
+    memo: list[dict[tuple[str, Currency], Decimal]] = []
+
+    def read() -> dict[tuple[str, Currency], Decimal]:
+        if not memo:
+            memo.append(pool_balances(load_cash_ledgers(conn), as_of=as_of))
+        return memo[0]
+
+    return read
+
+
 def _cash_overdraft_issue(
     conn: sqlite3.Connection, body: ManualBody, draft_fee: Decimal, draft_tax: Decimal,
-    *, as_of: date,
+    *, pools: TodayPools,
 ) -> Issue | None:
     """Soft overdraft warning (audit C1b): only when the account opted into cash tracking
     (>=1 cash movement) AND this BUY would push the instrument's cash pool below zero.
 
     Never a hard block — users may not track cash at all (only fires once they do).
 
-    ``as_of`` is the request clock's day (M5-06, X8a): the pool is read as of TODAY — the
-    same figure the 帳戶現金 line beside this warning quotes — so a deposit dated in the
-    future is in the ledger but cannot silence a warning about a pool that is negative
-    today. Required, no default: a caller that forgets it is a ``TypeError``, not a quiet
-    return to the whole-history read.
+    ``pools`` is today's balance read (:func:`_today_pools` — M5-06, X8a: as of the request
+    clock's day, the same figure the 帳戶現金 line beside this warning quotes, so a deposit
+    dated in the future is in the ledger but cannot silence a warning about a pool that is
+    negative today; ⑪: built from the cash page's own snapshot, so a payout the replay
+    refused cannot cover a buy either). Required, no default: a caller that forgets it is a
+    ``TypeError``, not a quiet return to a different read.
     """
     if parse_side(body.side) is not Side.BUY:
         return None
@@ -568,12 +583,7 @@ def _cash_overdraft_issue(
     ).fetchone()
     if tracked is None:
         return None
-    bal = cash_balances(
-        list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
-        list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
-        as_of=as_of,
-    )
-    current = bal.get((body.account_id, inst.quote_ccy), _ZERO)
+    current = pools().get((body.account_id, inst.quote_ccy), _ZERO)
     # The settled 價金, as the pool will book it (owner 2026-09-30).
     cost = settled_notional(body.shares, body.price, inst.quote_ccy) + draft_fee + draft_tax
     if current - cost < _ZERO:
@@ -954,16 +964,17 @@ def _position_preview(
 
 
 def _account_cash(
-    conn: sqlite3.Connection, body: ManualBody, *, as_of: date
+    conn: sqlite3.Connection, body: ManualBody, *, pools: TodayPools
 ) -> tuple[dict[str, Any] | None, Decimal | None]:
     """DISPLAY-ONLY cash-pool balance for the trade's settlement (quote) currency (R6-E) —
     the SAME ``cash_balances`` figure /api/cash serves, AS OF THE SAME DAY (``as_of`` = the
     request clock's date, M5-06), so the draft line and the 資金 page never disagree. That
     sentence was false between X1 and X8a (2026-09-06): /api/cash had moved to today's
     balance while this read the whole history, so the two differed by exactly any
-    future-dated row. ``as_of`` is required with no default so the next caller cannot
-    silently fall back to the whole history. null when the symbol is unregistered (no quote
-    ccy); ``balance`` null when the pool has no tracked activity. Adds NO issue and NO
+    future-dated row. ``pools`` (:func:`_today_pools`) is required with no default so the
+    next caller cannot silently fall back to the whole history — nor, since ⑪, to a pool
+    that still counts a payout the replay refused. null when the symbol is unregistered (no
+    quote ccy); ``balance`` null when the pool has no tracked activity. Adds NO issue and NO
     gating (owner-signed). Never-500.
 
     Returns ``(wire_dict, balance)``: the wire dict is the byte-identical ``{ccy, balance}``
@@ -976,12 +987,7 @@ def _account_cash(
         return None, None
     amount: Decimal | None
     try:
-        bal = cash_balances(
-            list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
-            list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
-            as_of=as_of,
-        )
-        amount = bal.get((body.account_id, inst.quote_ccy))
+        amount = pools().get((body.account_id, inst.quote_ccy))
     except (ValueError, KeyError, ArithmeticError):
         amount = None
     wire = {
@@ -1048,11 +1054,12 @@ def manual_preview(
         else (gross - draft.fee - draft.tax)
     )
     issues = list(draft.issues)
+    pools = _today_pools(conn, as_of=now.date())   # ⑪: one snapshot for the two cash reads
     # The overdraft warning and the two cash lines describe an ADDED row; for an edit they
     # would count the stored row twice, so the edit preview withholds them (DEF-042) — the
     # edit door has no cash gate, exactly as before.
     overdraft = (None if replacing is not None else
-                 _cash_overdraft_issue(conn, body, draft.fee, draft.tax, as_of=now.date()))
+                 _cash_overdraft_issue(conn, body, draft.fee, draft.tax, pools=pools))
     if overdraft is not None:
         issues.append(overdraft)
     # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
@@ -1072,7 +1079,7 @@ def manual_preview(
     position_preview = (None if replacing is not None else
                         _position_preview(conn, body, draft.fee, draft.tax, gross))
     account_cash, cash_bal = ((None, None) if replacing is not None else
-                              _account_cash(conn, body, as_of=now.date()))
+                              _account_cash(conn, body, pools=pools))
     # R7 A3 (additive, C5): projected pool AFTER settlement = balance + the ALREADY-SIGNED total
     # (BUY total is negative, SELL positive), in the SAME quote ccy as account_cash. Emitted only
     # when the balance is known (else null) — a pure Decimal add over figures already computed,
