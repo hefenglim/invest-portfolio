@@ -442,6 +442,32 @@ def write_corporate_action(db_path: Path, account_id: str, action_date: str, kin
         conn.close()
 
 
+def write_legacy_dividend(db_path: Path, account_id: str, symbol: str, pay_date: str,
+                          div_type: str, net: Decimal) -> int:
+    """Write ONE dividend row straight into the ledger — a LEGACY-DATA fixture — and return
+    its id.
+
+    Why not a door: since CR-02 (2026-10-04) every dividend door (manual, CSV, AI, the
+    inbox, the edit dialog) refuses a dividend whose account had opened no position in the
+    symbol by its date (``dividend_without_position``). Such a row can therefore only exist
+    as data written BEFORE that guard — a pre-CR-02 import, a hand-edited database — and the
+    replay still has to refuse it without a 500 (YQ3). This writes exactly that: the app's
+    own store insert, below every validator, like :func:`write_corporate_action`. The
+    scenario proves the door refuses the same row before it writes this one.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import insert_dividend
+    conn = sqlite3.connect(str(db_path))
+    try:
+        did = insert_dividend(conn, account_id=account_id, symbol=symbol,
+                              div_date=date.fromisoformat(pay_date), div_type=div_type,
+                              gross=net, withholding=Decimal("0"), net=net)
+        conn.commit()
+        return int(did)
+    finally:
+        conn.close()
+
+
 def delete_corporate_action_row(db_path: Path, action_id: int) -> bool:
     """Delete one corporate action (E16: editing/deleting re-computes history)."""
     sys.path.insert(0, str(REPO_ROOT))

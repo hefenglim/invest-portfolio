@@ -248,8 +248,101 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
 
     run_corporate_actions(ev, api, db_path, op, buy, sell)
     run_batch_import(ev, api, db_path, op)
+    run_refused_dividends(ev, api, db_path, op, buy, sell)
 
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
+
+
+def _written(resp) -> int:
+    """How many rows a CSV commit wrote (0 when the door refused every row)."""
+    body = resp.get("json") if isinstance(resp, dict) else None
+    return int((body or {}).get("written") or 0) if isinstance(body, dict) else 0
+
+
+def run_refused_dividends(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """The two dividend-refusal classes the declared-short block above does not reach (YQ3).
+
+    ``domain-ledger.md`` defines three dividends the replay refuses — booked nowhere, no
+    realized income, no cash (⑪), no flow (K2), the days marked incomplete (K3), a held
+    carrier still valued (Y3):
+
+    * an OPEN declared short (2609 above — removed before its cover, so it is the HELD case);
+    * a ticker an EXCHANGE vacated (E24) — here, through the real doors: the dividend door
+      accepts the row because VCO WAS held before its exchange, and the replay refuses it.
+      A CASH row (no income on a dead ticker) and a 配股 (no zero-cost resurrection). It is
+      reconciled twice: with the successor VCN HELD (Y3: its value stays in the trend and net
+      worth) and after VCN is sold FLAT (K3: the flag has no carrier, the record stands). It
+      is NOT resolved, so the ``final`` checkpoint carries it too — XIRR computes without it.
+    * no position at all (CR-02) — a LEGACY-DATA row, see below.
+
+    Placed after every other block so each existing expectation stays a control, and with
+    dedicated symbols (VCO / VCN / ORP) so nothing else can satisfy or disturb them.
+    """
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 100000)
+
+    # ---- E24 through the doors -------------------------------------------------------------
+    buy("VCOB", "tw_broker", "VCO", "2026-02-09", 1000, 50)
+    op.corporate_action("tw_broker", "EXCHANGE", "2026-03-09", "VCO", "VCN", 1, 1,
+                        note="E24 setup: VCO's whole position moves to VCN")
+    r = op.dividend("tw_broker", "VCO", "2026-04-09", "CASH", 3000)
+    ev.check("refused.vacated_cash_door_accepts", "tw_broker/VCO CASH 2026-04-09",
+             1, _written(r), "phase1:refused")
+    r = op.dividend("tw_broker", "VCO", "2026-04-16", "STOCK", 0, reinvest_shares=50)
+    ev.check("refused.vacated_stock_door_accepts", "tw_broker/VCO STOCK 2026-04-16",
+             1, _written(r), "phase1:refused")
+
+    res = reconcile(ev, api, db_path, "refused_vacated_held", valuation=True)
+    # Scenario knowledge, asserted so a silent oracle cannot pass: both rows ARE refused, and
+    # neither is an orphan (VCO was held before its exchange).
+    ev.check("refused.oracle_refuses_both_vacated_rows", "refused_vacated_held",
+             [("tw_broker", "VCO", "2026-04-09"), ("tw_broker", "VCO", "2026-04-16")],
+             [(a, s, d.isoformat()) for a, s, d in res.refused_dividends],
+             "phase1:refused_vacated_held")
+    ev.check("refused.vacated_rows_are_not_orphans", "refused_vacated_held", [],
+             res.orphan_dividends, "phase1:refused_vacated_held")
+    # ABSOLUTE anchors (literals, not the oracle): the live successor holds the 1,000 shares
+    # and carries the flag; the old ticker was NOT resurrected by the 配股 (no VCO row).
+    P1.anchor(ev, api, "refused.anchor.successor_shares", "tw_broker", "VCN", "shares", "1000",
+              phase="phase1:refused_vacated_held")
+    P1.anchor(ev, api, "refused.anchor.successor_flagged", "tw_broker", "VCN",
+              "unbookable_dividend", True, phase="phase1:refused_vacated_held")
+    P1.anchor(ev, api, "refused.anchor.no_resurrection", "tw_broker", "VCO", "shares", None,
+              phase="phase1:refused_vacated_held")
+
+    # ---- K3: the successor sold out — the flag has no carrier, the refusal stands ------------
+    sell("VCNS", "tw_broker", "VCN", "2026-05-11", 1000, 55)
+    reconcile(ev, api, db_path, "refused_vacated_flat", valuation=True)
+
+    # ---- CR-02: a dividend with no position — LEGACY DATA ----------------------------------
+    # It cannot come through a door: since CR-02 every dividend door refuses a row whose
+    # account had opened no position in the symbol by its date (`dividend_without_position`).
+    # Proved first, then the same row is written below the validators, as a pre-CR-02 import
+    # or a hand-edited database would hold it — the replay must refuse it without a 500.
+    r = op.dividend("tw_broker", "ORP", "2026-03-23", "CASH", 900)
+    ev.check("refused.orphan_door_refuses", "tw_broker/ORP CASH 2026-03-23 (never held)",
+             0, _written(r), "phase1:refused")
+    did = C.write_legacy_dividend(db_path, "tw_broker", "ORP", "2026-03-23", "CASH",
+                                  C.dec("900"))
+    ev.op("phase1", "DB", "legacy.dividend_without_position",
+          {"account_id": "tw_broker", "symbol": "ORP", "date": "2026-03-23", "net": "900"},
+          {"status": 201, "json": {"dividend_id": did}},
+          note="legacy-data scenario: no door accepts this row since CR-02")
+    ev.check("refused.legacy_orphan_dashboard_200", "a stored orphan must not 500",
+             "200", str(api.get("/api/dashboard").status_code), "phase1:refused")
+    res = reconcile(ev, api, db_path, "refused_orphan", valuation=True)
+    ev.check("refused.oracle_names_the_orphan", "refused_orphan",
+             [("tw_broker", "ORP", "2026-03-23")],
+             [(a, s, d.isoformat()) for a, s, d in res.orphan_dividends],
+             "phase1:refused_orphan")
+
+    # ---- the owner's remedy for the orphan: delete it, through the door ---------------------
+    # (The vacated rows stay: the `final` checkpoint reconciles XIRR, cash and the trend with
+    # a refused payout and a flat carrier in the ledger.)
+    rd = api.delete(f"/api/ledgers/dividends/{did}")
+    ev.op("phase1", "API", "delete.dividend", {"id": did},
+          {"status": rd.status_code, "json": _json(rd)}, note="remove the legacy orphan row")
+    ev.check("refused.orphan_removable", "delete the legacy orphan dividend",
+             "200", str(rd.status_code), "phase1:refused")
 
 
 def run_batch_import(ev: C.Evidence, api: C.Api, db_path, op: Ops):

@@ -74,6 +74,14 @@ INSTRUMENTS = [
     ("CBS", "TW", "TWD", "CB Batch Sibling", "Industrials", False),   # buy+sell, one file
     ("CCA", "TW", "TWD", "CC Chain Source", "Industrials", False),    # EXCHANGE -> CCB
     ("CCB", "TW", "TWD", "CC Chain Dest", "Industrials", False),      # …then SPLIT, same file
+    # ---- Refused dividends (YQ3, owner ruling 2026-10-05). The replay refuses a payout in
+    # three classes — no position by its date (CR-02), an open declared short, a ticker an
+    # EXCHANGE vacated (E24) — and every figure leaves it out. The short class has its own
+    # symbol above (2609); these two give the other two classes dedicated symbols, so no other
+    # op can satisfy or disturb them.
+    ("VCO", "TW", "TWD", "Vacated Source", "Industrials", False),     # EXCHANGEd -> VCN
+    ("VCN", "TW", "TWD", "Vacated Successor", "Industrials", False),  # carries E24's flag
+    ("ORP", "TW", "TWD", "Orphan Payer", "Industrials", False),       # never held (legacy row)
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -97,6 +105,10 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # Batch-import symbols (C1/C2). CCA ends flat (its whole position EXCHANGEs into CCB);
     # priced anyway, for the same fixture-uniformity reason as CA3/CA5 above.
     "CBS": D("310"), "CCA": D("120"), "CCB": D("64"),
+    # Refused-dividend symbols (YQ3). VCN is HELD at the first refused checkpoint, so its
+    # price is what Y3's "the carrier keeps its value" is measured with; VCO and ORP are
+    # never held at a checkpoint and are priced for fixture uniformity.
+    "VCO": D("52"), "VCN": D("54"), "ORP": D("30"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -581,6 +593,10 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
       (:func:`_day_value_judgeable`), INCLUDING a day marked incomplete only for a refused
       dividend (Y3: the app keeps that position's value). Asserting it on an unpriced day would
       be asserting the fixture, not the app.
+    * ``trend.net_worth`` - on the same days: ``total_value`` plus every cash pool's
+      end-of-day balance, each converted at that day's on-or-before rate (FU-D29 / C8). The
+      pools are the oracle's own point-in-time replay (``res_d.cash``), so a refused payout
+      moves no day's net worth (⑪) while the carrier's value stays in it (Y3).
 
     What is NOT compared, and why: a point-in-time per-symbol SHARE COUNT, because no app
     surface returns one. ``trend.points`` carries four portfolio-level numbers, and the sell
@@ -646,6 +662,13 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
                                       quote=PRICES[h.symbol], quoted_on=ASOF)
             total += close * h.shares * rate
         ev.check("trend.total_value", day_iso, total, dec(p["total_value"]), phase)
+        cash_total = O.ZERO
+        for (_acct, ccy), bal in res_d.cash.items():
+            if bal == O.ZERO:
+                continue          # a zero pool contributes nothing and needs no rate
+            cash_total += bal * (O.ONE if ccy == REPORTING else fx_on(day, ccy, REPORTING))
+        ev.check("trend.net_worth", day_iso, total + cash_total,
+                 dec(p.get("net_worth")) if p.get("net_worth") is not None else None, phase)
 
     # No silent caps: a day this family declined to judge is named, not quietly absent.
     if skipped:
@@ -677,6 +700,12 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     # that state (oversold -> not computable; short -> negative terminal value) and the
     # scenario always closes the short before the final full-KPI reconcile.
     oversold = any(h.shares < O.ZERO for h in res.holdings.values())
+    # YQ1 (owner ruling 2026-10-05): the TREND family has its own, narrower gate. A declared
+    # short is a real, priced position the series carries (2026-07-31), and a refused
+    # dividend on it keeps that value (Y3) — so the trend is judged while a declared short is
+    # open and switched off only by an UNDECLARED oversell (sticky 賣超), whose basis is gone
+    # on every day. The KPI / XIRR gate above is unchanged, exactly as its author set it.
+    undeclared_oversell = any(h.oversold for h in res.holdings.values())
 
     # ---- A0. Corporate actions the oracle REFUSED (spec §5) ----
     # Op-logged, not asserted here: which rule fired is scenario knowledge, so the
@@ -766,9 +795,12 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     if valuation and not oversold:
         _reconcile_kpis(ev, res, dash, facts, prices, sp, phase)
         _reconcile_xirr(ev, res, dash, facts, prices, sp, phase)
-        # E3. POINT-IN-TIME: the daily replay, sampled at event boundaries. Behind the SAME
-        # gate as the KPI family — an oversold ledger has no honest valuation on any day, so
-        # judging its trend would be judging a state the app itself declines to value.
+    if valuation and not undeclared_oversell:
+        # E3. POINT-IN-TIME: the daily replay, sampled at event boundaries. Behind the 賣超
+        # gate only (YQ1): an undeclared oversell has no honest valuation on any day, so
+        # judging its trend would be judging a state the app itself declines to value — but
+        # a declared short is valued, and the `short_open` checkpoint is where a held carrier
+        # of a refused dividend lives (Y3).
         _reconcile_trend(ev, dash, facts, phase)
 
     # ---- E2. Ledger INTEGRITY (validity, not arithmetic — see oracle layer 4) ----
@@ -983,8 +1015,19 @@ def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
     # accumulation rule requires the oracle to derive one independently before it ships; the
     # other two terms are already pinned (A above, and B through `trend.total_value` /
     # `trend.net_invested` at the last point).
+    # B (含匯兌總損益) is the trend's LAST day, and it is withheld — never replaced by an
+    # earlier day — when that day is incomplete (AI-D41); its third term rides with it, so the
+    # decomposition is never published half-built (AI-D48). Until YQ3 no KPI checkpoint had an
+    # incomplete last day, so the oracle never had to say so: a refused dividend now marks every
+    # day from its date (K3), and the oracle's OWN day rule decides (`_day_incomplete`, on the
+    # replay as at the app's as_of — which `res` is). B's VALUE is pinned through
+    # `trend.total_value` / `trend.net_invested` at the last point; this pins whether it exists.
+    as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
+    b_withheld = _day_incomplete(res, as_of)
+    ev.check("kpi.fx_complete_withheld", "TWD", b_withheld,
+             kpis.get("total_return_fx_complete") is None, phase)
     ev.check("kpi.trading_financing_cost", "TWD",
-             O.trading_financing_cost(facts, REPORTING, fx_on_resolver()),
+             None if b_withheld else O.trading_financing_cost(facts, REPORTING, fx_on_resolver()),
              kpis.get("trading_financing_cost"), phase)
 
 
@@ -1004,6 +1047,17 @@ def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
     def fx_now(base, quote):
         return sp.rate(base, quote)
 
+    if res.orphan_dividends:
+        # CR-02 (domain-ledger.md): a dividend with no position is "named, and withholds
+        # XIRR" — the ledger is missing the position that earned it. The oracle's OWN replay
+        # says whether one exists; the app must then publish no figure and name each row
+        # (account, symbol, effective date) in its reason.
+        ev.check("xirr.withheld_for_orphan_dividend", "TWD", None, app_xirr, phase)
+        reason = (dash.get("freshness") or {}).get("xirr_unavailable_reason") or ""
+        for acct, sym, eff in res.orphan_dividends:
+            ev.check("xirr.orphan_reason_names_row", f"{acct}/{sym}@{eff.isoformat()}", True,
+                     (sym in reason and acct in reason and eff.isoformat() in reason), phase)
+        return
     try:
         dates, amounts = O.xirr_cashflows(res, facts, prices, REPORTING, fx_on, fx_now, as_of)
     except KeyError:
@@ -1036,12 +1090,18 @@ def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
     drows = api.get("/api/ledgers/dividends", limit=500).json()["rows"]
     dapp = {r["id"]: r for r in drows}
     ev.check("ledger.div.count", "count", len(facts.divs), len(drows), phase)
+    # X1 / YQ3: the listing marks every row the replay refuses 「未入帳（待釐清）」. Which rows
+    # those are is the oracle's OWN replay of the whole stored ledger (the listing is not a
+    # valuation, so it is not cut at as_of).
+    refused = O.replay(facts).refused_dividend_ids
     for dv in facts.divs:
         a = dapp.get(dv.id)
         if a is None:
             continue
         ev.check("ledger.div.net", f"id={dv.id}", dv.net, a["net"], phase)
         ev.check("ledger.div.gross", f"id={dv.id}", dv.gross, a["gross"], phase)
+        ev.check("ledger.div.booked", f"id={dv.id} {dv.account_id}/{dv.symbol}@{dv.d}",
+                 dv.id not in refused, a.get("booked"), phase)
     # fx
     frows = api.get("/api/ledgers/fx", limit=500).json()["rows"]
     fapp = {r["id"]: r for r in frows}

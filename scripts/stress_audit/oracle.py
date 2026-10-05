@@ -537,16 +537,23 @@ class OracleResult:
     # (edge-code, scope) for every corporate action the replay REFUSED to apply — the
     # oracle's own §5 refusal matrix, surfaced so the evidence trail says WHICH rule fired.
     action_refusals: list[tuple[str, str]] = field(default_factory=list)
-    # (account, symbol, pay date) for every dividend skipped because it landed on an OPEN
-    # SHORT (K3, owner ruling 2026-10-05). Recorded on the RESULT, not only as the position's
-    # `unbookable_dividend`: a later cover of exactly the short's size nets the position to 0,
-    # the emit loop drops it, and the flag went with it. The ruling is that the 待釐清 must not
-    # die with a flat carrier — so a day by which such a dividend was refused stays incomplete.
+    # (account, symbol, pay date) for EVERY dividend the replay refused — all three classes
+    # domain-ledger.md defines (YQ3, 2026-10-05): no position by its date (CR-02), an OPEN
+    # declared short (the short pays in lieu), a ticker an EXCHANGE vacated (E24). Recorded on
+    # the RESULT, not only as a position's `unbookable_dividend` (K3): an orphan has no
+    # position at all, and a carrier can be FLAT — a short covered to 0, a successor sold out —
+    # which the emit loop drops with its flag. A day by which any of them was refused stays
+    # incomplete; the value of what IS held is still honest (Y3).
     refused_dividends: list[tuple[str, str, date]] = field(default_factory=list)
-    # ⑪ / K2 (owner rulings 2026-10-05): the ids of the dividends this replay REFUSED (a
-    # payout landing on an open declared short). A refused payout moves no cash figure — the
-    # pools, the FX pool's foreign cash and the trend's net_invested all leave it out.
+    # ⑪ / K2 (owner rulings 2026-10-05): the ids of those same dividends. A refused payout is
+    # booked nowhere and moves no cash figure — the pools, the statement, the FX pool's foreign
+    # cash, the trend's net_invested and the XIRR flows all leave it out.
     refused_dividend_ids: frozenset[int] = field(default_factory=frozenset)
+    # (account, symbol, EFFECTIVE date) of the refusals that are ORPHANS — no opening, trade or
+    # corporate action had created the position by then (CR-02). The one class that also
+    # WITHHOLDS XIRR ("named, and withholds XIRR", domain-ledger.md): the ledger is missing the
+    # position that earned it, so a money-weighted return over it is a different ledger's.
+    orphan_dividends: list[tuple[str, str, date]] = field(default_factory=list)
 
 
 class EventPriority(IntEnum):
@@ -588,8 +595,39 @@ class _Pos:
     short_shares: Decimal = ZERO       # declared-short lot (shares owed)
     short_proceeds: Decimal = ZERO     # net proceeds received for them
     ever_oversold: bool = False        # sticky 賣超 ("was ever negative")
-    unbookable_dividend: bool = False  # a dividend landed while short — skipped, flagged
+    unbookable_dividend: bool = False  # a dividend was refused on it (short / vacated)
     unbookable_action: bool = False    # a corporate action was refused — skipped, flagged
+    # E24 (D32) + CR-06, transcribed from domain-ledger.md: the symbol an EXCHANGE moved this
+    # position to, while it stays moved. "A trade, an opening, or an EXCHANGE / SPINOFF
+    # landing shares on a vacated ticker clears it, so a reused ticker's dividends book;
+    # while it stays vacated, a dividend on it is still refused (E24) and flagged on the live
+    # successor." Set by an APPLIED exchange only — a ticker sold down to zero is not vacated,
+    # and its payout books as post-close income (audit H2).
+    vacated_to: str | None = None
+
+
+def _reopen(pos: _Pos) -> None:
+    """Shares are landing on *pos*, so it is no longer an EXCHANGE-vacated ticker (CR-06)."""
+    pos.vacated_to = None
+
+
+def _live_successor(positions: dict[tuple[str, str], _Pos], account_id: str,
+                    start: _Pos) -> _Pos:
+    """Where E24's flag goes: follow ``vacated_to`` to the position the owner holds now.
+
+    Transitive (a de-SPAC later renamed is an exchange of an exchange) and bounded by the
+    symbols already visited, so it ends even on a ledger nobody should have. A chain that
+    dead-ends flags the last position reached.
+    """
+    seen: set[str] = set()
+    node = start
+    while node.vacated_to is not None and node.vacated_to not in seen:
+        seen.add(node.vacated_to)
+        nxt = positions.get((account_id, node.vacated_to))
+        if nxt is None:
+            break
+        node = nxt
+    return node
 
 
 SPLIT, EXCHANGE, SPINOFF = "SPLIT", "EXCHANGE", "SPINOFF"
@@ -696,6 +734,7 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
     ever_oversld unchanged         nothing transferred (E3/E22 keep both sides False)
     unbook_divid unchanged         Q |= P (E19)                Q |= P (E19); P keeps its
     unbook_actio unchanged         Q |= P (F-37)               Q |= P (F-37); P keeps its
+    vacated_to   unchanged         P := Q; Q := None (CR-06)   Q := None (CR-06)
     ============ ================= =========================== ==========================
 
     Why EXCHANGE zeroes ``short_proceeds``/``short_shares`` explicitly even though E5
@@ -783,6 +822,7 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
     if dst is None:
         dst = positions.setdefault(
             dst_key, _Pos(act.account_id, act.to_symbol, insts[act.to_symbol].quote_ccy))
+    _reopen(dst)   # CR-06: shares land on the destination, so it is live from here on
 
     if act.kind == EXCHANGE:
         # §4.2 — the whole position moves. If Q already holds, the two merge by weighted
@@ -799,6 +839,7 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
         src.adjusted_total = ZERO
         src.short_shares = ZERO      # explicit (trap #7) — E5 says 0, but only NEARLY
         src.short_proceeds = ZERO    # explicit (trap #7)
+        src.vacated_to = act.to_symbol   # E24: moved away, not sold — see _Pos.vacated_to
         return None
 
     # §4.3 SPINOFF — the parent keeps its shares, a child is created.
@@ -872,8 +913,13 @@ def replay(facts: Facts) -> OracleResult:
     positions: dict[tuple[str, str], _Pos] = {}
     realized_rows: list[RealizedRow] = []
     refusals: list[tuple[str, str]] = []
-    refused_dividends: list[tuple[str, str, date]] = []   # K3 — see OracleResult
+    refused_dividends: list[tuple[str, str, date]] = []   # K3 / YQ3 — see OracleResult
     refused_divs: set[int] = set()   # ⑪: the payouts this replay refused, by fact id
+    orphan_dividends: list[tuple[str, str, date]] = []    # CR-02 — see OracleResult
+
+    def refuse_dividend(dv: DivFact) -> None:
+        refused_dividends.append((dv.account_id, dv.symbol, dv.d))
+        refused_divs.add(dv.id)
 
     for _d, _p, _seq, kind, ev in events:
         if kind == "corp":
@@ -887,6 +933,7 @@ def replay(facts: Facts) -> OracleResult:
             assert isinstance(ev, OpenFact)
             key = (ev.account_id, ev.symbol)
             pos = positions.setdefault(key, _Pos(ev.account_id, ev.symbol, qccy(ev.symbol)))
+            _reopen(pos)                                     # CR-06
             pos.shares += ev.shares
             pos.original_total += ev.orig_total
             pos.adjusted_total += ev.orig_total
@@ -894,6 +941,8 @@ def replay(facts: Facts) -> OracleResult:
             assert isinstance(ev, TxFact)
             key = (ev.account_id, ev.symbol)
             pos = positions.setdefault(key, _Pos(ev.account_id, ev.symbol, qccy(ev.symbol)))
+            if ev.qty != ZERO:
+                _reopen(pos)       # CR-06: a trade that moves shares puts it back in play
             if ev.side == "BUY":
                 # Cover an open declared short FIRST, at this buy's all-in per-share cost;
                 # the gain/loss realizes on the COVER date (owner's rule).
@@ -967,15 +1016,30 @@ def replay(facts: Facts) -> OracleResult:
             key = (ev.account_id, ev.symbol)
             pos2 = positions.get(key)
             if pos2 is None:
-                raise ValueError(f"dividend for unknown position {key}")
+                # CR-02 (domain-ledger.md): "A dividend needs a position that exists by its
+                # effective date" — no opening, no trade, no EXCHANGE / SPINOFF had created
+                # (account, symbol) by now. Refused: never income, never a ghost holding, and
+                # the ledger is missing the position that earned it. This raised until YQ3 —
+                # an oracle that crashes on a row the app degrades on cannot reconcile it.
+                orphan_dividends.append((ev.account_id, ev.symbol, ev.effective))
+                refuse_dividend(ev)
+                continue
             if pos2.short_shares > ZERO:
                 # A dividend on an OPEN SHORT is not representable: the short seller PAYS
                 # the dividend in lieu, and there is no debit row for that. Booking the
                 # positive net (income) or DRIP shares (breaks long/short exclusivity)
                 # would be money-of-record errors — skip the event, flag the position.
                 pos2.unbookable_dividend = True
-                refused_dividends.append((ev.account_id, ev.symbol, ev.d))   # K3
-                refused_divs.add(ev.id)   # ⑪: and it moves no cash either
+                refuse_dividend(ev)       # K3 + ⑪: on the result, and no cash either
+                continue
+            if pos2.vacated_to is not None:
+                # E24 (D32): the ticker was moved away by an EXCHANGE and nothing has put it
+                # back in play. A CASH payout here would be income on a ticker that no longer
+                # exists; a DRIP / 配股 would resurrect it at zero cost with no price. Refused,
+                # and flagged on the LIVE successor — the position the owner still holds (it
+                # may be flat; the result records the refusal either way, K3).
+                _live_successor(positions, ev.account_id, pos2).unbookable_dividend = True
+                refuse_dividend(ev)
                 continue
             if ev.type in CASH_DIVIDEND_TYPES:
                 if pos2.shares == ZERO:
@@ -1017,7 +1081,8 @@ def replay(facts: Facts) -> OracleResult:
     return OracleResult(holdings, realized_rows, dict(realized_by_ccy), cash,
                         fx_avg, fx_real, fx_fcash, fx_cov, refusals,
                         refused_dividends=refused_dividends,
-                        refused_dividend_ids=frozenset(refused_divs))
+                        refused_dividend_ids=frozenset(refused_divs),
+                        orphan_dividends=orphan_dividends)
 
 
 def facts_through(facts: Facts, day: date) -> Facts:
@@ -1396,7 +1461,10 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
         else:
             add(t.trade_date, ccy, gross - t.fee - t.tax)
     for dv in facts.divs:
-        if dv.type in CASH_DIVIDEND_TYPES:
+        # A payout the replay refused is no flow (K2 / review R2 ⑤): it is booked nowhere, so
+        # counting it here would give one payment two answers. The ORPHAN class goes further
+        # and withholds the whole figure — decided by the caller from ``res.orphan_dividends``.
+        if dv.type in CASH_DIVIDEND_TYPES and dv.id not in res.refused_dividend_ids:
             add(dv.d, insts[dv.symbol].quote_ccy, dv.net)
     # AI-D42: the three trading/financing costs. A cash movement carries its OWN currency
     # (there is no symbol to look one up from), and the sign comes from DEBIT_KINDS — the
@@ -1578,10 +1646,14 @@ def integrity_findings(
             _apply_action(positions, ev, insts)
         elif ekind == "open":
             assert isinstance(ev, OpenFact)
-            pos_for(ev.account_id, ev.symbol).shares += ev.shares
+            p = pos_for(ev.account_id, ev.symbol)
+            _reopen(p)                                       # CR-06, as the replay
+            p.shares += ev.shares
         elif ekind == "tx":
             assert isinstance(ev, TxFact)
             p = pos_for(ev.account_id, ev.symbol)
+            if ev.qty != ZERO:
+                _reopen(p)                                   # CR-06, as the replay
             if ev.side.upper() == "BUY":
                 cover = min(ev.qty, p.short_shares)
                 p.short_shares -= cover
@@ -1599,10 +1671,15 @@ def integrity_findings(
                         reported.add(key)
                         out.append(("position.never_negative",
                                     f"{key[0]}/{key[1]} nets {p.shares} on {d.isoformat()}"))
-        else:  # reinvest shares — skipped while a short is open (unbookable dividend)
+        else:  # reinvest shares — skipped wherever the replay refuses the dividend
             assert isinstance(ev, DivFact)
+            # The three refusal classes (YQ3): no position at all (CR-02 — checked BEFORE
+            # pos_for, which would create one), an open short, a vacated ticker (E24).
+            if (ev.account_id, ev.symbol) not in positions:
+                continue
             p = pos_for(ev.account_id, ev.symbol)
-            if p.short_shares > ZERO or ev.reinvest_shares is None:
+            if (p.short_shares > ZERO or p.vacated_to is not None
+                    or ev.reinvest_shares is None):
                 continue
             p.shares += ev.reinvest_shares
 
