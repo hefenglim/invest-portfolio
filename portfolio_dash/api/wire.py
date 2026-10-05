@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.csv_import import _CellError, _side_cell
 from portfolio_dash.data_ingestion.validate import Issue
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.returns import DividendIdentity, DividendRefusals
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import MarketRule
 from portfolio_dash.shared.models.enums import Side
@@ -178,4 +180,27 @@ def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:
         "tax_sell": decimal_str(r.tax_normal),
         "tax_sell_etf": decimal_str(r.tax_etf),
         "label": label,
+    }
+
+
+def unbooked_wire(refusals: DividendRefusals, row: DividendIdentity) -> dict[str, Any]:
+    """X1 (owner ruling 2026-10-05): a listed dividend row's booking state.
+
+    On every wire that lists dividend rows — the 交易帳本 股利 tab
+    (``api/routers/ledgers.py``), the drawer's 配息史 (``api/routers/symbol.py``) — in the
+    keys the 現金收支明細 rows carry:
+
+    * ``booked`` — false only on a row the replay refused (no position by its date, an open
+      declared short, a ticker an EXCHANGE vacated);
+    * ``unbooked_note`` — 「未入帳（待釐清）」;
+    * ``unbooked_reason`` — the replay's own sentence for the row
+      (``returns.DividendRefusals.why``).
+
+    A refused row is LISTED — it is in the ledger, and the owner must be able to find and
+    correct it — but it is in no balance, no return and no total."""
+    why = refusals.why(row)
+    return {
+        "booked": why is None,
+        "unbooked_note": None if why is None else UNBOOKED_DIVIDEND_NOTE,
+        "unbooked_reason": None if why is None else why[1],
     }

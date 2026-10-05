@@ -919,6 +919,20 @@
       const meta = DIV_TYPE[d.type] || { label: d.type, cls: '' };
       const tdType = el('td', 'col-text');
       tdType.appendChild(el('span', 'type-chip ' + meta.cls, meta.label));
+      /* X1 (owner ruling 2026-10-05): the replay REFUSED this row (no position by its date, an
+         open declared short, a ticker an EXCHANGE vacated) — it is in the ledger, so it is
+         listed, but in no balance, return or total. Marked on the row like an unapplied
+         corporate action (DEF-023): the server's 「未入帳（待釐清）」 and its own sentence, the
+         net struck through. Classes only (DEF-077). */
+      const unbooked = d.booked === false;
+      if (unbooked) {
+        tr.classList.add('row-stale', 'ledger-unbooked-row');
+        const ub = el('span', 'badge badge-missing ledger-unbooked', d.unbooked_note || '');
+        ub.title = d.unbooked_reason || '';
+        tdType.appendChild(document.createTextNode(' '));
+        tdType.appendChild(ub);
+        tr.title = (d.unbooked_note || '') + '：' + (d.unbooked_reason || '');
+      }
       tr.appendChild(tdType);
       const mkAmt = (v) => {
         const td = el('td', 'num');
@@ -928,7 +942,9 @@
       };
       tr.appendChild(mkAmt(d.gross));
       tr.appendChild(mkAmt(d.withhold));
-      tr.appendChild(mkAmt(d.net));
+      const tdNet = mkAmt(d.net);
+      if (unbooked) tdNet.classList.add('ledger-unbooked-amt');
+      tr.appendChild(tdNet);
       const tdRe = el('td', 'num');
       if (d.reinvest_shares === null) { tdRe.textContent = f.NULL_GLYPH; tdRe.classList.add('sign-nil'); }
       else tdRe.textContent = f.shares(d.reinvest_shares) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy);

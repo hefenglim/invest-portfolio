@@ -72,7 +72,7 @@ from portfolio_dash.api.routers.cash import (
     fx_edit_negative_guard,
     load_cash_ledgers,
 )
-from portfolio_dash.api.wire import issue_wire, parse_side
+from portfolio_dash.api.wire import issue_wire, parse_side, unbooked_wire
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.fees import (
@@ -155,6 +155,7 @@ from portfolio_dash.data_ingestion.validate import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
+from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.pricing.seed import (
     SeedPriceVerdict,
     SeedSkip,
@@ -296,9 +297,16 @@ def dividends(
         return bad
     today = now.date()
     accts, names, ccys = _names(conn)
+    # X1 (owner ruling 2026-10-05): every row the replay refused is marked, with the replay's
+    # own reason. ONE replay per request over the whole ledger — the rows read once, the
+    # account / symbol filter applied here rather than in a second, filtered SELECT.
+    stored = list_dividends(conn)
+    refusals = replay_dividend_refusals(load_ledger_bundle(conn, dividends=stored))
     out: list[dict[str, Any]] = []
-    for d in list_dividends(conn, account_id=account_id, symbol=symbol):
-        if not _in_range(d.date, frm, to):
+    for d in stored:
+        if ((account_id is not None and d.account_id != account_id)
+                or (symbol is not None and d.symbol != symbol)
+                or not _in_range(d.date, frm, to)):
             continue
         out.append({
             "id": d.id, "date": d.date.isoformat(), "account_id": d.account_id,
@@ -321,6 +329,7 @@ def dividends(
             # date, or a 配股's ex-date — the same date the valuation cut reads.
             "counts_from": _counts_from(
                 dividend_effective_date(d.type, d.date, d.ex_date), today),
+            **unbooked_wire(refusals, d),
         })
     return _page(out, limit, offset)
 

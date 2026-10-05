@@ -13,6 +13,11 @@ offline and prints cleanly across many pages (page-break-safe rows, thead repeat
 Date range: transactions/dividends/FX filter on their event date; opening inventory filters
 on its build date. An empty section renders 「本區間無紀錄」. The header shows the range
 (「全部期間」 when unbounded).
+
+X1 (owner ruling 2026-10-05): a dividend the replay refused is listed in 股利紀錄 marked
+「未入帳（待釐清）」, its reason (the replay's own sentence) printed under the table, and it is
+LEFT OUT of 淨額合計 — it is in the ledger, but in no balance, return or total. One replay per
+report (``portfolio.returns.replay_dividend_refusals``) over the rows the report already read.
 """
 
 import sqlite3
@@ -33,6 +38,7 @@ from portfolio_dash.data_ingestion.store import (
     list_instruments,
     list_opening,
     list_transactions,
+    load_ledger_bundle,
 )
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.report_html import (
@@ -46,6 +52,8 @@ from portfolio_dash.export.report_html import (
     _page_header,
     _version_line,
 )
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.returns import DividendRefusals, replay_dividend_refusals
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
 from portfolio_dash.shared.corporate_actions import KIND_ZH
@@ -229,26 +237,38 @@ def _dividends_section(
     frm: str | None,
     to: str | None,
     today: date,
+    *,
+    refusals: DividendRefusals,
 ) -> str:
     rows: list[str] = []
     net_totals: dict[str, Decimal] = {}
     count = 0
+    unbooked: list[str] = []
     for d in divs:
         if not _in_range(d.date, frm, to):
             continue
         count += 1
         ccy = ccys.get(d.symbol, "")
-        _add(net_totals, ccy, d.net)
+        why = refusals.why(d)
+        if why is None:
+            _add(net_totals, ccy, d.net)
+        else:
+            # X1: listed, marked, its reason under the table — and out of 淨額合計.
+            unbooked.append(
+                f'<p class="note">{_esc(d.date.isoformat())}・{_esc(d.symbol)}・'
+                f"{_esc(UNBOOKED_DIVIDEND_NOTE)}：{_esc(why[1])}</p>")
         if d.reinvest_shares is not None:
             reinvest = f"{_fmt_shares(d.reinvest_shares)} 股 @ {_fmt_amount(d.reinvest_price, ccy)}"
         else:
             reinvest = _NULL
+        mark = ("" if why is None
+                else f'<br><span class="chip unbooked">{_esc(UNBOOKED_DIVIDEND_NOTE)}</span>')
         rows.append(
-            "<tr>"
-            f"{_date_cell(d.date, today, dividend_effective_date(d.type, d.date, d.ex_date))}"
+            ("<tr>" if why is None else '<tr class="unbooked">')
+            + f"{_date_cell(d.date, today, dividend_effective_date(d.type, d.date, d.ex_date))}"
             f'<td class="l">{_acct_label(d.account_id)}</td>'
             f"{_sym_cell(d.symbol, names.get(d.symbol, ''))}"
-            f'<td class="l">{_esc(_DIV_TYPE_ZH.get(d.type.upper(), d.type))}</td>'
+            f'<td class="l">{_esc(_DIV_TYPE_ZH.get(d.type.upper(), d.type))}{mark}</td>'
             f'<td class="num">{_fmt_amount(d.gross, ccy)}</td>'
             f'<td class="num">{_fmt_amount(d.withholding, ccy)}</td>'
             f'<td class="num">{_amount_ccy(d.net, ccy)}</td>'
@@ -262,9 +282,12 @@ def _dividends_section(
         '<th class="l">類型</th><th>總額</th><th>預扣</th><th>淨額</th>'
         "<th>再投資</th></tr>"
     )
-    return _section(
-        "股利紀錄", count, head, "".join(rows), [_totals_line("淨額合計", net_totals)]
-    )
+    notes = [_totals_line("淨額合計", net_totals)]
+    if unbooked:
+        notes.append(f'<p class="note">其中 {len(unbooked)} 筆標示「'
+                     f"{_esc(UNBOOKED_DIVIDEND_NOTE)}」，不計入淨額合計：</p>")
+        notes.extend(unbooked)
+    return _section("股利紀錄", count, head, "".join(rows), notes)
 
 
 def _fx_section(
@@ -504,18 +527,23 @@ def build_ledgers_report_html(
     names = {i.symbol: i.name for i in insts}
     ccys = {i.symbol: i.quote_ccy.value for i in insts}
     moves = list_cash_movements(conn)
+    # Each ledger read ONCE: the sections list them, and X1's replay books them.
+    txs, divs, opening = list_transactions(conn), list_dividends(conn), list_opening(conn)
+    actions = list_corporate_actions(conn)
+    refusals = replay_dividend_refusals(load_ledger_bundle(
+        conn, transactions=txs, dividends=divs, opening=opening, actions=actions,
+        instruments={i.symbol: i for i in insts}))
     # DEF-056: the report's valuation day — the SERVER clock, as the ledger lists' counts_from.
     today = now.date()
 
     body = "\n".join(
         [
             _header_html(now, frm, to),
-            _transactions_section(list_transactions(conn), names, ccys, frm, to, today),
-            _dividends_section(list_dividends(conn), names, ccys, frm, to, today),
+            _transactions_section(txs, names, ccys, frm, to, today),
+            _dividends_section(divs, names, ccys, frm, to, today, refusals=refusals),
             _fx_section(list_fx_conversions(conn), frm, to, today),
-            _openings_section(list_opening(conn), names, ccys, frm, to, today),
-            _actions_section(list_corporate_actions(conn), names, frm, to, today,
-                             fees=_linked_fees(moves)),
+            _openings_section(opening, names, ccys, frm, to, today),
+            _actions_section(actions, names, frm, to, today, fees=_linked_fees(moves)),
             _cash_section(moves, frm, to, today),
             _page_footer("帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。"),
         ]

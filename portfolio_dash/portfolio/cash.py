@@ -42,7 +42,7 @@ Two views are exposed:
   computed server-side; the frontend never computes money.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -94,6 +94,7 @@ class _DivRow(Protocol):
     symbol: str
     date: date
     type: str
+    gross: Decimal   # with the fields above, the row's ``returns.dividend_key`` (⑪ / X1)
     net: Decimal
 
 
@@ -195,7 +196,8 @@ class CashLine:
     shows so the payout does not vanish from the statement. ``delta`` is still the net the row
     records, but :func:`_effect` reads it as zero, so the line moves no running balance in any
     of this module's views — a refused line that reached a guard's timeline could not move it
-    either.
+    either. ``reason`` (X1, 2026-10-05) is the replay's own sentence for that refusal, when the
+    listing that built the line was handed one (``pool_lines``' ``unbooked_reason``).
     """
 
     date: date
@@ -213,6 +215,7 @@ class CashLine:
     counter_ccy: str | None = None
     counter_amount: Decimal | None = None
     booked: bool = True
+    reason: str | None = None
 
 
 #: ⑪ — how every listing marks a ``booked=False`` line: the 現金收支明細 screen (sent on the
@@ -240,6 +243,7 @@ def pool_lines(
     instruments: dict[str, Instrument],
     *,
     unbooked_dividends: Sequence[_DivRow] = (),
+    unbooked_reason: Callable[[_DivRow], str | None] | None = None,
 ) -> list[CashLine]:
     """Every dated flow into ONE (account, ccy) pool (movements + fx legs + trade
     settlements + cash dividends). Unsorted; use :func:`running_statement`/`running_min`.
@@ -250,7 +254,9 @@ def pool_lines(
 
     ``dividends`` are the rows that BOOK (⑪). ``unbooked_dividends`` — the rows the replay
     refused — are for a LISTING only: each becomes a ``booked=False`` line that the statement
-    shows and no balance counts. A guard or a balance never passes them."""
+    shows and no balance counts. A guard or a balance never passes them. ``unbooked_reason``
+    (X1) gives each such line the replay's sentence for its refusal
+    (``returns.DividendRefusals.why``)."""
     lines: list[CashLine] = []
     for m in movements:
         if m.account_id != account_id or m.ccy != ccy:
@@ -287,8 +293,11 @@ def pool_lines(
             if inst is None or d.account_id != account_id or inst.quote_ccy != ccy:
                 continue
             if d.type in CASH_DIVIDEND_TYPES:
+                reason = (None if booked or unbooked_reason is None
+                          else unbooked_reason(d))
                 lines.append(CashLine(d.date, "dividend", d.symbol, d.net,
-                                      symbol=d.symbol, name=inst.name, booked=booked))
+                                      symbol=d.symbol, name=inst.name, booked=booked,
+                                      reason=reason))
     return lines
 
 
@@ -357,6 +366,7 @@ def account_statement(
     *,
     ccy: Currency | None = None,
     unbooked_dividends: Sequence[_DivRow] = (),
+    unbooked_reason: Callable[[_DivRow], str | None] | None = None,
 ) -> list[tuple[Currency, list[tuple[CashLine, Decimal]]]]:
     """Per-(account, ccy) running statements for one account.
 
@@ -375,7 +385,7 @@ def account_statement(
     for c in candidates:
         stmt = running_statement(pool_lines(
             account_id, c, movements, fx_conversions, transactions, dividends, instruments,
-            unbooked_dividends=unbooked_dividends))
+            unbooked_dividends=unbooked_dividends, unbooked_reason=unbooked_reason))
         if ccy is None and not stmt:
             continue  # skip currencies this account never touched
         result.append((c, stmt))

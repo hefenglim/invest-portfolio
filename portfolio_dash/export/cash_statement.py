@@ -14,9 +14,10 @@ never blended. The full statement is exported (all rows), never the paged API wi
 this statement against the broker's, and a row that vanished would read as a lost one — but
 it moves no balance, and both exports mark it with the screen's own words
 (``portfolio.cash.UNBOOKED_DIVIDEND_NOTE``): the CSV in its ``unbooked`` column, the printed
-report in the row's 說明 and in the section title. The split is the replay's own
-(``portfolio.returns.replay_refusals`` → ``booked_dividends`` / ``unbooked_dividends``), the
-same one ``GET /api/cash/statement`` reads.
+report in the row's 說明 and in the section title, with the replay's own sentence for each
+refused row under the table (X1). The split is the replay's own
+(``portfolio.returns.replay_dividend_refusals``), the same one ``GET /api/cash/statement``
+reads.
 """
 
 import sqlite3
@@ -53,11 +54,7 @@ from portfolio_dash.portfolio.cash import (
     CashLine,
     account_statement,
 )
-from portfolio_dash.portfolio.returns import (
-    booked_dividends,
-    replay_refusals,
-    unbooked_dividends,
-)
+from portfolio_dash.portfolio.returns import DividendRefusals, replay_dividend_refusals
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.enums import Currency
@@ -99,27 +96,29 @@ _KIND_ZH = {
 _Ledgers = tuple[
     list[StoredCashMovement], list[StoredFxConversion],
     list[StoredTransaction], list[StoredDividend], dict[str, Instrument],
-    list[StoredDividend],
+    list[StoredDividend], DividendRefusals,
 ]
 
 
 def _load(conn: sqlite3.Connection) -> _Ledgers:
     """The ledger inputs ``account_statement`` needs (loaded once): the five pool ledgers,
     the dividends split by the replay's own refusal (⑪ — booked rows in the fourth slot, the
-    refused ones last, for listing only), exactly as ``api/routers/cash.py::load_cash_ledgers``
-    splits them for the on-screen statement. One replay per export."""
+    refused ones next, for listing only, and the refusal itself last for its reasons), exactly
+    as ``api/routers/cash.py::load_cash_ledgers`` splits them for the on-screen statement. One
+    replay per export."""
     txs = list_transactions(conn)
     divs = list_dividends(conn)
     instruments = {i.symbol: i for i in list_instruments(conn)}
-    refused = replay_refusals(load_ledger_bundle(
+    refused = replay_dividend_refusals(load_ledger_bundle(
         conn, transactions=txs, dividends=divs, instruments=instruments))
     return (
         list_cash_movements(conn),
         list_fx_conversions(conn),
         txs,
-        booked_dividends(divs, refused),
+        refused.booked(divs),
         instruments,
-        unbooked_dividends(divs, refused),
+        refused.unbooked(divs),
+        refused,
     )
 
 
@@ -138,9 +137,10 @@ def build_cash_statement_csv(
     None). Unknown account → None (router answers 400). Raw source-precision strings."""
     if account not in {a.account_id for a in list_accounts(conn)}:
         return None
-    movements, fx, txs, divs, instruments, unbooked = _load(conn)
+    movements, fx, txs, divs, instruments, unbooked, refusals = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy,
-                                   unbooked_dividends=unbooked)
+                                   unbooked_dividends=unbooked,
+                                   unbooked_reason=refusals.reason)
     today = now.date()
     rows: list[list[str]] = []
     for pool_ccy, stmt in statements:
@@ -306,15 +306,19 @@ def _pool_section(
     title = f"{_esc(ccy)} 資金池 · 目前餘額 {_fmt_amount(bal, ccy)} {_esc(ccy)}"
     if future:
         title += f"（截至 {_esc(as_of.isoformat())}，不含 {future} 筆未來日期）"
-    note = f"共 {len(stmt)} 筆"
+    reasons = ""
     if unbooked:
-        # ⑪: the count, the marker and the reason — the static page's hover.
+        # ⑪ / X1: the count in the title, and under the table each refused row with the
+        # replay's own sentence — the static page's hover.
         title += f"（另有 {unbooked} 筆股利未入帳，不計入餘額）"
-        note += f"；標示「{_esc(UNBOOKED_DIVIDEND_NOTE)}」的股利：{_esc(UNBOOKED_DIVIDEND_REASON)}"
+        reasons = "".join(
+            f'<p class="note">{_esc(ln.date.isoformat())}・{_esc(ln.symbol or "")}・'
+            f"{_esc(UNBOOKED_DIVIDEND_NOTE)}：{_esc(ln.reason or UNBOOKED_DIVIDEND_REASON)}</p>"
+            for ln, _ in stmt if not ln.booked)
     return (
         f"<section><h2>{title}</h2>"
-        f'<p class="note">{note}</p>'
-        f"<table><thead>{head}</thead><tbody>{body}</tbody></table></section>"
+        f'<p class="note">共 {len(stmt)} 筆</p>'
+        f"<table><thead>{head}</thead><tbody>{body}</tbody></table>{reasons}</section>"
     )
 
 
@@ -343,9 +347,10 @@ def build_cash_statement_report_html(
     """Print-optimized 現金收支明細 report (one section per pool). Unknown account → None."""
     if account not in {a.account_id for a in list_accounts(conn)}:
         return None
-    movements, fx, txs, divs, instruments, unbooked = _load(conn)
+    movements, fx, txs, divs, instruments, unbooked, refusals = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy,
-                                   unbooked_dividends=unbooked)
+                                   unbooked_dividends=unbooked,
+                                   unbooked_reason=refusals.reason)
     # One clock for the whole page: the header's ``now`` dates the balances too (M5-06).
     sections = [_pool_section(c, stmt, as_of=now.date()) for c, stmt in statements] or [
         '<section><p class="note">此帳戶尚無現金收支紀錄</p></section>'

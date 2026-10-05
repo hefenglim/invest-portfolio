@@ -197,7 +197,8 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- dividend (股利) — all available ---
     VarSpec(
         "dividends_json", "配息史", "dividend", "portfolio", True,
-        "帳本全部股利記錄（type/gross/net/再投資，含幣別）",
+        "帳本全部股利記錄（type/gross/net/再投資，含幣別；重算無法入帳的列另標 "
+        "unbooked「未入帳（待釐清）」與原因代碼，不是收入）",
         '[{"symbol":"0056","date":"2026-04-15","type":"cash","net":"8500","ccy":"TWD"}, …]',
     ),
     VarSpec(

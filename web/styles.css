@@ -2519,6 +2519,11 @@ button[disabled], .btn[disabled] {
 .unapplied-item .unapplied-reason { flex: 1 1 320px; min-width: 0; }
 /* DEF-023: the 未套用 mark on a 公司行動 ledger row, and the drawer's link into that row. */
 .ledger-unapplied { margin-left: 4px; vertical-align: middle; }
+/* X1 (owner ruling 2026-10-05): a dividend the replay refused — 「未入帳（待釐清）」 on the 股利
+   ledger row and the drawer's 配息史 row (marked like an unapplied action), its net struck
+   through: it is listed, and in no balance, return or total. */
+.ledger-unbooked { margin-left: 4px; vertical-align: middle; }
+.ledger-unbooked-amt { text-decoration: line-through; }
 .sd-tx-issue-link { color: var(--accent); font-weight: 600; white-space: nowrap; }
 /* CR-02 (2026-10-04): the drawer's 配息史 line for a dividend the book refused (no position in
    that account by its date) — the error colour of the activity footer's cause lines, as a class. */

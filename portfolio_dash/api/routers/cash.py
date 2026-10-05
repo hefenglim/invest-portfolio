@@ -81,10 +81,8 @@ from portfolio_dash.portfolio.cash import (
     running_low,
 )
 from portfolio_dash.portfolio.returns import (
-    DividendIdentity,
-    booked_dividends,
-    replay_refusals,
-    unbooked_dividends,
+    DividendRefusals,
+    replay_dividend_refusals,
 )
 from portfolio_dash.pricing.store import get_fx, get_fx_on
 from portfolio_dash.shared.account_ref import account_ref
@@ -135,7 +133,8 @@ class CashLedgers:
     short, a ticker an EXCHANGE vacated). Every balance, every guard and every statement on
     this page is built from this one snapshot, so the pool the page shows and the pool a
     withdrawal is judged against are the same pool: a refused payout counts in neither, and a
-    statement lists it with the balance it did not move (``unbooked``).
+    statement lists it with the balance it did not move (``unbooked``) and the replay's reason
+    for it (``refusals``, X1).
     """
 
     movements: tuple[StoredCashMovement, ...]
@@ -144,6 +143,7 @@ class CashLedgers:
     dividends: tuple[StoredDividend, ...]
     instruments: dict[str, Instrument]
     unbooked: tuple[StoredDividend, ...] = ()
+    refusals: DividendRefusals = DividendRefusals()
 
 
 def load_cash_ledgers(
@@ -153,7 +153,7 @@ def load_cash_ledgers(
     transactions: Sequence[StoredTransaction] | None = None,
     dividends: Sequence[StoredDividend] | None = None,
     instruments: dict[str, Instrument] | None = None,
-    refused: Sequence[DividendIdentity] | None = None,
+    refused: DividendRefusals | None = None,
 ) -> CashLedgers:
     """The ONE read of the five pool ledgers a request makes (CR-12).
 
@@ -164,7 +164,7 @@ def load_cash_ledgers(
     rows must be the STORED rows, in the store's order — what this function would have read.
 
     ⑪: the stored dividends are split by the replay's own refusal
-    (``portfolio/returns.py::booked_dividends``). ``refused`` is that refusal when the caller
+    (``portfolio/returns.py::DividendRefusals``). ``refused`` is that refusal when the caller
     already replayed THIS ledger (the replay guards pass their "before" book's); ``None``
     replays it here — ONE ``build_book`` per snapshot, never per row or per pool, over the
     rows above plus the openings and corporate actions (one read each), which is why a probe
@@ -175,15 +175,16 @@ def load_cash_ledgers(
     insts = (instruments if instruments is not None
              else {i.symbol: i for i in list_instruments(conn)})
     if refused is None:
-        refused = replay_refusals(load_ledger_bundle(
+        refused = replay_dividend_refusals(load_ledger_bundle(
             conn, transactions=txs, dividends=divs, instruments=insts))
     return CashLedgers(
         movements=tuple(movements if movements is not None else list_cash_movements(conn)),
         fx=tuple(list_fx_conversions(conn)),
         transactions=tuple(txs),
-        dividends=tuple(booked_dividends(divs, refused)),
+        dividends=tuple(refused.booked(divs)),
         instruments=insts,
-        unbooked=tuple(unbooked_dividends(divs, refused)),
+        unbooked=tuple(refused.unbooked(divs)),
+        refusals=refused,
     )
 
 
@@ -636,7 +637,8 @@ def _stmt_row_wire(
         "balance": decimal_str(bal),
         "booked": ln.booked,
         "unbooked_note": None if ln.booked else UNBOOKED_DIVIDEND_NOTE,
-        "unbooked_reason": None if ln.booked else UNBOOKED_DIVIDEND_REASON,
+        # X1: the replay's own sentence for THIS row (the generic one if none reached it).
+        "unbooked_reason": None if ln.booked else (ln.reason or UNBOOKED_DIVIDEND_REASON),
         "future": counts_from is not None,
         "counts_from": _iso_or_none(counts_from),
         "symbol": ln.symbol,
@@ -692,6 +694,7 @@ def cash_statement(
     statements = account_statement(
         account, ledgers.movements, ledgers.fx, ledgers.transactions, ledgers.dividends,
         ledgers.instruments, ccy=ccy, unbooked_dividends=ledgers.unbooked,
+        unbooked_reason=ledgers.refusals.reason,   # X1: the replay's sentence per row
     )
 
     def _as_of_balance(stmt: list[tuple[CashLine, Decimal]]) -> Decimal:

@@ -55,6 +55,7 @@ from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 # The correction doors' own 賣超 sentence (a sibling module of this router, same layer), so the
 # drawer names the day a 賣超 broke in exactly the words the 422 that asked about it used.
 from portfolio_dash.api.replay_guard import _oversell_phrase as oversell_phrase
+from portfolio_dash.api.wire import unbooked_wire
 from portfolio_dash.data_ingestion.holdings import (
     _shares_until as shares_naive,  # §6.3's second term, by NAME — see _corporate_delta
 )
@@ -70,6 +71,7 @@ from portfolio_dash.data_ingestion.store import (
     list_instruments,
     list_opening,
     list_transactions,
+    load_ledger_bundle,
 )
 from portfolio_dash.portfolio.cost_basis import (
     CASH_MOVEMENT_REMEDY,
@@ -81,6 +83,7 @@ from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
 from portfolio_dash.portfolio.position_aggregate import aggregate_position
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
+from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.corporate_actions import ActionIndex, kind_label
 from portfolio_dash.shared.enums import Currency
@@ -701,6 +704,11 @@ def symbol_detail(
     # row, a dividend paying next month included, while the position above already leaves it
     # out; so it carries the ledger tab's own flag (the same effective date and predicate as
     # ``/api/ledgers/dividends``), and the drawer badges it like the ledger does.
+    # X1 (owner ruling 2026-10-05): and the ledger tab's booking marks — a row the replay
+    # refused is listed 「未入帳（待釐清）」 with the replay's reason. The whole ledger's replay,
+    # as the ledger tab reads it (a future row is marked by the same answer it will get), once
+    # per request; the 待釐清 lines under the table (``ledger_issues``) stay as they are.
+    refusals = replay_dividend_refusals(load_ledger_bundle(conn))
     dividend_events = [
         {
             "date": d.date.isoformat(),
@@ -716,6 +724,7 @@ def symbol_detail(
                 decimal_str(d.reinvest_price) if d.reinvest_price is not None else None
             ),
             "ccy": ccy,
+            **unbooked_wire(refusals, d),
         }
         for d in sym_divs
     ]

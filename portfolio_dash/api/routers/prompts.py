@@ -30,7 +30,7 @@ from portfolio_dash.api import signals_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.holdings import load_action_index
-from portfolio_dash.data_ingestion.store import list_dividends
+from portfolio_dash.data_ingestion.store import list_dividends, load_ledger_bundle
 from portfolio_dash.llm_insight import official_templates, prompt_diff
 from portfolio_dash.llm_insight import system_prompt as system_prompt_store
 from portfolio_dash.llm_insight import variables as V
@@ -53,8 +53,10 @@ from portfolio_dash.portfolio.backtest import (
     WindowStats,
     event_study,
 )
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.price_basis import series_in
+from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
@@ -435,18 +437,33 @@ def _resolve_fx_rates(
 
 def _dividend_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Per-event dividend ledger rows with the instrument's quote currency (LLM-facing,
-    type lowercased to match the wire convention)."""
+    type lowercased to match the wire convention).
+
+    X1 (owner ruling 2026-10-05): a row the replay REFUSED (no position by its date, an open
+    declared short, a ticker an EXCHANGE vacated) is listed — it is in the ledger — but marked
+    ``"booked": false`` / ``"unbooked": "未入帳（待釐清）"`` with its ``unbooked_cause``
+    (``orphan`` / ``short`` / ``vacated``, the replay's own vocabulary), so the model is never
+    handed a refused payout as income. A booked row carries no extra key — its JSON, and every
+    prompt fingerprint built over a ledger with no refusal, is byte-identical to before. One
+    replay per call (``portfolio.returns.replay_dividend_refusals``)."""
     ccy_by_symbol = {
         r["symbol"]: r["quote_ccy"]
         for r in conn.execute("SELECT symbol, quote_ccy FROM instruments")
     }
+    stored = list_dividends(conn)
+    refusals = replay_dividend_refusals(load_ledger_bundle(conn, dividends=stored))
     rows: list[dict[str, Any]] = []
-    for d in list_dividends(conn):
-        rows.append({
+    for d in stored:
+        row: dict[str, Any] = {
             "symbol": d.symbol, "date": d.date.isoformat(), "type": d.type.lower(),
             "gross": d.gross, "withholding": d.withholding, "net": d.net,
             "reinvest_shares": d.reinvest_shares, "ccy": ccy_by_symbol.get(d.symbol),
-        })
+        }
+        why = refusals.why(d)
+        if why is not None:
+            row.update({"booked": False, "unbooked": UNBOOKED_DIVIDEND_NOTE,
+                        "unbooked_cause": why[0]})
+        rows.append(row)
     return rows
 
 

@@ -12,7 +12,10 @@ from portfolio_dash.data_ingestion.store import insert_dividend
 from portfolio_dash.export.symbol_detail import build_symbol_detail_csv
 from tests.conftest import _seed_golden, init_golden_base
 
-_COLS = "date,type,gross,withholding,net,reinvest_shares,reinvest_price,ccy,counts_from"
+# X1 (2026-10-05): ``unbooked`` (「未入帳（待釐清）」 on a row the replay refused) sits before
+# ``counts_from``, which stays last; every row below books, so its ``unbooked`` cell is empty.
+_COLS = ("date,type,gross,withholding,net,reinvest_shares,reinvest_price,ccy,unbooked,"
+         "counts_from")
 _DAY = date(2026, 6, 11)  # the golden valuation day
 
 
@@ -45,7 +48,7 @@ def test_known_symbol_dividend_row_at_source_precision() -> None:
     text = art.content[3:].decode("utf-8")
     assert text.split("\r\n", 1)[0] == _COLS
     # golden 2330 cash dividend: 2026-03-01 gross 5000 / withhold 0 / net 5000, TWD.
-    assert "2026-03-01,cash,5000,0,5000,,,TWD," in text
+    assert "2026-03-01,cash,5000,0,5000,,,TWD,," in text
 
 
 def test_known_symbol_no_dividends_header_only() -> None:
@@ -73,7 +76,7 @@ def test_reinvest_columns_populated_for_drip() -> None:
         conn.close()
     assert art is not None
     text = art.content[3:].decode("utf-8")
-    assert "2026-04-01,drip,10,3,7,0.05,140,USD," in text
+    assert "2026-04-01,drip,10,3,7,0.05,140,USD,," in text
 
 
 def test_a_dividend_that_does_not_count_yet_says_from_when() -> None:
@@ -96,8 +99,8 @@ def test_a_dividend_that_does_not_count_yet_says_from_when() -> None:
         conn.close()
     assert ahead is not None and on_the_day is not None
     rows = [ln for ln in ahead.content[3:].decode("utf-8").split("\r\n")[1:] if ln]
-    assert "2026-07-01,cash,18200,0,18200,,,TWD,2026-07-01" in rows
-    assert "2026-07-01,stock,0,0,0,50,,TWD," in rows  # its ex-date is past: it counts
-    assert "2026-03-01,cash,5000,0,5000,,,TWD," in rows
+    assert "2026-07-01,cash,18200,0,18200,,,TWD,,2026-07-01" in rows
+    assert "2026-07-01,stock,0,0,0,50,,TWD,," in rows  # its ex-date is past: it counts
+    assert "2026-03-01,cash,5000,0,5000,,,TWD,," in rows
     later = on_the_day.content[3:].decode("utf-8").split("\r\n")[1:]
     assert all(ln.endswith(",") for ln in later if ln), later

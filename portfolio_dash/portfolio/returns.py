@@ -1,16 +1,18 @@
 """Returns: per-currency total return + blended reporting total, and reporting XIRR."""
 
 import math
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from functools import cached_property
 from typing import Protocol
 
 from pyxirr import InvalidPaymentsError
 from pyxirr import xirr as _xirr
 
-from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_REASON
+from portfolio_dash.portfolio.cost_basis import build_book, orphan_dividend_message
 from portfolio_dash.portfolio.results import (
     Book,
     CurrencyReturn,
@@ -214,26 +216,96 @@ def unbooked_dividends[D: DividendIdentity](
     return [r for r in rows if dividend_key(r) in keys]
 
 
-def replay_refusals(bundle: LedgerBundle) -> list[Dividend]:
-    """``Book.refused_dividends`` of the dashboard-path replay of *bundle* (⑪).
+@dataclass(frozen=True)
+class DividendRefusals:
+    """The replay's answer to "which dividends book" — with its OWN reason for each refusal.
+
+    ⑪ / X1 (owner rulings 2026-10-05): a refused payout counts in no balance, no flow and no
+    total, and every surface that LISTS dividend rows lists it marked 「未入帳（待釐清）」 with
+    the reason. One object carries both halves, so a reader cannot take the exclusion from one
+    replay and the marks from another: balances and flows read :meth:`booked`, listings read
+    :meth:`why` (``None`` on a booked row) — the same :func:`dividend_key` membership either way.
+
+    ``reasons`` maps a refused row's key to ``(cause, sentence)``: ``"orphan"`` with CR-02's
+    :func:`~portfolio.cost_basis.orphan_dividend_message`, or a K3
+    :class:`~portfolio.results.UnbookableDividend`'s ``cause`` (``"short"`` / ``"vacated"``)
+    with its ``reason`` — the strict path's sentence, verbatim, so every surface explains the
+    refusal in the replay's words and none re-derives it.
+    """
+
+    refused: tuple[Dividend, ...] = ()
+    reasons: Mapping[tuple[object, ...], tuple[str, str]] = field(default_factory=dict)
+
+    @cached_property
+    def _keys(self) -> frozenset[tuple[object, ...]]:
+        return frozenset(dividend_key(dv) for dv in self.refused)
+
+    def booked[D: DividendIdentity](self, rows: Iterable[D]) -> list[D]:
+        """:func:`booked_dividends` over this refusal."""
+        return [r for r in rows if dividend_key(r) not in self._keys]
+
+    def unbooked[D: DividendIdentity](self, rows: Iterable[D]) -> list[D]:
+        """:func:`unbooked_dividends` over this refusal."""
+        return [r for r in rows if dividend_key(r) in self._keys]
+
+    def why(self, row: DividendIdentity) -> tuple[str, str] | None:
+        """``(cause, sentence)`` when the replay refused *row*; ``None`` when it booked it.
+
+        A refused row with no recorded reason (unreachable today: every refusal is an orphan
+        or an :class:`~portfolio.results.UnbookableDividend`) reads ``"refused"`` with the
+        statement's generic sentence rather than passing as booked."""
+        key = dividend_key(row)
+        if key not in self._keys:
+            return None
+        return self.reasons.get(key, ("refused", UNBOOKED_DIVIDEND_REASON))
+
+    def reason(self, row: DividendIdentity) -> str | None:
+        """The sentence half of :meth:`why` — what a listing prints beside the mark."""
+        why = self.why(row)
+        return None if why is None else why[1]
+
+
+def dividend_refusals(book: Book | None) -> DividendRefusals:
+    """The :class:`DividendRefusals` of a replay the caller already ran; none for ``None``
+    (a ledger the replay could not book at all — see :func:`replay_refusals`)."""
+    if book is None:
+        return DividendRefusals()
+    reasons: dict[tuple[object, ...], tuple[str, str]] = {
+        dividend_key(d): ("orphan", orphan_dividend_message(d)) for d in book.orphan_dividends
+    }
+    reasons.update({dividend_key(u.dividend): (u.cause, u.reason)
+                    for u in book.unbookable_dividends})
+    return DividendRefusals(refused=tuple(book.refused_dividends), reasons=reasons)
+
+
+def replay_dividend_refusals(bundle: LedgerBundle) -> DividendRefusals:
+    """Replay *bundle* once and return its :class:`DividendRefusals` (⑪ / X1).
 
     For a reader that holds the ledgers but not a book — the cash API's one snapshot
-    (``api/routers/cash.py::load_cash_ledgers``), the 現金收支明細 exports, the trend. A
-    reader that already replayed the same bundle passes its own ``book.refused_dividends`` to
-    :func:`booked_dividends` instead and pays for no second replay.
+    (``api/routers/cash.py::load_cash_ledgers``), the 現金收支明細 exports, the ledger tab, the
+    printed ledger report, the drawer's 配息史, the AI-facing dividend rows, the trend. A
+    reader that already replayed the same bundle calls :func:`dividend_refusals` on its own
+    book instead and pays for no second replay.
 
     The replay is run exactly as ``build_dashboard`` runs it: unregistered rows dropped first
     (they cannot be booked, and ``cash_balances`` skips them too), ``allow_oversell=True`` so a
     賣超 or a refused dividend is recorded on the book rather than raised. A ledger the replay
     refuses OUTRIGHT (a DRIP row with no share count, an uncomputable value — the dashboard
-    answers 422 naming the row) yields ``[]``: there is no refusal to read, so every payout
-    counts, as it did before ⑪, on every cash surface and every guard alike, because they all
-    read this one answer.
+    answers 422 naming the row) yields no refusal: there is none to read, so every payout
+    counts and none is marked, as before ⑪, on every surface and every guard alike, because
+    they all read this one answer (owner ruling X2, 2026-10-05: keep).
     """
     try:
-        return build_book(bundle.without_unregistered(), allow_oversell=True).refused_dividends
+        book = build_book(bundle.without_unregistered(), allow_oversell=True)
     except (ValueError, KeyError, ArithmeticError):
-        return []
+        return DividendRefusals()
+    return dividend_refusals(book)
+
+
+def replay_refusals(bundle: LedgerBundle) -> list[Dividend]:
+    """``Book.refused_dividends`` of the dashboard-path replay of *bundle* (⑪) — the rows of
+    :func:`replay_dividend_refusals`, for a reader that needs no reasons (the trend)."""
+    return list(replay_dividend_refusals(bundle).refused)
 
 
 def xirr_reporting(

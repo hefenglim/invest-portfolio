@@ -1021,9 +1021,20 @@
       const tdType = el('td', 'col-text');
       const chipCls = d.type === 'drip' ? 'chip-drip' : d.type === 'stock' ? 'chip-stock' : d.type === 'net' ? 'chip-net' : 'chip-cash';
       tdType.appendChild(el('span', 'type-chip ' + chipCls, typeZh(d)));
+      /* X1 (owner ruling 2026-10-05): the ledger tab's mark, on the same row — the server's
+         「未入帳（待釐清）」 and the replay's sentence, the net struck through (classes only). The
+         待釐清 lines under the table still name the position the refusal concerns. */
+      const unbooked = d.booked === false;
+      if (unbooked) {
+        tr.classList.add('row-stale', 'ledger-unbooked-row');
+        const ub = el('span', 'badge badge-missing ledger-unbooked', d.unbooked_note || '');
+        ub.title = d.unbooked_reason || '';
+        tdType.appendChild(document.createTextNode(' '));
+        tdType.appendChild(ub);
+      }
       tr.appendChild(tdType);
       tr.appendChild(el('td', 'num', d.gross == null ? f.NULL_GLYPH : f.money(d.gross, d.ccy)));
-      tr.appendChild(el('td', 'num', f.money(d.net, d.ccy)));
+      tr.appendChild(el('td', 'num' + (unbooked ? ' ledger-unbooked-amt' : ''), f.money(d.net, d.ccy)));
       tr.appendChild(el('td', 'num', d.reinvest_shares ? f.shares(d.reinvest_shares) + ' 股 @ ' + f.price(d.reinvest_price, d.ccy) : f.NULL_GLYPH));
       tbody.appendChild(tr);
     });

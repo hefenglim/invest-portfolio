@@ -58,14 +58,10 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, OversoldPosition
-from portfolio_dash.portfolio.returns import booked_dividends
+from portfolio_dash.portfolio.returns import dividend_refusals
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.models.ledger import (
-    Dividend,
-    LedgerBundle,
-    dividend_effective_date,
-)
+from portfolio_dash.shared.models.ledger import LedgerBundle, dividend_effective_date
 from portfolio_dash.shared.wire import decimal_str
 
 
@@ -205,12 +201,6 @@ def _replays(
                       actions if actions is not None else read.actions,
                       instruments=read.instruments)
     return _Replays(pre=pre, post=post, pre_book=_replayed(pre), post_book=_replayed(post))
-
-
-def _refused(book: Book | None) -> list[Dividend]:
-    """The dividends *book* refused (⑪); none when the ledger could not be booked at all —
-    the same answer ``returns.replay_refusals`` gives the cash snapshot for such a ledger."""
-    return book.refused_dividends if book is not None else []
 
 
 #: A dividend's ORPHAN identity: (account, symbol, effective date). Exact, not an
@@ -539,20 +529,20 @@ def _batch_cash_refusal(
 
     ⑪: each side counts the payouts ITS replay booked — the "before" pool the current
     ledger's (*replays*' ``pre_book``), the "after" pool the would-be ledger's (``post_book``)
-    — through ``returns.booked_dividends``, so this check and the 資金 page after the undo read
+    — through ``returns.dividend_refusals``, so this check and the 資金 page after the undo read
     one pool. No replay of its own: the guard's two are handed in."""
     action_ids = rows.of("corporate_actions")
     if not (rows.of("cash_movements") or rows.of("fx_conversions") or action_ids):
         return None
     ledgers = load_cash_ledgers(conn, transactions=read.transactions, dividends=read.dividends,
                                 instruments=read.instruments,
-                                refused=_refused(replays.pre_book))
+                                refused=dividend_refusals(replays.pre_book))
     leaving = {m.id for m in ledgers.movements
                if m.id in rows.of("cash_movements")
                or (m.corporate_action_id is not None and m.corporate_action_id in action_ids)}
     return _pool_refusal(ledgers, leaving=leaving, gone_fx=rows.of("fx_conversions"),
                          would_txs=would_txs,
-                         would_divs=booked_dividends(would_divs, _refused(replays.post_book)))
+                         would_divs=dividend_refusals(replays.post_book).booked(would_divs))
 
 
 def batch_undo_guard(
@@ -656,9 +646,9 @@ def action_change_guard(
                                         transactions=read.transactions,
                                         dividends=read.dividends,
                                         instruments=read.instruments,
-                                        refused=_refused(replays.pre_book))
+                                        refused=dividend_refusals(replays.pre_book))
             return _pool_refusal(ledgers, leaving=fees, gone_fx=frozenset(),
                                  would_txs=ledgers.transactions,
-                                 would_divs=booked_dividends(
-                                     read.dividends, _refused(replays.post_book)))
+                                 would_divs=dividend_refusals(
+                                     replays.post_book).booked(read.dividends))
     return None
