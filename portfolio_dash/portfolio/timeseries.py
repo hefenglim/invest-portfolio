@@ -382,15 +382,26 @@ def daily_value_series(
             for h in book.holdings:
                 if h.shares == _ZERO:
                     continue
-                # `unbookable_action` belongs here for a STRONGER reason than the other two:
-                # a skipped corporate action leaves `shares` in PRE-action terms while
-                # `price_history` is global and already POST-action, so `price * shares` is
-                # not merely incomplete, it is wrong by the action's whole ratio (a 3-for-1
-                # understates the position threefold). Omitting it let that product into the
-                # trend and net-worth series as though valid, and unflagged.
-                if h.oversold or h.unbookable_dividend or h.unbookable_action:
-                    incomplete = True  # 賣超 / 待釐清 day — value undefined
+                # `unbookable_action` belongs here for a STRONGER reason than 賣超: a skipped
+                # corporate action leaves `shares` in PRE-action terms while `price_history` is
+                # global and already POST-action, so `price * shares` is not merely incomplete,
+                # it is wrong by the action's whole ratio (a 3-for-1 understates the position
+                # threefold). Omitting it let that product into the trend and net-worth series
+                # as though valid, and unflagged.
+                if h.oversold or h.unbookable_action:
+                    incomplete = True  # 賣超 / 股數待釐清 — value undefined, so not counted
                     continue
+                # Y3 (owner ruling 2026-10-05): `unbookable_dividend` is NOT in that branch any
+                # more. It means a payout was refused (an open short, a vacated ticker); the
+                # SHARES are right and the price is global and current, so the value is real —
+                # `Holding`'s taxonomy and `pnl.value_holdings` (which never suppresses it, so the
+                # KPI total counts it) already said so. Dropping it here made this series the
+                # one reader that disagreed: the trend's last point read 0 against a 530,000 KPI
+                # total for the same day, and net worth fell by the position on the payout day
+                # with no cash or share moving. The day is still marked — the payout is 待釐清,
+                # and B is withheld on it — but the position is counted below like any other.
+                if h.unbookable_dividend:
+                    incomplete = True  # 股利無法入帳 — value kept (also on the book, K3 above)
                 # A DECLARED short is NOT excluded (2026-07-31 ruling): it is a real priced
                 # position and its NEGATIVE market value is a liability the series must carry.
                 # Dropping it (the old `shares < 0` test) overstated both the trend and net worth

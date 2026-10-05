@@ -589,7 +589,7 @@
          EXCHANGE moved to this position — the text named only the first. */
       add('badge-missing', '股利待釐清',
         '有股利紀錄無法入帳：放空期間的股利（放空方需支付股利），或已換股標的在換股後的股利，'
-        + '此筆未列入計算（請改以現金收支登錄，並刪除該筆股利；原因列在下方配息史）');
+        + '此筆未列入計算（原因與修正方式列在下方配息史）');
     } else if (h.revived_by_dividend) {
       add('badge-revived', '配息復活',
         '此部位原本已清空，是配股／DRIP 再投入才重新有股數，成本基礎為零，'
@@ -1326,22 +1326,22 @@
       const refused = (ledger.unbookable_dividends || []).filter(keep)
         .filter((r) => r.role === 'own' && r.reinvest);
       const toCash = [['前往資金收支', 'cash.html'], ['前往股利帳本', 'trades.html?ledger=div']];
+      /* Y1 (owner ruling 2026-10-05): the remedy's WORDS are the server's (`r.remedy`, one
+         owner in portfolio/cost_basis.py — the strict refusal sentence ends with the same
+         phrase). This file keeps the label and the links, never a copy of the phrase: two
+         copies had already drifted (「或」 there, 「並」 here). */
       const remedies = [];
-      if ((ledger.orphan_dividends || []).filter(keep).some((r) => r.reinvest)) {
-        remedies.push(['orphan', '股利無對應持倉',
-          '補登該日（含）之前的買進或期初庫存，或刪除該筆股利',
+      const orphan = (ledger.orphan_dividends || []).filter(keep).find((r) => r.reinvest);
+      if (orphan) {
+        remedies.push(['orphan', '股利無對應持倉', orphan.remedy,
           [['前往股利帳本', 'trades.html?ledger=div']]]);
       }
       /* E24 (domain-ledger.md): a payout on a ticker an EXCHANGE vacated is recorded as a cash
          movement, and the dividend row deleted — the same remedy as a payout on an open short. */
-      if (refused.some((r) => r.cause === 'vacated')) {
-        remedies.push(['vacated', '已換股標的的股利', '改以現金收支登錄這筆配息，並刪除該筆股利',
-          toCash]);
-      }
-      if (refused.some((r) => r.cause === 'short')) {
-        remedies.push(['short', '放空期間的股利', '改以現金收支登錄這筆配息，並刪除該筆股利',
-          toCash]);
-      }
+      const vacated = refused.find((r) => r.cause === 'vacated');
+      if (vacated) remedies.push(['vacated', '已換股標的的股利', vacated.remedy, toCash]);
+      const shorted = refused.find((r) => r.cause === 'short');
+      if (shorted) remedies.push(['short', '放空期間的股利', shorted.remedy, toCash]);
       return remedies.map(([cause, label, text, links]) => {
         const row = el('div', 'sd-tx-remedy');
         row.dataset.cause = cause;

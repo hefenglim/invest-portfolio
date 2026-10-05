@@ -448,38 +448,54 @@ def _uncomputable_message(booking: object | None) -> str:
             "（數值過大或除以零）— 請於交易帳本修正該列後重試")
 
 
+#: The remedy for a dividend the replay refuses on a position that DID exist — an open declared
+#: short (it pays the dividend in lieu) or a ticker an EXCHANGE vacated (E24): record what was
+#: actually paid as a cash movement, and remove the row the ledger cannot book. ONE owner (Y1,
+#: owner ruling 2026-10-05): the strict sentences below end with it and the drawer renders it
+#: from the wire (`ledger_issues[*].remedy`); no web file holds a copy, because two copies —
+#: 「或」 here, 「並」 in the drawer — is how the wording had already drifted.
+CASH_MOVEMENT_REMEDY = "改以現金收支登錄這筆配息，並刪除該筆股利"
+
+#: The remedy for a dividend with NO position by its effective date (CR-02), in the owner's
+#: K1 words — the same one-owner rule as :data:`CASH_MOVEMENT_REMEDY`.
+ORPHAN_DIVIDEND_REMEDY = "補登該日（含）之前的買進或期初庫存，或刪除該筆股利"
+
+
 def orphan_dividend_message(ev: Dividend) -> str:
     """The sentence for a dividend the account never held a position for (CR-02, 2026-10-04).
 
     Raised on the strict path and quoted by every dashboard surface that names the row, so the
     two paths explain the refusal in the same words. Dated by the EFFECTIVE date — the day the
     replay books it (a 配股's ex-date when it has one), which is the day the position had to
-    exist by.
+    exist by. Ends with :data:`ORPHAN_DIVIDEND_REMEDY` (Y1) — until then it said
+    「請先補登該日之前的…，或刪除這筆股利」 while the drawer offered 「補登該日（含）之前的…」.
     """
     return (f"{ev.symbol}（{account_ref(ev.account_id)}）於 {ev.effective_date.isoformat()} "
             "有股利紀錄，但此帳戶在該日（含）之前沒有任何買進、期初庫存或公司行動建立的持倉 — "
-            "這筆股利沒有對應持倉，無法入帳。請先補登該日之前的買進或期初庫存，或刪除這筆股利")
+            f"這筆股利沒有對應持倉，無法入帳。請{ORPHAN_DIVIDEND_REMEDY}")
 
 
 def _short_dividend_message(ev: Dividend) -> str:
     """The sentence for a dividend that landed on an open declared short — raised on the strict
     path and recorded as ``UnbookableDividend.reason`` on the dashboard path (K3), so the two
-    explain the refusal in the same words."""
+    explain the refusal in the same words. Ends with :data:`CASH_MOVEMENT_REMEDY` (Y1: it said
+    「請刪除該筆股利，或改以現金收支登錄」 — "or", where the remedy is both)."""
     return (f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
             f"{ev.date.isoformat()} 有股利紀錄，"
             "但該時點是放空部位 — 放空方需支付股利，本系統無此借方分錄。"
-            "請刪除該筆股利，或改以現金收支登錄。")
+            f"請{CASH_MOVEMENT_REMEDY}。")
 
 
 def _vacated_dividend_message(ev: Dividend, vacated_to: str) -> str:
     """The sentence for a dividend on a ticker an EXCHANGE had already moved away (E24 / D32) —
-    the strict path's error and the dashboard path's ``UnbookableDividend.reason`` (K3)."""
+    the strict path's error and the dashboard path's ``UnbookableDividend.reason`` (K3). Ends
+    with :data:`CASH_MOVEMENT_REMEDY` (Y1), the E24 remedy ``domain-ledger.md`` gives."""
     return (f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
             f"{ev.date.isoformat()} 有股利紀錄，"
             f"但該部位已於此之前換股為 {vacated_to} — "
             "已換出的標的不再有持倉可歸屬這筆配息，"
             "記在原標的上會變成一筆已下市代號的已實現收益（或把部位以零成本復活）。"
-            "請刪除該筆股利，或改以現金收支登錄。")
+            f"請{CASH_MOVEMENT_REMEDY}。")
 
 
 def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:

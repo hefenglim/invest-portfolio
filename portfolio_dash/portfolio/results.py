@@ -32,7 +32,11 @@ class Holding(BaseModel):
     every corporate action:
 
     * ``unbookable_dividend`` — shares are RIGHT; only ``adjusted_cost_total`` is short one
-      payout. Its market value is genuinely correct, so it takes (1) ONLY.
+      payout. Its market value is genuinely correct, so it takes (1) ONLY. The trend marks
+      its days ``incomplete`` (the ledger holds a row it cannot book, so B is withheld) but
+      COUNTS its value like any other position — a day marker is a disclosure, not mechanism
+      (2). Until Y3 (owner ruling 2026-10-05) ``timeseries.daily_value_series`` dropped the
+      value as it does for the two below, the one reader that disagreed with this line.
     * ``oversold`` — shares are negative and the basis was discarded: all three.
     * ``unbookable_action`` — the shares are in PRE-action terms against a POST-action
       price, so the market value is wrong by the action's whole ratio: all three. It gets

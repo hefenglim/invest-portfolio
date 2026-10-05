@@ -71,7 +71,11 @@ from portfolio_dash.data_ingestion.store import (
     list_opening,
     list_transactions,
 )
-from portfolio_dash.portfolio.cost_basis import orphan_dividend_message
+from portfolio_dash.portfolio.cost_basis import (
+    CASH_MOVEMENT_REMEDY,
+    ORPHAN_DIVIDEND_REMEDY,
+    orphan_dividend_message,
+)
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
 from portfolio_dash.portfolio.position_aggregate import aggregate_position
@@ -453,6 +457,9 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
     A separate key rather than more ``action_issues`` lists, because all three are about the
     trade / dividend ledgers, not corporate actions. ``reason`` is a server sentence the
     drawer renders verbatim; account references in it are tokens the fetch layer resolves.
+    Each dividend row also carries ``remedy`` (Y1, 2026-10-05): the phrase its ``reason`` ends
+    with, from its one owner in ``cost_basis``, which the drawer's remedy line renders instead
+    of keeping a copy of its own.
     """
     def _row(account_id: str, on: date | None, reason: str) -> dict[str, Any]:
         return {"account_id": account_id, "date": _iso_or_none(on), "reason": reason}
@@ -467,7 +474,8 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
         ],
         "orphan_dividends": [
             {**_row(d.account_id, d.effective_date, orphan_dividend_message(d)),
-             "reinvest": DividendType(d.type) in _REINVEST_TYPES}
+             "reinvest": DividendType(d.type) in _REINVEST_TYPES,
+             "remedy": ORPHAN_DIVIDEND_REMEDY}
             for d in data.orphan_dividends if d.symbol == symbol
         ],
         "unbookable_dividends": [
@@ -476,7 +484,8 @@ def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
              "carrier_symbol": u.carrier_symbol,
              "cause": u.cause,
              "role": "own" if u.dividend.symbol == symbol else "carrier",
-             "reinvest": DividendType(u.dividend.type) in _REINVEST_TYPES}
+             "reinvest": DividendType(u.dividend.type) in _REINVEST_TYPES,
+             "remedy": CASH_MOVEMENT_REMEDY}
             for u in data.unbookable_dividends
             if symbol in (u.dividend.symbol, u.carrier_symbol)
         ],

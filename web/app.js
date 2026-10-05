@@ -704,10 +704,12 @@
         tr.title = '公司行動未套用：股數仍是行動前的數字，價格卻已是行動後的，'
           + '市值與未實現損益因此失真（請修正該筆公司行動或補齊持倉紀錄）';
       } else if (h.unbookable_dividend) {
-        /* Two causes (K3): a payout on an open short, or on a ticker an EXCHANGE moved here. */
+        /* Two causes (K3): a payout on an open short, or on a ticker an EXCHANGE moved here.
+           The remedy is not restated here (Y1): its one owner is the server, and the
+           drawer's 配息史 prints it. */
         tr.classList.add('row-stale');
         tr.title = '股利無法入帳：放空期間的股利（放空方需支付股利），或已換股標的在換股後的股利，'
-          + '此筆未列入計算（請改以現金收支登錄，並刪除該筆股利）';
+          + '此筆未列入計算（原因與修正方式列在個股詳情的配息史）';
       } else if (h.revived_by_dividend) {
         /* QA-06 — informs, does NOT mark the row stale: nothing here is 待釐清. */
         tr.title = '配息復活：此部位原本已清空，是配股／DRIP 再投入才重新有股數，'

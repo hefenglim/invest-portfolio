@@ -498,7 +498,10 @@ def _day_incomplete(res_d, day: date) -> bool:
     Three causes, from ``domain-ledger.md`` plus this fixture's own price schedule:
 
     * a held position that is 賣超 / 待釐清 (``oversold`` / ``unbookable_dividend`` /
-      ``unbookable_action``) has no honest value that day;
+      ``unbookable_action``). The first and last have no honest value that day; a refused
+      dividend leaves the value honest and only the payout 待釐清 (Y3, owner ruling
+      2026-10-05) — the day is marked all the same, and :func:`_day_value_judgeable` decides
+      the value separately;
     * a held position with NO stored price on-or-before ``day`` cannot be valued. Since
       :func:`_ensure_daily_prices` seeds a close for every fixture symbol on every day from
       the first ledger event through :data:`ASOF`, the only symbol that can now hit this is
@@ -534,6 +537,26 @@ def _day_incomplete(res_d, day: date) -> bool:
     return False
 
 
+def _day_value_judgeable(res_d) -> bool:
+    """Whether ``trend.total_value`` is assertable on a day - every held position has an
+    honest value, derived from ``domain-ledger.md``, not read off the app.
+
+    Separate from :func:`_day_incomplete` since Y3 (owner ruling 2026-10-05): a day can be
+    INCOMPLETE and still have an honest total. A refused dividend (held carrier flagged
+    ``unbookable_dividend``, or a refusal whose carrier is flat) leaves every SHARE right, so
+    the app counts the position and this family asserts the total on that day too. A held
+    賣超 (basis discarded) or ``unbookable_action`` (pre-action shares against a post-action
+    price) has no honest value: the app leaves it out, so the total is not asserted. An
+    unpriced symbol cannot be valued either (see :func:`_day_incomplete`).
+    """
+    for h in res_d.holdings.values():
+        if h.shares == O.ZERO:
+            continue
+        if h.oversold or h.unbookable_action or h.symbol not in PRICES:
+            return False
+    return True
+
+
 def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
     """POINT-IN-TIME reconciliation of the daily replay (the ``trend.*`` family).
 
@@ -554,9 +577,10 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
       onto the three cash kinds together, and this family goes red in between.
     * ``trend.incomplete`` - the app's honesty about days it cannot value, derived
       independently by :func:`_day_incomplete` over a point-in-time replay.
-    * ``trend.total_value`` - only on days the oracle judges complete. With one seeded close
-      per symbol that is ASOF onward; asserting it on an unpriced day would be asserting the
-      fixture, not the app.
+    * ``trend.total_value`` - on every day whose holdings all have an honest value
+      (:func:`_day_value_judgeable`), INCLUDING a day marked incomplete only for a refused
+      dividend (Y3: the app keeps that position's value). Asserting it on an unpriced day would
+      be asserting the fixture, not the app.
 
     What is NOT compared, and why: a point-in-time per-symbol SHARE COUNT, because no app
     surface returns one. ``trend.points`` carries four portfolio-level numbers, and the sell
@@ -605,7 +629,7 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
             continue
         expected_inc = _day_incomplete(res_d, day)
         ev.check("trend.incomplete", day_iso, expected_inc, bool(p["incomplete"]), phase)
-        if expected_inc:
+        if not _day_value_judgeable(res_d):
             continue
         total = O.ZERO
         for h in res_d.holdings.values():
