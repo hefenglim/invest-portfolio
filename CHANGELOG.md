@@ -9,6 +9,68 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Owner rulings 2026-10-05 (in chat, one by one; 24 items).** The open questions of the CR round
+were put to the owner as choices; the kept-as-built answers need no code.
+
+Kept as built (no code change): ① a bare `ack_warnings` (scripts, the stress audit) is still
+accepted — only the pages bind the acknowledgement to `acked_keys`; ③ the carried-ex-date
+question fires on a symbol change, or a 配股's type / pay-date change, only; ④ a linked 折讓款
+credit keeps its account; ⑤ any non-zero trade reopens a vacated ticker (a sell from zero is a
+flagged 賣超); ⑥ an orphan dividend withholds the portfolio XIRR; ⑦ no dashboard banner for a
+flat 賣超 or an orphan dividend; ⑧ no 試算 on a 待釐清 position, a curing back-dated buy
+included; ⑨ the drawer's 交易明細 shows a 配股 at its ex-date only; ⑩ the inbox keeps soft
+findings in the item's note; K4 the demo seed's MYR/TWD rows stay (the first FX refresh
+re-derives them); X2 an unreplayable ledger counts every payout, consistently; X3 a pool whose
+only rows are refused payouts is not listed; Y2 the remedy names no cash kind; YQ2 the
+remedy-wording alignment of the orphan sentence and the tooltips is confirmed.
+
+Changed:
+
+- **② `ex_date_after_pay_date` is a warning, not a refusal** (「改為警告、確認後可存」). Soft in the
+  one validator: the doors ask, the edit door saves with the warning in its answer, the inbox
+  shows it in the note and the item stays confirmable.
+- **⑪ / K2 — a dividend the replay refuses moves no cash figure and no flow.** No position by
+  its date, an open declared short, a ticker an EXCHANGE vacated: 總報酬, XIRR and 股利總覽 left
+  them out while the cash pool, the guards, net worth, the FX pool and B still counted them (an
+  orphan 300 raised the TWD pool, and a withdrawal of pool + 100 passed). `returns.DividendRefusals`
+  / `booked_dividends` is the one decision; `api/routers/cash.py::load_cash_ledgers` splits the
+  stored rows once per request (one replay) and every balance, the statement, the draft cash line,
+  the hard withdraw / 換匯 guards, the CSV / AI doors (through `cash_pool_fn`) and the ack-able
+  dip check read that snapshot; the batch undo and corporate-action delete judge each side with
+  its own replay's refusals. The statement lists a refused payout as 「未入帳（待釐清）」 without
+  moving the balance (CSV column `unbooked`, print marked). `build_reporting_flows` takes a
+  REQUIRED `refused_dividends`, so B, `net_invested`, TWR and the benchmark exclude it too.
+- **X1 — every listing marks a refused dividend and leaves it out of every total:** the 交易帳本
+  股利 tab, the drawer's 配息史 and its CSV, the printed 帳本報告 (out of 淨額合計), the AI-facing
+  `{{dividends_json}}` rows (`booked:false`, `unbooked_cause`) and the 現金收支明細 hover / print,
+  each with the replay's own sentence. The raw re-importable ledger CSV stays raw (DEF-026).
+- **K3 — a refused dividend's 待釐清 does not die with a flat carrier.** It flagged the short or
+  the live successor; when that position was flat the flag went with it (measured: trend complete,
+  含匯兌總損益 23,000 with no reason, both drawers silent). `Book.unbookable_dividends` records each
+  (cause, carrier, the strict sentence); the trend marks the days incomplete, B's reason names the
+  rows, the drawer names it on the dividend's symbol and on the carrier.
+- **K1 — the drawer offers the remedy of each cause** of a red 交易明細 footer, from server facts
+  (`refused_reinvest_shares`, `gap_is_refused_dividends`): no position → 補登該日（含）之前的買進或
+  期初庫存，或刪除該筆股利; open short / vacated → 改以現金收支登錄這筆配息，並刪除該筆股利; 補登公司行動
+  only for a corporate-action cause.
+- **Y1 — one wording, one owner** for the remedy: the strict sentences end with it
+  (`cost_basis.CASH_MOVEMENT_REMEDY` / `ORPHAN_DIVIDEND_REMEDY`, unified to 「並」) and the drawer
+  renders the server's copy; a test fails on any copy in `web/`. The orphan sentence and the
+  股利待釐清 tooltips follow (YQ2).
+- **Y3 — a HELD position with a refused dividend keeps its value** in the trend and net worth
+  (the day stays incomplete, B stays withheld): the trend's last point read 0 against a 530,000 KPI
+  total. A held 賣超 or unapplied action is unchanged.
+- **YQ1 / YQ3 — the stress oracle refuses all three classes** from its own reading of the rules
+  (E24 with CR-06's reopen rule; orphan as labelled legacy data, since every door now refuses it),
+  the trend family runs while a declared short is open, and new families `trend.net_worth`,
+  `ledger.div.booked`, the orphan XIRR withholding and `kpi.fx_complete_withheld`. Detection power
+  measured by breaking the app on purpose: fail = 448 / 249 / 1,572. Baseline now **ops=137
+  pass=11,406 fail=0** (was 128 / 6,025).
+- **Accounting manual v1.11** (zh authority + en mirror): new §6.6 Refused Dividends with its
+  verification anchor.
+
+Gates: <after the run>.
+
 **Pre-merge code review fixes (CR-01..CR-14, 2026-10-04).** An xhigh code review of
 `feat/corporate-actions` before the merge into `main` found 14 issues (five reproduced by probe);
 three parallel fixers (A: data correctness, B: rules and edges, C: efficiency) fixed them, each

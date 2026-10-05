@@ -174,7 +174,8 @@ Canonical tables (names indicative; finalize in the spec phase):
   of correct.
 - `dividends` — account, instrument, date, type (cash / stock / DRIP), gross,
   withholding, net, reinvest shares + price (see dividend models in `domain-ledger.md`), and
-  `ex_date` (≤ `date`, refused otherwise on every door). Every door that writes a dividend runs
+  `ex_date` (an ex-date after `date` is ASKED about on every door — a warning the owner
+  confirms, owner ruling ② 2026-10-05; CR-09 shipped it as a refusal). Every door that writes a dividend runs
   `validate_dividend` — the inbox confirm included — and the correction door edits `ex_date`
   (absent = keep, null = clear; a kept ex-date across a symbol change or a 配股's type / pay-date
   change asks first) (CR-09, 2026-10-04).

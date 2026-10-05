@@ -1,6 +1,6 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.10`（2026-09-06）
+> **版本**：`v1.11`（2026-10-05）
 > **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF；含
 > 2026-08-13 之**現金收支七種 kind／兩軸表**與**美股現金股利 P1b**）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
@@ -1152,6 +1152,33 @@ $$\text{added\_shares} = \frac{\text{shares\_held}\times \text{stock\_amount（�
 > DRIP 需 `reinvest_shares` 否則 fail-loud）。
 > **依據**：`.claude/rules/domain-ledger.md`（Dividend models；P&L and returns）、`.claude/rules/markets-and-fees.md`（30% 預扣）。
 
+### 6.6 被拒入帳的股利（refused dividends；owner 裁定 2026-10-05）
+
+重播（`portfolio/cost_basis.py::build_book`）拒絕三類股利列，並逐筆記於**帳本層級**（不隨承接部位消失）：
+
+| 類別 | 條件 | 帳本紀錄 |
+| --- | --- | --- |
+| 無持倉（orphan） | 該帳戶於股利生效日（含）之前未曾建立該標的之部位（無期初、無非零交易、無換入／分拆換入） | `Book.orphan_dividends` |
+| 放空中（short） | 股利落在宣告式放空部位上（放空方代付股利，本系統無此借方分錄；§4.3） | `Book.unbookable_dividends`（cause = `short`） |
+| 已換出（vacated） | 標的已被 EXCHANGE 換出，且其後無交易、期初或換入使其重新建立（E24；重新建立規則 CR-06） | `Book.unbookable_dividends`（cause = `vacated`） |
+
+三類皆列入 `Book.refused_dividends`。被拒之股利列對**所有金額**之貢獻為 0：
+
+$$\text{contribution}(\text{refused dividend}) = 0$$
+
+適用於：現金池與對帳單餘額、FX 池之外幣現金、$net\_invested$ 與 XIRR 現金流、B（含匯兌總損益，§7.1a）與指數對照現金流、已實現收益、股數、股利總覽與一切列表合計。
+
+- **一個判定**：`portfolio/returns.py::DividendRefusals`（`booked()`／`unbooked()`／`why()`）讀重播之拒絕結果；現金、報酬、列表與守門檢查皆經此判定，不得另行推導拒絕規則。
+- **列表照列、標示不計**（X1）：交易帳本股利分頁、持股明細配息史與其 CSV、列印之帳本報告、現金收支明細與其 CSV／列印、AI 提示詞之股利列，皆列出該筆並標示「未入帳（待釐清）」與重播之原句，**不計入任何合計**；可重新匯入之原始帳本 CSV 維持原樣（DEF-026）。
+- **待釐清不隨承接部位消失**（K3）：該筆之後每一日之走勢標示「不完整」，B 不顯示並說明原因；無持倉之股利另使 XIRR 不顯示（裁定 ⑥）。
+- **持有中之承接部位照計市值**（Y3）：走勢、淨值與 KPI 總市值皆計入 $price \times shares$；僅該日標示不完整。
+- **補救**（Y1，單一來源 `cost_basis.ORPHAN_DIVIDEND_REMEDY`／`CASH_MOVEMENT_REMEDY`）：無持倉 →「補登該日（含）之前的買進或期初庫存，或刪除該筆股利」；放空中／已換出 →「改以現金收支登錄這筆配息，並刪除該筆股利」（不指定現金類型，裁定 Y2）。
+- **入口**：新寫入之無持倉股利於所有入口被拒（`dividend_without_position`，CR-02），故無持倉股利僅可能為舊資料。**無法重算之帳本**：所有股利照舊計入（裁定 X2）。
+
+> **驗證錨點**：stress phase 1 `run_refused_dividends`：VCO 1,000 @ 50 → EXCHANGE 1:1 → VCN；VCO 之 CASH 3,000 與配股 50 經 CSV 入口寫入後被重播拒絕；tw_broker TWD 現金池不受其影響；VCN = 1,000 股並標示；無 VCO 持倉（`refused_vacated_held`、`refused_vacated_flat`）；無持倉股利以舊資料寫入，核對 XIRR 不顯示且原因點名該筆（`refused_orphan`）；放空中類別見 `phase1:short_open`（2609）。實跑：phase-1 **137 ops、11,406 斷言、0 fail**（2026-10-05）。
+> **實作位置**：`portfolio/cost_basis.py`（拒絕分支、`orphan_dividend_message`、`UnbookableDividend`）、`portfolio/returns.py`（`DividendRefusals`、`booked_dividends`）、`portfolio/cash.py`（`CashLine.booked`）、`api/routers/cash.py::load_cash_ledgers`、`portfolio/timeseries.py`、`api/wire.py::unbooked_wire`。
+> **依據**：`.claude/rules/domain-ledger.md`（A dividend needs a position；賣超 STICKY；`vacated_to`）；owner 裁定 2026-10-05（②⑥⑪ K1 K2 K3 X1 X2 Y1 Y2 Y3）。
+
 ---
 
 ## 7. 總報酬與報酬率（含 XIRR）
@@ -1968,6 +1995,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.8` | 2026-08-13 | **現金收支七種 kind／兩軸表 + 美股現金股利（P1b）**（業主裁決 **D1 = A**，2026-08-13；D35，2026-08-10）。① **新增 §9.1.1**：現金收支由四種增為**七種**（新增 `INTEREST` 利息、`INTEREST_EXPENSE` 融資利息、`BROKER_FEE` 券商費用），由 `shared/cash_kinds.py` 這唯一一張表以**兩條正交軸**規範——`credit`（是否增加池餘額）與 `fx_acquisition`（是否進 `covered_ratio` 分母）。舊述詞「`kind == "WITHDRAW"` 才是借方、其餘皆為取得型 credit」會讓一筆 `BROKER_FEE` **增加**現金餘額**又**拉低 `covered_ratio`（兩個錯誤的金額之記錄且皆不拋錯）；`INTEREST` 即是證明一個布林值不夠的那一列——**credit 但非取得**。② **§8.1 增訂第二軸之規範**：分母只收取得型 kind，池內孳生之收益（利息，同 sale proceeds 與外幣現金股利）**沿用池均價**；否則一個從未換匯、僅收到利息的 USD 帳戶會回報 `covered_ratio < 1`，並依 F3 把現金與股票整個曝險標為基礎不完整（**在每個真實帳戶上都響的假警報**）。輸入端據此以 `acq_cost_not_an_acquisition` 拒收利息／費用的取得成本。③ **§7.2 增訂明訂規則**：**七種 kind 全部不進 XIRR**（D1=A）——`xirr_reporting` 的簽章根本不收 `cash_movements`，流量序列仍只由 `opening` + `transactions` + `dividends` 構成；被否決的選項 B 會改變每一個歷史 XIRR 的意義，選項 C 因多數列**沒有 symbol** 而當場否決。④ **§9.3 明訂護欄不擴張**：`running_min` 提領護欄與 N1 外幣提領提示仍**只**鍵在 `WITHDRAW`——提領是使用者的**意圖**（值得擋），費用／融資利息是**已發生事實之記錄**，且融資帳戶本來就會有負現金餘額。⑤ **新增 §6.2b**：`drip_us` 模型自 P1b 起同時受理 `DRIP` 與 `CASH`，移除每列的 `dividend_type_mismatch` 軟阻擋；美股現金股利與 TW／MY 同式降成本（**D35**，本節只錨定公式不重新裁決），**預扣由使用者填寫而非 `gross × 0.30`**（券商實扣經其自身分位進位，與乘積不會逐分相符），空白預扣於 `drip_us` 上以軟性 `us_cash_dividend_no_withholding` 追問但**不改數**。§6 前言與 §6.3b 同步標明其適用範圍為 `CASH_DIVIDEND_TYPES` 全體。⑥ **§4.4.7 限制 2 就地更新**：原文「只有四種 kind、只有 `WITHDRAW` 是借方（`api/routers/cash.py::_KINDS`）」已失效（該常數不存在），改引 `CASH_MOVEMENT_KINDS`；D12 之結論**不變**且由 D1=A 再次確認。⑦ 新增 §12.1 之 **E25／E26**、§12.2 四則詞彙。**沒有任何既有數字改變**：三種新 kind 從未進入任何報酬流量序列，`covered_ratio` 恆 1 之帳本仍跳過乘法，故本手冊每一個已錨定的工作範例與壓測 oracle 的每一個期望值都留在原處。⑧ **壓測場景同版補齊**：phase-1 新增 ops 50–52（`schwab` USD 池之 `INTEREST`／`INTEREST_EXPENSE`／`BROKER_FEE`）與一筆 `schwab/AAPL` `CASH` 股利，實跑 **122 ops、3,799/3,799、0 fail**；oracle 之 `DEBIT_KINDS`／`ACQUIRING_KINDS` 係獨立於 app 的表另寫，故一致非自我確認。此前之「只有 hermetic 錨點」狀態已解除。同 change set 重生英文鏡像。 |
 | `v1.9` | 2026-08-29 | **§9.3 護欄語意同步至實作（FU-D43a／FU-D34）**（QA R1 BUG-02；基線 `v0.1.28 + staged`）。§9.3 原記「現金門（deposit/withdraw、fx.convert）之硬護欄 = `running_min < 0` 且未 `ack_negative` → 422 `negative_cash`」——與實作及其自引之測試相左：**出金**為硬拒 **422 `withdraw_insufficient_balance`（FU-D43a：`ack_negative` 不可繞過、無融資）**，**換匯**為硬拒 **422 `fx_insufficient_balance`（FU-D34，需求五：無 ack、不提供融資）**；兩者皆為「期末餘額 + date-aware dip」雙檢、批次感知（CSV 同檔互為 sibling；換匯之批 = 結構有效**且**被勾選之列），並共用「不加深既有 dip 永不阻擋」規則（`after.low < min(before.low, 0)`）。credit 型 kind 進池本就不做餘額檢查（§9.1.1，未變）。`negative_cash`＋`ack_negative` **僅**存於縮減資金面之更正門（PUT／DELETE 現金收支、DELETE 換匯——date-aware `running_min`、**所有受影響池**：編輯之舊＋新 (account, ccy)、換匯刪除之兩腿）。§9.3 依此改寫（寫入門硬拒／更正門可 ack／交易門軟警告三類）並補列換匯側與更正門驗證錨點；§12.1 E16 措辭同步限縮。仲裁意涵：此前依 §1.1 仲裁一筆被拒之出金會誤判 app 為錯——本版起以實作（owner 簽署之 docstring 裁定 + §9.3 引用之測試）為準。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為護欄語意之文件同步。** |
 | `v1.10` | 2026-09-06 | **§7.2／§9.1.1 之 D1 = A 殘留同步至 AI-D42**（QA DOC-02；基線 `v0.1.28 + feat/corporate-actions`）。2026-08-24 AI-D42 已把 `REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE` 三類納入 XIRR（§7.2 表與 §4.4.7 橫幅早已更新），但 §7.2 之「D1 = A」整段（「函式簽章根本不接收 `cash_movements`」、驗證錨點「無 `cash_movements` 參數」）與 §9.1.1 之「七種 kind 全部不是 XIRR 流量」**未加取代標記**，與同節上表自相矛盾；`portfolio/returns.py::xirr_reporting` 實際帶**必填**關鍵字參數 `cash_movements`（無預設值，刻意如此）。本版：① §7.2 D1 = A 段補取代橫幅（原文完整保留）；② §9.1.1 該句改寫為三類進、四類不進；③ **`INTEREST` 不進 XIRR 再次確認**（實測：帳本加一筆 `INTEREST` 500 USD → XIRR 逐位相同 `0.3336061959279546`；對照組加 `BROKER_FEE` 500 USD → `0.33285721007646424`），並修正工程規則檔 `.claude/rules/domain-ledger.md` 中唯一把 `INTEREST` 列為流量的段落（全倉庫唯一寫反處；其引用之 `CASH_KIND_TABLE.credit` 不存在，實名 `shared/cash_kinds.py::movement_sign`）。英文鏡像自 v1.8 起未收到 AI-D42（`grep -c AI-D42` = 0）：本版同 change set 重生 §4.4.7 橫幅、§7.2 表與兩段橫幅、§7.6 AI-D48／AI-D49 段、§9.1.1 句與版本紀錄。**無任何公式或會計定義變更；無任何數字移動。** |
+| `v1.11` | 2026-10-05 | **新增 §6.6 被拒入帳的股利**（owner 裁定 2026-10-05；基線 `feat/corporate-actions`，上線前 code review CR-01..14／R1..R12／S1..S11 之後）：三類拒絕（無持倉／放空中／已換出）逐筆記於帳本、對一切金額貢獻為 0、列表照列標示「未入帳（待釐清）」不計合計、走勢該日不完整而持有中承接部位照計市值、補救說法單一來源；驗證錨點對應當前實跑（phase-1 137 ops／11,406 斷言／0 fail）。英文鏡像於同一 change set 重生。**除 §6.6 外無既有公式或會計定義變更。** |
 
 ### 12.4 如何仲裁一個爭議金額
 

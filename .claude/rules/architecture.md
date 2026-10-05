@@ -94,7 +94,11 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   validators and to the guard (`_replay_guard` / `action_change_guard` `read=`, S6); a by-id
   store lookup asks `WHERE id=?`, it never lists the table. Measured before: one
   cross-account FX edit issued 27 full-table SELECTs; a batch undo read the trades 3 times.
-  `tests/contract/test_cr12_cash_guards_read_the_ledgers_once.py` pins the ceilings.
+  `tests/contract/test_cr12_cash_guards_read_the_ledgers_once.py` pins the ceilings. The
+  snapshot also carries the replay's dividend refusals (⑪, 2026-10-05): `load_cash_ledgers`
+  replays once per snapshot (or takes a guard's own book), so the pool the page shows and the
+  pool a withdrawal is judged against exclude the same refused payouts — and `data_ingestion`
+  never imports `portfolio` for it (the binder of `cash_pool_fn` does the filtering).
 - **`data_ingestion → portfolio`: exactly four imports are authorised** (recorded 2026-08-12, in
   D39's form, after the edge was found undocumented). `data_ingestion/validate.py` and
   `data_ingestion/corporate_action_import.py` may import `portfolio.cost_basis.build_book` and

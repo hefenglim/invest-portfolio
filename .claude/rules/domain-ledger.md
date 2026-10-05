@@ -280,6 +280,22 @@ bullet above, applied to the figure the bullet does not cover. `total_return`'s 
   trade, an opening, or an EXCHANGE / SPINOFF landing shares on a vacated ticker clears it, so
   a reused ticker's dividends book; while it stays vacated, a dividend on it is still refused
   (E24) and flagged on the live successor.
+- **A refused dividend moves no money and counts nowhere** (owner rulings ⑪ / K2 / K3 / X1 / Y1 /
+  Y3, 2026-10-05; manual §6.6). The replay refuses three kinds — no position by the effective
+  date (`Book.orphan_dividends`), an open declared short and a vacated ticker
+  (`Book.unbookable_dividends`, with cause, carrier and the strict sentence) — all in
+  `Book.refused_dividends`. Such a row is excluded from EVERY money figure: cash pools and the
+  statement balance, the guards' pool, the FX pool's foreign cash, net worth, `net_invested` /
+  XIRR / B / TWR / the benchmark flows, realized income, shares and every listing total — through
+  ONE decision, `returns.DividendRefusals` over the replay's own refusals, never a re-derivation.
+  A surface that LISTS dividend rows lists it marked 「未入帳（待釐清）」 with that sentence; the
+  raw re-importable ledger CSV stays raw (DEF-026). The 待釐清 is on the BOOK, so it does not die
+  with a flat carrier: every trend day from it is incomplete and B is withheld with the reason,
+  while a HELD carrier keeps its value (its shares and price are real — only a 賣超 or an
+  unapplied action drops a value). The remedy wording has one owner
+  (`cost_basis.ORPHAN_DIVIDEND_REMEDY` / `CASH_MOVEMENT_REMEDY`, unified to 「…並刪除該筆股利」),
+  and the drawer offers the remedy of each cause from server facts. An unreplayable ledger counts
+  every payout, as before (X2).
 - **A PREVIEW MUST MIRROR THE REPLAY'S BRANCHES, LITERALLY** (audit 2026-08-24, review §1.3).
   Every "what would this trade do" surface — the manual sell preview
   (`api/routers/input_center.py`), the drawer 試算 (`strategy/whatif.py`) — reproduces
