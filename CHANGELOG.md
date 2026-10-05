@@ -69,7 +69,9 @@ Changed:
 - **Accounting manual v1.11** (zh authority + en mirror): new §6.6 Refused Dividends with its
   verification anchor.
 
-Gates: <after the run>.
+Gates on `7dfff81`: ruff clean; `mypy --strict` (cold cache) 1,030 files, 0 errors; pytest non-e2e
+7,111 passed + 5 skipped = the 7,116 collected (6 batches); e2e 339 passed in 32 chunks; stress-audit
+phase 1 ops=137 pass=11,406 fail=0 (oracle independence grep clean).
 
 **Pre-merge code review fixes (CR-01..CR-14, 2026-10-04).** An xhigh code review of
 `feat/corporate-actions` before the merge into `main` found 14 issues (five reproduced by probe);
