@@ -55,6 +55,7 @@ Duplication here is the *mechanism of the check*, not an oversight.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
@@ -542,6 +543,10 @@ class OracleResult:
     # the emit loop drops it, and the flag went with it. The ruling is that the 待釐清 must not
     # die with a flat carrier — so a day by which such a dividend was refused stays incomplete.
     refused_dividends: list[tuple[str, str, date]] = field(default_factory=list)
+    # ⑪ / K2 (owner rulings 2026-10-05): the ids of the dividends this replay REFUSED (a
+    # payout landing on an open declared short). A refused payout moves no cash figure — the
+    # pools, the FX pool's foreign cash and the trend's net_invested all leave it out.
+    refused_dividend_ids: frozenset[int] = field(default_factory=frozenset)
 
 
 class EventPriority(IntEnum):
@@ -868,6 +873,7 @@ def replay(facts: Facts) -> OracleResult:
     realized_rows: list[RealizedRow] = []
     refusals: list[tuple[str, str]] = []
     refused_dividends: list[tuple[str, str, date]] = []   # K3 — see OracleResult
+    refused_divs: set[int] = set()   # ⑪: the payouts this replay refused, by fact id
 
     for _d, _p, _seq, kind, ev in events:
         if kind == "corp":
@@ -969,6 +975,7 @@ def replay(facts: Facts) -> OracleResult:
                 # would be money-of-record errors — skip the event, flag the position.
                 pos2.unbookable_dividend = True
                 refused_dividends.append((ev.account_id, ev.symbol, ev.d))   # K3
+                refused_divs.add(ev.id)   # ⑪: and it moves no cash either
                 continue
             if ev.type in CASH_DIVIDEND_TYPES:
                 if pos2.shares == ZERO:
@@ -1004,12 +1011,13 @@ def replay(facts: Facts) -> OracleResult:
     for rr in realized_rows:
         realized_by_ccy[rr.quote_ccy] += rr.realized
 
-    cash = _cash_balances(facts)
-    fx_avg, fx_real, fx_fcash, fx_cov = _fx_pools(facts)
+    cash = _cash_balances(facts, refused_divs)
+    fx_avg, fx_real, fx_fcash, fx_cov = _fx_pools(facts, refused_divs)
 
     return OracleResult(holdings, realized_rows, dict(realized_by_ccy), cash,
                         fx_avg, fx_real, fx_fcash, fx_cov, refusals,
-                        refused_dividends=refused_dividends)
+                        refused_dividends=refused_dividends,
+                        refused_dividend_ids=frozenset(refused_divs))
 
 
 def facts_through(facts: Facts, day: date) -> Facts:
@@ -1120,6 +1128,10 @@ def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Deci
     """
     insts = facts.instruments
     total = ZERO
+    # K2 (owner ruling 2026-10-05): a payout the replay refused is no flow. This module's OWN
+    # replay decides which; a refusal is fixed by the events before the payout, so the whole
+    # ledger's replay answers for every day.
+    refused = replay(facts).refused_dividend_ids
 
     def add(d: date, ccy: str, native: Decimal) -> None:
         nonlocal total
@@ -1141,7 +1153,7 @@ def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Deci
     for dv in facts.divs:
         # The PAYMENT date, not `effective`: this is when the cash actually arrives. Only a
         # STOCK dividend moves under R6, and a STOCK dividend is not a cash flow at all.
-        if dv.d <= day and dv.type.upper() in ("CASH", "NET"):
+        if dv.d <= day and dv.type.upper() in ("CASH", "NET") and dv.id not in refused:
             add(dv.d, insts[dv.symbol].quote_ccy, -dv.net)
     for mv in facts.cash:
         # A movement carries its OWN currency (no symbol to look one up from). The sign is
@@ -1153,11 +1165,17 @@ def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Deci
     return total
 
 
-def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
+def _cash_balances(
+    facts: Facts, refused: Collection[int]
+) -> dict[tuple[str, str], Decimal]:
     """Per (account, ccy) pool (portfolio/cash.py semantics, re-derived from rules):
     debits (WITHDRAW / INTEREST_EXPENSE / BROKER_FEE) reduce the pool, every other kind
     credits it (audit C4); -fx.from +fx.to; -buy(qty*p+fee+tax) +sell(qty*p-fee-tax);
     +cash-family dividend net (CASH/NET). Opening inventory + DRIP/STOCK do not touch cash.
+
+    ⑪ (owner ruling 2026-10-05): a dividend the replay REFUSED (*refused*, by fact id — this
+    module's own replay decides it) moves no pool. Transcribed when the app moved: until then
+    the pool counted it, and this function said so.
     """
     bal: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
     for m in facts.cash:
@@ -1177,7 +1195,7 @@ def _cash_balances(facts: Facts) -> dict[tuple[str, str], Decimal]:
             bal[(t.account_id, inst.quote_ccy)] += (gross - t.fee - t.tax)
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)
-        if inst is None:
+        if inst is None or dv.id in refused:
             continue
         if dv.type in CASH_DIVIDEND_TYPES:
             bal[(dv.account_id, inst.quote_ccy)] += dv.net
@@ -1211,7 +1229,7 @@ def _fx_avg_as_of(
     return (h / f) if f != ZERO else None
 
 
-def _fx_pools(facts: Facts):
+def _fx_pools(facts: Facts, refused: Collection[int]):
     """Per-account FX pool (domain-ledger.md / forex module semantics).
 
     avg_rate = sum(home cost) / sum(foreign acquired) over home->foreign conversions AND
@@ -1226,6 +1244,7 @@ def _fx_pools(facts: Facts):
     covered_ratio = basis-known acquisitions / all acquisitions (F2); exactly 1 when nothing
                    is unbased. It scales BOTH unrealized legs (F3) — see phase1's reconcile.
     Only accounts with settlement_ccy != funding_ccy are FX-exposed.
+    A dividend the replay refused (*refused*) is no foreign cash (⑪) — the funds view's rule.
     """
     avg: dict[str, Decimal | None] = {}
     realized: dict[str, Decimal | None] = {}
@@ -1295,7 +1314,7 @@ def _fx_pools(facts: Facts):
             else:
                 cash += gross - t.fee - t.tax
         for dv in facts.divs:
-            if dv.account_id != aid:
+            if dv.account_id != aid or dv.id in refused:
                 continue
             # CASH *and* NET (domain-ledger.md: TW cash and MY single-tier net are both
             # money that lands in the pool). This read ``== "CASH"`` while ``_cash_balances``

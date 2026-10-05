@@ -302,7 +302,7 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
     for pool in sorted(set(res.cash) | set(app_bal)):
         ev.check("cash.balance", "|".join(pool), res.cash.get(pool, O.ZERO),
                  app_bal.get(pool, O.ZERO), phase)
-    _cash_statement(ev, snap["facts"], app_bal, phase)
+    _cash_statement(ev, snap["facts"], app_bal, phase, refused=res.refused_dividend_ids)
 
     # realized rows
     app_real = dash["realized"]["rows"]
@@ -372,7 +372,7 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
     return res
 
 
-def _cash_statement(ev, facts, app_bal, phase):
+def _cash_statement(ev, facts, app_bal, phase, *, refused):
     lines: dict[tuple, list] = {}
 
     def add(key, delta):
@@ -396,6 +396,8 @@ def _cash_statement(ev, facts, app_bal, phase):
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)
         if inst is None or dv.type not in O.CASH_DIVIDEND_TYPES:
+            continue
+        if dv.id in refused:   # ⑪: a payout the oracle's replay refused moves no balance
             continue
         add((dv.account_id, inst.quote_ccy), dv.net)
     for key in sorted(set(lines) | set(app_bal)):

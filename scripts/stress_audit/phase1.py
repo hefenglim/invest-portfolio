@@ -815,6 +815,10 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         inst = facts.instruments.get(dv.symbol)
         if inst is None or dv.type not in O.CASH_DIVIDEND_TYPES:
             continue
+        if dv.id in res.refused_dividend_ids:
+            # ⑪ (owner ruling 2026-10-05): the statement LISTS a payout the replay refused but
+            # it moves no running balance — the oracle's own replay says which (``res``).
+            continue
         add((dv.account_id, inst.quote_ccy), dv.d, (3, dv.id), "DIV", dv.net)
 
     for key in sorted(set(lines) | set(app_bal)):
