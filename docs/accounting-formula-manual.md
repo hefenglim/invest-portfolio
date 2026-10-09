@@ -1,6 +1,6 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.11`（2026-10-05）
+> **版本**：`v1.12`（2026-10-10）
 > **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF；含
 > 2026-08-13 之**現金收支七種 kind／兩軸表**與**美股現金股利 P1b**）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
@@ -28,7 +28,7 @@
 1. [總則與精度規範](#1-總則與精度規範)
 2. [帳戶／市場／幣別模型](#2-帳戶市場幣別模型)
 3. [費用與交易稅公式](#3-費用與交易稅公式)
-4. [成本基礎（加權平均、宣告式賣空、**公司行動**）](#4-成本基礎加權平均)
+4. [成本基礎（加權平均、宣告式賣空、**公司行動**、**美股選擇權**）](#4-成本基礎加權平均)
 5. [已實現／未實現損益](#5-已實現未實現損益)
 6. [股息三模型](#6-股息三模型)
 7. [總報酬與報酬率（含 XIRR）](#7-總報酬與報酬率含-xirr)
@@ -879,6 +879,107 @@ US$12.00」——**不新增第四種 kind，且沒有任何受支援的輸入�
 > **依據**：`docs/spec/2026-08-06-corporate-actions.md`（§2 守恆律、§3 資料模型與比例、§4 重播語意與
 > 欄位移轉表、§5 邊界矩陣、§8 裁定 D1–D39、§9 排除項）、`.claude/rules/domain-ledger.md`（Cost basis；
 > 賣超 STICKY；Declared short sale）、`.claude/rules/data-and-pricing.md`（精度；不得儲存四捨五入後的商）。
+
+### 4.5 美股選擇權（owner 裁定 R1–R7、OPT-D1..D22，2026-10-09）
+
+**規格正本**：`docs/spec/2026-10-09-options-ledger.md`（方案 ④）。僅限美股（R6）；僅單腳買權／賣權、
+標準交割（每口 100 股）；非標準合約一律拒收（OPT-D11）。
+
+**合約即標的、數量以股當量計（R1、OPT-D1、OPT-D22）**
+
+每一檔合約是交易帳本裡的一個 `instruments` 列（`asset_type = 'option'`），條款一律由 OCC 代號
+解析（`XYZ261218P00050000` ＝ XYZ、2026-12-18、Put、履約價 50），**不另存第二份**。數量以
+**股當量**記（口數 × 100），價格為**每股權利金**——因此全倉庫所有 `quantity × price` 均**原封不動**
+即為正確的權利金金額。手動輸入與更正表單收**口數**，由伺服器換算；CSV 收股當量。
+
+$$\text{股當量} = \text{口數}\times 100,\qquad \text{權利金金額} = \text{股當量}\times\text{每股權利金}$$
+
+**開倉與平倉**
+
+| 券商事件 | 帳本列 | 重播效果 | 已實現列 |
+| --- | --- | --- | --- |
+| 賣出開倉 | SELL、`short_sale = 1`（即 §4.3 宣告式賣空） | 先賣長倉，餘量開／擴空倉 | 空倉部分無 |
+| 買進平倉 | BUY | 先回補空倉 | `short_cover` |
+| 買進開倉 | BUY | 開／加長倉 | — |
+| 賣出平倉 | SELL | 賣長倉 | `sale` |
+| 到期（賣方） | BUY、價 0、費稅 0、`close_reason = expired` | 以 0 回補整個空倉 | `short_cover` = 剩餘權利金全數 |
+| 到期（買方） | SELL、價 0、費稅 0、`close_reason = expired` | 以 0 賣出整個長倉 | `sale` = −剩餘成本 |
+| 被指派 | 選擇權 BUY 價 0 `assigned` ＋ 標的股票 BUY（Put）／SELL（Call）於履約價 | 權利金留在選擇權損益（R5） | 選擇權 `short_cover`；股票依其分支 |
+| 履約 | 選擇權 SELL 價 0 `exercised` ＋ 股票 BUY（Call）／SELL（Put）於履約價 | 支付之權利金為選擇權已實現損失（R5） | 選擇權 `sale`；股票依其分支 |
+
+平倉列（`close_reason`）的**方向與數量由部位推導**：到期＝當時整個部位、日期＝到期日；被指派／履約
+＝ 0 < 數量 ≤ |部位|、100 的倍數、不晚於到期日。平倉列**不收手續費與稅、不呼叫費用引擎**
+（`fee_rule_snapshot = {"source": "close_reason"}`）。**R5**：被指派／履約時，權利金**永不**併入股票
+成本——股票腿是一筆以履約價成交的普通交易。
+
+**費用（OPT-D6，`fees.py::_us_option`）**
+
+$$\text{fee} = \text{cent}(\text{option\_per\_contract}\times n) + \text{cent}(\text{option\_reg\_per\_contract}\times n)
++ [\text{SELL}]\ \text{cent}(\max(\text{sec\_rate}\times\text{權利金金額},\ 0.01)),\qquad \text{tax} = 0$$
+
+$n$ ＝口數。無 TAF、無 CAT、選擇權不課 MY 印花稅（v1）。費率綁**規則集**：`schwab` 0.65；
+`moomoo_us` **未設定**（`None` ≠ 0）——此時對帳單手續費必填，否則拒收（`option_fee_unset`）。
+
+**平倉列永不開倉（§4.4）**
+
+重播拒絕會「開出或擴大」部位的平倉列：BUY 超過空倉、SELL 超過 $\max(\text{長倉}, 0)$（完全無部位
+亦同）。該列**不入帳**，記於 `Book.refused_closes`（部位存在時另設黏性旗標 `unbookable_close`），
+且只要記錄非空，**XIRR 與 B 一律暫停顯示**並附原因（與 `orphan_dividends` 同一姿態），自該列日期起
+走勢各日標為不完整。更正若會使某筆平倉列無法入帳，一律硬性拒絕（`refused_close_correction`）。
+
+**合約調整 `OPTION_ADJUST`（§4.3、OPT-D3／D16）**
+
+僅限 1 → N 口（`ratio_from = 1`）、同權利別、同到期日，且 $\text{履約價}_\text{前}\times 1 =
+\text{履約價}_\text{後}\times N$。來源部位（長或空）整筆移至目的合約：股當量 × N、成本與空倉價款
+原樣轉移（故每股權利金 ÷ N）；目的合約若曾賣超或方向相反則拒絕。
+
+**估值（R2、R3、OPT-D4、OPT-D20）**
+
+未平倉合約以**帳本內最後一筆一般成交價**估值（排除平倉列；跨帳戶取同一合約；合約調整後尚無成交
+時取前身最後價 ÷ N），**永不**取報價、**永不**寫入 `prices`、不進新鮮度報告。帶號股數下，§4.3 之
+估值式不需修改：
+
+$$\text{market\_value} = \text{last\_price}\times\text{shares},\qquad
+\text{unrealized} = (\text{last\_price} - \text{avg})\times\text{shares}$$
+
+**時點型數字含之**（KPI 總市值／總報酬／XIRR 期末值／總報酬 A／換匯曝險／月度成績）；**走勢型數字
+不含其市值**（走勢圖、B、TWR、基準比較），附一段說明（R3）。**本金匯率效果（B − A）於有未平倉
+選擇權時暫停**（OPT-D20）：B 不含選擇權市值而 A 含其未實現，兩者相減會把選擇權價值誤讀為匯率效果。
+持倉、權重、配置、小計與股票 `realized.rows` **只含股票**；選擇權另列於 `options` 區塊，
+KPI 總市值 ＝ 股票總小計 ＋ `options.market_value`（「其中選擇權」）。
+
+**已驗證工作範例（phase-1 場景 `run_options`，`schwab` 每口 0.65、賣出加 SEC 最低 0.01）**
+
+| 合約（合成代號） | 事件 | 計算 | 已實現 |
+| --- | --- | --- | ---: |
+| `OPA260918P00045000` | 賣出開倉 2 口 @1.50 → 買進平倉 2 口 @0.40 | 收 300 − (1.30＋SEC 0.01) = 298.69；付 80 ＋ 1.30 = 81.30 | **217.39** |
+| `OPA260821C00055000` | 賣出開倉 1 口 @0.80 → 到期 | 80 − 0.66 = 79.34，全數實現 | **79.34** |
+| `OPB260821P00025000` | 買進開倉 2 口 @0.55 → 到期 | 成本 110 ＋ 1.30 全數損失 | **−111.30** |
+| `OPB260821P00020000` | 賣出開倉 2 口 @0.70 → 同日買進平倉 1 口 @0.05，再到期 1 口 | 138.69 ÷ 2 = 69.345；69.345 − 5.65；餘 1 口到期 | **63.695**、**69.345** |
+| `OPA261218P00060000` → `OPA261218P00020000` | 賣出開倉 1 口 @3.00 → 1 → 3 調整 → 買進平倉 1 口 @0.90 | 價款 299.34 × 100/300 = 99.78 − 90.65 | **9.13** |
+| `OPA260918P00040000` | 賣出開倉 2 口 @1.10 → 被指派 2 口 | 220 − 1.31 = 218.69 留在選擇權損益（R5）；股票買 200 股 OPA @40 | **218.69** |
+| `OPA260918C00042000` | 買進開倉 2 口 @1.40 → 履約 1 口、另 1 口到期 | 每口成本 140.65 於履約與到期各自實現為損失 | **−140.65** ×2 |
+
+調整後部位之估值：`OPA261218P00020000` 賣方 3 口、`last_price` ＝ 3.00 ÷ 3 ＝ **1**、日期取前身
+成交日 2026-07-24、履約義務 20 × 100 × 3 ＝ **6,000**。兩筆股票腿（履約 100 股 @42、被指派 200 股 @40）
+合計 OPA **300 股、成本 12,200**——權利金未併入。
+
+> **驗證錨點**：`options.anchor.realized scope = schwab/OPA260918P00045000@2026-08-14 None`（217.39）、
+> `schwab/OPA260821C00055000@2026-08-21 expired`（79.34）、`schwab/OPB260821P00025000@2026-08-21 expired`
+> （−111.30）、`schwab/OPB260821P00020000@2026-08-21 None`（63.695）與 `… expired`（69.345）、
+> `moomoo_my/OPB260918C00030000@2026-09-01 None`（281.90，對帳單手續費）、
+> `schwab/OPA261218P00020000@2026-09-02 None`（9.13）、`schwab/OPA260918P00040000@2026-09-18 assigned`
+> （218.69）、`schwab/OPA260918C00042000@2026-09-11 exercised` 與 `@2026-09-18 expired`（−140.65）；
+> `options.anchor.open.{contracts,direction,last_price,last_price_date,obligation} scope =
+> schwab/OPA261218P00020000`（`phase1:options_open`）；`options.anchor.stock_legs_shares／_cost scope =
+> schwab|OPA`（300／12,200）；被拒平倉列：`options.oracle_refuses_the_close`、
+> `phase1:options_refused_close`；`option_side` 一致性：`options.option_side.ledger`。
+> 實跑：phase-1 **163 ops／19,252 斷言／0 fail**（2026-10-10）。
+
+> **實作位置**：`shared/options.py`（代號、乘數、標準調整、§6.1 詞彙與唯一分類器）、
+> `portfolio/cost_basis.py`（平倉列、§4.4、`OPTION_ADJUST`）、`portfolio/options.py`（最後成交價估值、
+> `options` 區塊）、`data_ingestion/fees.py::_us_option`、`data_ingestion/validate.py::option_close_issues`。
+> **依據**：`docs/spec/2026-10-09-options-ledger.md`、`.claude/rules/domain-ledger.md`（US equity options）。
 
 ---
 
@@ -1931,6 +2032,9 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E24 | **未能套用之行動之退化**（CAX 股數 −500 不變、旗標 True；XIRR 全投組空白且原因指名該列） | §4.4.6／§5.3／§7.2 | `corp.anchor.e5_source_unmoved`；`corp.anchor.e5_source_flagged`；`corp.xirr_blanked_by_unapplied`；`corp.xirr_reason_names_row` |
 | E25 | **現金收支七種 kind／兩軸**（`BROKER_FEE` 100 → 池 **−100**（舊述詞為 +100）；`DEPOSIT` 1,000（成本 32,000）+ `INTEREST` 7 → `covered_ratio` **1**） | §9.1.1／§8.1 | `cash.balance scope = schwab|USD`、`fx.covered_ratio scope = schwab`（phase-1 ops 50–52，2026-08-13 加入）；單元 `tests/shared/test_cash_kinds.py`（`test_broker_fee_reduces_the_cash_balance`／`test_interest_does_not_dilute_the_coverage_ratio`） |
 | E26 | **美股現金股利（P1b）**（`schwab/AAPL` `CASH` gross 100／withholding 30 → `net` **70**、issue 為空；空白預扣 → 軟性追問且仍記 `net = 100`） | §6.2b | `holding.dividend_portion scope = schwab|AAPL`（phase-1，2026-08-13 加入之 `CASH` 股利）；單元 `tests/data_ingestion/test_dividends.py::test_us_cash_dividend_is_not_a_mismatch`／`::test_us_cash_dividend_without_withholding_asks` |
+| E27 | 選擇權賣出開倉 → 買進平倉（`OPA260918P00045000` 2 口 → **217.39**） | §4.5 | `options.anchor.realized schwab/OPA260918P00045000@2026-08-14 None` |
+| E28 | 選擇權 1 → 3 合約調整後部分平倉（`OPA261218P00020000` → **9.13**；last_price **1**） | §4.5 | `options.anchor.realized schwab/OPA261218P00020000@2026-09-02 None`、`options.anchor.open.last_price schwab/OPA261218P00020000` |
+| E29 | 賣出 Put 被指派（`OPA260918P00040000` → 權利金 **218.69** 留在選擇權損益；OPA 300 股成本 **12,200**） | §4.5 | `options.anchor.realized schwab/OPA260918P00040000@2026-09-18 assigned`、`options.anchor.stock_legs_cost schwab|OPA` |
 
 ### 12.2 詞彙表（中文 ↔ 英文欄位）
 
@@ -1996,6 +2100,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.9` | 2026-08-29 | **§9.3 護欄語意同步至實作（FU-D43a／FU-D34）**（QA R1 BUG-02；基線 `v0.1.28 + staged`）。§9.3 原記「現金門（deposit/withdraw、fx.convert）之硬護欄 = `running_min < 0` 且未 `ack_negative` → 422 `negative_cash`」——與實作及其自引之測試相左：**出金**為硬拒 **422 `withdraw_insufficient_balance`（FU-D43a：`ack_negative` 不可繞過、無融資）**，**換匯**為硬拒 **422 `fx_insufficient_balance`（FU-D34，需求五：無 ack、不提供融資）**；兩者皆為「期末餘額 + date-aware dip」雙檢、批次感知（CSV 同檔互為 sibling；換匯之批 = 結構有效**且**被勾選之列），並共用「不加深既有 dip 永不阻擋」規則（`after.low < min(before.low, 0)`）。credit 型 kind 進池本就不做餘額檢查（§9.1.1，未變）。`negative_cash`＋`ack_negative` **僅**存於縮減資金面之更正門（PUT／DELETE 現金收支、DELETE 換匯——date-aware `running_min`、**所有受影響池**：編輯之舊＋新 (account, ccy)、換匯刪除之兩腿）。§9.3 依此改寫（寫入門硬拒／更正門可 ack／交易門軟警告三類）並補列換匯側與更正門驗證錨點；§12.1 E16 措辭同步限縮。仲裁意涵：此前依 §1.1 仲裁一筆被拒之出金會誤判 app 為錯——本版起以實作（owner 簽署之 docstring 裁定 + §9.3 引用之測試）為準。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為護欄語意之文件同步。** |
 | `v1.10` | 2026-09-06 | **§7.2／§9.1.1 之 D1 = A 殘留同步至 AI-D42**（QA DOC-02；基線 `v0.1.28 + feat/corporate-actions`）。2026-08-24 AI-D42 已把 `REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE` 三類納入 XIRR（§7.2 表與 §4.4.7 橫幅早已更新），但 §7.2 之「D1 = A」整段（「函式簽章根本不接收 `cash_movements`」、驗證錨點「無 `cash_movements` 參數」）與 §9.1.1 之「七種 kind 全部不是 XIRR 流量」**未加取代標記**，與同節上表自相矛盾；`portfolio/returns.py::xirr_reporting` 實際帶**必填**關鍵字參數 `cash_movements`（無預設值，刻意如此）。本版：① §7.2 D1 = A 段補取代橫幅（原文完整保留）；② §9.1.1 該句改寫為三類進、四類不進；③ **`INTEREST` 不進 XIRR 再次確認**（實測：帳本加一筆 `INTEREST` 500 USD → XIRR 逐位相同 `0.3336061959279546`；對照組加 `BROKER_FEE` 500 USD → `0.33285721007646424`），並修正工程規則檔 `.claude/rules/domain-ledger.md` 中唯一把 `INTEREST` 列為流量的段落（全倉庫唯一寫反處；其引用之 `CASH_KIND_TABLE.credit` 不存在，實名 `shared/cash_kinds.py::movement_sign`）。英文鏡像自 v1.8 起未收到 AI-D42（`grep -c AI-D42` = 0）：本版同 change set 重生 §4.4.7 橫幅、§7.2 表與兩段橫幅、§7.6 AI-D48／AI-D49 段、§9.1.1 句與版本紀錄。**無任何公式或會計定義變更；無任何數字移動。** |
 | `v1.11` | 2026-10-05 | **新增 §6.6 被拒入帳的股利**（owner 裁定 2026-10-05；基線 `feat/corporate-actions`，上線前 code review CR-01..14／R1..R12／S1..S11 之後）：三類拒絕（無持倉／放空中／已換出）逐筆記於帳本、對一切金額貢獻為 0、列表照列標示「未入帳（待釐清）」不計合計、走勢該日不完整而持有中承接部位照計市值、補救說法單一來源；驗證錨點對應當前實跑（phase-1 137 ops／11,406 斷言／0 fail）。英文鏡像於同一 change set 重生。**除 §6.6 外無既有公式或會計定義變更。** |
+| `v1.12` | 2026-10-10 | **新增 §4.5 美股選擇權**（owner 裁定 R1–R7、OPT-D1..D22；基線 `feat/options-ledger`）：合約即標的、股當量、賣出開倉即宣告式賣空、價 0 平倉列（到期／被指派／履約）與 R5、選擇權費用分支、§4.4 平倉列永不開倉、`OPTION_ADJUST`、最後成交價估值與時點型／走勢型之分、OPT-D20；工作範例與驗證錨點取自當前實跑（phase-1 163 ops／19,252 斷言／0 fail）。英文鏡像於同一 change set 重生。**既有股票之公式與會計定義無任何變更。** |
 
 ### 12.4 如何仲裁一個爭議金額
 
