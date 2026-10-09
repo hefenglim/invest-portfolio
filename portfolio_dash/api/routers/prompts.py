@@ -12,6 +12,9 @@ Two paths share one validation core (``validate_tokens``):
   in a portfolio-scope body (= spec 04 R1); otherwise calls the real LLM, records
   ``llm_usage`` (agent=``prompt_test``), and honours the budget (exhausted -> 402 via
   the global handler).
+
+Both refuse a ``per_symbol`` target that is an option contract (422, options spec OPT-D10:
+prompts and AI insights are stock-only in v1) — the one exception to preview's 200.
 """
 
 import math
@@ -63,6 +66,7 @@ from portfolio_dash.shared import llm
 from portfolio_dash.shared import prompt_versions as pv
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.instrument_scope import is_option_symbol
 from portfolio_dash.shared.llm_config import budget_remaining
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_history
@@ -1025,7 +1029,19 @@ def _est_tokens(system_prompt: str, rendered: str) -> int:
     return math.ceil(len(system_prompt + "\n" + rendered) / 4)
 
 
-# --- 6.2 preview (always 200, no LLM) -----------------------------------------
+def _option_target_refused(payload: PromptBody) -> JSONResponse | None:
+    """422 when a ``per_symbol`` render targets an option contract (options spec OPT-D10).
+
+    Every per-symbol variable — price history, technicals, chips, fundamentals, news, signals —
+    describes a stock; a contract has none of them, and v1 keeps options out of AI insights."""
+    if payload.scope == "per_symbol" and payload.symbol and is_option_symbol(payload.symbol):
+        return JSONResponse(status_code=422, content=error_body(
+            "validation_error", f"{payload.symbol.strip()} 是選擇權合約，不提供 AI 分析",
+            field="symbol"))
+    return None
+
+
+# --- 6.2 preview (200 unless the target is an option contract; no LLM) -----------
 
 
 @router.post("/prompts/preview")
@@ -1034,7 +1050,10 @@ def preview(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
-) -> dict[str, Any]:
+) -> Any:
+    refused = _option_target_refused(payload)
+    if refused is not None:
+        return refused
     validation = V.validate_tokens(payload.body, payload.scope)
     ctx = _build_context(conn, payload, now, reporting)
     rendered, tokens_used = V.render_prompt(payload.body, ctx)
@@ -1064,8 +1083,12 @@ def test_prompt(
     Unlike preview, this REJECTS bad tokens with 422 (unknown token OR a per_symbol var
     used in a portfolio-scope body = spec 04 R1). The budget gate / role activation /
     provider failure surface as 402 / 409 / 503 via the global exception handlers.
-    Records ``llm_usage`` with agent ``prompt_test``; does NOT write an insight card.
+    Records ``llm_usage`` with agent ``prompt_test``; does NOT write an insight card. A
+    per-symbol option target is refused first, before any token check or LLM call.
     """
+    refused = _option_target_refused(payload)
+    if refused is not None:
+        return refused
     validation = V.validate_tokens(payload.body, payload.scope)
     if validation.unknown_tokens or validation.scope_violations:
         issues = [

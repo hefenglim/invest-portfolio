@@ -23,6 +23,7 @@ from portfolio_dash.api.instrument_service import (
     last_price_date,
     lookup_instrument,
     quick_register,
+    refuse_option_contract,
     restore_archived,
 )
 from portfolio_dash.data_ingestion.holdings import holds_position, load_action_index
@@ -46,6 +47,7 @@ from portfolio_dash.pricing.store import get_latest_price, get_price_history
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.instrument_names import AliasError, has_cjk, normalize_aliases
+from portfolio_dash.shared.instrument_scope import OPTION_REGISTRATION_REFUSAL, is_option_symbol
 from portfolio_dash.shared.llm import complete_structured
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.sectors import (
@@ -130,6 +132,9 @@ def _element(conn: sqlite3.Connection, inst: Instrument,
         # show 待確認 rather than presenting an assumed False as a decision.
         "etf_flag_unknown": inst.etf_flag_unknown,
         "archived": inst.archived,
+        # Options spec §6.2 / §10 (additive): "stock" | "option". A contract carries no quote
+        # (``last`` / ``chg_pct`` stay null — R2 values it at its last trade price elsewhere).
+        "asset_type": inst.asset_type,
         # FU-D32: any permanent ledger history (incl. closed positions) — the watchlist
         # dialog pre-disables 永久移除 (purge) for these (~3 LIMIT-1 queries; fine at scale).
         "has_history": has_ledger_history(conn, inst.symbol),
@@ -138,12 +143,17 @@ def _element(conn: sqlite3.Connection, inst: Instrument,
 
 @router.get("/instruments")
 def list_all(
+    include_options: bool = Query(False),
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
+    """The watchlist / registry list. Option contracts are hidden unless ``include_options=1``
+    (options spec §6.2, 「顯示選擇權合約」): a contract is created by the trade door and lives in
+    the 選擇權 section, so by default the watchlist stays the list of stocks it always was."""
     actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
     items = [_element(conn, inst, now, actions=actions)
-             for inst in list_instruments(conn)]
+             for inst in list_instruments(conn)
+             if include_options or not inst.is_option]
     return {"as_of": now.isoformat(), "list": items}
 
 
@@ -361,6 +371,16 @@ def ai_resolve(
                     "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
                 }
 
+    # (a1) options spec §6.2: an unregistered OCC contract code is never resolved by the model —
+    #      a contract is created by the trade door, so answer the stock doors' refusal with no
+    #      LLM call (``not_found`` carries its message, which every dialog already renders).
+    if any(is_option_symbol(key) for key in _regate_keys(query)):
+        return {
+            "status": "not_found",
+            "message": OPTION_REGISTRATION_REFUSAL,
+            "prompt_version": AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
+        }
+
     # (a2) dedup cache: an identical NOT-yet-registered query within the TTL returns the already
     #      computed reply without re-paying the LLM (F4c). Placed AFTER the registry re-gate so a
     #      freshly-registered symbol is never masked by a stale cached candidates reply.
@@ -564,6 +584,12 @@ def register(
                             content=error_body("validation_error", "US/MY 不可帶台股板別",
                                                field="board"))
     sym = body.symbol.strip().upper()
+    # Options spec §6.2: a contract is refused AT ENTRY — before the name checks and before the
+    # archived-restore branch below, which would otherwise un-archive it without quick_register.
+    try:
+        refuse_option_contract(sym)
+    except QuickRegisterError as exc:
+        return JSONResponse(status_code=exc.status, content=error_body(exc.code, exc.message))
     # R6: a blank industry means "not provided" — never clobbers a stored value (the edit form,
     # via UpdateBody + exclude_unset, is the path that can explicitly clear it).
     industry = (body.industry or "").strip() or None

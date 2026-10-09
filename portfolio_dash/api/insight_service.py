@@ -66,7 +66,7 @@ from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.scheduler.jobs import insight_job_id
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.instrument_scope import tracked_symbols
+from portfolio_dash.shared.instrument_scope import is_option_symbol, tracked_symbols
 from portfolio_dash.shared.llm_config import (
     LLMBudgetExceeded,
     LLMError,
@@ -133,8 +133,13 @@ def held_in_book(data: DashboardData) -> set[str]:
     (``build_book``), one row per (account, symbol), so the union is taken over accounts; a
     declared short (shares < 0) is a live position and counts. It is never re-derived from
     the ledger rows (``current_shares``) — that would be a second owner of the answer.
+
+    STOCKS only (options spec OPT-D10): AI insights and alerts are out for option contracts in
+    v1, and every reader of this set spends a card or a push on a symbol. ``data.holdings`` is
+    stock-only already (OPT-D5); the filter is stated here too because this set is what an
+    LLM call is paid for.
     """
-    return {h.symbol for h in data.holdings if h.shares != 0}
+    return {h.symbol for h in data.holdings if h.shares != 0 and not is_option_symbol(h.symbol)}
 
 
 def held_symbols_for_alerts(
@@ -1602,13 +1607,17 @@ def _resolve_universe_raw(
     """Resolve a per_symbol universe value — THE one resolver (DEF-059): mode:all →
     holdings, mode:custom → the listed symbols, mode:all_registered → holdings + the active
     (non-archived) watchlist; anything else follows holdings. A saved task
-    (:func:`_resolve_universe`) and an unsaved draft (spec 07 §7.2 dry run) both land here."""
+    (:func:`_resolve_universe`) and an unsaved draft (spec 07 §7.2 dry run) both land here.
+
+    Every mode is stocks only (OPT-D10): holdings via :func:`held_in_book`, the watchlist via
+    ``tracked_symbols``, and a custom list drops any option contract it names."""
     held_set = held_in_book(data)
     held = sorted(held_set)
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":
-            return _custom_symbols(universe.get("symbols"))
+            return [s for s in _custom_symbols(universe.get("symbols"))
+                    if not is_option_symbol(s)]
         if mode == "all_registered":
             return _all_registered_symbols(conn, held_set)
         if mode == "all":

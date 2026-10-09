@@ -19,6 +19,7 @@ from portfolio_dash.data_ingestion.holdings import held_among
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.instrument_scope import is_option_symbol, stock_instruments
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import target_weights as tw
@@ -184,10 +185,13 @@ def _target_weights_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str
     and its 封存 / 移除 doors (DEF-075, owner ruling ② B). It was ``current_shares > 0``, so a
     position closed only by a FUTURE-dated sale and a declared short read 「觀察」 here while
     the watchlist read 「持有」.
+
+    Stocks only (options spec OPT-D10): a contract never carries a target weight — weights
+    are stock MV / Σ stock MV (OPT-D5) — so it is not listed and the PUT refuses one.
     """
     tw.ensure_target_weights_seeded(conn)
     stored = tw.load_target_weights(conn)
-    instruments = sorted(list_instruments(conn), key=lambda i: i.symbol)
+    instruments = sorted(stock_instruments(list_instruments(conn)), key=lambda i: i.symbol)
     held = held_among(conn, [i.symbol for i in instruments], today=now.date())
     total = _ZERO
     rows: list[dict[str, Any]] = []
@@ -223,6 +227,9 @@ def put_target_weights(body: TargetWeightsBody,
     weights: dict[str, Decimal] = {}
     total = _ZERO
     for sym, raw in body.weights.items():
+        if is_option_symbol(sym):  # OPT-D10: target weights are stock-only
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"{sym} 是選擇權合約，不設目標權重", field="weights"))
         if sym not in registered:
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error", f"未知標的 {sym}", field="weights"))

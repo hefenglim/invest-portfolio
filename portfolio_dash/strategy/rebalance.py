@@ -65,8 +65,10 @@ from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
+from portfolio_dash.shared.instrument_scope import is_option_symbol
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.strategy import target_weights as tw
+from portfolio_dash.strategy.stock_scope import stock_market_value
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -208,7 +210,10 @@ def compute_rebalance(
     # stamp (silent omit + snapshot note if unavailable). Ignored by non-US-stamp rules.
     stamp_fx = resolve_stamp_fx(conn, now.date())
     resolver = RateResolver(conn, now=now)
-    total = data.kpis.total_market_value
+    # Σ STOCK market value (options spec OPT-D5): the weights this engine sizes against are
+    # the dashboard's stock MV / Σ stock MV; the KPI 總市值 also carries open option contracts
+    # (a sold put negatively). Identical to the KPI on a ledger with no option.
+    total = stock_market_value(data)
 
     instruments = {i.symbol: i for i in list_instruments(conn)}
     missing = set(data.freshness.missing_prices)
@@ -262,6 +267,12 @@ def compute_rebalance(
     rebate_estimate_total = _ZERO
 
     for symbol, target_ratio in targets.items():
+        # OPT-D10: rebalance is stock-only. A contract has no quote (R2) — the honest reason is
+        # the existing ``no_price``, and it is decided here, never by what the holdings list
+        # happens to contain.
+        if is_option_symbol(symbol):
+            _exclude(symbol, "no_price")
+            continue
         cons = _priced_constituents(data.holdings, symbol)
         # Exclude any symbol without a usable current price (never fabricate one).
         if not cons or symbol in missing:

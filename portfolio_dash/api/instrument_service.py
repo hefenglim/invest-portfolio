@@ -16,6 +16,12 @@ can supply is almost always a typo, and admitting it would recreate the
 permanently price-less rows this gate exists to prevent. ``force=True`` (an
 explicit user confirmation) registers a quote-less symbol anyway; the classic
 register endpoint passes it for backward compatibility.
+
+**An option contract never enters through here** (options spec §6.2, OPT-D7): the quick-add,
+the classic register door and every restore refuse an OCC-shaped symbol AT ENTRY, before any
+provider call and regardless of ``force`` (「選擇權合約由交易登錄建立」) — a contract is created
+from its symbol by the trade door (``data_ingestion/register.py::register_option_contract``) and
+is never quoted (R2). The gap backfill and the quick-add lookup skip one without a provider call.
 """
 
 import logging
@@ -62,6 +68,7 @@ from portfolio_dash.shared.instrument_names import (
     name_conflict,
     normalize_aliases,
 )
+from portfolio_dash.shared.instrument_scope import OPTION_REGISTRATION_REFUSAL, is_option_symbol
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.symbol_format import contains_cjk
 
@@ -201,6 +208,18 @@ class QuickRegisterError(Exception):
         self.status = status
 
 
+def refuse_option_contract(symbol: str) -> None:
+    """Raise the stock doors' refusal when *symbol* is an option contract (options spec §6.2).
+
+    ``option_contract`` / 422 / 「選擇權合約由交易登錄建立」, checked BEFORE anything is read or
+    fetched and regardless of ``force``: a contract is never quote-gated (R2) and is created by
+    the trade door from its symbol (OPT-D7). Called at the entry of :func:`quick_register` and
+    :func:`restore_archived`, and by the classic register door before its own restore branch.
+    """
+    if is_option_symbol(symbol):
+        raise QuickRegisterError("option_contract", OPTION_REGISTRATION_REFUSAL, 422)
+
+
 def _quote_not_found(sym: str) -> QuickRegisterError:
     """The typo guard's refusal — ONE sentence for the provider miss and the CJK fast path."""
     return QuickRegisterError(
@@ -274,6 +293,10 @@ def lookup_instrument(
         # Owner 2026-09-30 (R8 F-01): a name (台積電) is never a code, so the provider can only
         # answer 「查無報價」 — after the board probe + quote fetch had taken 25–30 s. Same
         # answer, from the registry alone; the dialog then goes straight to AI 辨識.
+        return InstrumentLookup(found=False)
+    if is_option_symbol(sym):
+        # Options spec §6.2: a contract is never quoted, and the quick-add refuses it at entry
+        # anyway — answer from the shape alone instead of asking a provider about it.
         return InstrumentLookup(found=False)
     # Brand-new symbol: probe the board (TW) then verify existence via a real quote fetch.
     # ``names`` catches the exchange's short name from the probe's own response (item 8).
@@ -360,7 +383,11 @@ def restore_archived(
     overrides (FU-D18 restore doors b/c). Caller-supplied non-empty values win; omitted
     fields keep the archived row's stored metadata. This does NOT fetch market data — the
     caller schedules :func:`gap_backfill` (background, doors a/b) or runs it inline (door c).
+
+    Raises :class:`QuickRegisterError` ``option_contract`` for an option contract, before
+    anything is written (options spec §6.2 — see :func:`refuse_option_contract`).
     """
+    refuse_option_contract(existing.symbol)
     merged = existing.model_copy(
         update={
             "name": (name or "").strip() or existing.name,
@@ -417,6 +444,11 @@ def _gap_start(conn: sqlite3.Connection, symbol: str, now: datetime) -> date:
 def _gap_backfill_inner(conn: sqlite3.Connection, symbol: str, now: datetime) -> None:
     inst = get_instrument(conn, symbol)
     if inst is None:  # restored row deleted again before the task ran — nothing to do
+        return
+    if inst.is_option or is_option_symbol(symbol):
+        # Options spec §6.2: a contract has no quote, history or dividend events to fetch (R2
+        # values it at its last trade price). Reached when 還原 un-archives a contract.
+        logger.info("gap backfill skipped for option contract %s", symbol)
         return
     board = inst.board or DEFAULT_BOARD[inst.market]
     ref = InstrumentRef(symbol=symbol, market=inst.market, board=board)
@@ -477,10 +509,12 @@ def quick_register(
 ) -> QuickRegisterOutcome:
     """Register *symbol* in one step: probe, fetch a real quote, name it, backfill.
 
-    Raises :class:`QuickRegisterError` — ``duplicate_symbol`` (409) when already
-    registered, ``quote_not_found`` (422) when no source supplies a price and
-    *force* is False. Quote/history/name fetches are idempotent upserts; history
-    and name failures never block the registration itself.
+    Raises :class:`QuickRegisterError` — ``option_contract`` (422) for an OCC-shaped symbol,
+    at entry and regardless of *force* (options spec §6.2: a contract is created by the trade
+    door, never here); ``duplicate_symbol`` (409) when already registered,
+    ``quote_not_found`` (422) when no source supplies a price and *force* is False.
+    Quote/history/name fetches are idempotent upserts; history and name failures never block
+    the registration itself.
 
     ``backfill_history=False`` skips the SYNCHRONOUS initial history window: the caller
     (the classic register endpoint, FU-D23) instead schedules the heavy history/dividend
@@ -495,6 +529,7 @@ def quick_register(
     sym = symbol.strip().upper()
     if not sym:
         raise QuickRegisterError("validation_error", "symbol 不可為空", 400)
+    refuse_option_contract(sym)  # before the restore branch too: an archived contract stays
     existing = get_instrument(conn, sym)
     if existing is not None:
         if not existing.archived:

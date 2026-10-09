@@ -23,7 +23,7 @@ from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.pricing import finmind_datasets
 from portfolio_dash.shared import prompt_versions
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.instrument_scope import tracked_instruments
+from portfolio_dash.shared.instrument_scope import is_option_symbol, tracked_instruments
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +136,13 @@ def run_news_daily(
     The nightly job stays held-only (holdings from the dashboard) → :func:`run_news_for`.
     The manual endpoint is the one that widens the universe to the watchlist. ``progress``
     (FU-D46) is the optional per-step status callback the scheduler seam forwards.
+
+    Option contracts are out (options spec §6.2 / OPT-D10): the news sources are asked per
+    ticker, and a contract code is not one — so a held contract never reaches a provider.
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
-    holdings = sorted({(h.symbol, h.market.value) for h in data.holdings})
+    holdings = sorted({(h.symbol, h.market.value) for h in data.holdings
+                       if not is_option_symbol(h.symbol)})
     if progress is None:
         # Keep the delegation TRULY additive: without a callback the call is
         # byte-identical to the pre-FU-D46 form, so existing stubs/monkeypatches of
@@ -159,11 +163,13 @@ def resolve_news_scope(
     when archived (the user asked for that name by name). An unknown symbol (or an otherwise
     invalid scope) → ``None`` so the caller returns a 400. Deterministic ordering.
     "Archived" is the one shared predicate (``shared/instrument_scope.py``, DEF-064).
+    An option contract is never a news scope (OPT-D10): ``"all"`` leaves it out through the
+    same predicate, and a scope naming one answers ``None`` like an unknown symbol.
     """
     if scope == "all":
         return sorted({(t.symbol, t.market.value) for t in tracked_instruments(conn)})
     instruments = list_instruments(conn)
     for i in instruments:
-        if i.symbol == scope:
+        if i.symbol == scope and not i.is_option:
             return [(i.symbol, i.market.value)]
     return None

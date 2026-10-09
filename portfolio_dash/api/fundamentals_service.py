@@ -19,6 +19,7 @@ from portfolio_dash.data_ingestion.holdings import held_among
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.pricing import ingest
 from portfolio_dash.pricing.refs import InstrumentRef
+from portfolio_dash.shared.instrument_scope import stock_instruments
 
 
 def _held_refs(conn: sqlite3.Connection, *, today: date) -> list[InstrumentRef]:
@@ -28,8 +29,12 @@ def _held_refs(conn: sqlite3.Connection, *, today: date) -> list[InstrumentRef]:
     DEF-075: "held" is ``held_among`` (a position today or on any later ledger date). It was
     ``current_shares > 0``, so a position closed only by a FUTURE-dated sale — still held
     today — and a declared short got no Alpha Vantage fundamentals.
+
+    Option contracts are out (options spec OPT-D10 / §6.2): a held contract is a position but
+    has no fundamentals, and asking Alpha Vantage about one would spend a call of its 25-a-day
+    quota on a symbol it cannot answer.
     """
-    instruments = list_instruments(conn)
+    instruments = stock_instruments(list_instruments(conn))
     held = held_among(conn, [i.symbol for i in instruments], today=today)
     return [
         InstrumentRef(symbol=inst.symbol, market=inst.market, board=inst.board)
