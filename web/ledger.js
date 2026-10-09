@@ -10,6 +10,10 @@
      arrays so any pre-boot render (or a fetch failure) degrades to empty tables. */
   let D = { transactions: [], dividends: [], fx: [], openings: [], actions: [], cash: [] };
   const f = window.fmt;
+  /* Options spec §6.1: the browser's one pinned copy of the option words the wire carries as
+     codes (format.js → shared/options.py); `option_side` itself is the server's string. */
+  const OPT = window.pdOptionWords || { closeReason: {}, unit: '口', shareEq: '股當量',
+                                        refusedRemedy: '', unbooked: '未入帳（待釐清）' };
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -173,6 +177,14 @@
      `before()` runs only when the dialog IS about to open: it closes whatever must be gone
      first (M3-04 below — the edit modal, or the delete path's progress toast). */
   function ackConfirm(err, verb, retry, before) {
+    if (err && err.status === 422 && err.code === 'refused_close_correction') {
+      /* Options spec §4.4: HARD, never ack-able — the correction would leave option close
+         rows with no lot to close. The 422 names every one; list them, each with its remedy
+         and a way to the row, instead of a one-line fail toast. */
+      if (before) before();
+      refusedCloseDialog(err);
+      return true;
+    }
     const meta = err && err.status === 422 ? ACK_CODES[err.code] : null;
     if (!meta) return false;
     if (before) before();
@@ -186,6 +198,58 @@
   /* DEF-049: shared with 最近匯入 › 復原 (broker-import.js), whose undo answers the same
      ack-able 422s — one dialog, one ack table, for every door that removes ledger rows. */
   window.pdAckConfirm = ackConfirm;
+
+  /* The deep link to one 交易 row (ledger.js openDeepLink): the row's account and date narrow
+     the table so the row is on the first page. */
+  function txRowHref(r) {
+    let href = 'trades.html?ledger=tx&txn_id=' + encodeURIComponent(r.txn_id);
+    if (r.account_id) href += '&account_id=' + encodeURIComponent(r.account_id);
+    if (r.date) href += '&date=' + encodeURIComponent(r.date);
+    return href;
+  }
+
+  /* Options spec §4.4 — the `refused_close_correction` 422 rendered as a list: every close
+     row the correction would strand (`issues[]`, kind refused_close), with the server's
+     reason and remedy, and a link to the row. Informational: nothing is written. */
+  function refusedCloseDialog(err) {
+    const rows = ((err && err.issues) || []).filter((i) => i && i.kind === 'refused_close');
+    const backdrop = el('div', 'modal-backdrop');
+    const modal = el('div', 'modal');
+    modal.id = 'refused-close-dialog';
+    const head = el('div', 'modal-head');
+    head.appendChild(el('h3', 'modal-title', '選擇權結清列將無法入帳'));
+    const x = el('button', 'modal-close', '✕'); x.type = 'button';
+    head.appendChild(x);
+    modal.appendChild(head);
+    const body = el('div', 'modal-body');
+    body.appendChild(el('div', null, (err && err.message) || ''));
+    const list = el('ul', 'opt-refused-list');
+    rows.forEach((r) => {
+      const li = el('li', 'opt-refused-item');
+      li.appendChild(el('span', 'opt-refused-meta', (r.contract || r.symbol) + '・'
+        + acctZh(r.account_id) + '・' + f.date(r.date) + '・'
+        + (OPT.closeReason[r.close_reason] || r.close_reason)));
+      li.appendChild(el('span', 'opt-refused-reason', r.remedy || r.reason || ''));
+      if (r.txn_id !== null && r.txn_id !== undefined) {
+        const a = el('a', 'unreg-link', '前往該筆交易');
+        a.href = txRowHref(r);
+        li.appendChild(a);
+      }
+      list.appendChild(li);
+    });
+    body.appendChild(list);
+    modal.appendChild(body);
+    const foot = el('div', 'modal-foot');
+    const ok = el('button', 'btn btn-primary', '知道了'); ok.type = 'button';
+    foot.appendChild(ok);
+    modal.appendChild(foot);
+    backdrop.appendChild(modal);
+    const dismiss = () => backdrop.remove();
+    x.addEventListener('click', dismiss);
+    ok.addEventListener('click', dismiss);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
+    document.body.appendChild(backdrop);
+  }
 
   /* ===== M3-04 (2026-09-06): one ledger mutation at a time, and it is visible =====
      Every correction door on this page used to close its dialog FIRST and await the request
@@ -346,6 +410,21 @@
           + ' 可能失去持倉依據而無法套用（待釐清）。';
       });
     } catch (e) { /* degrade to the plain confirm */ }
+    /* Options spec §4.4: deleting an option trade can strand a LATER close row of the same
+       contract (到期作廢／被指派／履約) — named here before the confirm, read from the ledger
+       (same account + contract). The server's replay guard is the authority: if the delete
+       would strand one it answers 422 refused_close_correction, rendered as a list. */
+    if (t.option_side && !t.close_reason) {
+      try {
+        const resp = await window.pdApi.get('/api/ledgers/transactions', {
+          account_id: t.account_id, symbol: t.symbol, from: t.date, limit: 500 });
+        ((resp && resp.rows) || []).filter((r) => r.symbol === t.symbol && r.close_reason
+          && r.id !== t.id && r.date >= t.date).forEach((r) => {
+          extra += '　⚠ 刪除後 ' + f.date(r.date) + ' 的' + (OPT.closeReason[r.close_reason] || '結清')
+            + ' ' + f.exact(r.contracts) + ' ' + OPT.unit + ' 可能沒有可結清的部位而無法入帳（待釐清）。';
+        });
+      } catch (e) { /* degrade to the plain confirm */ }
+    }
     delWithConfirm('/api/ledgers/transactions/' + t.id, '交易', extra);
   }
 
@@ -493,14 +572,25 @@
     + '空單成本，買回回補時才結算已實現損益 — 請記得登錄同日買回的那一筆。';
 
   function editTx(t) {
+    /* Options spec §4.2: an option row is edited in 口數 (`contracts` — the server converts;
+       the browser never forms a share-equivalent), and a close row (到期作廢／被指派／履約)
+       keeps its reason, its price 0 and its zero fee: the v1 edit door cannot change them —
+       delete and re-enter instead. */
+    const isOpt = t.contracts !== null && t.contracts !== undefined;
+    const isClose = !!t.close_reason;
     const fDate = inp(t.date, 'date');
     const fAcc = accountSel(t.account_id);
     const fSym = inp(t.symbol);
     const fSide = sel([['buy', '買入'], ['sell', '賣出']], t.side);
-    const fShares = inp(t.shares, 'number', 'any');
+    const fShares = isOpt ? inp(t.contracts, 'number', '1') : inp(t.shares, 'number', 'any');
+    if (isOpt) fShares.id = 'edit-contracts';
     const fPrice = inp(t.price, 'number', 'any');
     const fFee = inp(t.fee, 'number', 'any');
     const fTax = inp(t.tax, 'number', 'any');
+    if (isClose) {
+      [fPrice, fFee, fTax].forEach((n) => { n.readOnly = true; });
+      fSide.disabled = true;
+    }
     const fNote = inp(t.note || '');
     /* DEF-013: the two sell-side flags, correctable here like every other field. Both are
        persisted columns; the PUT preserves them when absent, so they are always sent. */
@@ -515,7 +605,8 @@
       return { line: lab, box: cb };
     };
     const fDaytrade = flag('edit-daytrade', '當沖（賣出稅 0.15%）', t.daytrade);
-    const fShort = flag('edit-short', '放空（賣出股數可超過持股）', t.short_sale);
+    const fShort = flag('edit-short', isOpt ? '賣出開倉（宣告為賣方部位，可超過持有口數）'
+      : '放空（賣出股數可超過持股）', t.short_sale);
     const flags = el('div');
     flags.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
     flags.appendChild(fDaytrade.line);
@@ -526,11 +617,16 @@
       const sell = fSide.value === 'sell';
       /* Both are SELL-side (input.js setSide): on a buy they are hidden AND cleared, so a
          stale tick can never exempt a buy from anything or reprice it. */
-      fDaytrade.line.hidden = !sell;
-      fShort.line.hidden = !sell;
+      fDaytrade.line.hidden = !sell || isOpt;          // 當沖 is a TW tax rate — never an option's
+      fShort.line.hidden = !sell || isClose;           // a close row is never a declared short
       if (!sell) { fDaytrade.box.checked = false; fShort.box.checked = false; }
       comboNote.hidden = !(sell && fDaytrade.box.checked && fShort.box.checked);
     };
+    /* The row's §6.1 side as the server reads it, and — on a close row — why its reason,
+       price and fee cannot change here. */
+    const sideNote = isOpt ? el('div', 'hint opt-edit-side', '此列：' + (t.option_side || '')
+      + (isClose ? '（到期作廢／被指派／履約不能在更正時變更原因、價格與費用；如需變更請刪除後重新登錄）'
+        : '')) : null;
     /* audit M6: track whether the user explicitly edited fee/tax. When a core field
        (帳戶/代號/方向/股數/價格/日期/當沖) changes and fee/tax are NOT dirty, the modal
        re-fetches the computed fee/tax from the entry preview seam and the backend
@@ -577,6 +673,12 @@
         daytrade: fDaytrade.box.checked, short_sale: fShort.box.checked,
         replaces_txn_id: t.id,
       };
+      if (isOpt) {
+        /* 口數 on the wire; the server converts (OPT-D8). */
+        delete body.shares;
+        body.contracts = fShares.value || '0';
+        if (isClose) { body.close_reason = t.close_reason; delete body.price; }
+      }
       if (!writeFees) {
         if (fFee.value.trim() !== '') body.fee_override = fFee.value.trim();
         if (fTax.value.trim() !== '') body.tax_override = fTax.value.trim();
@@ -637,22 +739,33 @@
     const warn = el('div', 'hint',
       '⚠ 更改「代號」或「帳戶」會把這筆交易移到另一個持倉，兩邊的成本、損益與報酬將自動重建；' +
       '新代號必須與帳戶市場相符且已註冊，會先做賣超與孤兒紀錄檢核；未手動改費用／稅時會依新帳戶規則重算。');
-    ui0 = editModal('編輯交易 #' + t.id + ' — ' + t.symbol, [
+    const fieldRows = [
       ['日期', fDate], ['帳戶', fAcc], ['代號', fSym], ['方向', fSide],
-      ['股數', fShares], ['價格', fPrice], ['', flags],
+      [isOpt ? '口數' : '股數', fShares], [isOpt ? '權利金（每股）' : '價格', fPrice], ['', flags],
       ['手續費', feeCell], ['交易稅', taxCell], ['備註', fNote],
       ['', issueBox],
       ['', warn],
-    ], async (ui) => {
+    ];
+    if (sideNote) fieldRows.splice(4, 0, ['', sideNote]);
+    ui0 = editModal('編輯交易 #' + t.id + ' — ' + (isOpt ? (t.name || t.symbol) : t.symbol),
+      fieldRows, async (ui) => {
       /* values ride through as the user's raw STRINGS; the backend parses Decimal */
-      await putWithAckGuard('/api/ledgers/transactions/' + t.id, (ack) => ({
-        account_id: fAcc.value, symbol: fSym.value.trim(), side: fSide.value,
-        date: fDate.value, shares: fShares.value, price: fPrice.value,
-        fee: fFee.value, tax: fTax.value, note: fNote.value.trim() || null,
-        fee_overridden: feeDirty, tax_overridden: taxDirty,
-        daytrade: fDaytrade.box.checked, short_sale: fShort.box.checked,
-        ack_oversell: ack,
-      }), '編輯', ui);
+      await putWithAckGuard('/api/ledgers/transactions/' + t.id, (ack) => {
+        const body = {
+          account_id: fAcc.value, symbol: fSym.value.trim(), side: fSide.value,
+          date: fDate.value, shares: fShares.value, price: fPrice.value,
+          fee: fFee.value, tax: fTax.value, note: fNote.value.trim() || null,
+          fee_overridden: feeDirty, tax_overridden: taxDirty,
+          daytrade: fDaytrade.box.checked, short_sale: fShort.box.checked,
+          ack_oversell: ack,
+        };
+        if (isOpt) {
+          delete body.shares;
+          body.contracts = fShares.value;
+          if (isClose) body.close_reason = t.close_reason;
+        }
+        return body;
+      }, '編輯', ui);
     });
     syncFlags();
     /* DEF-042: the findings of the row AS IT STANDS are shown on open — the entry door never
@@ -839,13 +952,34 @@
     tbody.replaceChildren();
     byKeyword(D.transactions).forEach((t) => {
       const tr = el('tr', 'expandable');
+      tr.dataset.txnId = String(t.id);
       const tdCaret = el('td', 'num caret-cell', '▸');
       tr.appendChild(tdCaret);
       tr.appendChild(dateCell(t.date, t.counts_from));
       tr.appendChild(el('td', 'col-text', acctZh(t.account_id)));
       tr.appendChild(symCell(t.symbol, t.name));
       const tdSide = el('td', 'col-text');
-      tdSide.appendChild(dirChip(t.side));
+      /* Options spec §6.1 / §6.2: an option row says what it did in the server's ONE
+         classifier's words (`option_side` — 賣出開倉／買進平倉／到期作廢…), since 買進平倉 and
+         買進開倉 are both a bare BUY. A close the replay refused (§4.4) books nothing: it keeps
+         its 買／賣 and its reason, and is marked 未入帳（待釐清） with the remedy. */
+      const opt = !!t.option_side;
+      if (opt && t.refused_close) {
+        tdSide.appendChild(dirChip(t.side));
+        if (t.close_reason) {
+          tdSide.appendChild(el('span', 'dir-chip dir-close',
+            OPT.closeReason[t.close_reason] || t.close_reason));
+        }
+        const u = el('span', 'dir-chip dir-opt-unbooked tx-opt-side', OPT.unbooked);
+        u.title = '這筆結清列沒有可結清的部位，帳本未入帳：' + OPT.refusedRemedy;
+        tdSide.appendChild(u);
+      } else if (opt) {
+        const c = el('span', 'dir-chip dir-opt tx-opt-side', t.option_side);
+        c.title = '選擇權：' + t.option_side;
+        tdSide.appendChild(c);
+      } else {
+        tdSide.appendChild(dirChip(t.side));
+      }
       /* DEF-013 (owner ruling 2026-09-24): the two flags that change what this row books are
          visible on the row — both read off the row's own persisted columns (the wire's
          `daytrade` / `short_sale`), the same chips the CSV / AI previews already show. */
@@ -854,13 +988,21 @@
         dt.title = '當日沖銷：賣出證交稅以當沖稅率 0.15% 計（優先於 ETF 的 0.1%）';
         tdSide.appendChild(dt);
       }
-      if (t.short_sale) {
+      /* An option's declared short IS its 賣出開倉 — the chip above already says so. */
+      if (t.short_sale && !opt) {
         const sh = el('span', 'dir-chip dir-short tx-flag-short', '放空');
         sh.title = '宣告放空：帳本以收到的價金作為空單成本，買回回補時結算已實現損益';
         tdSide.appendChild(sh);
       }
       tr.appendChild(tdSide);
-      tr.appendChild(el('td', 'num', f.shares(t.shares)));
+      if (t.contracts !== null && t.contracts !== undefined) {
+        /* 口數 beside the share-equivalents — both the server's (OPT-D8), never converted here. */
+        const tdQty = el('td', 'num', f.exact(t.contracts) + ' ' + OPT.unit);
+        tdQty.appendChild(el('span', 'opt-qty-sub', f.shares(t.shares) + ' ' + OPT.shareEq));
+        tr.appendChild(tdQty);
+      } else {
+        tr.appendChild(el('td', 'num', f.shares(t.shares)));
+      }
       tr.appendChild(el('td', 'num', f.price(t.price, t.ccy)));
       tr.appendChild(el('td', 'num', f.money(t.fee, t.ccy)));
       tr.appendChild(el('td', 'num', f.money(t.tax, t.ccy)));
@@ -885,6 +1027,11 @@
       if (!Object.keys(snap).length) kv.appendChild(el('span', 'num', f.NULL_GLYPH));
       box.appendChild(kv);
       if (t.note) box.appendChild(el('span', 'snap-note', '備註：' + t.note));
+      if (t.refused_close) {
+        box.appendChild(el('span', 'snap-note opt-refused-note',
+          OPT.unbooked + '：這筆' + (OPT.closeReason[t.close_reason] || '結清') + '列沒有可結清的部位，'
+          + '不計入任何數字 — ' + OPT.refusedRemedy));
+      }
       td.appendChild(box);
       detail.appendChild(td);
       detail.hidden = true;
@@ -1017,7 +1164,10 @@
     const fAcc = accountSel(a.account_id);
     const fFrom = inp(a.symbol);
     const fTo = inp(a.to_symbol);
-    const fKind = sel([['SPLIT', '分割'], ['EXCHANGE', '換股'], ['SPINOFF', '分拆']], a.kind);
+    /* The fourth kind (options spec §4.3) is listed so an OPTION_ADJUST row opens AS one — a
+       select with no matching option would fall on 分割 and save the row as a SPLIT. */
+    const fKind = sel([['SPLIT', '分割'], ['EXCHANGE', '換股'], ['SPINOFF', '分拆'],
+                       ['OPTION_ADJUST', '選擇權合約調整']], a.kind);
     const fRatioFrom = inp(a.ratio_from, 'number', '1');
     const fRatioTo = inp(a.ratio_to, 'number', '1');
     const fCarry = inp(a.cost_carry === null ? '' : a.cost_carry, 'number', 'any');
@@ -1544,6 +1694,26 @@
     try { q = new URLSearchParams(window.location.search); } catch (e) { return; }
     const tab = q.get('ledger');
     if (!tab || !LOADERS[tab]) return;
+    /* Options spec §4.4: `?ledger=tx&txn_id=N` (the 待釐清 banner's 「前往該筆交易」, the
+       選擇權 section, the refused-close dialog) flashes one 交易 row. The link may carry the
+       row's account and date; they narrow the table first so the row is on the first page. */
+    const txnId = tab === 'tx' ? q.get('txn_id') : null;
+    if (txnId) {
+      const acct = q.get('account_id');
+      const day = q.get('date');
+      if (acct && accountList.some((a) => a.id === acct)) {
+        state.account = acct;
+        initFilters();
+      }
+      if (day) {
+        state.from = day; state.to = day;
+        const fromIn = document.getElementById('ledger-date-from');
+        const toIn = document.getElementById('ledger-date-to');
+        if (fromIn) fromIn.value = day;
+        if (toIn) toIn.value = day;
+      }
+      resetOffsets();
+    }
     /* Not dirty BEFORE the click: the click handler's ensureTab would otherwise start a
        second, un-awaited fetch of the same pane beside the one awaited here. */
     dirty[tab] = false;
@@ -1551,6 +1721,16 @@
     if (btn) btn.click();
     activeTab = tab;
     await LOADERS[tab]();
+    if (txnId) {
+      const txRow = document.querySelector('#tx-body tr[data-txn-id="' + txnId + '"]');
+      if (!txRow) {
+        if (window.toast) window.toast('找不到該筆交易列', 'warn', '可能不在目前頁面，請翻頁或調整篩選');
+        return;
+      }
+      txRow.classList.add('ledger-added-row');
+      if (txRow.scrollIntoView) txRow.scrollIntoView({ block: 'center' });
+      return;
+    }
     if (tab !== 'action') return;
     const id = q.get('action_id');
     const want = { account_id: q.get('account_id'), symbol: q.get('symbol'),

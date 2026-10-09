@@ -70,6 +70,20 @@ CATALOG: list[Feature] = [
     # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
     # delivery date and this has not been delivered; it is set at ship time, in the same edit
     # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29, US equity options in the ledger (options spec §8, 2026-10-09) -----------
+    Feature(
+        version="0.1.29",
+        id="us-equity-options",
+        title="可以登錄美股選擇權了：賣出 Put、到期、被指派、合約調整都進帳本",
+        desc="美股帳戶的手動交易多了「＋選擇權合約」：輸入標的、到期日、履約價與買權／賣權即可"
+        "建立合約，以口數與每股權利金登錄賣出開倉、買進平倉、買進開倉、賣出平倉，也能一鍵登錄"
+        "到期作廢與被指派／履約（股票腿同時寫入）。儀表板新增「選擇權」區：未平倉合約依剩餘天數"
+        "排列，賣出 Put 列出履約義務，已實現依合約、年度、標的分組；到期日已過而尚未登錄的合約"
+        "會出現在收件匣的「待確認到期」。CSV 匯入與嘉信對帳單轉換也支援選擇權列",
+        href="trades.html",
+        area="交易帳本 → 交易輸入／儀表板 → 選擇權",
+        target="#m-sym-foot",
+    ),
     # --- v0.1.29, instrument aliases (post-closure item 8, 2026-09-30) ---------------------
     Feature(
         version="0.1.29",

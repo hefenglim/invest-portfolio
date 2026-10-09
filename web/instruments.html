@@ -89,6 +89,9 @@
     <div class="inst-toolbar">
       <input class="input" id="inst-search" type="search" placeholder="搜尋代號或名稱…"></input>
       <button class="btn" id="toggle-archived" type="button" style="display: none;" title="顯示或隱藏已移除／封存（停止追蹤，資料仍保留）的標的"></button>
+      <!-- Options spec §6.2: option contracts are registered by their trades and hidden here
+           unless asked for; instruments.js shows this toggle only when a contract exists. -->
+      <button class="btn" id="toggle-options" type="button" style="display: none;" title="顯示或隱藏由交易建立的美股選擇權合約（合約不抓取報價）"></button>
       <span class="spacer"></span>
       <button class="btn" id="backfill-btn" type="button" title="個股：12 個月（持倉自最早買入日起）＋匯率：自帳本最早一筆流量日起">回補歷史報價</button>
     </div>

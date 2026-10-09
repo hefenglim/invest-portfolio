@@ -173,6 +173,8 @@
     let message;                       // stays undefined unless the envelope supplies one
     let field;
     let issues;
+    let reason;
+    let line;
     try {
       const body = await resp.json();
       const err = body && body.error;
@@ -181,6 +183,10 @@
         if (err.message) message = err.message;
         field = err.field;             // stays undefined if absent
         issues = err.issues;           // stays undefined if absent
+        /* Options spec §8: the broker converter's refusal names WHICH rule stopped it
+           (`reason`, a machine code the page maps to a remedy) and the statement LINE. */
+        reason = err.reason;
+        line = err.line;
       }
     } catch (e) {
       /* no / non-JSON body — no message of record; the caller's zh fallback renders */
@@ -190,6 +196,8 @@
     const out = new PdApiError(
       resp.status, code, _resolveRefs(message), field, _resolveRefs(issues));
     out.statusText = resp.statusText || '';   // diagnostics only — never toasted
+    if (reason !== undefined && reason !== null) out.reason = reason;
+    if (line !== undefined && line !== null) out.line = line;
     return out;
   }
 

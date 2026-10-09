@@ -251,6 +251,13 @@
      ``accts`` = detail.position_accounts is the per-account breakdown behind the aggregate.
      Both are null/empty for an unheld / watchlist symbol. */
   function renderDrawer(drawer, head, body, symbol, detail) {
+    /* Options spec §6.2: a CONTRACT's drawer is its own shape — header from its terms, the
+       open position from the dashboard's `options` block, trades in 口 with §6.1 chips, no
+       配息史, no 試算. `detail.options` exists only on a ledger that carries an option. */
+    if (detail && detail.options && detail.options.is_contract) {
+      renderContractDrawer(head, body, symbol, detail);
+      return;
+    }
     const pos = (detail && detail.position) || null;
     const accts = (detail && detail.position_accounts) || [];
     /* head */
@@ -298,6 +305,10 @@
     /* body */
     body.replaceChildren();
     body.appendChild(chartSection(detail, pos));
+    /* Options spec §6.2: a stock with contracts written on it says so —
+       「未平倉選擇權：2 口 2026-12-18 50 Put（賣方）→ 選擇權區」 (the server's line). */
+    const openOpts = (detail && detail.options && detail.options.open) || [];
+    if (openOpts.length) body.appendChild(openOptionsLine(openOpts));
     if (pos) {
       body.appendChild(statsSection(pos, accts));
       body.appendChild(signalsSection(symbol));
@@ -365,6 +376,131 @@
     const tx = txSection(symbol, detail);
     if (tx) body.appendChild(tx);
     renderChart(detail, pos);
+  }
+
+  /* ---------- options (spec §6.2) ---------- */
+  const OPTW = window.pdOptionWords || { closeReason: {}, unit: '口', shareEq: '股當量',
+                                         unbooked: '未入帳（待釐清）' };
+
+  function openOptionsLine(rows) {
+    const line = el('div', 'sd-opt-line');
+    line.appendChild(el('span', 'k', '未平倉選擇權：'));
+    line.appendChild(el('span', null, rows.map((r) => r.text).join('、')));
+    const a = el('a', 'sd-tx-issue-link', '→ 選擇權區');
+    a.href = 'index.html#options-panel';
+    line.appendChild(a);
+    return line;
+  }
+
+  /* 「登錄到期作廢」 from the drawer: the in-page prefill where the form lives (trades.html),
+     the dashboard's navigation elsewhere (options.js), a plain link as the last resort. */
+  function prefillOptionClose(r) {
+    const p = { account_id: r.account_id, symbol: r.symbol, close_reason: 'expired',
+                contracts: r.contracts, date: r.expiry };
+    if (window.pdPrefillOptionClose) { close(); window.pdPrefillOptionClose(p); return; }
+    window.location.href = 'trades.html?option_close=expired&account_id='
+      + encodeURIComponent(p.account_id) + '&symbol=' + encodeURIComponent(p.symbol)
+      + '&contracts=' + encodeURIComponent(p.contracts || '') + '&date=' + encodeURIComponent(p.date || '');
+  }
+
+  function txLink(rc) {
+    return 'trades.html?ledger=tx&txn_id=' + encodeURIComponent(rc.txn_id)
+      + '&account_id=' + encodeURIComponent(rc.account_id || '')
+      + '&date=' + encodeURIComponent(rc.date || '');
+  }
+
+  function renderContractDrawer(head, body, symbol, detail) {
+    const o = detail.options;
+    const c = o.contract || {};
+    head.replaceChildren();
+    const code = el('span', 'sym-code', c.name || symbol);
+    code.title = symbol;
+    head.appendChild(code);
+    head.appendChild(el('span', 'badge', '美股選擇權・' + (c.right_label || '')));
+    head.appendChild(el('span', 'header-spacer'));
+    const x = el('button', 'sd-close', '✕');
+    x.type = 'button';
+    x.title = '關閉（Esc）';
+    x.addEventListener('click', close);
+    head.appendChild(x);
+
+    body.replaceChildren();
+    body.appendChild(contractSection(symbol, detail));
+    body.appendChild(realizedSection(symbol, detail));
+    const tx = txSection(symbol, detail);
+    if (tx) body.appendChild(tx);
+  }
+
+  function contractSection(symbol, detail) {
+    const o = detail.options;
+    const c = o.contract || {};
+    const sec = el('div', 'sd-section sd-contract');
+    sec.appendChild(secHead('合約', '每口 ' + c.multiplier + ' 股・不抓取報價，未平倉以最後一筆成交價估值'));
+    const grid = el('div', 'sd-stats');
+    const stat = (k, v, sub) => {
+      const d = el('div', 'sd-stat');
+      d.appendChild(el('span', 'k', k));
+      d.appendChild(typeof v === 'string' ? el('span', 'v', v) : v);
+      if (sub) d.appendChild(el('span', 's', sub));
+      return d;
+    };
+    const und = el('span', 'v sym-link sd-opt-underlying', c.underlying || '');
+    und.title = '查看標的 ' + (c.underlying || '');
+    und.addEventListener('click', () => { if (window.pdOpenSymbol) window.pdOpenSymbol(c.underlying); });
+    grid.appendChild(stat('標的', und));
+    grid.appendChild(stat('到期日', f.date(c.expiry)));
+    grid.appendChild(stat('履約價', f.price(c.strike, 'USD'), 'USD'));
+    grid.appendChild(stat('類型', c.right_label || c.right || ''));
+    sec.appendChild(grid);
+
+    (o.open || []).forEach((r) => {
+      const box = el('div', 'sd-opt-pos');
+      box.dataset.accountId = r.account_id;
+      const title = el('div', 'sd-opt-pos-head');
+      title.appendChild(el('span', 'sd-opt-acct', acctZh(r.account_id)));
+      title.appendChild(el('span', null, r.direction_label + ' ' + f.exact(r.contracts) + ' '
+        + OPTW.unit + '（' + f.shares(r.share_equivalents) + ' ' + OPTW.shareEq + '）'));
+      if (r.past_expiry) {
+        title.appendChild(el('span', 'badge badge-opt-past', '已過到期日・待登錄'));
+        const btn = el('button', 'btn btn-sm', '登錄到期作廢');
+        btn.type = 'button';
+        btn.addEventListener('click', () => prefillOptionClose(Object.assign({ expiry: c.expiry }, r)));
+        title.appendChild(btn);
+      }
+      if (r.unbookable_close) title.appendChild(el('span', 'badge badge-missing', OPTW.unbooked));
+      else if (r.oversold) title.appendChild(el('span', 'badge badge-missing', '賣超'));
+      box.appendChild(title);
+      const g = el('div', 'sd-stats');
+      g.appendChild(stat('平均權利金（每股）', f.price(r.average_premium, 'USD')));
+      g.appendChild(stat(r.direction === 'short' ? '已收權利金' : '已付權利金',
+        f.money(r.premium_total, 'USD'), 'USD'));
+      g.appendChild(stat('最後成交價', r.last_price == null ? f.NULL_GLYPH : f.price(r.last_price, 'USD'),
+        r.last_price_date ? f.date(r.last_price_date) : null));
+      g.appendChild(stat('市值', r.market_value == null ? f.NULL_GLYPH : f.signed(r.market_value, 'USD'), 'USD'));
+      const ur = el('span', 'v ' + f.signClass(r.unrealized),
+        r.unrealized == null ? f.NULL_GLYPH : f.signed(r.unrealized, 'USD'));
+      g.appendChild(stat('未實現', ur, 'USD'));
+      if (r.obligation != null) g.appendChild(stat('履約義務', f.money(r.obligation, 'USD'), 'USD'));
+      box.appendChild(g);
+      sec.appendChild(box);
+    });
+    if (!(o.open || []).length) {
+      sec.appendChild(el('div', 'sd-empty', '目前無未平倉部位 — 已實現與交易明細列在下方。'));
+    }
+    /* §4.4: a close the replay refused — named, with its remedy and a way to the row. */
+    (o.refused_closes || []).forEach((rc) => {
+      const line = el('div', 'sd-ledger-issue sd-opt-refused');
+      line.appendChild(el('span', null, '⚠ ' + OPTW.unbooked + '（' + acctZh(rc.account_id) + '・'
+        + f.date(rc.date) + '・' + rc.close_reason_label + '）：' + rc.reason + ' — ' + rc.remedy + ' '));
+      if (rc.txn_id != null) {
+        const a = el('a', 'sd-tx-issue-link', '前往該筆交易');
+        a.href = txLink(rc);
+        line.appendChild(a);
+      }
+      sec.appendChild(line);
+    });
+    sec.appendChild(el('div', 'sd-empty sd-opt-whatif', o.whatif_note || '選擇權不提供試算'));
+    return sec;
   }
 
   /* ---------- sections ---------- */
@@ -1079,9 +1215,14 @@
     }
     const wrap = el('div', 'table-wrap');
     const table = el('table', 'data');
+    /* A contract's rows are in share-equivalents and premiums (options spec §6.2); each says
+       how the contract closed (`closed_how`, the server's §6.1 word) as its chip. */
+    const isContract = !!(detail.options && detail.options.is_contract);
     /* 日期 first, as 交易明細 below it (M2-06): `sell_date` is the sale date, the dividend's
        payment date, or — for a short cover — the COVER date, which is when the gain realizes. */
-    table.innerHTML = '<thead><tr><th>日期</th><th class="col-text">帳戶</th><th>賣出股數</th><th>淨收款</th><th>調整成本移除</th><th>已實現損益</th></tr></thead>';
+    table.innerHTML = isContract
+      ? '<thead><tr><th>日期</th><th class="col-text">帳戶</th><th>結清（股當量）</th><th>收入權利金</th><th>支付權利金</th><th>已實現損益</th></tr></thead>'
+      : '<thead><tr><th>日期</th><th class="col-text">帳戶</th><th>賣出股數</th><th>淨收款</th><th>調整成本移除</th><th>已實現損益</th></tr></thead>';
     const tbody = el('tbody');
     rows.forEach((r) => {
       const tr = el('tr');
@@ -1091,7 +1232,9 @@
          不適用 rather than a misleading 0. */
       const isDiv = r.kind === 'dividend';
       const tdAcct = el('td', 'col-text', acctZh(r.account_id));
-      if (isDiv) {
+      if (r.closed_how) {
+        tdAcct.appendChild(el('span', 'rz-kind opt-reason', r.closed_how));
+      } else if (isDiv) {
         const chip = el('span', 'rz-kind', '股利');
         chip.title = '清倉後入帳的現金股利 — 已無成本可沖減，列為已實現收益';
         tdAcct.appendChild(chip);
@@ -1181,6 +1324,9 @@
     const allRows = (detail && detail.activity) || [];
     if (!allRows.length) return null;   // pure watchlist name → omit the section
     const reconcile = (detail && detail.activity_reconcile) || { total: null, by_account: {} };
+    /* A contract's footer counts share-equivalents (options spec §6.2: the book's count is
+       `options.open`'s, in 股當量) — the server says which unit. */
+    const unitWord = (detail && detail.options && detail.options.is_contract && detail.options.unit) || '股';
     const seq = drawerSeq;   // lifecycle token (guards the async pager-load hop only)
     const LIMIT = 10;
 
@@ -1239,7 +1385,19 @@
            and 「Charles Schwab」 on every row that button filtered. */
         tr.appendChild(el('td', 'col-text', acctZh(t.account_id)));
         const tdSide = el('td', 'col-text');
-        tdSide.appendChild(sideChip(t.side));
+        if (t.option_side) {
+          /* Options spec §6.1: the server's word for what the row did; a refused close
+             (§4.4) keeps its reason and is marked 未入帳（待釐清）. */
+          if (t.refused_close) {
+            tdSide.appendChild(sideChip(t.side));
+            if (t.close_reason_label) tdSide.appendChild(el('span', 'dir-chip dir-close', t.close_reason_label));
+            tdSide.appendChild(el('span', 'dir-chip dir-opt-unbooked', OPTW.unbooked));
+          } else {
+            tdSide.appendChild(el('span', 'dir-chip dir-opt', t.option_side));
+          }
+        } else {
+          tdSide.appendChild(sideChip(t.side));
+        }
         if (t.side === 'action') {
           const lbl = el('span', 'sd-act-label', actionLabel(t));
           lbl.style.cssText = 'margin-left:6px;color:var(--text-2)';
@@ -1248,8 +1406,15 @@
         }
         tr.appendChild(tdSide);
         /* An action row carries `shares: null` (see actionLabel) -> em-dash, never a
-           fabricated 0: f.shares nil-guards, but the intent is stated here. */
-        tr.appendChild(el('td', 'num', f.shares(t.shares)));
+           fabricated 0: f.shares nil-guards, but the intent is stated here. A contract's row
+           shows its 口數 (the server's) over the share-equivalents. */
+        if (t.contracts != null) {
+          const tdQ = el('td', 'num', f.exact(t.contracts) + ' ' + OPTW.unit);
+          tdQ.appendChild(el('span', 'opt-qty-sub', f.shares(t.shares) + ' ' + OPTW.shareEq));
+          tr.appendChild(tdQ);
+        } else {
+          tr.appendChild(el('td', 'num', f.shares(t.shares)));
+        }
         /* opening/配股 may carry no price/fee/tax → em-dash (never fabricate a 0). */
         tr.appendChild(el('td', 'num', t.price == null ? f.NULL_GLYPH : f.price(t.price, t.ccy)));
         tr.appendChild(el('td', 'num', t.fee == null ? f.NULL_GLYPH : f.money(t.fee, t.ccy)));
@@ -1302,7 +1467,7 @@
           : '＋公司行動 ' + shown);
       }
       footHost.appendChild(el('span', null,
-        parts.join(' ') + ' ＝ 部位摘要 ' + f.shares(rec.book_shares) + ' 股'));
+        parts.join(' ') + ' ＝ 部位摘要 ' + f.shares(rec.book_shares) + ' ' + unitWord));
       const badge = el('span', null, rec.balances ? ' ✓ 對帳一致' : ' ⚠ 對帳不一致');
       badge.style.cssText = 'margin-left:8px;font-weight:700;color:'
         + (rec.balances ? cssVar('--down') : cssVar('--up'));
@@ -1310,7 +1475,7 @@
       /* Name the gap. A red flag without its size tells the owner nothing they can act on;
          `diff_shares` is the server's exact signed figure (net − 部位摘要). */
       if (!rec.balances && rec.diff_shares != null) {
-        footHost.appendChild(el('span', null, '（差額 ' + f.shares(rec.diff_shares) + ' 股）'));
+        footHost.appendChild(el('span', null, '（差額 ' + f.shares(rec.diff_shares) + ' ' + unitWord + '）'));
       }
       const remedies = renderRemedies(rec);   // the corporate-action door renders inline here
       renderActionIssues();                   // the causes…
@@ -1333,7 +1498,14 @@
       const issues = (detail && detail.action_issues) || {};
       const actionCause = ['unapplied', 'depth_capped', 'negative_side_skipped']
         .some((k) => (issues[k] || []).filter(keep).length > 0);
-      if (actionCause || !rec.gap_is_refused_dividends) renderRepairDoor(true);
+      /* Options spec §4.4: a close row the replay refused is counted by the ledger path and
+         booked nowhere, so the footer is red by its quantity — its remedy is the server's
+         (delete the close row, or restore the trade it closes), not a corporate action. */
+      const refusedCloses = ((detail && detail.options && detail.options.refused_closes) || [])
+        .filter(keep);
+      if (actionCause || (!rec.gap_is_refused_dividends && !refusedCloses.length)) {
+        renderRepairDoor(true);
+      }
       const refused = (ledger.unbookable_dividends || []).filter(keep)
         .filter((r) => r.role === 'own' && r.reinvest);
       const toCash = [['前往資金收支', 'cash.html'], ['前往股利帳本', 'trades.html?ledger=div']];
@@ -1353,6 +1525,10 @@
       if (vacated) remedies.push(['vacated', '已換股標的的股利', vacated.remedy, toCash]);
       const shorted = refused.find((r) => r.cause === 'short');
       if (shorted) remedies.push(['short', '放空期間的股利', shorted.remedy, toCash]);
+      if (refusedCloses.length) {
+        remedies.push(['refused_close', '未入帳的結清列', refusedCloses[0].remedy,
+          [['前往該筆交易', txLink(refusedCloses[0])]]]);
+      }
       return remedies.map(([cause, label, text, links]) => {
         const row = el('div', 'sd-tx-remedy');
         row.dataset.cause = cause;
@@ -1480,6 +1656,12 @@
         .filter((r) => r.role === 'own' && r.reinvest).forEach((r) => {
           lines.push('⚠ 股利無法入帳（' + acctZh(r.account_id) + '）：' + r.reason);
         });
+      /* Options spec §4.4: a refused close row is a term of the ledger path the book does not
+         hold — a red footer on a contract names it. */
+      ((detail && detail.options && detail.options.refused_closes) || []).filter(keep).forEach((rc) => {
+        lines.push('⚠ ' + OPTW.unbooked + '（' + acctZh(rc.account_id) + '・' + f.date(rc.date) + '・'
+          + rc.close_reason_label + '）：' + rc.reason);
+      });
       lines.forEach((text) => {
         const row = el('div', 'sd-tx-issue', text);
         row.style.cssText = 'margin-top:4px;color:var(--up)';

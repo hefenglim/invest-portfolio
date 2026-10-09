@@ -186,3 +186,27 @@
   .dc-grid { grid-template-columns: 1fr; }
   .preview-card { position: static; }
 }
+
+/* ---- Options spec §8: the manual form's option mode ------------------------------------
+   The contract builder (inline, under 代號), the four side buttons + the two close buttons,
+   the picker footer's 「＋選擇權合約」, the two-leg card and the 轉倉 line. A side is a
+   direction, not P&L: the active button is filled neutrally, never red/green. */
+.opt-builder-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.opt-builder-row .input { width: auto; min-width: 0; flex: 1 1 110px; }
+.opt-builder-row #m-ob-underlying { flex: 0 1 110px; text-transform: uppercase; }
+.opt-builder-msg-err { color: var(--up); }
+.opt-side-seg { flex-wrap: wrap; }
+.opt-side-seg button.active { color: var(--bg); background: var(--text-2); font-weight: 700; }
+.opt-close-seg { margin-top: 4px; }
+.sym-pick-addopt { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  background: none; border: none; padding: 7px 8px; cursor: pointer; color: var(--accent);
+  font: inherit; font-weight: 600; border-radius: 6px; }
+.sym-pick-addopt:hover { background: rgba(255, 255, 255, .06); }
+.opt-mode-tag { margin-left: 6px; }
+.pc-leg { display: flex; flex-direction: column; gap: 2px; padding: 6px 0;
+  border-bottom: 1px solid var(--border-soft); }
+.pc-leg .pc-leg-label { font-size: 10.5px; font-weight: 700; color: var(--text-3); }
+.pc-leg .pc-leg-text { font-size: 12px; color: var(--text); }
+.pc-leg .pc-leg-amt { font-family: var(--font-num); font-size: 11px; color: var(--text-2); }
+.opt-roll { padding: 6px 0 0; }
+.opt-fee-link { margin-left: 6px; color: var(--accent); font-weight: 600; }

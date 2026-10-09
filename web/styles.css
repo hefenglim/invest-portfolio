@@ -2545,3 +2545,73 @@ select.ai-edit { padding-right: 2px; }
 /* DEF-024 (2026-09-23): a preview row's ADVISORY (`info`) — a grey note that asks for nothing,
    never painted as a warning. */
 .row-info { color: var(--text-3); font-size: 11px; line-height: 1.5; white-space: normal; }
+
+/* ---------- Options (spec §7, W5) ----------------------------------------------------------
+   The dashboard's 選擇權 section (web/options.js), the option rows elsewhere (ledger chips,
+   the manual form's option mode, the drawer, the expiry inbox). Every state colour is a
+   class here (DEF-077): 「已過到期日・待登錄」 is amber like 過期 — it asks for an entry, it is
+   not a data error; 未入帳（待釐清） reuses the red .badge-missing. Direction (買方／賣方) is
+   neutral, like 買／賣 — a direction is not P&L. */
+.opt-panel .opt-block { padding: 0 var(--pad) 12px; }
+.opt-sub-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0 6px; }
+.opt-sub-title { margin: 0; font-size: 13px; font-weight: 700; color: var(--text); }
+.opt-contract { font-weight: 600; color: var(--text); }
+.opt-contract.sym-link:hover { color: var(--accent); }
+.opt-acct { margin-left: 6px; font-size: 11px; color: var(--text-3); }
+.opt-caret { display: inline-block; width: 12px; color: var(--text-3); }
+.opt-paid { margin-left: 4px; font-size: 10px; color: var(--text-3); }
+.badge-opt-past {
+  color: var(--amber);
+  border-color: rgba(217, 161, 63, 0.4);
+  background: var(--amber-soft);
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+  margin-left: 6px;
+}
+.opt-close-btn { margin-left: 6px; }
+.opt-c-contract .badge { margin-left: 6px; vertical-align: middle; }
+.opt-detail-row td { background: var(--panel-2); }
+.opt-kv { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 6px 4px; font-size: 11px; }
+.opt-kv-item .k { color: var(--text-3); margin-right: 6px; }
+.opt-kv-item .v { color: var(--text); }
+.opt-obligation { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0 0;
+  font-size: 11px; color: var(--text-2); }
+.opt-obligation .k { font-weight: 700; color: var(--text); }
+.opt-refused-head { padding: 8px 0 4px; font-size: 12px; font-weight: 600; color: var(--up); }
+.opt-refused-list { list-style: none; margin: 0; padding: 0 0 0 16px; font-size: 11px; }
+.opt-refused-item { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+  padding: 2px 0; color: var(--text-2); }
+.opt-refused-meta { font-weight: 600; color: var(--text); white-space: nowrap; }
+.opt-refused-reason { flex: 1 1 320px; min-width: 0; }
+.opt-reason { margin-left: 0; }
+.opt-note, .trend-opt-note { padding: 6px var(--pad) 12px; font-size: 11px; line-height: 1.55;
+  color: var(--text-3); }
+.trend-opt-note { padding: 6px 2px 0; }
+.realized-opt-line { padding-top: 0; }
+.kpi-opt-row .k { color: var(--text-2); }
+/* Option side chips (§6.1) on the 交易 tab, the drawer and the manual form: neutral like the
+   買／賣 chips; a refused close (未入帳（待釐清）) reads red. */
+.dir-opt { margin-left: 4px; color: var(--text); border: 1px solid var(--border);
+  background: var(--panel-2); }
+.dir-opt-unbooked { margin-left: 4px; color: var(--up); border: 1px solid rgba(240, 84, 79, 0.4);
+  background: var(--up-soft); }
+.dir-close { margin-left: 4px; color: var(--text-2); border: 1px dashed var(--text-3); }
+.opt-qty-sub { display: block; font-size: 10px; color: var(--text-3); }
+@media (max-width: 640px) {
+  /* ≤ 640 px the 未平倉 table renders as cards (spec §7.1): one block per contract, each cell
+     a labelled line. The expander row stays a full-width block under its card. */
+  .opt-open-table thead { display: none; }
+  .opt-open-table, .opt-open-table tbody, .opt-open-table tr, .opt-open-table td {
+    display: block; width: 100%; box-sizing: border-box; }
+  .opt-open-table tr.opt-row { border: 1px solid var(--border); border-radius: var(--radius-sm);
+    margin: 0 0 8px; padding: 6px 8px; }
+  .opt-open-table tr.opt-row td { display: flex; justify-content: space-between; gap: 8px;
+    border: none; padding: 2px 0; text-align: right; white-space: normal; }
+  .opt-open-table tr.opt-row td::before { content: attr(data-label); color: var(--text-3);
+    text-align: left; flex: none; }
+  .opt-open-table tr.opt-row td.opt-c-contract { display: block; text-align: left; }
+  .opt-open-table tr.opt-row td.opt-c-contract::before { content: none; }
+  .opt-open-table tr.opt-detail-row { margin: -6px 0 8px; }
+  .opt-open-table tr.opt-detail-row[hidden] { display: none; }
+}

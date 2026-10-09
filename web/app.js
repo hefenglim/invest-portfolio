@@ -93,6 +93,48 @@
        is never nested under another block's early return. */
     renderUnregisteredBanner();
     renderUnappliedBanner();
+    renderRefusedCloseBanner();
+  }
+
+  /* Options spec §4.4: an expiry / assignment / exercise row the replay refused books nothing,
+     and XIRR + B are withheld for the WHOLE portfolio while one exists (the record, like the
+     orphan dividends). Same treatment as the unapplied-action block above: a visible list, one
+     line per row, the server's sentence and remedy verbatim, and 「前往該筆交易」 to the row in
+     the 交易 tab (ledger.js deep link `?ledger=tx&txn_id=`). Renders nothing without the
+     `options` block (a stock ledger) or with an empty list. */
+  function renderRefusedCloseBanner() {
+    const rows = (D.options && D.options.refused_closes) || [];
+    const page = document.querySelector('.page');
+    const old = document.getElementById('refused-close-banner');
+    if (old) old.remove();
+    if (!rows.length || !page) return;
+    const words = (window.pdOptionWords && window.pdOptionWords.closeReason) || {};
+    const bar = el('div', 'unreg-banner unapplied-banner');
+    bar.id = 'refused-close-banner';
+    const head = el('div', 'unapplied-head');
+    head.appendChild(el('span', 'unreg-ico', '⚠'));
+    head.appendChild(el('span', 'unreg-text',
+      '帳本中有 ' + rows.length + ' 筆選擇權到期作廢／被指派／履約列未入帳（待釐清）— '
+      + '整個投資組合的年化報酬率（XIRR）與含匯兌總損益暫不計算。'));
+    bar.appendChild(head);
+    const list = el('ul', 'unapplied-list');
+    rows.forEach((rc) => {
+      const li = el('li', 'unapplied-item');
+      li.appendChild(el('span', 'unapplied-meta',
+        acctZh(rc.account_id) + '・' + f.date(rc.date) + '・' + (words[rc.close_reason] || rc.close_reason)));
+      li.appendChild(el('span', 'unapplied-reason', rc.reason + ' — ' + rc.remedy));
+      if (rc.txn_id !== null && rc.txn_id !== undefined) {
+        const link = el('a', 'unreg-link', '前往該筆交易');
+        link.href = 'trades.html?ledger=tx&txn_id=' + encodeURIComponent(rc.txn_id)
+          + '&account_id=' + encodeURIComponent(rc.account_id || '')
+          + '&date=' + encodeURIComponent(rc.date || '');
+        li.appendChild(link);
+      }
+      list.appendChild(li);
+    });
+    bar.appendChild(list);
+    const after = document.getElementById('unapplied-banner') || document.getElementById('unreg-banner');
+    page.insertBefore(bar, after ? after.nextSibling : page.firstChild);
   }
 
   /* Unregistered-symbol warning (2026-07-02): ledger rows whose symbol has no
@@ -294,6 +336,11 @@
       if (cls === 'sign-down') card.classList.add('kpi-down');
     };
 
+    /* Options spec §7.1 / OPT-D5: on a ledger that carries an option the KPI totals INCLUDE
+       it, and each says how much with a 「其中選擇權」 row — the block's own reporting-currency
+       figures, never a sum or a difference formed here. Absent block → no row (invariant 1). */
+    const opt = D.options || null;
+
     /* 1 · 總市值 — the anchor, and the band's only unsigned figure. */
     {
       const card = mkCard('hero', '總市值');
@@ -303,6 +350,11 @@
       }
       card.appendChild(value);
       if (nil(k && k.total_market_value)) addFlag(card, '匯率不足', '匯率資料不足');
+      if (opt) {
+        addRow(card, '選擇權', opt.market_value && opt.market_value.reporting,
+          { indent: true, wi: true, reason: '匯率資料不足' });
+        card.lastChild.classList.add('kpi-opt-row');
+      }
     }
 
     /* 2 · 資產損益 (A). AI-D41: `total_return` applies today's spot to each currency's NET
@@ -347,7 +399,17 @@
     {
       const card = mkCard('detail', '損益拆解（' + ccy + '）');
       addRow(card, '已實現', k && k.realized_total);
+      if (opt) {
+        addRow(card, '選擇權', opt.realized && opt.realized.realized_total
+          && opt.realized.realized_total.reporting, { indent: true, wi: true, reason: '匯率資料不足' });
+        card.lastChild.classList.add('kpi-opt-row');
+      }
       addRow(card, '未實現', k && k.unrealized_total);
+      if (opt) {
+        addRow(card, '選擇權', opt.unrealized && opt.unrealized.reporting,
+          { indent: true, wi: true, reason: '匯率資料不足' });
+        card.lastChild.classList.add('kpi-opt-row');
+      }
       addCap(card, '兩者合計即上方「資產損益」。');
     }
 
@@ -386,6 +448,13 @@
         { reason: (k && k.fx_complete_reason) || '資料不足' });
       if (hasB && !nil(k.principal_fx_effect)) {
         addRow(card, '本金匯率效果', k.principal_fx_effect, { indent: true, wi: true });
+      } else if (hasB && opt && opt.principal_fx_note) {
+        /* OPT-D20: while an option is open B excludes its value and A includes its unrealized,
+           so B − A cannot isolate the FX effect — the row reads 「—」 with the server's reason,
+           instead of disappearing (a row that silently vanishes reads as a feature never built). */
+        addRow(card, '本金匯率效果', null,
+          { indent: true, wi: true, reason: opt.principal_fx_note });
+        addNote(card, opt.principal_fx_note);
       }
       const tfc = k && k.trading_financing_cost;
       const tfcSign = f.signClass(tfc);
@@ -393,6 +462,9 @@
         addRow(card, '交易與融資成本', tfc, { indent: true, wi: true });
       }
       if (!hasB) addNote(card, k && k.fx_complete_reason);
+      /* R3: B is trend-derived, so it leaves an open option's value out — the server's one
+         note says so (spec §5), here as under the trend chart and the 選擇權 section. */
+      if (hasB && opt && opt.note) addNote(card, opt.note);
       addCap(card, '與上方「資產損益」並列呈現，不相加。');
     }
 
@@ -1270,6 +1342,27 @@
       chip.appendChild(b);
       footer.appendChild(chip);
     });
+    /* OPT-D5: the option realized P&L is its own line — the table above is stocks only and
+       this line is never summed into its totals; the rows live in the 選擇權 section. */
+    const opt = D.options && D.options.realized && D.options.realized.realized_total;
+    const old = document.getElementById('realized-opt-line');
+    if (old) old.remove();
+    if (opt) {
+      const line = el('div', 'realized-footer realized-opt-line');
+      line.id = 'realized-opt-line';
+      line.appendChild(el('span', null, '選擇權已實現（另列，不含於上表）'));
+      Object.keys(opt.by_currency || {}).forEach((ccy) => {
+        const v = opt.by_currency[ccy];
+        const chip = el('span', 'ccy-chip');
+        chip.appendChild(el('span', null, ccy + ' '));
+        chip.appendChild(el('b', f.signClass(v), f.signed(v, ccy)));
+        line.appendChild(chip);
+      });
+      const link = el('a', 'unreg-link', '→ 選擇權區');
+      link.href = '#options-panel';
+      line.appendChild(link);
+      footer.parentNode.insertBefore(line, footer.nextSibling);
+    }
   }
 
   /* ============ H. 股利區 ============

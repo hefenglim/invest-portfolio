@@ -92,11 +92,46 @@
                   <div id="m-sym-list"></div>
                   <div class="sym-pick-foot" id="m-sym-foot">
                     <button type="button" id="m-sym-addnew" class="sym-pick-addnew">＋新增標的</button>
+                    <!-- Options spec §8: on an account that trades US stocks, the footer opens
+                         the contract builder (input.js); hidden on every other account. -->
+                    <button type="button" id="m-sym-addopt" class="sym-pick-addopt" hidden="hidden">＋選擇權合約</button>
                   </div>
                 </div>
                 <span class="hint" id="m-sym-hint"></span>
               </div>
-              <div class="field">
+              <!-- Options spec §8: the inline contract builder — 標的／到期日／履約價／買權｜賣權 →
+                   GET /api/input/option-symbol (the server composes the OCC symbol; the page
+                   never does). -->
+              <div class="field span-2 opt-builder" id="m-opt-builder" hidden="hidden">
+                <label>選擇權合約</label>
+                <div class="opt-builder-row">
+                  <input class="input" id="m-ob-underlying" placeholder="標的（US 代號）" spellcheck="false" autocomplete="off"></input>
+                  <input class="input" id="m-ob-expiry" type="date" title="到期日"></input>
+                  <input class="input" id="m-ob-strike" type="number" min="0" step="0.001" placeholder="履約價"></input>
+                  <div class="segmented" id="m-ob-right">
+                    <button type="button" data-right="C" id="m-ob-call">買權</button>
+                    <button type="button" data-right="P" id="m-ob-put" class="active">賣權</button>
+                  </div>
+                  <button class="btn btn-sm btn-primary" type="button" id="m-ob-make">建立合約</button>
+                  <button class="btn btn-sm" type="button" id="m-ob-cancel">取消</button>
+                </div>
+                <span class="hint" id="m-ob-msg"></span>
+              </div>
+              <div class="field opt-only" id="m-opt-side-field" hidden="hidden">
+                <label>選擇權方向</label>
+                <div class="segmented opt-side-seg" id="m-opt-sides">
+                  <button type="button" data-intent="STO">賣出開倉</button>
+                  <button type="button" data-intent="BTC">買進平倉</button>
+                  <button type="button" data-intent="BTO">買進開倉</button>
+                  <button type="button" data-intent="STC">賣出平倉</button>
+                </div>
+                <div class="segmented opt-side-seg opt-close-seg" id="m-opt-closes">
+                  <button type="button" data-close="expired">到期作廢</button>
+                  <button type="button" data-close="assign">被指派／履約</button>
+                </div>
+                <span class="hint" id="m-opt-side-hint"></span>
+              </div>
+              <div class="field stock-only" id="m-side-field">
                 <label>方向</label>
                 <div class="segmented side-seg">
                   <button type="button" id="m-side-buy" class="active buy-on">買進</button>
@@ -118,15 +153,29 @@
                 <label for="m-date">交易日期</label>
                 <input class="input" id="m-date" type="date"></input>
               </div>
-              <div class="field">
+              <div class="field stock-only" id="m-shares-field">
                 <label for="m-shares">股數</label>
                 <input class="input" id="m-shares" type="number" min="0"></input>
                 <span class="hint" id="m-shares-hint" hidden="hidden"></span>
               </div>
-              <div class="field">
-                <label for="m-price">價格</label>
+              <!-- Options spec §8 (OPT-D8): option mode enters 口數; the server returns the
+                   share-equivalents (「= 200 股當量」). -->
+              <div class="field opt-only" id="m-contracts-field" hidden="hidden">
+                <label for="m-contracts">口數</label>
+                <input class="input" id="m-contracts" type="number" min="1" step="1"></input>
+                <span class="hint" id="m-contracts-hint"></span>
+              </div>
+              <div class="field" id="m-price-field">
+                <label for="m-price" id="m-price-label">價格</label>
                 <input class="input" id="m-price" type="number" min="0" step="0.001"></input>
                 <span class="hint" id="m-price-hint" hidden="hidden"></span>
+              </div>
+              <!-- Options spec §4.2: an assignment / exercise also writes the stock leg — at the
+                   strike unless the statement says otherwise (blank = the strike). -->
+              <div class="field opt-only" id="m-stock-price-field" hidden="hidden">
+                <label for="m-stock-price">股票腿價格</label>
+                <input class="input" id="m-stock-price" type="number" min="0" step="0.001" placeholder="預設＝履約價"></input>
+                <span class="hint">留空＝以履約價成交</span>
               </div>
               <div class="field">
                 <label>手續費 <span class="ovr-chip" id="m-fee-ovr" hidden="hidden">已覆寫</span></label>
@@ -152,6 +201,9 @@
             <span class="hint" id="m-pc-label"></span>
             <div class="pc-rows" id="m-pc-rows"></div>
             <div class="issues" id="m-issues"></div>
+            <!-- Options spec §8: after a 買進平倉 commit, 「轉倉」 reopens the builder prefilled
+                 (same underlying / right / 口數 / date, side 賣出開倉) — two rows, no chain. -->
+            <div class="opt-roll" id="m-opt-roll" hidden="hidden"></div>
             <div class="pc-actions">
               <button class="btn" type="button" id="m-clear">清除</button>
               <button class="btn btn-primary" id="m-confirm" type="button">確認寫入</button>
@@ -189,7 +241,7 @@
           </div>
           <div class="field">
             <label for="csv-paste">或貼上 CSV 文字</label>
-            <textarea class="input" id="csv-paste" style="min-height:96px;" placeholder="account,symbol,side,date,shares,price,fee,tax,daytrade,short_sale,note" spellcheck="false"></textarea>
+            <textarea class="input" id="csv-paste" style="min-height:96px;" placeholder="account,symbol,side,date,shares,price,fee,tax,daytrade,short_sale,note,close_reason" spellcheck="false"></textarea>
           </div>
         </div>
         <input type="file" id="csv-file-input" accept=".csv,text/csv" hidden="hidden"></input>
@@ -445,8 +497,8 @@
     <div class="mode-pane" id="pane-laction">
       <div class="filter-bar" style="gap: 8px;">
         <button class="btn btn-primary btn-sm" id="action-add" type="button"
-                title="補登分割／換股／分拆，並自動套用到所有持有此標的的帳戶">＋補登公司行動</button>
-        <span class="hint">分割／換股／分拆會改變股數而不改變成本；一筆行動會同時登錄到所有持有該標的的帳戶。</span>
+                title="補登分割／換股／分拆／選擇權合約調整，並自動套用到所有持有此標的的帳戶">＋補登公司行動</button>
+        <span class="hint">分割／換股／分拆會改變股數而不改變成本；選擇權合約調整把 1 口舊合約換成 N 口新合約（履約價×口數不變）；一筆行動會同時登錄到所有持有該標的的帳戶。</span>
       </div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th>日期</th><th class="col-text">帳戶</th><th class="col-text">類型</th><th class="col-text">來源代號</th><th class="col-text">目的代號</th><th class="col-text">比例</th><th>成本分攤</th><th class="col-text">備註</th><th></th></tr></thead>

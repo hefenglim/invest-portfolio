@@ -34,6 +34,8 @@
 (function () {
   'use strict';
   const f = window.fmt;
+  /* §6.1 words for the holdings wire's option CODES (format.js, pinned to shared/options.py) */
+  const W = window.pdOptionWords || { direction: {}, unit: '口' };
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -92,6 +94,7 @@
       const emptyText = cfg.emptyText || ((built, q) => (q ? '無相符標的 — 可直接輸入代號' : '尚無標的'));
       const onPick = cfg.onPick || (() => {});
       const onType = cfg.onType || null;
+      const optionsOk = cfg.options === true;
 
       styleShell(cfg);
 
@@ -115,14 +118,22 @@
           + 'border-radius:6px;font:inherit;';
         b.addEventListener('mouseenter', () => { b.style.background = 'rgba(255,255,255,.06)'; });
         b.addEventListener('mouseleave', () => { b.style.background = 'none'; });
-        const code = el('span', null, row.symbol);
+        /* An option contract (options spec §6.2) is named by its display name — 「XYZ
+           2026-12-18 50 Put・賣方 2 口」 — with the OCC symbol on hover. */
+        const code = el('span', null, row.anno === 'option' ? (row.name || row.symbol) : row.symbol);
         code.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums;flex:none;';
+        if (row.anno === 'option') code.title = row.symbol;
         b.appendChild(code);
-        const name = el('span', null, row.name || '');
+        const name = el('span', null, row.anno === 'option' ? '' : (row.name || ''));
         name.style.cssText = 'color:var(--text-3,#8a92a3);font-size:11px;overflow:hidden;'
           + 'text-overflow:ellipsis;white-space:nowrap;';
         b.appendChild(name);
-        if (row.anno === 'shares') {
+        if (row.anno === 'option') {
+          const ann = el('span', null, row.optText);
+          ann.style.cssText = 'margin-left:auto;flex:none;font-size:10.5px;'
+            + 'font-variant-numeric:tabular-nums;color:var(--text-2,#c2c8d2);';
+          b.appendChild(ann);
+        } else if (row.anno === 'shares') {
           const ann = el('span', null, null);
           ann.style.cssText = 'margin-left:auto;display:flex;gap:10px;flex:none;font-size:10.5px;'
             + 'font-variant-numeric:tabular-nums;color:var(--text-2,#c2c8d2);';
@@ -167,9 +178,21 @@
          Returns { groups:[{header, rows, divider}], held, closed, showClosed }. */
       function buildGroups(data) {
         const a = accountOf();
-        const held = (data && data.held) || [];
+        /* Options spec §6.2: a held contract is listed only where it can be traded (the
+           manual picker, `cfg.options`); the dividend and opening doors refuse a contract, so
+           theirs never offer one. A contract nobody holds is never a 未持有 candidate either —
+           the builder (「＋選擇權合約」) composes it again in one step. */
+        const held = ((data && data.held) || [])
+          .filter((h) => optionsOk || h.asset_type !== 'option');
         const heldRow = (h) => {
           const it = instOf(h.symbol);
+          if (h.asset_type === 'option') {
+            return {
+              symbol: h.symbol, name: h.name || (it ? it.name : '') || h.symbol,
+              anno: 'option',
+              optText: (W.direction[h.direction] || '') + ' ' + f.exact(h.contracts) + ' ' + W.unit,
+            };
+          }
           return {
             symbol: h.symbol,
             name: h.name || (it ? it.name : '') || '',
@@ -181,7 +204,8 @@
           };
         };
         if (mode === 'held-closed') {
-          const closed = (data && data.closed) || [];
+          const closed = ((data && data.closed) || [])
+            .filter((c) => optionsOk || c.asset_type !== 'option');
           const showClosed = !!(closedToggle && closedToggle.checkbox && closedToggle.checkbox.checked)
             && closed.length > 0;
           const groups = [{ header: '已持有', rows: held.map(heldRow) }];
@@ -203,7 +227,8 @@
         const multi = markets.length > 1;
         const inMarket = (mk) => !marketFilter || markets.length === 0 || markets.indexOf(mk) >= 0;
         const notHeld = instrumentsOf()
-          .filter((i) => !heldSet[i.symbol] && !i.archived && inMarket(i.market))
+          .filter((i) => !heldSet[i.symbol] && !i.archived && inMarket(i.market)
+            && i.asset_type !== 'option')
           .map((i) => ({
             symbol: i.symbol, name: i.name || '', ccy: i.ccy || '', market: i.market || '',
             anno: (multi && i.market) ? 'market' : null,

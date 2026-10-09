@@ -313,3 +313,22 @@ window.pdField = (function () {
   return Object.freeze({ writeIfUntouched: writeIfUntouched, autoFill: autoFill,
                          resetField: resetField });
 })();
+
+/* ---- Options spec §6.1 — the zh words for the three option CODES the wire carries ---------
+   `direction` (long / short), `right` (C / P) and `close_reason` (expired / assigned /
+   exercised) reach the browser as CODES on a few wires (the dashboard `options` block, the
+   /api/input/holdings rows, the refused-close list); every other §6.1 word arrives as a
+   server string (`option_side`, `closed_how`, the drawer's `*_label`) and is printed as is.
+   These maps are the browser's ONLY copy of a §6.1 word, pinned to shared/options.py by
+   tests/contract/test_options_w5_vocabulary.py — a JS table that is not pinned drifts. */
+window.pdOptionWords = Object.freeze({
+  direction: Object.freeze({ long: '買方', short: '賣方' }),
+  right: Object.freeze({ C: '買權', P: '賣權' }),
+  closeReason: Object.freeze({ expired: '到期作廢', assigned: '被指派', exercised: '履約' }),
+  unit: '口',
+  shareEq: '股當量',
+  /* §4.4 — the remedy every surface prints beside a refused close; the ledger rows carry only
+     the `refused_close` flag, so the 交易 tab reads the sentence from here. */
+  refusedRemedy: '刪除該筆到期作廢／被指派／履約列，或補回被刪除的交易',
+  unbooked: '未入帳（待釐清）',
+});

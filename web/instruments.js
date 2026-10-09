@@ -20,6 +20,8 @@
   let listKnown = false;
   /* FU-D13: archived (停止追蹤) rows are hidden by default behind the toolbar toggle. */
   let showArchived = false;
+  /* Options spec §6.2: contracts hidden unless 「顯示選擇權合約」. */
+  let showOptions = false;
   const f = window.fmt;
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => {
@@ -109,10 +111,22 @@
         ? '隱藏已移除／封存'
         : ('顯示已移除／封存（' + archivedCount + '）');
     }
+    /* Options spec §6.2: contracts are fetched (`include_options=1`) but listed only behind
+       「顯示選擇權合約」 — the watchlist is a stock list; the toggle exists only when a
+       contract does. */
+    const optionCount = D.list.filter((i) => i.asset_type === 'option').length;
+    const optToggle = $('#toggle-options');
+    if (optToggle) {
+      optToggle.style.display = optionCount ? '' : 'none';
+      optToggle.textContent = showOptions
+        ? '隱藏選擇權合約'
+        : ('顯示選擇權合約（' + optionCount + '）');
+    }
     /* Item 8 (owner 2026-09-30): an alias finds the row too — 大立光 finds 3008 LARGAN. */
     const matches = (i) => !q || i.symbol.toLowerCase().includes(q) || (i.name || '').toLowerCase().includes(q)
       || (i.aliases || []).some((a) => a.toLowerCase().includes(q));
-    const visible = D.list.filter((i) => showArchived || !i.archived).filter(matches);
+    const visible = D.list.filter((i) => showArchived || !i.archived)
+      .filter((i) => showOptions || i.asset_type !== 'option').filter(matches);
     visible.forEach((i) => {
         const tr = el('tr');
         if (i.archived) tr.classList.add('inst-archived');
@@ -475,7 +489,7 @@
   async function refresh() {
     let resp;
     try {
-      resp = await window.pdApi.get('/api/instruments');
+      resp = await window.pdApi.get('/api/instruments', { include_options: 1 });
     } catch (err) {
       D = { list: [] };
       listKnown = false;  // M6-04: an unknown list is blank, never 「尚無標的」
@@ -501,5 +515,12 @@
     showArchived = !showArchived;
     render($('#inst-search').value);
   });
+  const optToggleBtn = $('#toggle-options');
+  if (optToggleBtn) {
+    optToggleBtn.addEventListener('click', () => {
+      showOptions = !showOptions;
+      render($('#inst-search').value);
+    });
+  }
   refresh();
 })();

@@ -140,6 +140,7 @@
     $('#m-confirm').addEventListener('click', commitManual);
     $('#m-clear').addEventListener('click', clearManual);
     initManualPicker();   // #8: grouped 已持有／未持有 代號 picker (replaces the free-text datalist)
+    initOptionMode();     // options spec §8: the builder, the side buttons, 口數
     schedulePreview();
   }
   /* 「清除」 (audit M3, 2026-07-26): the button existed in the markup since the form was
@@ -151,10 +152,16 @@
      re-renders the neutral pristine state with 確認寫入 disabled (runManualPreview's
      empty-form branch), so the preview never keeps stale rows. */
   function clearManual() {
-    ['m-symbol', 'm-shares', 'm-price', 'm-fee', 'm-tax'].forEach((id) => {
+    ['m-symbol', 'm-shares', 'm-price', 'm-fee', 'm-tax', 'm-contracts', 'm-stock-price'].forEach((id) => {
       const n = $('#' + id);
       if (n) n.value = '';
     });
+    /* option mode resets with the form (its side, the builder, a pending 轉倉) */
+    optState.intent = null; optState.close = null; optState.autoSide = null; optState.roll = null;
+    const ob = $('#m-opt-builder');
+    if (ob) ob.hidden = true;
+    const roll = $('#m-opt-roll');
+    if (roll) roll.hidden = true;
     const dt = $('#m-daytrade');
     if (dt) dt.checked = false;
     const sc = $('#m-short');
@@ -235,6 +242,7 @@
      through as the user's raw string (the input-side numeric is sent; the backend
      computes the value of record). Empty/blank => omit (let the backend auto-fill). */
   function manualBody() {
+    if (optState.on) return optionBody();
     const sym = $('#m-symbol').value.trim();
     const sharesRaw = $('#m-shares').value.trim();
     const priceRaw = $('#m-price').value.trim();
@@ -266,9 +274,40 @@
     return body;
   }
 
+  /* Option mode's ManualBody (options spec §4.2 / §8): 口數 + the side BUTTON, or a close
+     reason — never `shares` / `side` (the server derives both). The premium per share and the
+     fee/tax overrides ride as the owner's raw strings, like the stock form's. */
+  function optionBody() {
+    const sym = $('#m-symbol').value.trim().toUpperCase();
+    const body = {
+      account_id: $('#m-account').value || (ctx.accounts[0] && ctx.accounts[0].id) || '',
+      symbol: sym,
+      date: $('#m-date').value || TODAY,
+      contracts: $('#m-contracts').value.trim() || '0',
+    };
+    if (optState.close) {
+      body.close_reason = closeReasonOf(sym);
+      const sp = $('#m-stock-price') ? $('#m-stock-price').value.trim() : '';
+      if (optState.close === 'assign' && sp !== '') body.stock_price = sp;
+      return body;
+    }
+    body.option_intent = optState.intent || 'STO';
+    body.price = $('#m-price').value.trim() || '0';
+    if (m.feeOverride) {
+      const fv = $('#m-fee').value.trim();
+      if (fv !== '') body.fee_override = fv;
+    }
+    if (m.taxOverride) {
+      const tv = $('#m-tax').value.trim();
+      if (tv !== '') body.tax_override = tv;
+    }
+    return body;
+  }
+
   /* Debounce the live preview so each keystroke does not fire a request. */
   let previewTimer = null;
   function schedulePreview() {
+    syncOptionMode();            // options spec §8: which fields this 代號 needs
     renderSymbolHint();          // local, instant
     renderSellHints();           // FU-D44: instant from cache; async fill on a cache miss
     if (previewTimer) clearTimeout(previewTimer);
@@ -280,6 +319,15 @@
     const it = inst(sym);
     const symHint = $('#m-sym-hint');
     symHint.replaceChildren();
+    const contract = optInst(sym);
+    if (contract) {
+      /* A contract: its name (the server's), and — when only the builder knows it — that the
+         first commit registers it from its symbol (OPT-D7; no quote lookup). */
+      symHint.appendChild(el('span', null, contract.name || contract.symbol));
+      symHint.appendChild(el('span', 'badge badge-info-mini opt-mode-tag', '選擇權'));
+      if (!it) symHint.appendChild(el('span', null, '　新合約 — 寫入時由代號建立'));
+      return;
+    }
     if (sym && !it) {
       symHint.appendChild(el('span', null, '未註冊 — 寫入時將自動查詢並註冊（依帳戶判定市場）　'));
       /* The ETF answer, asked at the moment the user is already looking at the symbol
@@ -340,6 +388,24 @@
     const hide = (n) => { n.hidden = true; n.replaceChildren(); };
     const a = acc($('#m-account').value);
     const it = inst($('#m-symbol').value.trim());
+    if (optState.on) {
+      /* Option mode: 「可平倉 N 口」 under 口數 (the server's count; click fills it). */
+      hide(sharesHint); hide(priceHint);
+      const ch = $('#m-contracts-hint');
+      if (!ch) return;
+      ch.replaceChildren();
+      const h = heldOption($('#m-symbol').value);
+      if (h && h.contracts) {
+        const b = el('button', 'btn-link', '可平倉 ' + f.exact(h.contracts) + ' ' + OPT_WORDS.unit);
+        b.type = 'button';
+        b.title = '點擊帶入（' + (OPT_WORDS.direction[h.direction] || '') + '部位全部口數）';
+        b.addEventListener('click', () => { $('#m-contracts').value = h.contracts; schedulePreview(); });
+        ch.appendChild(b);
+      }
+      const se = mPreview && mPreview.share_equivalents;
+      if (se) ch.appendChild(el('span', 'opt-se-hint', '　= ' + f.shares(se) + ' ' + OPT_WORDS.shareEq));
+      return;
+    }
     if (m.side !== 'sell' || !a || !it) { hide(sharesHint); hide(priceHint); return; }
     const data = acctHoldingsCache[a.id];
     if (!data) {
@@ -386,6 +452,310 @@
       priceHint.appendChild(fillBtn(today + '持有均價 ' + f.price(held.adjusted_avg, it.ccy),
         '#m-price', held.adjusted_avg));
     }
+  }
+
+  /* ================= Option mode (options spec §4.2 / §8, W5) =================
+     A US account's manual form takes option trades. Option mode is ON when the 代號 is an
+     option contract — a registered one (`asset_type: 'option'` on the context wire) or one the
+     builder just composed (the server's `{symbol, name}`; the contract registers on the first
+     commit). The browser never composes an OCC symbol, never converts 口 ↔ 股當量 and never
+     forms a premium total: it sends 口數 (`contracts`) and the side BUTTON (`option_intent`),
+     or `close_reason`, and prints what the preview answers.
+       · four side buttons — 賣出開倉 / 買進平倉 / 買進開倉 / 賣出平倉 — defaulted BY POSITION
+         (OPT-D18: held short → 買進平倉, held long → 賣出平倉, none → 賣出開倉), and 口數
+         defaulted to the whole position on a closing side;
+       · 到期作廢 and 被指派／履約 (a sold contract is ASSIGNED, a bought one EXERCISED — §4.1),
+         the latter a two-leg card with an editable 股票腿價格 (blank = the strike);
+       · after a 買進平倉 commit, 「轉倉」 reopens the builder for the next 賣出開倉. */
+  const OPT_WORDS = window.pdOptionWords || { direction: {}, closeReason: {}, unit: '口',
+                                              shareEq: '股當量' };
+  const optState = {
+    on: false, symbol: null, intent: null, close: null, keepSide: false,
+    built: Object.create(null),   // symbol -> {name, underlying, right} the builder composed
+    autoSide: null,               // the side the position chose (a click overrides it)
+    roll: null,                   // {contracts, date} pending a 轉倉 build
+  };
+  const CLOSE_INTENT = { BTC: true, STC: true };
+
+  function optInst(sym) {
+    const s = (sym || '').trim().toUpperCase();
+    if (!s) return null;
+    const it = inst(s);
+    if (it && it.asset_type === 'option') return { symbol: it.symbol, name: it.name };
+    const b = optState.built[s];
+    return b ? { symbol: s, name: b.name } : null;
+  }
+  /* The account's held position in this contract, from /api/input/holdings (the server's
+     direction and 口數 — never derived here). */
+  function heldOption(sym) {
+    const a = acc($('#m-account').value);
+    const data = a ? acctHoldingsCache[a.id] : null;
+    const s = (sym || '').trim().toUpperCase();
+    return ((data && data.held) || []).find((h) => h.symbol === s && h.asset_type === 'option')
+      || null;
+  }
+  function accountTradesUs(a) {
+    const mk = acctMarkets(a);
+    return mk.length ? mk.indexOf('US') >= 0 : !!(a && (a.ccy === 'USD' || a.settlement_ccy === 'USD'));
+  }
+  function closeReasonOf(sym) {
+    if (optState.close === 'expired') return 'expired';
+    const h = heldOption(sym);
+    return h && h.direction === 'long' ? 'exercised' : 'assigned';
+  }
+
+  /* Paint the side buttons; `intent`/`close` are mutually exclusive. */
+  function paintOptSides() {
+    document.querySelectorAll('#m-opt-sides button').forEach((b) => {
+      b.classList.toggle('active', !optState.close && b.dataset.intent === optState.intent);
+    });
+    document.querySelectorAll('#m-opt-closes button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.close === optState.close);
+    });
+  }
+
+  /* The position default (OPT-D18), applied while the owner has not picked a side. */
+  function applyPositionDefault() {
+    if (optState.autoSide === 'user') return;
+    const h = heldOption($('#m-symbol').value);
+    const intent = !h ? 'STO' : (h.direction === 'short' ? 'BTC' : 'STC');
+    if (optState.intent !== intent || optState.close) {
+      optState.intent = intent;
+      optState.close = null;
+    }
+    optState.autoSide = 'position';
+    paintOptSides();
+    fillWholePosition();
+  }
+  /* 口數 = the whole position on a closing side — only into an EMPTY field (or the page's own
+     earlier fill): a typed 口數 is the owner's. */
+  function fillWholePosition() {
+    const h = heldOption($('#m-symbol').value);
+    const closing = optState.close || CLOSE_INTENT[optState.intent];
+    if (h && h.contracts && closing) window.pdField.autoFill($('#m-contracts'), h.contracts);
+  }
+
+  /* Show / hide the option-only fields; called on every schedulePreview. */
+  function syncOptionMode() {
+    const sym = $('#m-symbol').value.trim();
+    const was = optState.on;
+    const contract = optInst(sym);
+    optState.on = !!contract;
+    const changed = optState.on && optState.symbol !== (contract && contract.symbol);
+    optState.symbol = contract ? contract.symbol : null;
+    if (!optState.on && was) {
+      optState.intent = null; optState.close = null; optState.autoSide = null;
+    }
+    const on = optState.on;
+    const show = (id, v) => { const n = $('#' + id); if (n) n.hidden = !v; };
+    show('m-side-field', !on);
+    show('m-shares-field', !on);
+    show('m-opt-side-field', on);
+    show('m-contracts-field', on);
+    show('m-price-field', !(on && optState.close));
+    show('m-stock-price-field', on && optState.close === 'assign');
+    const lbl = $('#m-price-label');
+    if (lbl) lbl.textContent = on ? '權利金（每股）' : '價格';
+    let ph = $('#m-premium-hint');
+    if (on && !ph) {
+      ph = el('span', 'hint', '對帳單 Price 欄；總權利金由伺服器計算');
+      ph.id = 'm-premium-hint';
+      $('#m-price-field').appendChild(ph);
+    }
+    if (ph) ph.hidden = !on;
+    /* A NEW contract in 代號: the side follows its position again — unless a caller (the
+       prefill, 轉倉) or the owner already chose one for it. */
+    if (on && (changed || !was)) {
+      if (optState.keepSide) {
+        optState.keepSide = false;          // a prefill / 轉倉 chose this contract's side
+      } else {
+        optState.autoSide = null;
+        applyPositionDefault();
+      }
+      const a = acc($('#m-account').value);
+      if (a && !acctHoldingsCache[a.id]) {
+        loadAcctHoldings(a.id, false).then(() => {
+          if (optState.on) { applyPositionDefault(); schedulePreview(); }
+        }).catch(() => {});
+      }
+    }
+    optState.keepSide = false;   // one-shot: consumed by the sync it was set for
+    paintOptSides();
+    show('m-price-field', !(on && optState.close));
+    show('m-stock-price-field', on && optState.close === 'assign');
+    const hint = $('#m-opt-side-hint');
+    if (hint) {
+      const h = on ? heldOption(sym) : null;
+      hint.textContent = !on ? '' : (h
+        ? '目前持有' + (OPT_WORDS.direction[h.direction] || h.direction) + '部位 '
+          + f.exact(h.contracts) + ' ' + OPT_WORDS.unit
+        : '此帳戶目前沒有這個合約的部位');
+    }
+  }
+
+  /* The picker footer's 「＋選擇權合約」 — shown only on an account that trades US stocks. */
+  function syncOptionFooter() {
+    const btn = $('#m-sym-addopt');
+    if (btn) btn.hidden = !accountTradesUs(acc($('#m-account').value));
+  }
+
+  function openOptionBuilder(prefill) {
+    const box = $('#m-opt-builder');
+    if (!box) return;
+    if (manualPicker) manualPicker.close();
+    const p = prefill || {};
+    const und = $('#m-ob-underlying');
+    if (p.underlying) und.value = p.underlying;
+    else if (!und.value) {
+      const it = inst($('#m-symbol').value);
+      if (it && it.market === 'US' && it.asset_type !== 'option') und.value = it.symbol;
+    }
+    if (p.right) {
+      document.querySelectorAll('#m-ob-right button').forEach((b) => {
+        b.classList.toggle('active', b.dataset.right === p.right);
+      });
+    }
+    if (p.clearTerms) { $('#m-ob-expiry').value = ''; $('#m-ob-strike').value = ''; }
+    const msg = $('#m-ob-msg');
+    msg.textContent = '';
+    msg.classList.remove('opt-builder-msg-err');
+    box.hidden = false;
+    (p.focus === 'expiry' ? $('#m-ob-expiry') : und).focus();
+  }
+
+  /* 建立合約 → the compose endpoint; the server's symbol + name land in 代號. */
+  async function makeOptionContract() {
+    const und = $('#m-ob-underlying').value.trim().toUpperCase();
+    const expiry = $('#m-ob-expiry').value;
+    const strike = $('#m-ob-strike').value.trim();
+    const rightBtn = document.querySelector('#m-ob-right button.active');
+    const right = rightBtn ? rightBtn.dataset.right : 'P';
+    const msg = $('#m-ob-msg');
+    const symIn = $('#m-symbol');
+    const before = symIn.value;
+    let resp;
+    try {
+      resp = await api.get('/api/input/option-symbol',
+        { underlying: und, expiry: expiry, strike: strike, right: right });
+    } catch (err) {
+      msg.textContent = (err && err.message) || '無法建立合約';
+      msg.classList.add('opt-builder-msg-err');
+      return;
+    }
+    optState.built[resp.symbol] = { name: resp.name, underlying: und, right: right };
+    msg.classList.remove('opt-builder-msg-err');
+    msg.textContent = '已建立：' + resp.name + '（' + resp.symbol + '）';
+    if (!window.pdField.writeIfUntouched(symIn, before, resp.symbol)) return;
+    $('#m-opt-builder').hidden = true;
+    const roll = optState.roll;
+    optState.roll = null;
+    if (roll) {
+      /* 轉倉: the new contract opens on the SAME 口數 and date, side 賣出開倉 (spec §8). */
+      optState.intent = 'STO'; optState.close = null; optState.autoSide = 'user';
+      optState.keepSide = true;
+      window.pdField.autoFill($('#m-contracts'), roll.contracts);
+      window.pdField.autoFill($('#m-date'), roll.date);
+    }
+    schedulePreview();
+    const c = $('#m-contracts');
+    if (c) c.focus();
+  }
+
+  /* A contract's underlying / right: the builder's own record, else the drawer wire's terms
+     (parsed from the symbol by the server — never here). */
+  async function optionTerms(sym) {
+    const s = (sym || '').trim().toUpperCase();
+    if (optState.built[s]) return optState.built[s];
+    try {
+      const d = await api.get('/api/symbol/' + encodeURIComponent(s) + '/detail');
+      const c = d && d.options && d.options.contract;
+      return c ? { underlying: c.underlying, right: c.right, name: c.name } : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /* After a 買進平倉 commit: 「轉倉：賣出開倉同標的新合約」. */
+  function showRollButton(sym, contractsRaw, dateRaw) {
+    const host = $('#m-opt-roll');
+    if (!host) return;
+    host.replaceChildren();
+    const b = el('button', 'btn btn-sm', '轉倉：賣出開倉同標的新合約');
+    b.type = 'button';
+    b.id = 'm-opt-roll-btn';
+    b.title = '以相同標的、買權／賣權、口數與日期開啟合約建立器，方向為賣出開倉（另寫一筆，不串連）';
+    b.addEventListener('click', async () => {
+      const t = await optionTerms(sym);
+      host.hidden = true;
+      optState.roll = { contracts: contractsRaw, date: dateRaw };
+      openOptionBuilder({ underlying: t && t.underlying, right: t && t.right,
+                          clearTerms: true, focus: 'expiry' });
+    });
+    host.appendChild(b);
+    host.hidden = false;
+  }
+
+  /* Prefill from the dashboard's 「登錄到期作廢」, the expiry inbox's 「改登錄被指派／履約」
+     (both `trades.html?option_close=…`) or an in-page caller. */
+  window.pdPrefillOptionClose = function (p) {
+    const tab = document.getElementById('tab-manual');
+    if (tab) tab.click();
+    const section = document.getElementById('input-section');
+    if (section) section.classList.add('open');
+    const set = (id, v) => { const n = $('#' + id); if (n && v !== undefined && v !== null && v !== '') n.value = v; };
+    set('m-account', p.account_id);
+    set('m-symbol', p.symbol);
+    set('m-contracts', p.contracts);
+    set('m-date', p.date);
+    optState.close = p.close_reason === 'expired' ? 'expired' : 'assign';
+    optState.intent = null;
+    optState.autoSide = 'user';
+    optState.keepSide = true;
+    schedulePreview();     // → syncOptionMode: option mode on, the chosen close kept
+  };
+  function applyOptionPrefillFromUrl() {
+    let q;
+    try { q = new URLSearchParams(window.location.search); } catch (e) { return; }
+    const reason = q.get('option_close');
+    if (!reason) return;
+    window.pdPrefillOptionClose({
+      close_reason: reason, account_id: q.get('account_id'), symbol: q.get('symbol'),
+      contracts: q.get('contracts'), date: q.get('date'),
+    });
+  }
+
+  function initOptionMode() {
+    document.querySelectorAll('#m-opt-sides button').forEach((b) => {
+      b.addEventListener('click', () => {
+        optState.intent = b.dataset.intent; optState.close = null; optState.autoSide = 'user';
+        paintOptSides(); fillWholePosition(); syncOptionMode(); schedulePreview();
+      });
+    });
+    document.querySelectorAll('#m-opt-closes button').forEach((b) => {
+      b.addEventListener('click', () => {
+        optState.close = b.dataset.close; optState.intent = null; optState.autoSide = 'user';
+        paintOptSides(); fillWholePosition(); syncOptionMode(); schedulePreview();
+      });
+    });
+    document.querySelectorAll('#m-ob-right button').forEach((b) => {
+      b.addEventListener('click', () => {
+        document.querySelectorAll('#m-ob-right button').forEach((x) => x.classList.toggle('active', x === b));
+      });
+    });
+    const make = $('#m-ob-make');
+    if (make) make.addEventListener('click', makeOptionContract);
+    const cancel = $('#m-ob-cancel');
+    if (cancel) cancel.addEventListener('click', () => { $('#m-opt-builder').hidden = true; optState.roll = null; });
+    const addOpt = $('#m-sym-addopt');
+    if (addOpt) {
+      addOpt.addEventListener('mousedown', (e) => { e.preventDefault(); openOptionBuilder(); });
+      addOpt.addEventListener('click', () => openOptionBuilder());
+    }
+    ['m-contracts', 'm-stock-price'].forEach((id) => {
+      const n = $('#' + id);
+      if (n) n.addEventListener('input', schedulePreview);
+    });
+    syncOptionFooter();
   }
 
   /* Market resolution for the input forms (Batch B — merged multi-market accounts).
@@ -512,7 +882,13 @@
   function onManualAccountChange() {
     if (manualPicker) manualPicker.close();
     const accId = $('#m-account').value;
-    if (accId) loadAcctHoldings(accId, false).catch(() => {});
+    syncOptionFooter();          // 「＋選擇權合約」 only where the account trades US stocks
+    optState.autoSide = null;    // a contract's side follows THIS account's position
+    if (accId) {
+      loadAcctHoldings(accId, false).then(() => {
+        if (optState.on) { applyPositionDefault(); schedulePreview(); }
+      }).catch(() => {});
+    }
   }
 
   function initManualPicker() {
@@ -526,6 +902,7 @@
       mode: 'held-unheld',
       marketFilter: true,
       annotateHeld: true,
+      options: true,      // options spec §6.2: held contracts in 已持有 (「…・賣方 2 口」)
       accountOf: () => acc($('#m-account').value),
       instrumentsOf: () => ctx.instruments,
       instOf: (s) => inst(s),
@@ -570,25 +947,49 @@
     const shares = Number($('#m-shares').value) || 0;
     const price = Number($('#m-price').value) || 0;
 
-    /* pristine form (boots empty since 2026-07-02): no red errors on an untouched
-       page — render the neutral empty state with the confirm disabled. A selected symbol
-       alone does not end pristineness (L18): after a commit or 清除 the symbol may stay for
-       the next entry, and 「股數必須大於 0」 before any 股數 was typed blames the user for a
-       field the page itself just emptied. Both entry fields empty ⇒ neutral. */
-    if ($('#m-shares').value.trim() === '' && $('#m-price').value.trim() === '') {
-      mPreview = null;
-      renderManual(null, [], false);
-      return;
-    }
+    if (optState.on) {
+      /* Option mode (spec §8): 口數 + 權利金 (a close row has no premium — price 0 by
+         definition, so only 口數 is asked for). The checks below are on the owner's own
+         typed counts, never on a money figure. */
+      const closing = !!optState.close;
+      if ($('#m-contracts').value.trim() === '' && (closing || $('#m-price').value.trim() === '')) {
+        mPreview = null;
+        renderManual(null, [], false);
+        return;
+      }
+      const optIssues = [];
+      if (!(Number($('#m-contracts').value) > 0)) {
+        optIssues.push({ sev: 'error', text: '口數必須大於 0', field: 'm-contracts' });
+      }
+      if (!closing && !(price > 0)) {
+        optIssues.push({ sev: 'error', text: '權利金必須大於 0', field: 'm-price' });
+      }
+      if (optIssues.length) {
+        mPreview = null;
+        renderManual(null, optIssues, false);
+        return;
+      }
+    } else {
+      /* pristine form (boots empty since 2026-07-02): no red errors on an untouched
+         page — render the neutral empty state with the confirm disabled. A selected symbol
+         alone does not end pristineness (L18): after a commit or 清除 the symbol may stay for
+         the next entry, and 「股數必須大於 0」 before any 股數 was typed blames the user for a
+         field the page itself just emptied. Both entry fields empty ⇒ neutral. */
+      if ($('#m-shares').value.trim() === '' && $('#m-price').value.trim() === '') {
+        mPreview = null;
+        renderManual(null, [], false);
+        return;
+      }
 
-    const localIssues = [];
-    if (!sym) localIssues.push({ sev: 'error', text: '請輸入代號', field: 'm-symbol' });
-    if (shares <= 0) localIssues.push({ sev: 'error', text: '股數必須大於 0', field: 'm-shares' });
-    if (price <= 0) localIssues.push({ sev: 'error', text: '價格必須大於 0', field: 'm-price' });
-    if (localIssues.length) {
-      mPreview = null;
-      renderManual(null, localIssues, false);
-      return;
+      const localIssues = [];
+      if (!sym) localIssues.push({ sev: 'error', text: '請輸入代號', field: 'm-symbol' });
+      if (shares <= 0) localIssues.push({ sev: 'error', text: '股數必須大於 0', field: 'm-shares' });
+      if (price <= 0) localIssues.push({ sev: 'error', text: '價格必須大於 0', field: 'm-price' });
+      if (localIssues.length) {
+        mPreview = null;
+        renderManual(null, localIssues, false);
+        return;
+      }
     }
 
     const ctrl = api.abortable('manual-preview');
@@ -611,6 +1012,13 @@
     if (!m.feeOverride) $('#m-fee').value = resp.fee !== undefined ? f.money(resp.fee, ccy) : '0';
     if (!m.taxOverride) $('#m-tax').value = resp.tax !== undefined ? f.money(resp.tax, ccy) : '0';
     if (resp.fee_rule_label) $('#m-fee-rule').textContent = resp.fee_rule_label;
+    if (optState.on) {
+      /* The 股票腿 price the server used (the strike by default) lands in its field — only
+         into an empty field or the page's own earlier fill (pdField): a typed price wins. */
+      const stockLeg = (resp.legs || []).find((l) => l.role === 'stock');
+      if (stockLeg && $('#m-stock-price')) window.pdField.autoFill($('#m-stock-price'), stockLeg.price);
+      renderSellHints();       // 「= 200 股當量」 from this preview
+    }
     renderManual(resp, (resp.issues || []), true);
   }
 
@@ -673,8 +1081,12 @@
     Object.keys(m.acks).forEach((k) => { if (liveAcks.indexOf(k) < 0) delete m.acks[k]; });
 
     /* field-error highlight from issue.field (mapped to the m-* input ids) */
-    const FIELD_ID = { symbol: 'm-symbol', shares: 'm-shares', price: 'm-price' };
-    ['m-symbol', 'm-shares', 'm-price'].forEach((id) => $('#' + id).classList.remove('field-error'));
+    const FIELD_ID = { symbol: 'm-symbol', shares: optState.on ? 'm-contracts' : 'm-shares',
+                       contracts: 'm-contracts', price: 'm-price' };
+    ['m-symbol', 'm-shares', 'm-price', 'm-contracts'].forEach((id) => {
+      const n = $('#' + id);
+      if (n) n.classList.remove('field-error');
+    });
     issues.forEach((i) => {
       const id = i.field && (FIELD_ID[i.field] || (i.field.indexOf('m-') === 0 ? i.field : null));
       if (id) $('#' + id).classList.add('field-error');
@@ -686,8 +1098,20 @@
        a STRING op — no arithmetic on the money string — before handing it to fmt. */
     const hasServer = serverOk && preview && preview.total !== undefined && preview.total !== null;
     const totalAbs = hasServer ? String(preview.total).replace(/^-/, '') : null;
-    $('#m-pc-label').textContent = m.side === 'buy' ? '總成本（含費稅）' : '淨收款（扣費稅）';
-    $('#m-pc-value').textContent = hasServer ? f.money(totalAbs, ccy) : f.NULL_GLYPH;
+    /* Options spec §8: option mode's large label — 「淨收權利金」／「權利金總成本」 by the side
+       button, 到期作廢 a zero-cash close, and an assignment / exercise the STOCK leg's cash
+       (signed: a put assigned buys, a call assigned sells). */
+    const legs = (hasServer && optState.on && Array.isArray(preview.legs)) ? preview.legs : null;
+    let pcLabel = m.side === 'buy' ? '總成本（含費稅）' : '淨收款（扣費稅）';
+    if (optState.on) {
+      if (legs) pcLabel = '股票腿現金（含費稅）';
+      else if (optState.close) pcLabel = '到期作廢（價格 0、不收手續費與稅）';
+      else pcLabel = (optState.intent === 'STO' || optState.intent === 'STC')
+        ? '淨收權利金' : '權利金總成本';
+    }
+    $('#m-pc-label').textContent = pcLabel;
+    $('#m-pc-value').textContent = !hasServer ? f.NULL_GLYPH
+      : (legs ? f.signed(preview.total, ccy) : f.money(totalAbs, ccy));
     $('#m-pc-ccy').textContent = ccy;
     const rows = $('#m-pc-rows');
     rows.replaceChildren();
@@ -712,8 +1136,27 @@
       row.appendChild(v);
       rows.appendChild(row);
     };
-    if (hasServer) {
-      [['成交金額', preview.gross], ['手續費' + (m.feeOverride ? '（已覆寫）' : ''), preview.fee],
+    if (hasServer && legs) {
+      /* 被指派／履約 (spec §4.2): ONE action, TWO rows — the option leg's close and the stock
+         leg — each in the server's own sentence and figures; both are written together or
+         neither is. */
+      legs.forEach((leg) => {
+        const box = el('div', 'pc-leg');
+        box.dataset.role = leg.role;
+        box.appendChild(el('span', 'pc-leg-label', leg.label));
+        box.appendChild(el('span', 'pc-leg-text', leg.text));
+        box.appendChild(el('span', 'pc-leg-amt', '價 ' + f.price(leg.price, leg.ccy)
+          + '・費 ' + f.money(leg.fee, leg.ccy) + '・稅 ' + f.money(leg.tax, leg.ccy)
+          + '・合計 ' + f.signed(leg.total, leg.ccy) + ' ' + leg.ccy));
+        rows.appendChild(box);
+      });
+    } else if (hasServer) {
+      const grossLabel = optState.on ? '權利金合計' : '成交金額';
+      if (optState.on && preview.share_equivalents) {
+        pcRow('口數', f.exact($('#m-contracts').value.trim()) + ' ' + OPT_WORDS.unit + ' = '
+          + f.shares(preview.share_equivalents) + ' ' + OPT_WORDS.shareEq);
+      }
+      [[grossLabel, preview.gross], ['手續費' + (m.feeOverride ? '（已覆寫）' : ''), preview.fee],
        ['交易稅' + (m.taxOverride ? '（已覆寫）' : ''), preview.tax]].forEach(([k, v]) => {
         pcRow(k, f.money(v, ccy) + ' ' + ccy);
       });
@@ -744,8 +1187,11 @@
           + '（寫入後帳本依日期重播；該日之後的紀錄不在這幾列）';
         rows.appendChild(asOf);
       }
+      /* A contract's position is in share-equivalents (OPT-D1); its averages are the premium
+         per share. Same server figures, the option's own units. */
+      const posLabel = optState.on ? '部位（' + OPT_WORDS.shareEq + '）' : '持股';
       if (pp && pp.kind === 'sell') {
-        pcPair('持股', f.shares(pp.old_shares), f.shares(pp.remain_shares));
+        pcPair(posLabel, f.shares(pp.old_shares), f.shares(pp.remain_shares));
         /* On the 賣超 branch the projected average is ZERO because the replay DISCARDS the
            basis — which is what the ledger will hold, so the number agrees with the row the
            user is about to see. The note carries the reason, so 0 cannot be read as 「your
@@ -759,7 +1205,7 @@
         pcRow('已實現損益', sgn(pp.realized_pnl), f.signClass(pp.realized_pnl));
         if (pp.short_opened) pcRow('開／加空股數', f.shares(pp.short_opened));
       } else if (pp && pp.kind === 'buy') {
-        pcPair('持股', f.shares(pp.old_shares), f.shares(pp.new_shares));
+        pcPair(posLabel, f.shares(pp.old_shares), f.shares(pp.new_shares));
         pcPair('原始均價', f.price(pp.old_original_avg, ccy), f.price(pp.new_original_avg, ccy));
         pcPair('調整均價', f.price(pp.old_adjusted_avg, ccy), f.price(pp.new_adjusted_avg, ccy));
         if (pp.covered_shares) {
@@ -800,6 +1246,13 @@
       const div = el('div', 'issue issue-error');
       div.appendChild(el('span', null, '✕'));
       div.appendChild(el('span', null, i.text));
+      /* OPT-D6: an option on a rule set with no per-contract rate needs the statement's fee —
+         the sentence names both repairs; the second one is a link. */
+      if (i.code === 'option_fee_unset') {
+        const link = el('a', 'opt-fee-link', '前往 系統設定 → 費率');
+        link.href = 'settings.html#accounts';
+        div.appendChild(link);
+      }
       issueBox.appendChild(div);
     });
     infos.forEach((i) => {
@@ -1039,13 +1492,49 @@
         oversellDialog(msg, body);
         return;
       }
+      if (err && err.code === 'underlying_unregistered') {
+        /* Options spec §4.2: the assignment's stock leg needs its underlying registered (the
+           quote gate applies); the pair was refused, nothing written. Offer 立即註冊 inline. */
+        showUnderlyingRegister(err.message, body.symbol);
+        return;
+      }
       if (window.toast) window.toast((err && err.message) || '寫入失敗', 'fail', err && err.code);
     }
   }
 
+  async function showUnderlyingRegister(message, contractSymbol) {
+    const box = $('#m-issues');
+    const div = el('div', 'issue issue-error');
+    div.id = 'm-underlying-unregistered';
+    div.appendChild(el('span', null, '✕'));
+    div.appendChild(el('span', null, message || '請先登錄標的'));
+    box.appendChild(div);
+    const terms = await optionTerms(contractSymbol);
+    if (!terms || !terms.underlying || !div.isConnected) return;
+    const reg = el('button', 'btn-link', '立即註冊 ' + terms.underlying);
+    reg.type = 'button';
+    reg.addEventListener('click', () => {
+      if (!window.pdInstQuickAdd) return;
+      window.pdInstQuickAdd({
+        symbol: terms.underlying, market: 'US', lockSymbol: true,
+        onConfirm: async () => { await reloadContext(); schedulePreview(); },
+        onBuy: async () => { await reloadContext(); schedulePreview(); },
+      });
+    });
+    div.appendChild(reg);
+  }
+
   async function onManualWritten(resp) {
+    /* Options spec §8: what was just written, read BEFORE the form resets — a 買進平倉 offers
+       the 轉倉 line; an assignment / exercise wrote TWO rows (both ids in the toast). */
+    const wasOpt = optState.on;
+    const closedShort = wasOpt && !optState.close && optState.intent === 'BTC';
+    const rolledFrom = { symbol: $('#m-symbol').value.trim().toUpperCase(),
+                         contracts: $('#m-contracts').value.trim(), date: $('#m-date').value };
     if (window.toast) {
-      const id = resp && resp.txn_id !== undefined ? '（#' + resp.txn_id + '）' : '';
+      const ids = resp && Array.isArray(resp.txn_ids) ? resp.txn_ids : null;
+      const id = ids ? '（#' + ids.join('、#') + '）'
+        : (resp && resp.txn_id !== undefined ? '（#' + resp.txn_id + '）' : '');
       const ar = resp && resp.auto_registered;
       const arTxt = ar
         ? '；已自動註冊 ' + ar.symbol + (ar.name ? ' ' + ar.name : '') +
@@ -1065,6 +1554,11 @@
        "no shares and no price" as pristine whether or not a symbol is still selected. */
     $('#m-fee').value = '';
     $('#m-tax').value = '';
+    if (wasOpt) {
+      ['m-contracts', 'm-stock-price'].forEach((id) => window.pdField.resetField($('#' + id)));
+      optState.close = null;
+      optState.autoSide = null;   // the side follows the new position again
+    }
     /* Fable F8: a commit that AUTO-REGISTERED an unknown symbol must refresh ctx so the 未註冊
        hint clears, the symbol resolves in the preview, and it appears in every picker (manual /
        opening read ctx.instruments live). Awaited before schedulePreview so renderSymbolHint
@@ -1074,8 +1568,22 @@
        auto-switch the 交易 tab. `context` only when the commit auto-registered a symbol, and
        awaited, so schedulePreview below resolves the now-registered symbol (Fable F8). */
     await refreshAfterLedgerChange('transactions',
-      { context: !!(resp && resp.auto_registered) });
+      /* an option commit may have registered its contract from the symbol (OPT-D7) */
+      { context: !!(resp && resp.auto_registered) || wasOpt });
+    if (wasOpt) {
+      /* OPT-D18: the next side follows the position this commit left (a 賣出開倉 makes the
+         next default 買進平倉 with the whole short as 口數). */
+      const accId = $('#m-account').value;
+      try { await loadAcctHoldings(accId, false); } catch (e) { /* the default stays */ }
+      applyPositionDefault();
+    }
     schedulePreview();
+    if (closedShort && rolledFrom.symbol) {
+      showRollButton(rolledFrom.symbol, rolledFrom.contracts, rolledFrom.date);
+    } else {
+      const roll = $('#m-opt-roll');
+      if (roll) roll.hidden = true;
+    }
   }
 
   /* ================= Tab 2 CSV 匯入 ================= */
@@ -1106,13 +1614,13 @@
      the REQUIRED `account` column; matches the *_COLUMNS constants in the backend parsers +
      the downloadable 範本; date carries its YYYY-MM-DD hint, optional columns marked 選填). */
   const CSV_HINTS = {
-    transactions: '欄位：account・symbol・side・date（YYYY-MM-DD）・shares・price・fee（選填）・tax（選填）・daytrade（選填）・short_sale（選填，1＝宣告放空）・note（選填）',
+    transactions: '欄位：account・symbol・side・date（YYYY-MM-DD）・shares（選擇權填股當量＝口數×100，例：2 口＝200）・price（選擇權填每股權利金）・fee（選填）・tax（選填）・daytrade（選填）・short_sale（選填，1＝宣告放空；選擇權賣出開倉也填 1）・note（選填）・close_reason（選填，選擇權結清：expired／assigned／exercised，價格填 0）',
     dividends: '欄位：account・symbol・date（YYYY-MM-DD，發放日）・type（CASH/STOCK/DRIP/NET）・gross・withholding（選填）・net（選填）・reinvest_shares（選填）・reinvest_price（選填）・ex_date（選填，除息日；僅配股會用到）',
     fx: '欄位：account・date（YYYY-MM-DD）・from_ccy・from_amount・to_ccy・to_amount',
     openings: '欄位：account・symbol・shares・original_cost_total・build_date（YYYY-MM-DD）・original_avg_cost（選填・舊檔相容）',
     /* 比例一定是「兩個整數欄位」，不是一個算好的小數（§3.1(ii)）：0.2857 這種寫法會讓
        700 股的 2 換 7 算成 199.99 股，之後賣 200 股會被判成賣超、成本基礎被永久捨棄。 */
-    corporate_actions: '欄位：account・date（YYYY-MM-DD）・kind（SPLIT/EXCHANGE/SPINOFF，也可填 分割/換股/分拆）・from_symbol・to_symbol・ratio_to・ratio_from（兩個整數，不可填小數）・cost_carry（選填・僅分拆）・note（選填）',
+    corporate_actions: '欄位：account・date（YYYY-MM-DD）・kind（SPLIT/EXCHANGE/SPINOFF/OPTION_ADJUST，也可填 分割/換股/分拆/選擇權合約調整）・from_symbol・to_symbol・ratio_to・ratio_from（兩個整數，不可填小數）・cost_carry（選填・僅分拆）・note（選填）',
     /* 取得成本只收「家幣金額」，不收匯率（spec F1）：匯率是平均值，平均值不可以是帳本的
        權威來源。外幣入金若不填取得成本，該筆金額仍會計入餘額、但不會進入換匯成本均價，
        畫面上會以 covered_ratio／匯損缺口揭露 — 寧可留白，也不要猜一個匯率。 */
@@ -1305,7 +1813,7 @@
   /* The 買/賣 chip, plus the two flags that move money (當沖 halves the TW sell tax; a
      declared short is exempt from the 賣超 guard) — a flag the owner cannot see is one they
      cannot correct. */
-  function csvSideChips(sideRaw, daytrade, shortSale) {
+  function csvSideChips(sideRaw, daytrade, shortSale, closeReason) {
     const frag = document.createDocumentFragment();
     const side = String(sideRaw || '').toLowerCase();
     if (!side) return frag;
@@ -1313,7 +1821,16 @@
       side === 'buy' ? '買' : '賣'));
     if (String(daytrade) === '1') frag.appendChild(el('span', 'dir-chip dir-daytrade', '當沖'));
     if (String(shortSale) === '1') frag.appendChild(el('span', 'dir-chip dir-short', '放空'));
+    /* An option close row (§4.1): the raw column value is shown as-is — the file's own word,
+       not a translation kept here (§6.1's zh lives on the server; the 交易 tab prints it). */
+    if (closeReason) frag.appendChild(el('span', 'dir-chip dir-close', String(closeReason)));
     return frag;
+  }
+  function csvSymbolCell(symbol, contractName) {
+    if (!contractName) return symbol || '';
+    const s = el('span', 'opt-contract', contractName);
+    s.title = symbol || '';
+    return s;
   }
   /* The two ratio terms side by side in the ledger's own phrasing (ledgers.py ratio_label) —
      never divided: they are stored as two integers precisely so nobody has to (§3.1(ii)). */
@@ -1323,9 +1840,15 @@
     transactions: [
       ['日期', 'num', (d) => f.date(d.trade_date)],
       ['帳戶', 'col-text', (d) => acctZh(d.account_id)],
-      ['買賣', 'col-text', (d) => csvSideChips(d.side, d.daytrade, d.short_sale)],
-      ['代號', 'col-text num', (d) => d.symbol || ''],
-      ['股數', 'num', (d) => f.shares(d.quantity)],
+      ['買賣', 'col-text', (d) => csvSideChips(d.side, d.daytrade, d.short_sale, d.close_reason)],
+      /* Options spec §8: a contract row names the contract (「XYZ 2026-12-18 50 Put」, the
+         server's `contract_name`) with the OCC symbol as its tooltip, and the 股數 cell says
+         what the share-equivalents mean (「200 = 2 口」 — the server's `contracts`; this file
+         never converts 口 ↔ 股當量). A stock row: both keys null, the cells unchanged. */
+      ['代號', 'col-text num', (d) => csvSymbolCell(d.symbol, d.contract_name)],
+      ['股數', 'num', (d) => (d.contracts
+        ? f.shares(d.quantity) + ' = ' + f.exact(d.contracts) + ' 口'
+        : f.shares(d.quantity))],
       ['價格', 'num', (d) => f.price(d.price, csvCcy(d))],
       ['手續費', 'num', (d) => csvAmt(d.fee, csvCcy(d))],
       ['稅', 'num', (d) => csvAmt(d.tax, csvCcy(d))],
@@ -3405,6 +3928,7 @@
     initDiv();
     initFxOpen();
     if (!tabPicked) showTab('manual');
+    applyOptionPrefillFromUrl();   // options spec §7: 「登錄到期作廢」 / 「改登錄被指派／履約」
   }
 
   boot();

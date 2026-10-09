@@ -31,7 +31,17 @@
     broker_assisted_surcharge: '專人下單附加費',
     clearing_rate: '清算費率', clearing_cap: '清算費上限', sst_rate: 'SST 稅率',
     stamp_unit: '印花稅級距', stamp_per_unit: '印花稅每級距',
-    stamp_cap_stock: '印花稅上限（股票）', stamp_cap_etf: '印花稅上限（ETF）'
+    stamp_cap_stock: '印花稅上限（股票）', stamp_cap_etf: '印花稅上限（ETF）',
+    option_per_contract: '選擇權每口手續費', option_reg_per_contract: '選擇權每口監管費'
+  };
+  /* Options spec §8 / OPT-D6: the two per-CONTRACT option fees, US rule sets only. They are
+     shown even when unset or 0 — `option_per_contract` UNSET is not 0: it means the engine has
+     no rate, so an option trade must carry the statement's fee (the 選擇權 rows' ✎ 覆寫). A
+     per-contract amount is not a ratio, so it is never capped at 1 like the rates around it. */
+  const OPTION_KEYS = new Set(['option_per_contract', 'option_reg_per_contract']);
+  const OPTION_NOTES = {
+    option_per_contract: '未設定＝選擇權交易須填對帳單手續費（✎ 覆寫）；填 0 表示每口免手續費',
+    option_reg_per_contract: '每口額外的監管費（ORF 等）；預設 0',
   };
   /* Fields relevant per market — keeps each card scannable (a US card never shows MY-only
      fields). Within the list, zero-default numeric fields that are NOT overridden are hidden
@@ -40,7 +50,8 @@
     TW: ['brokerage', 'discount', 'min_fee', 'tax_normal', 'tax_etf', 'tax_daytrade', 'rebate_rate', 'rounding'],
     US: ['commission_rate', 'commission_min', 'platform_fee', 'settlement_per_share', 'settlement_cap_rate',
       'cat_per_share', 'sec_rate', 'sec_min', 'taf_per_share', 'taf_min', 'taf_cap',
-      'stamp_unit', 'stamp_per_unit', 'stamp_cap_stock', 'stamp_cap_etf', 'broker_assisted_surcharge', 'rounding'],
+      'stamp_unit', 'stamp_per_unit', 'stamp_cap_stock', 'stamp_cap_etf', 'broker_assisted_surcharge',
+      'option_per_contract', 'option_reg_per_contract', 'rounding'],
     MY: ['commission_rate', 'commission_min', 'platform_fee', 'clearing_rate', 'clearing_cap', 'sst_rate',
       'stamp_unit', 'stamp_per_unit', 'stamp_cap_stock', 'stamp_cap_etf', 'rounding']
   };
@@ -55,6 +66,7 @@
 
   function isMeaningful(f) {
     if (f.key === 'rounding') return true;
+    if (OPTION_KEYS.has(f.key)) return true;   // unset is a state the owner must see (OPT-D6)
     if (f.overridden) return true;
     if (CAP_KEYS.has(f.key)) return f.default !== null && f.default !== undefined; // 0-cap is meaningful (exempt)
     return f.default !== null && f.default !== undefined && Number(f.default) !== 0;
@@ -106,11 +118,13 @@
 
     const input = el('input', 'input fee-input');
     input.type = 'number'; input.step = 'any'; input.min = '0';
-    if (!CAP_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
+    if (!CAP_KEYS.has(f.key) && !OPTION_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
     input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
     if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
+    if (f.key === 'option_per_contract') input.placeholder = '未設定';
     input.dataset.key = f.key;
     ctrl.appendChild(input);
+    if (OPTION_NOTES[f.key]) ctrl.appendChild(el('span', 'panel-sub fee-opt-note', OPTION_NOTES[f.key]));
 
     const revert = el('button', 'fee-revert', '還原');
     revert.type = 'button';

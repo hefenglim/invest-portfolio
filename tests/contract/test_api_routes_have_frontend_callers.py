@@ -61,12 +61,6 @@ _NO_CALLER_ALLOWED: dict[tuple[str, str], str] = {
         "disables a task through PUT enabled=false instead",
     ("DELETE", "/api/insight-tasks/{insight_type_id}/schedule"):
         "twin of the insight-types route above",
-    # Options W3 (backend) lands before W5 (web): the manual form's 「＋選擇權合約」 builder is
-    # this route's caller (options spec §8). The stale-entry test fails the moment W5 wires
-    # it, which is when this entry must go.
-    ("GET", "/api/input/option-symbol"):
-        "options compose endpoint — its caller, the manual form's contract builder, is the "
-        "web wave (W5) that follows this backend wave",
 }
 
 _VERB = {"get": "GET", "post": "POST", "put": "PUT", "del": "DELETE", "download": None}

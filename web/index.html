@@ -273,6 +273,9 @@
 <script src="alerts.js?v=0.1.28"></script>
 <script src="app.js?v=0.1.28"></script>
 <script src="charts.js?v=0.1.28"></script>
+<!-- Options spec §7.1: the 選擇權 section. It creates its panel after 持倉明細 only when the
+     dashboard payload carries `options` — on a ledger with no option it touches nothing. -->
+<script src="options.js?v=0.1.28"></script>
 <script src="dividends-card.js?v=0.1.28"></script>
 <!-- §6.7 door 2's dependency, loaded BEFORE detail.js: the drawer's 補登公司行動 button
      (beside a ⚠ 對帳不一致 footer) calls window.pdCorpActionForm.open({...}). The tag is
