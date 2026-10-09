@@ -197,11 +197,14 @@ reconcile}.py`, `portfolio/cash.py` (`account_statement` + `pool_lines`' `txn_id
   snapshot `{"option": true, "contracts": N}`); `schwab` 0.65, `moomoo_us` None → issue
   `option_fee_unset` only when the **fee** is unsupplied; an option-label helper for the preview
   (`fee_rules_wire()["label"]` unchanged); a nullable field class in `fee_overrides` for the two keys
-  (+ `EDITABLE_FIELD_ORDER`), on `/api/fee-rules` via `fee_rules.py` / `wire.py::fee_rules_wire`;
+  (`option_per_contract` in a nullable field class; `option_reg_per_contract` in `_AMOUNT_FIELDS`;
+  + `EDITABLE_FIELD_ORDER`), on `/api/fee-rules` via `fee_rules.py` / `wire.py::fee_rules_wire`;
   re-pin `tests/api/test_r7_fee_rule_readonly_wire.py`, the DEF-010 test and the zip's fee snapshot.
 - [ ] **Manual door** (`input_center.py` + `data_ingestion/manual.py`): `ManualBody.option_intent`,
   `contracts` (then `shares` is optional and set by `contracts_to_shares`), `close_reason`,
-  `stock_price`; `enter_transaction` resolves an OCC symbol through `register_option_contract`, skips
+  `stock_price`; `enter_transaction` treats a parseable OCC symbol as resolvable without writing when
+  `confirm=False` (the preview says 「將建立選擇權合約 …」) and calls `register_option_contract` only on
+  `confirm=True`, inside the commit's transaction; it skips
   the engine on a close row, writes `close_reason`, and writes the two-leg pair in one transaction
   (rollback on a failed second leg); option-mode refusals (spec §4.2 incl. OPT-D14 / D21); the close
   row's preview (realized figure, position after); `legs`, `txn_ids`, per-leg totals; preview
@@ -319,7 +322,8 @@ and `api/routers/option_expiry.py`; tests under `tests/export/`, `tests/contract
   confirm-all, `ensure_tables` for `option_expiry_skips`). The main session wires it in `app.py`.
 - [ ] Tests (fail first): detector over expired / live / closed / partially-assigned / skipped / short
   and long; confirm writes exactly the §4.1 row; confirm-all per item; count 0 on a stock ledger; a
-  refused-close item is not confirmable; the DEF-065 GET sweep covers the new GETs.
+  refused-close item is not confirmable; E's own test app asserts the new GETs open no write
+  transaction (the DEF-065 sweep, which boots the real app, runs in W7b).
 - **Done when:** targeted tests, ruff, mypy; commit `feat(options): W6 exports + expiry inbox backend`.
 
 ## 8. W7 — Oracle, manual, acceptance
@@ -340,9 +344,10 @@ the app:
   preview over a refused close; the 交易 tab marks a refused close; `option_side` identical on the
   ledgers wire, cash lines and exports and agreeing with the replay's realized rows; `/api/input/
   holdings` direction agrees with `options.open` (no refused close); `data.holdings` readers see no
-  option; the inbox confirm through B's helper; the inbox e2e (confirm, confirm-all); the §6.1
-  vocabulary guard; KPI 總市值 = stock grand subtotal + `options.market_value` (update
-  `tests/api/test_dashboard.py`'s grand == KPI pin for option ledgers only).
+  option; the inbox confirm through B's helper; the inbox e2e (confirm, confirm-all); the DEF-065 GET
+  sweep over the new inbox GETs; the §6.1 vocabulary guard; KPI 總市值 = stock grand subtotal +
+  `options.market_value` (an option-ledger case beside `tests/portfolio/test_dashboard.py:451`; the
+  stock-ledger pin is unchanged).
 - [ ] Accounting manual zh + en; rule files (`domain-ledger.md`, `data-and-pricing.md`,
   `markets-and-fees.md`, `architecture.md`); CHANGELOG `[Unreleased]` (R1–R7, OPT-D1..D22; `grep -c
   "^## \[v"` = 30).
@@ -445,9 +450,11 @@ reason :844-845; FX stock value :858-868; ex-div :940-957; `combined_view` → :
 :1100-1108**; freshness :1151-1156 / :1173-1174; subtotals :317-390; `fx_complete_return` :489-533;
 benchmark :539. `returns.py` :39-87, flows :361-365, XIRR terminal value `price_map × shares`
 :388-394. `dashboard_models.py` `TrendPoint` :211-221, `exclude=True` :427-443. `routers/dashboard.py`
-:47. Golden `test_spec17_financials.py` :613; grand == KPI pin `tests/api/test_dashboard.py` :451.
+:47. Golden `test_spec17_financials.py` :613.
 月度成績 `web/app.js` :1018-1025 → `api/snapshots.py` :44-63. Money scan
 `test_frontend_never_computes_money.py` :34-70; settlement scan `test_settled_notional.py` :122-173.
+Grand == KPI pin `tests/portfolio/test_dashboard.py` :451 (stock ledger). `web/app.js` omits the
+本金匯率效果 row when the value is null :387 (D adds the 「—」 + note branch).
 
 **Trend** — `timeseries.py` :282-445 (:382-433; short :405-409; no price :410-413), flows :198-204;
 `web/charts.js` :68-70/:121-122; `index.html` :81.

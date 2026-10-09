@@ -19,7 +19,7 @@ record for options. Its multiplier census and its "direction is not a gap" findi
 | 2026-10-09 | **Review round 2** (READY-WITH-FIXES → folded): additive wire keys; `Holding.unbookable_close`; drawer reconciliation; `options.realized.rows`; option-mode refusals; same right / expiry; the assignment's stock leg; freshness |
 | 2026-10-09 | **Review round 3** (READY): wording |
 | 2026-10-09 | **Review round 4** — reviewer A (consistency), reviewer B (entry-point usability), reviewer C (integration; M1–M21); owner OPT-D13..D19; fold verification N1–N9 (the `option_side` walk includes `OPTION_ADJUST`; `account_statement` carries the side) |
-| 2026-10-09 | **Pre-build review** (Opus 5.5, max; GO-WITH-FIXES; P1–P21, two blockers). Owner OPT-D20 (本金匯率效果 withheld while an option is open), OPT-D21 (option-mode 賣出開倉 while long refused), OPT-D22 (no `option_contracts` table — terms parse from the symbol). Folded: P1 the converter's display text goes to `RowDetail.symbol` / `shares`, never `cells` (§8); P3 `Transaction.id` and the pinned `RefusedClose` (§3); P4 the manual / edit request wire (§4.2, §8); P5 the inbox routes (§7.2); P6 `CashLine.txn_id` (§3, §6.2); P7 the edit door (§4.2); P8 `past_expiry` / the inbox read the book, and a back-dated trade cannot strand an `expired` row (§4.2, §7); P9 classifier labels (§6.1); P10 the corporate-action validator's bypasses (§4.3); P11 the converter's error path, CLI and openings (§8); P12 fees (§2, §4.2, §8); P13 the fee snapshot in the zip (§10); P14 block keys (§7.1); P15 replay order (§4.3, §4.4); P17–P20 wording, preview, the stranded-close list |
+| 2026-10-09 | **Pre-build review** (Opus 5.5, max; GO-WITH-FIXES; P1–P21, two blockers). Owner OPT-D20 (本金匯率效果 withheld while an option is open), OPT-D21 (option-mode 賣出開倉 while long refused), OPT-D22 (no `option_contracts` table — terms parse from the symbol). Folded: P1 the converter's display text goes to `RowDetail.symbol` / `shares`, never `cells` (§8); P3 `Transaction.id` and the pinned `RefusedClose` (§3); P4 the manual / edit request wire (§4.2, §8); P5 the inbox routes (§7.2); P6 `CashLine.txn_id` (§3, §6.2); P7 the edit door (§4.2); P8 `past_expiry` / the inbox read the book, and a back-dated trade cannot strand an `expired` row (§4.2, §7); P9 classifier labels (§6.1); P10 the corporate-action validator's bypasses (§4.3); P11 the converter's error path, CLI and openings (§8); P12 fees (§2, §4.2, §8); P13 the fee snapshot in the zip (§10); P14 block keys (§7.1); P15 replay order (§4.3, §4.4); P17–P20 wording, preview, the stranded-close list. Fold verification (Opus 5.5): GO-WITH-FIXES → N1–N6 folded (inbox skip shapes; preview never registers; fee-field nullability; OPT-D21's mirror recorded) |
 
 **Why now.** A real broker history cannot reconcile without its option legs: the premiums are cash
 the account really received and paid. The owner's acceptance figures live in the git-ignored
@@ -75,7 +75,7 @@ roll chains, collateral reservation, quotes / Greeks for open contracts, option-
 | OPT-D18 | Default side in option mode | **By position** (held short → 買進平倉, held long → 賣出平倉, none → 賣出開倉); 口數 defaults to the whole position on a closing side | The owner's dominant actions |
 | OPT-D19 | Converter across exports | **`known_positions` injected** by the broker-import route (§8) | Statements may be imported separately; the converter stays pure |
 | OPT-D20 | 本金匯率效果 while an option is open (pre-build review) | **Withheld** — `principal_fx_effect` is `None` (「—」) whenever an option position is open on the valuation day, with the reason in `options.principal_fx_note` | B excludes the open option's value while A includes its unrealized; their difference would absorb the option's value as "FX effect" (AI-D48) |
-| OPT-D21 | Option-mode 賣出開倉 while long (pre-build review) | **Refused** 「目前持有買方部位 N 口，請先賣出平倉」 | Symmetric with OPT-D14; one row does one thing |
+| OPT-D21 | Option-mode 賣出開倉 while long (pre-build review) | **Refused** 「目前持有買方部位 N 口，請先賣出平倉」; and its mirror, 買進開倉 while short, refused 「目前持有賣方部位 N 口，請先買進平倉」 (the mirror was added at the fold — confirmed with the plan approval) | Symmetric with OPT-D14; one row does one thing |
 | OPT-D22 | Contract terms storage (pre-build review) | **No `option_contracts` table** — `Instrument.option` is parsed from the symbol | The symbol carries every term and v1 fixes the multiplier at 100; a table would be a second copy that can disagree. A deliverable model (§12) may add one |
 
 ## 3. Data model
@@ -336,7 +336,8 @@ account_name, symbol, contract, direction, contracts, expiry, days_past, premium
 confirmable, remedy}]}`; `GET /api/option-expiry/count` → `{count}`; `POST /api/option-expiry/confirm`
 `{account_id, symbol}` → `{ok, txn_id}` or a zh 422; `POST /api/option-expiry/confirm-all` →
 `{results: [{account_id, symbol, ok, txn_id | error}]}`; `POST /api/option-expiry/skip` /
-`/unskip` `{account_id, symbol}`; `GET /api/option-expiry/skipped`. Every GET is read-only. The
+`/unskip` `{account_id, symbol}` → `{ok: true}`; `GET /api/option-expiry/skipped` → `{items:
+[{account_id, account_name, symbol, contract, expiry, skipped_at}]}`. Every GET is read-only. The
 detector and routes live in `api/` (they read the book).
 
 ## 8. Import doors
@@ -362,7 +363,10 @@ detector and routes live in `api/` (they read the book).
   `option_fee_unset`, 「此帳戶未設定選擇權手續費：請按 ✎ 覆寫填入對帳單手續費，或到 系統設定 → 費率 設定每口費率」 with a
   link; the preview's fee label for an option reads 「每口 0.65＋SEC（賣出）」 from a separate option label
   helper (`fee_rules_wire()["label"]` is unchanged). The fee settings panel lists
-  「選擇權每口手續費」／「選擇權每口監管費」 for US rule sets (nullable fields — unset is not 0).
+  「選擇權每口手續費」／「選擇權每口監管費」 for US rule sets (`option_per_contract` is nullable — unset is not
+  0; `option_reg_per_contract` defaults to 0). The CSV and manual doors never write an instrument on a
+  preview: a parseable OCC symbol resolves without writing (「將建立選擇權合約 …」) and
+  `register_option_contract` runs only inside the commit's transaction.
 - **What's new:** 「可以登錄美股選擇權了：賣出 Put、到期、被指派、合約調整都進帳本」, href `trades.html`, target
   `#m-sym-foot`, area 「交易帳本 → 交易輸入／儀表板 → 選擇權」.
 - **AI input door:** an OCC symbol is code-shaped; AI-recognised option rows commit through the CSV
