@@ -44,7 +44,7 @@ from dataclasses import dataclass
 
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import Instrument
-from portfolio_dash.shared.options import OPTION_PATTERN
+from portfolio_dash.shared.options import is_option_symbol
 
 #: The refusal of every stock registration door for an option contract (options spec §6.2):
 #: a contract is created by the trade door (``register_option_contract``, OPT-D7), never by
@@ -52,15 +52,9 @@ from portfolio_dash.shared.options import OPTION_PATTERN
 OPTION_REGISTRATION_REFUSAL = "選擇權合約由交易登錄建立"
 
 
-def is_option_symbol(symbol: str) -> bool:
-    """*symbol* has the OCC contract SHAPE (``shared/options.py::OPTION_PATTERN``, after
-    strip + upper) — the symbol-only form of ``Instrument.is_option``.
-
-    The two never disagree: every registering door sets ``asset_type`` from the symbol's parse
-    (options spec §3), and the stock doors refuse this shape at entry. Readers that hold only a
-    symbol (``DashboardData.holdings``, a request field, a stored universe) use this; readers
-    that hold an :class:`Instrument` use ``.is_option``."""
-    return OPTION_PATTERN.match(symbol.strip().upper()) is not None
+#: Re-exported: :func:`shared.options.is_option_symbol` is the one definition.
+__all__ = ["OPTION_REGISTRATION_REFUSAL", "TRACKED_SQL", "TrackedInstrument",
+           "is_option_symbol", "stock_instruments", "tracked_instruments"]
 
 
 def stock_instruments(instruments: Iterable[Instrument]) -> list[Instrument]:

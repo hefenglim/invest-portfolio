@@ -14,9 +14,9 @@ broker converter — can reach it without an edge (plan invariant 3,
 
 One definition per rule (plan invariant 6) — nothing below may be re-derived elsewhere:
 
-* the symbol: :data:`OPTION_PATTERN`, :func:`parse_option_symbol`, :func:`option_symbol` (the
-  only composer — the browser never composes one, it calls the compose endpoint),
-  :func:`option_display_name`, :func:`from_broker_option`;
+* the symbol: :data:`OPTION_PATTERN`, :func:`is_option_symbol`, :func:`parse_option_symbol`,
+  :func:`option_symbol` (the only composer — the browser never composes one, it calls the
+  compose endpoint), :func:`option_display_name`, :func:`from_broker_option`;
 * the multiplier: :func:`contracts_to_shares`, :func:`shares_to_contracts`,
   :func:`is_contract_multiple`;
 * OPT-D11 / OPT-D16: :func:`nonstandard_adjustment_reason` / :func:`is_standard_adjustment`;
@@ -107,6 +107,15 @@ def parse_option_symbol(symbol: str) -> OptionTerms | None:
         return None
     return OptionTerms(underlying=root, expiry=expiry, strike=strike,
                        right="C" if right == "C" else "P")
+
+
+def is_option_symbol(symbol: str) -> bool:
+    """*symbol* has the OCC contract SHAPE (after strip + upper) — the symbol-only form of
+    ``Instrument.is_option``. The two never disagree: every registering door sets
+    ``asset_type`` from the symbol's parse, and the stock doors refuse this shape at entry.
+    Readers that hold only a symbol use this; readers holding an ``Instrument`` use
+    ``.is_option``."""
+    return OPTION_PATTERN.match(symbol.strip().upper()) is not None
 
 
 def option_symbol(terms: OptionTerms) -> str:
