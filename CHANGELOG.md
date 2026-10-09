@@ -56,6 +56,20 @@ short refused) was confirmed with the plan approval.
   updated (`domain-ledger.md`, `markets-and-fees.md`, `data-and-pricing.md`, `architecture.md`).
 - **Fixed on the way:** `/api/input/holdings` now lists a contract that received its position
   through an `OPTION_ADJUST` and has no row of its own yet.
+- **Final review (three xhigh reviewers, 2026-10-10) — fixed before merge:** OCC symbols are
+  canonicalised at every door before validation (a lower-case contract skipped the close rules and
+  stored a dead OPTION_ADJUST); a statement posted after an already-booked expiry re-derives the
+  row for the CSV door to refuse instead of blocking the whole conversion (`known_positions`
+  measured per contract); an OPTION_ADJUST that would strand a stored close row is refused at
+  every door (`option_adjust_strands_close`); the edit preview of a stored close row no longer
+  reports a false side mismatch; the manual door requires a direction for an option; an advisory
+  no longer gates the corporate-action form; the Schwab option IN-transfer rule no longer catches
+  stock transfers; same-day adjustments of two underlyings convert as two pairs; after an
+  adjustment the destination is priced by the LATER of its own trade and the derived price, never
+  from a refused adjustment (spec §5 clarified); a 待釐清 contract shows no price, value or
+  obligation; the inbox / dashboard close prefill loads the contract's own account; the watchlist
+  labels contracts 「以最後成交價估值」; the OPTION_ADJUST source is a held-contract picker; a blank
+  fee field reverts to the default instead of failing the card.
 
 **Owner rulings 2026-10-05 (in chat, one by one; 24 items).** The open questions of the CR round
 were put to the owner as choices; the kept-as-built answers need no code.
