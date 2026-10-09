@@ -104,8 +104,6 @@ _ALLOWLIST: dict[str, str] = {
     "portfolio/dashboard.py::build_dashboard": (
         "the valuation itself: W2 splits book.holdings into the stock list and the options "
         "block here"),
-    "portfolio/timeseries.py::daily_value_series": (
-        "the trend replay: W2 applies R3 (the trend excludes option value, with a note) here"),
     "api/routers/input_center.py::_holdings_or_none": (
         "the manual door's preview book: option mode closes a contract position (W3)"),
     "api/routers/input_center.py::_position_preview": (
