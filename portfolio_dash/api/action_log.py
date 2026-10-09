@@ -69,6 +69,10 @@ _LABELS: list[tuple[str, str, str]] = [
     ("POST", "/api/dividend-inbox/skip", "配息略過"),
     ("POST", "/api/rebates/confirm", "折讓款確認入帳"),
     ("POST", "/api/rebates/skip", "折讓款略過"),
+    # confirm-all BEFORE confirm: labels match by prefix (options spec §7.2).
+    ("POST", "/api/option-expiry/confirm-all", "選擇權到期全部確認"),
+    ("POST", "/api/option-expiry/confirm", "選擇權到期確認作廢"),
+    ("POST", "/api/option-expiry/skip", "選擇權到期略過"),
     ("POST", "/api/instruments/quick", "一步新增標的"),
     ("POST", "/api/instruments/probe", "板別探測"),
     ("POST", "/api/instruments", "註冊標的"),
@@ -119,6 +123,7 @@ _LABELS: list[tuple[str, str, str]] = [
     ("POST", "/api/broker/convert", "券商匯出檔轉換"),
     ("POST", "/api/dividend-inbox/unskip", "配息取消略過"),
     ("POST", "/api/rebates/unskip", "折讓款取消略過"),
+    ("POST", "/api/option-expiry/unskip", "選擇權到期取消略過"),
     # reset-all first: it also matches the generic /api/fee-rules/ prefix below.
     ("POST", "/api/fee-rules/reset-all", "費稅規則全部重設"),
     ("POST", "/api/fee-rules/", "費稅規則重設"),
