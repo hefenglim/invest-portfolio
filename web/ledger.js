@@ -1697,7 +1697,13 @@
     /* Options spec §4.4: `?ledger=tx&txn_id=N` (the 待釐清 banner's 「前往該筆交易」, the
        選擇權 section, the refused-close dialog) flashes one 交易 row. The link may carry the
        row's account and date; they narrow the table first so the row is on the first page. */
-    const txnId = tab === 'tx' ? q.get('txn_id') : null;
+    const rawTxnId = tab === 'tx' ? q.get('txn_id') : null;
+    /* A ledger id is digits; anything else in the URL is never spliced into the CSS selector
+       below (R3 item 8 — `1"]` threw a SyntaxError and aborted the page's deep link). */
+    const txnId = rawTxnId && /^\d+$/.test(rawTxnId) ? rawTxnId : null;
+    if (rawTxnId && !txnId) {
+      if (window.toast) window.toast('找不到該筆交易列', 'warn', '連結中的交易編號格式不正確');
+    }
     if (txnId) {
       const acct = q.get('account_id');
       const day = q.get('date');

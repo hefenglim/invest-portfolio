@@ -128,11 +128,14 @@
     const visible = D.list.filter((i) => showArchived || !i.archived)
       .filter((i) => showOptions || i.asset_type !== 'option').filter(matches);
     visible.forEach((i) => {
+        const isOption = i.asset_type === 'option';
         const tr = el('tr');
         if (i.archived) tr.classList.add('inst-archived');
         const tdSym = el('td', 'col-text');
         const cell = el('div', 'sym-cell sym-link');
-        cell.title = '點擊查看個股詳情（價格與成本、配息史、試算）';
+        cell.title = isOption
+          ? '點擊查看合約詳情（部位、已實現、交易明細）'
+          : '點擊查看個股詳情（價格與成本、配息史、試算）';
         cell.addEventListener('click', () => {
           window.pdOpenSymbol(i.symbol);
         });
@@ -158,9 +161,16 @@
         tr.appendChild(el('td', 'col-text', i.sector));
         tr.appendChild(el('td', 'col-text', i.ccy));
 
-        /* 現價 + 漲跌 (Decimal strings -> via fmt, never computed in JS) */
+        /* 現價 + 漲跌 (Decimal strings -> via fmt, never computed in JS).
+           R3 m2: a contract is never quoted BY DESIGN (options spec R2 — the dashboard values an
+           open position at its last trade), so it carries no red 缺價 badge 「板別未解析或來源
+           無資料」, which reads as a broken feed; it says how it IS valued, in a neutral class. */
         const tdLast = el('td', 'num');
-        if (i.last === null || i.last === undefined) {
+        if (isOption) {
+          const lbl = el('span', 'inst-opt-unquoted', '以最後成交價估值');
+          lbl.title = '選擇權合約不抓取報價；未平倉部位以最後一筆成交價估值（儀表板 → 選擇權）';
+          tdLast.appendChild(lbl);
+        } else if (i.last === null || i.last === undefined) {
           tdLast.appendChild(el('span', 'sign-nil', f.NULL_GLYPH + ' '));
           const b = el('span', 'badge badge-missing', '缺價');
           b.title = '板別未解析或來源無資料';
@@ -220,7 +230,10 @@
           restore.title = '還原（恢復追蹤：重新納入報價、訊號與新聞範圍）';
           restore.addEventListener('click', () => archiveInstrument(i, false));
           acts.appendChild(restore);
-        } else {
+        } else if (!isOption) {
+          /* R3 m2: no 編輯 on a contract — the dialog's purpose is the 目標價提醒, and the alert
+             rules read stocks only (options spec §6.2 OPT-D10); a contract's name and terms
+             come from its symbol. */
           const edit = el('button', 'btn', '編輯'); edit.type = 'button';
           edit.title = '編輯產業與目標價提醒';
           edit.addEventListener('click', () => openEdit(i));

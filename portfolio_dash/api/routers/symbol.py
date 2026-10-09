@@ -50,6 +50,11 @@ New in options W5 (spec §6.2 Drawer, 2026-10-09) — ONLY on a ledger that carr
     are the block's own option rows (reason chips); and its reconciliation footer's
     ``book_shares`` is the signed share-equivalent count of ``options.open`` — a contract has no
     ``holdings`` row (OPT-D5), so the stock source would read every open contract as 0.
+  · a REGISTERED contract with no ledger row (its rows deleted, or opened from the watchlist's
+    「顯示選擇權合約」) gets the contract shape too — the branch is the instrument's own
+    ``is_option``, never the block's presence (final review R3 n3: it got the STOCK drawer, a
+    price chart for an instrument that is never quoted and a 試算 the what-if then refused). On
+    a stock ledger that is the one drawer carrying ``options``; a stock's drawer is unchanged.
 
 ``cost_basis`` binds to the account holding the most shares of the symbol (Q1); ``null`` for
 a non-held / watchlist symbol.
@@ -679,28 +684,32 @@ def _refused_close_wire(rc: RefusedClose) -> dict[str, Any]:
 
 
 def _options_wire(
-    symbol: str, inst: Instrument | None, block: OptionsBlock,
+    symbol: str, inst: Instrument | None, block: OptionsBlock | None,
 ) -> dict[str, Any]:
-    """The drawer's ``options`` key (spec §6.2) — present only on an option ledger.
+    """The drawer's ``options`` key (spec §6.2) — on an option ledger, and for any registered
+    contract.
 
     A contract gets its header, its open rows, its refused closes and the 試算 note; a stock
     gets the open contracts written on it, which the drawer prints as 「未平倉選擇權：…→ 選擇權
-    區」. Both read the dashboard's ONE ``options`` block — never a second valuation."""
+    區」. Both read the dashboard's ONE ``options`` block — never a second valuation. ``block``
+    is ``None`` only for a registered contract on a ledger with no option row (R3 n3): no open
+    row and no refused close, by definition."""
     terms = inst.option if inst is not None else None
+    open_rows = list(block.open) if block is not None else []
     if terms is None:
         return {
             "is_contract": False,
-            "open": [_open_contract_wire(r) for r in block.open if r.underlying == symbol],
+            "open": [_open_contract_wire(r) for r in open_rows if r.underlying == symbol],
         }
+    refused = list(block.refused_closes) if block is not None else []
     return {
         "is_contract": True,
         "contract": _contract_terms_wire(terms),
         "whatif_note": "選擇權不提供試算",
         "unit": UNIT_SHARE_EQUIVALENT,
         "multiplier": MULTIPLIER,
-        "open": [_open_contract_wire(r) for r in block.open if r.symbol == symbol],
-        "refused_closes": [_refused_close_wire(rc) for rc in block.refused_closes
-                           if rc.symbol == symbol],
+        "open": [_open_contract_wire(r) for r in open_rows if r.symbol == symbol],
+        "refused_closes": [_refused_close_wire(rc) for rc in refused if rc.symbol == symbol],
         "remedy": REFUSED_CLOSE_REMEDY,
     }
 
@@ -745,9 +754,12 @@ def symbol_detail(
     # provable re-sum of them (round-8.1 Wave A: one definition, never a parallel calc).
     data = build_dashboard(conn, now=now, reporting=reporting)
     # Options W5: a contract is read from the option block, never from `holdings` (stock-only,
-    # OPT-D5). None on a stock ledger, where every branch below keeps its old shape.
+    # OPT-D5). None on a stock ledger, where every STOCK branch below keeps its old shape.
+    # R3 n3: whether this symbol IS a contract is the instrument's own fact — a registered
+    # contract with no ledger row has no block (the ledger may carry no option row at all) and
+    # still gets the contract drawer, never the stock one.
     opt_block = data.options
-    is_contract = opt_block is not None and inst is not None and inst.is_option
+    is_contract = inst is not None and inst.is_option
     sym_holdings = sorted(
         (h for h in data.holdings if h.symbol == symbol),
         key=lambda h: h.shares,
@@ -1051,10 +1063,12 @@ def symbol_detail(
 
     # realized_rows — dashboard realized.rows shape, filtered to this symbol. A contract's rows
     # live in the option block (OPT-D5), with how each closed (the reason chips).
-    realized_rows: list[dict[str, Any]] = (
-        [_option_realized_wire(r) for r in opt_block.realized.rows if r.symbol == symbol]
-        if is_contract and opt_block is not None
-        else [_realized_wire(r) for r in data.realized.rows if r.symbol == symbol])
+    realized_rows: list[dict[str, Any]]
+    if is_contract:
+        realized_rows = ([_option_realized_wire(r) for r in opt_block.realized.rows
+                          if r.symbol == symbol] if opt_block is not None else [])
+    else:
+        realized_rows = [_realized_wire(r) for r in data.realized.rows if r.symbol == symbol]
 
     out: dict[str, Any] = {
         "symbol": symbol,
@@ -1085,8 +1099,9 @@ def symbol_detail(
         "position_opened": any(p.symbol == symbol for p in data.opened_positions),
         "realized_rows": realized_rows,
     }
-    if opt_block is not None:
-        # Options W5 (spec §6.2): additive, and only on a ledger that carries an option.
+    if opt_block is not None or is_contract:
+        # Options W5 (spec §6.2): additive — on a ledger that carries an option, and for every
+        # registered contract (R3 n3); a stock on a stock ledger never sees the key.
         out["options"] = _options_wire(symbol, inst, opt_block)
     return out
 

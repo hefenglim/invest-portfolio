@@ -385,6 +385,21 @@
       note.id = 'opt-note';
       sec.appendChild(note);
     }
+    scrollToHash(sec);
+  }
+
+  /* R3 m1: a link to `index.html#options-panel` (the stock drawer's 「→ 選擇權區」) followed from
+     another page landed at the TOP: this section is created here, after the dashboard fetch, so
+     the browser's own scroll-to-hash had already run and found nothing. Once, on the first
+     render, after the other renderers sharing the payload have painted (a macrotask runs after
+     every `.then` of the shared promise); a later re-render never pulls the page. */
+  let hashScrolled = false;
+  function scrollToHash(sec) {
+    if (hashScrolled || window.location.hash !== '#' + sec.id) return;
+    hashScrolled = true;
+    setTimeout(() => {
+      try { sec.scrollIntoView({ block: 'start' }); } catch (e) { /* noop */ }
+    }, 0);
   }
 
   (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')))

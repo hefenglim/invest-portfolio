@@ -115,9 +115,13 @@
     $('#m-symbol').value = '';
     $('#m-shares').value = '';
     $('#m-price').value = '';
-    /* item 6 (2026-07-03): 新增標的 → 記一筆買入 handoff — ?symbol=XXXX prefills. */
+    /* item 6 (2026-07-03): 新增標的 → 記一筆買入 handoff — ?symbol=XXXX prefills.
+       Not on the option-close deep link (`?option_close=…&symbol=<contract>`): that one has ONE
+       reader, pdPrefillOptionClose, which sets the contract's account first (R3 M1 — reading
+       `symbol` here put the contract under the REMEMBERED account before the prefill ran). */
     try {
-      const pre = new URLSearchParams(window.location.search).get('symbol');
+      const q = new URLSearchParams(window.location.search);
+      const pre = q.get('option_close') ? null : q.get('symbol');
       if (pre) {
         $('#m-symbol').value = pre.trim().toUpperCase();
         setTimeout(() => { const n = $('#m-shares'); if (n) n.focus(); }, 100);
@@ -242,7 +246,10 @@
      through as the user's raw string (the input-side numeric is sent; the backend
      computes the value of record). Empty/blank => omit (let the backend auto-fill). */
   function manualBody() {
-    if (optState.on) return optionBody();
+    /* A contract in 代號 always goes out as an option body — with `option_intent` or
+       `close_reason`, never neither (the server refuses that since the R3 fix round) — even if
+       no sync has run since the builder filled it. */
+    if (optState.on || optInst($('#m-symbol').value)) return optionBody();
     const sym = $('#m-symbol').value.trim();
     const sharesRaw = $('#m-shares').value.trim();
     const priceRaw = $('#m-price').value.trim();
@@ -696,15 +703,37 @@
   }
 
   /* Prefill from the dashboard's 「登錄到期作廢」, the expiry inbox's 「改登錄被指派／履約」
-     (both `trades.html?option_close=…`) or an in-page caller. */
-  window.pdPrefillOptionClose = function (p) {
+     (both `trades.html?option_close=…`, read ONLY here — initManual's `?symbol=` handoff stands
+     aside) or an in-page caller (the drawer on this page).
+     R3 M1: the CONTRACT's account decides what this form shows — 被指派 vs 履約 is that
+     position's direction (closeReasonOf), 「可平倉 N 口」 its count, the side hint its words —
+     so that account's holdings are loaded BEFORE the contract lands in 代號 and the form
+     previews. The account used to be set with `.value =` (no change event) after the form had
+     booted under the REMEMBERED account: the target holdings were never fetched, the hint read
+     「此帳戶目前沒有這個合約的部位」, a LONG contract went out as `assigned` and was refused,
+     and 確認寫入 stayed disabled. */
+  window.pdPrefillOptionClose = async function (p) {
     const tab = document.getElementById('tab-manual');
     if (tab) tab.click();
     const section = document.getElementById('input-section');
     if (section) section.classList.add('open');
-    const set = (id, v) => { const n = $('#' + id); if (n && v !== undefined && v !== null && v !== '') n.value = v; };
-    set('m-account', p.account_id);
-    set('m-symbol', p.symbol);
+    const given = (v) => v !== undefined && v !== null && v !== '';
+    const set = (id, v) => { const n = $('#' + id); if (n && given(v)) n.value = v; };
+    /* Nothing previews — and nothing can be written from — the half-set form while the
+       holdings load: a pending keystroke preview would go out with the new account and the old
+       代號, and a cancelled boot preview would leave 確認寫入 in its enabled markup state. The
+       neutral card holds 確認寫入 disabled until the prefilled draft's own preview lands. */
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+    mPreview = null;
+    renderManual(null, [], false);
+    const accSel = $('#m-account');
+    if (given(p.account_id) && ctx.accounts.some((a) => a.id === p.account_id)) {
+      accSel.value = p.account_id;
+    }
+    if (manualPicker) manualPicker.close();
+    syncOptionFooter();
+    await loadAcctHoldings(accSel.value, false);   // never rejects: a failed fetch degrades
+    set('m-symbol', given(p.symbol) ? String(p.symbol).trim().toUpperCase() : p.symbol);
     set('m-contracts', p.contracts);
     set('m-date', p.date);
     optState.close = p.close_reason === 'expired' ? 'expired' : 'assign';
@@ -721,7 +750,7 @@
     window.pdPrefillOptionClose({
       close_reason: reason, account_id: q.get('account_id'), symbol: q.get('symbol'),
       contracts: q.get('contracts'), date: q.get('date'),
-    });
+    }).catch(() => { /* the form stays as booted; nothing was written */ });
   }
 
   function initOptionMode() {
@@ -1011,7 +1040,12 @@
     const ccy = (it && it.ccy) || a.ccy;
     if (!m.feeOverride) $('#m-fee').value = resp.fee !== undefined ? f.money(resp.fee, ccy) : '0';
     if (!m.taxOverride) $('#m-tax').value = resp.tax !== undefined ? f.money(resp.tax, ccy) : '0';
+    /* The fee rule the server priced this draft under. An option CLOSE row (到期作廢／被指派／
+       履約) carries no fee and answers `fee_rule_label: null` — the line is CLEARED then, never
+       left showing the previous draft's 「每口 0.65＋SEC（賣出）」. An answer without the key
+       keeps the line (an older server). */
     if (resp.fee_rule_label) $('#m-fee-rule').textContent = resp.fee_rule_label;
+    else if ('fee_rule_label' in resp) $('#m-fee-rule').textContent = '';
     if (optState.on) {
       /* The 股票腿 price the server used (the strike by default) lands in its field — only
          into an empty field or the page's own earlier fill (pdField): a typed price wins. */

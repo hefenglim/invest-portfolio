@@ -2570,6 +2570,9 @@ select.ai-edit { padding-right: 2px; }
   margin-left: 6px;
 }
 .opt-close-btn { margin-left: 6px; }
+/* R3 m2: the watchlist's 現價 cell of a contract — never quoted by design (R2), so a neutral
+   statement of how it is valued, not the red 缺價 of a broken feed. */
+.inst-opt-unquoted { font-size: 11px; color: var(--text-3); white-space: nowrap; }
 .opt-c-contract .badge { margin-left: 6px; vertical-align: middle; }
 .opt-detail-row td { background: var(--panel-2); }
 .opt-kv { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 6px 4px; font-size: 11px; }

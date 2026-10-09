@@ -568,10 +568,17 @@
     bodyEl.appendChild(kindWrap);
 
     /* --- the identifying fields --- */
-    const fAcct = el('select', 'select');
+    const fAcct = el('select', 'select ca-acct-select');
     const fSym = el('input', 'input');
     fSym.spellcheck = false;
     fSym.value = prefill.from_symbol || '';
+    /* Options spec §6.2: an OPTION_ADJUST's 來源 is a HELD contract (R3 m3 — it was the free
+       text box above, which took any string). Picked from the account's held contracts on
+       GET /api/input/holdings, each named by the server's display name, direction and 口數
+       (「XYZ 2026-12-18 60 Put・賣方 1 口」 — the manual picker's words); the OCC symbol is the
+       option's value and its tooltip. Loaded when the kind is chosen and on every account
+       change. */
+    const fAdjSrc = el('select', 'select ca-adj-src');
     const fDate = el('input', 'input');
     fDate.type = 'date';
     fDate.value = prefill.date || todayIso();
@@ -582,9 +589,17 @@
 
     const grid = el('div', 'ca-grid');
     grid.appendChild(field('帳戶', fAcct, '公司行動會自動套用到所有持有這檔股票的帳戶'));
-    grid.appendChild(field('代號', fSym));
+    const symField = field('代號', fSym);
+    symField.classList.add('ca-sym-field');
+    grid.appendChild(symField);
     grid.appendChild(field('行動日期', fDate));
     bodyEl.appendChild(grid);
+    /* Its own row under the grid (the grid's one select is the account, which every door and
+       test addresses as such). */
+    const srcField = field('來源合約', fAdjSrc, '此帳戶目前持有的選擇權合約（1 口）');
+    srcField.classList.add('ca-src-field');
+    srcField.hidden = true;
+    bodyEl.appendChild(srcField);
 
     /* --- the ratio: two integer boxes, phrased the way brokers announce it --- */
     const fFrom = intBox(prefill.ratio_from || 1);
@@ -632,11 +647,53 @@
       '到期日與買權／賣權同原合約；新合約的代號由系統依標的、到期日、履約價組成');
     adjField.hidden = true;
     bodyEl.appendChild(adjField);
-    const adj = { src: null, srcFor: '', to: '', seq: 0 };
+    const adj = { src: null, srcFor: '', to: '', seq: 0, heldSeq: 0 };
+    /* The 來源 symbol: the picked held contract on an OPTION_ADJUST, the typed 代號 otherwise. */
+    function fromSymbol() {
+      return state.kind === 'OPTION_ADJUST' ? fAdjSrc.value : fSym.value.trim();
+    }
+    /* The account's held contracts → the 來源 picker. A contract with a non-zero signed count is
+       `held` on this wire with its direction and 口數 (spec §6.2); a stock row is skipped. */
+    async function loadHeldContracts() {
+      const seq = ++adj.heldSeq;
+      const acct = fAcct.value;
+      let held = [];
+      if (acct) {
+        try {
+          const resp = await api().get('/api/input/holdings', { account: acct });
+          held = ((resp && resp.held) || []).filter((h) => h.asset_type === 'option');
+        } catch (e) { held = []; }
+      }
+      if (seq !== adj.heldSeq) return;          // a newer account owns the picker
+      /* The pick survives the rebuild when this account still holds it — read NOW, after the
+         fetch, so a choice made while it was in flight is the one kept (DEF-007's class: a
+         late response never replaces what the owner chose; the rebuilt options carry the
+         selection, no late `.value` write). */
+      const keep = fAdjSrc.value || (prefill.from_symbol || '').trim().toUpperCase();
+      const keepHeld = held.some((h) => h.symbol === keep);
+      const W = window.pdOptionWords || { direction: {}, unit: '口' };
+      fAdjSrc.replaceChildren();
+      const ph = el('option', null, held.length
+        ? '請選擇合約' : (acct ? '此帳戶目前沒有持有的選擇權合約' : '請先選擇帳戶'));
+      ph.value = '';
+      ph.disabled = true;
+      ph.selected = !keepHeld;
+      fAdjSrc.appendChild(ph);
+      held.forEach((h) => {
+        const o = el('option', null, (h.name || h.symbol) + '・'
+          + (W.direction[h.direction] || '') + ' ' + f().exact(h.contracts) + ' ' + W.unit);
+        o.value = h.symbol;
+        o.title = h.symbol;
+        o.selected = keepHeld && h.symbol === keep;
+        fAdjSrc.appendChild(o);
+      });
+      composeAdjDest();
+    }
+    fAdjSrc.addEventListener('change', () => { composeAdjDest(); schedule(); });
     /* The source contract's terms — the drawer wire's `options.contract`, parsed from the
        symbol on the server (OPT-D22). */
     async function loadAdjSource() {
-      const sym = fSym.value.trim().toUpperCase();
+      const sym = fromSymbol().toUpperCase();
       if (!sym || adj.srcFor === sym) return adj.src;
       adj.srcFor = sym;
       adj.src = null;
@@ -653,7 +710,7 @@
       const src = await loadAdjSource();
       if (seq !== adj.seq) return;
       if (!src) {
-        adjName.textContent = fSym.value.trim() ? '代號不是已登錄的選擇權合約' : '';
+        adjName.textContent = fromSymbol() ? '代號不是已登錄的選擇權合約' : '';
         schedule();
         return;
       }
@@ -772,13 +829,15 @@
       carryField.hidden = state.kind !== 'SPINOFF';
       childPriceField.hidden = state.kind !== 'SPINOFF';
       adjField.hidden = !isAdj;
+      symField.hidden = isAdj;
+      srcField.hidden = !isAdj;
       unitFrom.textContent = isAdj ? '口 →' : '股 →';
       unitTo.textContent = isAdj ? '口' : '股';
       /* OPT-D16: 1 → N contracts — the source term is fixed at 1. */
       fFrom.readOnly = isAdj;
       if (isAdj) {
         fFrom.value = '1';
-        composeAdjDest();
+        loadHeldContracts();      // → composeAdjDest once the picker is filled
       }
     }
 
@@ -790,7 +849,7 @@
         account_id: fAcct.value,
         date: fDate.value,
         kind: state.kind,
-        from_symbol: fSym.value.trim(),
+        from_symbol: fromSymbol(),
         to_symbol: toSym,
         ratio_to: fTo.value,
         ratio_from: fFrom.value,
@@ -909,9 +968,11 @@
     /* fChildPrice too (DEF-040 R4): the preview says whether the typed price can be written. */
     [fSym, fToSym, fTo, fFrom, fCarry, fChildPrice].forEach(
       (n) => n.addEventListener('input', schedule));
-    /* OPTION_ADJUST: a different source contract re-reads its terms and the destination. */
-    fSym.addEventListener('input', () => { if (state.kind === 'OPTION_ADJUST') composeAdjDest(); });
+    /* OPTION_ADJUST: a different source contract re-reads its terms and the destination — the
+       picker's own `change` listener (fAdjSrc, above); the 代號 box is hidden on that kind. */
     [fAcct, fDate].forEach((n) => n.addEventListener('change', schedule));
+    /* OPTION_ADJUST: the 來源 picker lists THIS account's held contracts. */
+    fAcct.addEventListener('change', () => { if (state.kind === 'OPTION_ADJUST') loadHeldContracts(); });
 
     save.addEventListener('click', async () => {
       const body = requestBody();
@@ -988,6 +1049,7 @@
         o.selected = true;
         fAcct.appendChild(o);
       }
+      if (state.kind === 'OPTION_ADJUST') loadHeldContracts();
       schedule();
     }).catch(() => { schedule(); });
   }

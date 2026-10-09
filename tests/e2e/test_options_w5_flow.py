@@ -2,14 +2,14 @@
 the contract drawer and the refused-close banner — on a seeded option ledger — and the
 golden (stock-only) dashboard carrying no trace of any of it (invariant 1).
 
-The expiry-inbox routes are not wired into the app in this wave (they land with W6/W7b), so
-every page here stubs ``/api/option-expiry/*`` (the sidebar badge reads its count on every
-page); the inbox panel's own flows are in ``test_options_w5_expiry_inbox_flow.py``.
+Every page here runs against the REAL ``/api/option-expiry/*`` routes (wired in W7b; the
+sidebar badge reads their count on every page); the inbox panel's own flows are in
+``test_options_w5_expiry_inbox_flow.py`` (stubbed, the §7.2 contract) and
+``test_options_w7b_expiry_inbox_flow.py`` (real routes).
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterator
 from datetime import date, timedelta
@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page, Route
+from playwright.sync_api import Page
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.register import register_option_contract
@@ -44,17 +44,6 @@ def _loopback_sockets() -> Iterator[None]:
     disable_socket(allow_unix_socket=True)
 
 
-def stub_expiry(page: Page) -> None:
-    """``/api/option-expiry/*`` answered empty — the routes are wired in W7b."""
-
-    def handle(route: Route) -> None:
-        url = route.request.url
-        body: dict[str, Any] = {"count": 0} if "/count" in url else {"items": []}
-        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
-
-    page.route("**/api/option-expiry**", handle)
-
-
 def _errors(page: Page) -> list[str]:
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -75,7 +64,6 @@ def test_the_options_section_renders_from_the_block(
     page = fresh_page
     page.set_viewport_size({"width": 1440, "height": 1000})
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector("#options-panel #opt-open-body tr.opt-row")
 
@@ -131,7 +119,6 @@ def test_the_open_contracts_render_as_cards_on_a_phone(
     page = fresh_page
     page.set_viewport_size({"width": 390, "height": 860})
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector("#opt-open-body tr.opt-row")
     assert page.locator("#opt-open-table thead").is_hidden()
@@ -156,7 +143,6 @@ def test_a_stock_ledger_dashboard_carries_no_option_trace(
     base = flow_server(_seed_golden)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector("#holdings-body tr")
     page.wait_for_selector(".kpi-card")
@@ -173,7 +159,6 @@ def test_register_expiry_from_the_section_lands_on_the_prefilled_form(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector("#opt-open-body .opt-close-btn")
     with page.expect_navigation():
@@ -205,7 +190,16 @@ def test_option_mode_sell_to_open_then_buy_to_close_offers_the_roll(
     base = flow_server(_seed_golden)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
+    # Every option body the form sends — preview and commit — carries a side: `option_intent`
+    # or `close_reason`, never neither (the server refuses that), from the very first preview
+    # after the builder fills the contract.
+    bodies: list[dict[str, Any]] = []
+
+    def _on(req: Any) -> None:
+        if req.method == "POST" and "/api/input/manual/" in req.url:
+            bodies.append(req.post_data_json or {})
+
+    page.on("request", _on)
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#m-account option[value='schwab']", state="attached")
     page.select_option("#m-account", "schwab")
@@ -253,6 +247,10 @@ def test_option_mode_sell_to_open_then_buy_to_close_offers_the_roll(
     assert page.input_value("#m-ob-underlying") == "AAPL"
     assert "active" in (page.get_attribute("#m-ob-put", "class") or "")
     assert page.input_value("#m-ob-expiry") == ""
+    opt_bodies = [b for b in bodies if b.get("symbol") == symbol]
+    assert len(opt_bodies) >= 4, bodies               # previews + the two commits
+    assert all(b.get("option_intent") or b.get("close_reason") for b in opt_bodies), opt_bodies
+    assert opt_bodies[0].get("option_intent") == "STO"
     assert not errors, errors
 
 
@@ -263,7 +261,6 @@ def test_an_open_contracts_drawer_reconciles_and_its_underlying_names_it(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector(".kpi-card")
     with page.expect_response(f"**/api/symbol/{OPEN_PUT}/detail"):
@@ -316,7 +313,6 @@ def test_a_refused_close_is_named_on_the_dashboard_and_flashed_in_the_ledger(
     base = flow_server(_seed_refused_close)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/index.html", wait_until="load")
     page.wait_for_selector("#refused-close-banner .unreg-link")
     assert "未入帳（待釐清）" in page.inner_text("#refused-close-banner")

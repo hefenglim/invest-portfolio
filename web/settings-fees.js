@@ -74,10 +74,14 @@
 
   /* Change detection: does the input value differ from the field default? For numeric fields
      compare as numbers (a UI routing decision, never money of record — the value SENT is the
-     input's own string). Blank input = revert. */
+     input's own string). Blank input = revert: `collect()` sends it as null, which the server
+     reads as "drop the override" — the rule set's default again, which for a NULLABLE field
+     whose default is unset (moomoo_us `option_per_contract`) is 「未設定」. R3 n1: a blank used
+     to be sent as '' whenever the default was not null, and the server refused the whole card
+     (400 「非有效數值：''」). */
   function differsFromDefault(f, raw) {
     if (f.key === 'rounding') return raw !== f.default;
-    if (raw === '' || raw === null) return f.default !== null;   // blank -> revert (unless default already null)
+    if (raw === null || String(raw).trim() === '') return false;   // blank -> revert
     return Number(raw) !== Number(f.default);
   }
 
@@ -121,10 +125,20 @@
     if (!CAP_KEYS.has(f.key) && !OPTION_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
     input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
     if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
-    if (f.key === 'option_per_contract') input.placeholder = '未設定';
+    /* What a blank field means here: 「未設定」 only where the default IS unset; elsewhere a
+       blank reverts to the rule set's default (the server has no "unset" override). */
+    const optUnsetDefault = f.default === null || f.default === undefined;
+    if (f.key === 'option_per_contract') {
+      input.placeholder = optUnsetDefault ? '未設定' : '預設 ' + f.default;
+    }
     input.dataset.key = f.key;
     ctrl.appendChild(input);
-    if (OPTION_NOTES[f.key]) ctrl.appendChild(el('span', 'panel-sub fee-opt-note', OPTION_NOTES[f.key]));
+    if (OPTION_NOTES[f.key]) {
+      const note = f.key === 'option_per_contract' && !optUnsetDefault
+        ? '留空＝還原系統預設 ' + f.default + '；填 0 表示每口免手續費'
+        : OPTION_NOTES[f.key];
+      ctrl.appendChild(el('span', 'panel-sub fee-opt-note', note));
+    }
 
     const revert = el('button', 'fee-revert', '還原');
     revert.type = 'button';
@@ -230,8 +244,9 @@
 
   function collect(name, byKey) {
     /* Build the PUT overrides map from the card's inputs: a value that differs from the
-       default is sent as an override string; one equal to the default is sent as null
-       (revert / clear any stale override). Only rendered fields are touched. */
+       default is sent as an override string; one equal to the default — or blank — is sent
+       as null (revert / clear any stale override). Never '' (R3 n1). Only rendered fields
+       are touched. */
     const overrides = {};
     const card = document.querySelector('details.fee-detail [data-save="' + name + '"]');
     const det = card ? card.closest('details') : null;

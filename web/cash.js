@@ -338,6 +338,11 @@
     if (stmtPager) stmtPager.update({ offset: stmt.offset, totalCount: stmt.total });
   }
 
+  /* The §6.1 sides of an option CLOSE row (到期作廢／被指派／履約, and a §4.4-refused close's
+     未入帳（待釐清）) — format.js's words, pinned to shared/options.py by the vocabulary guard. */
+  const OPTW = window.pdOptionWords || { closeReason: {}, unbooked: '未入帳（待釐清）' };
+  const OPTION_CLOSE_SIDES = new Set(Object.values(OPTW.closeReason || {}).concat([OPTW.unbooked]));
+
   /* Compose the 說明 line from a row's structured detail (display-only formatting via the
      f.* helpers). Falls back to the note/ref for movements; empty note -> 「（無備註）」. */
   function describe(r) {
@@ -347,7 +352,9 @@
          口 — 「賣出開倉 1 口 XYZ 2026-12-18 50 Put」 — never 「賣出 100 股」. A close row
          (到期作廢／被指派／履約) moves no cash and carries no price, so it ends there. */
       let s = r.option_side + ' ' + f.exact(r.contracts) + ' 口 ' + (r.name || r.symbol || '');
-      if (Number(r.price) !== 0) {
+      /* Which rows are closes is the server's §6.1 label (R3 n2), never a coercion of its
+         price string. */
+      if (!OPTION_CLOSE_SIDES.has(r.option_side)) {
         s += ' @ ' + f.price(r.price, ccy) + '（費 ' + f.money(r.fee, ccy) + '・稅 '
           + f.money(r.tax, ccy) + '）';
       }

@@ -485,7 +485,12 @@
       sec.appendChild(box);
     });
     if (!(o.open || []).length) {
-      sec.appendChild(el('div', 'sd-empty', '目前無未平倉部位 — 已實現與交易明細列在下方。'));
+      /* R3 n3: a registered contract with no ledger row at all (reached from the watchlist's
+         「顯示選擇權合約」) has nothing below either — say so instead of pointing at it. */
+      const hasRows = (detail.activity || []).length > 0 || (detail.realized_rows || []).length > 0;
+      sec.appendChild(el('div', 'sd-empty', hasRows
+        ? '目前無未平倉部位 — 已實現與交易明細列在下方。'
+        : '此合約在帳本中沒有任何交易紀錄。'));
     }
     /* §4.4: a close the replay refused — named, with its remedy and a way to the row. */
     (o.refused_closes || []).forEach((rc) => {

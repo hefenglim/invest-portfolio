@@ -3,11 +3,13 @@
 warning and the refused-close dialog, the edit dialog in 口數, the 選擇權合約調整 form, the
 fee settings' two option fields, the watchlist toggle and the cash statement's wording.
 
-``/api/option-expiry/*`` is stubbed (wired in W7b) — see ``test_options_w5_flow.py``.
+Every page here runs against the REAL ``/api/option-expiry/*`` routes (wired in W7b; the
+sidebar badge reads their count on every page).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -18,7 +20,6 @@ from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 from tests.conftest import _seed_golden
 from tests.e2e.conftest import FlowServerFactory
 from tests.e2e.options_seed import OPEN_PUT, seed_option_ledger
-from tests.e2e.test_options_w5_flow import stub_expiry
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +57,6 @@ def test_an_assignment_previews_and_writes_both_legs(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     _manual_on(page, base, "schwab", OPEN_PUT)
     page.wait_for_selector("#m-opt-sides button[data-intent='BTC'].active")   # held short
     page.click("#m-opt-closes button[data-close='assign']")
@@ -85,7 +85,6 @@ def test_an_unset_option_fee_names_both_repairs(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     _manual_on(page, base, "moomoo_my", OPEN_PUT)
     page.click("#m-opt-sides button[data-intent='STO']")
     page.fill("#m-contracts", "1")
@@ -103,7 +102,6 @@ def test_the_ledger_delete_names_the_close_rows_and_lists_a_refusal(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#tx-body .tx-opt-side")
     # the bought call's opening trade — a later 到期作廢 row closes it
@@ -136,7 +134,6 @@ def test_the_edit_dialog_edits_an_option_row_in_contracts(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/trades.html", wait_until="load")
     page.wait_for_selector("#tx-body .tx-opt-side")
     row = page.locator("#tx-body tr.expandable", has_text="130 Call")
@@ -163,14 +160,24 @@ def test_the_option_adjust_form_composes_the_destination_and_prints_the_products
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/trades.html", wait_until="load")
     page.click("#tab-laction")
     page.click("#action-add")
     page.wait_for_selector(".ca-modal .ca-kind")
     page.locator(".ca-modal .ca-kind", has_text="選擇權合約被調整").click()
     page.wait_for_selector(".ca-modal .ca-adj-strike:visible")
-    page.locator(".ca-modal .field", has_text="代號").locator("input").first.fill(OPEN_PUT)
+    # R3 m3 (spec §6.2: 來源 = a held contract): the source is PICKED from the account's held
+    # contracts, named by the server (「…110 Put・賣方 2 口」) — never a free-text box.
+    assert page.locator(".ca-modal .ca-sym-field").is_hidden()
+    page.wait_for_selector(".ca-modal .ca-acct-select option[value='schwab']", state="attached")
+    page.select_option(".ca-modal .ca-acct-select", "schwab")
+    src = f".ca-modal .ca-adj-src option[value='{OPEN_PUT}']"
+    page.wait_for_selector(src, state="attached")
+    assert page.inner_text(src).endswith("110 Put・賣方 2 口")
+    labels = page.eval_on_selector_all(".ca-modal .ca-adj-src option",
+                                       "ns => ns.map((n) => n.textContent)")
+    assert all("・" in t for t in labels if t and not t.startswith("請選擇")), labels
+    page.select_option(".ca-modal .ca-adj-src", OPEN_PUT)
     page.wait_for_function(
         "() => document.querySelector('.ca-modal .ca-adj-und').value === 'AAPL'")
     assert page.locator(".ca-modal .ca-int").first.input_value() == "1"   # 來源 fixed at 1 口
@@ -191,7 +198,6 @@ def test_the_fee_settings_show_the_two_option_fields(
     base = flow_server(_seed_golden)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/settings.html#accounts", wait_until="load")
     page.wait_for_selector("#fee-rules-wrap .fee-field[data-key='option_per_contract']",
                            state="attached")
@@ -217,7 +223,6 @@ def test_the_watchlist_hides_contracts_until_asked(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/instruments.html", wait_until="load")
     page.wait_for_selector("#inst-body tr")
     assert page.locator("#inst-body tr", has_text=OPEN_PUT).count() == 0
@@ -226,6 +231,18 @@ def test_the_watchlist_hides_contracts_until_asked(
     assert toggle.inner_text() == "顯示選擇權合約（5）"
     toggle.click()
     page.wait_for_selector(f"#inst-body tr:has-text('{OPEN_PUT}')")
+    # R3 m2: a contract is never quoted by design (R2) — no red 缺價 badge, a neutral label
+    # with its own class, and no 編輯 (target-price alerts read stocks only).
+    row = page.locator("#inst-body tr", has_text=OPEN_PUT)
+    assert row.locator(".badge-missing").count() == 0
+    label = row.locator(".inst-opt-unquoted")
+    assert label.count() == 1 and label.inner_text() == "以最後成交價估值"
+    assert row.locator(".wl-actions .btn", has_text="編輯").count() == 0
+    # a stock row keeps its 編輯
+    aapl = page.locator("#inst-body tr").filter(
+        has=page.locator(".sym-code", has_text=re.compile(r"^AAPL$")))
+    assert aapl.count() == 1
+    assert aapl.locator(".wl-actions .btn", has_text="編輯").count() == 1
     assert not errors, errors
 
 
@@ -236,7 +253,6 @@ def test_the_cash_statement_says_what_an_option_line_did(
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
-    stub_expiry(page)
     page.goto(base + "/cash.html", wait_until="load")
     page.wait_for_selector("#cash-cards .cash-line")
     card = page.locator("#cash-cards .cash-card", has_text="嘉信").first
