@@ -408,7 +408,10 @@ calls and puts with the standard 100-share deliverable; anything else is refused
   expiry). It sits after SPLIT in `_apply_action` and has its own guards (E22, opposite
   direction); EXCHANGE's short refusal (E5) does not apply to it.
 - **Valuation (R2, OPT-D4):** an open contract is valued at its LAST ordinary trade price from
-  the ledger (close rows excluded; predecessor ÷ ratio after an adjustment) — never a quote,
+  the ledger (close rows excluded; after an `OPTION_ADJUST`, the LATER of the destination's own
+  last trade and the predecessor's last price ÷ ratio, and nothing from an adjustment the replay
+  refused — final review R1-M2, 2026-10-10; on a 待釐清 contract no price, value or obligation)
+  — never a quote,
   never written to `prices`, never in freshness. POINT-IN-TIME figures include it (KPI 總市值 /
   總報酬 / XIRR's terminal value / total return A / the FX pool / 月度成績); TREND-DERIVED figures
   exclude its value (the trend, B, TWR, the benchmark) with one note (R3). 本金匯率效果 (B − A) is

@@ -1149,8 +1149,11 @@ in the opposite direction, is refused.
 **Valuation (R2, R3, OPT-D4, OPT-D20)**
 
 An open contract is valued at the **last ordinary trade price in the ledger** (close rows
-excluded; the same contract across accounts; after an adjustment with no trade since, the
-predecessor's last price ÷ N) — **never** a quote, **never** written to `prices`, not in the
+excluded; the same contract across accounts; after an adjustment, the LATER by date of the
+destination's own last trade and the predecessor's last price before the adjustment ÷ N (dated the
+predecessor's trade), the destination's own trade winning a tie; an adjustment the replay refused
+propagates **no** price — clarified by final review R1-M2, 2026-10-10; a **待釐清** contract
+(oversold or with a refused close) carries no price, value or obligation) — **never** a quote, **never** written to `prices`, not in the
 freshness report. On the signed quantity the §4.3 valuation needs no change:
 
 $$\text{market\_value} = \text{last\_price}\times\text{shares},\qquad
