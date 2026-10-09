@@ -168,7 +168,7 @@ def build_holdings_csv(
         # not. Say how much of the whole-portfolio figure is options, whatever the filter.
         total = _s(data.kpis.total_market_value) or "n/a"
         opt_mv = _s(data.options.market_value.reporting) or "n/a"
-        footer.append(f"total_market_value={total}, 其中選擇權={opt_mv}, "
+        footer.append(f"total_market_value={total}, options_market_value={opt_mv}, "
                       f"reporting_ccy={reporting.value}")
     # When a filter is active, record it in the footer AND the filename so the download is
     # self-describing (an unfiltered export keeps the byte-identical name/footer it had).

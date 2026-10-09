@@ -137,7 +137,8 @@ def test_the_holdings_csv_appends_the_options_block_and_the_option_line(
         "premium_total": "398.7000", "last_price": "2.00", "market_value": "-400.00",
         "obligation": "10000", "past_expiry": "False", "reporting_ccy_value": "-12800.00"}
     text = art.content.decode("utf-8-sig")
-    assert "# total_market_value=25600.00, 其中選擇權=-12800.00, reporting_ccy=TWD" in text
+    assert ("# total_market_value=25600.00, options_market_value=-12800.00, "
+            "reporting_ccy=TWD") in text
 
 
 @pytest.mark.parametrize("kwargs", [{"account": "tw_broker"}, {"market": Market.TW}])
