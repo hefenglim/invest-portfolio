@@ -18,6 +18,8 @@ A fresh page is used per test so 401's real navigation never bleeds across tests
 import pytest
 from playwright.sync_api import Page
 
+from tests.e2e.conftest import install_third_party_stub
+
 
 def _fresh_api_page(browser_page: Page, live_server: str) -> Page:
     """Open a fresh page on /login.html (served, clean) and inject the served /api.js.
@@ -30,6 +32,7 @@ def _fresh_api_page(browser_page: Page, live_server: str) -> Page:
     browser = browser_page.context.browser
     assert browser is not None
     context = browser.new_context()
+    install_third_party_stub(context)  # issue #67 — no third-party network
     page = context.new_page()
     page.goto(live_server + "/login.html", wait_until="load")
     page.add_script_tag(url="/api.js")
@@ -95,6 +98,7 @@ def test_401_redirects_to_login(live_server: str, browser_page: Page) -> None:
     browser = browser_page.context.browser
     assert browser is not None
     context = browser.new_context()
+    install_third_party_stub(context)  # issue #67 — no third-party network
     page = context.new_page()
     try:
         page.goto(live_server + "/index.html", wait_until="load")

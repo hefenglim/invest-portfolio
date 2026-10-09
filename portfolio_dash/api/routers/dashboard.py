@@ -13,15 +13,20 @@ from fastapi import APIRouter, Depends, Query
 
 from portfolio_dash.api import alert_inputs, insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
+from portfolio_dash.api.routers.scheduler import scheduler_running_dep
 from portfolio_dash.api.serialize import to_wire
+from portfolio_dash.api.wire import alerts_wire
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight import composer_store, insights_store
 from portfolio_dash.ops import backup as backup_ops
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.shared.corporate_actions import kind_label
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy.alerts import account_display_names, compute_alerts_from
+from portfolio_dash.strategy.alerts import compute_alerts_from
 from portfolio_dash.strategy.rules_config import get_alert_rules
 
 router = APIRouter()
@@ -36,21 +41,37 @@ def dashboard(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
+    scheduler_running: bool | None = Depends(scheduler_running_dep),
 ) -> dict[str, Any]:
     data = build_dashboard(conn, now=now, reporting=reporting)
     payload: dict[str, Any] = to_wire(data.model_dump())
 
     # spark_30d: recent daily closes per held symbol (spec 01 add-on; batch-friendly read).
+    # §5.1(d) / W6c: the sparkline is a shape drawn from points compared to EACH OTHER, and
+    # its last point sits next to `row["market_price"]` — which `build_dashboard` already
+    # re-expressed into `as_of` at the `price_map` seam (W6b). Leaving the series raw would
+    # draw a 7x cliff on the split date beside a price that has no such cliff: two numbers
+    # on one row disagreeing by the ratio. ONE index for the whole request, built outside
+    # the per-holding loop (trap #21).
     end = now.date()
     start = end - timedelta(days=_SPARK_DAYS)
+    actions = load_action_index(conn)
     for row in payload["holdings"]:
-        history = get_price_history(conn, row["symbol"], start, end)
+        sym = row["symbol"]
+        history = series_in(
+            actions, sym, get_price_history(conn, sym, start, end), valued_on=end
+        )
         row["spark_30d"] = [decimal_str(p.value) for p in history]
 
     # Single source of truth (Σ top-ups − Σ usage); never None, $0 when nothing funded.
     # ``ai_active`` (P3 batch 3 · 3B): the smallest honest surface for the quota chip — when
     # false the chip shows a neutral 「AI 未啟用」 instead of 「AI 額度 $0」+warning, matching
     # the quota_low alert now being gated off while no model is configured.
+    # I-11 / I-14: the ledger's word for each refused action's kind, so the 未套用 banner prints
+    # the server's vocabulary (分割／換股／分拆) rather than a table of its own. ADDITIVE.
+    for u in payload.get("unapplied_actions") or []:
+        u["kind_label"] = kind_label(str(u.get("kind", "")))
+
     ai_on = ai_active(conn)
     payload["llm_quota"] = {
         "remaining_usd": decimal_str(budget_remaining(conn)),
@@ -60,6 +81,21 @@ def dashboard(
     # Backup freshness: ops/file state, not pure calc — build_dashboard leaves it None,
     # the router fills it. ISO-8601 UTC string of the newest backup, or None if none yet.
     payload["freshness"]["last_backup_at"] = backup_ops.latest_backup_at()
+
+    # Scheduler liveness: PROCESS state, not pure calc — filled here for exactly the same
+    # reason as the line above (build_dashboard has no request and no app.state). M3: on an
+    # instance running with PD_DISABLE_SCHEDULER=1, nothing refreshes on a schedule, so
+    # every 「最後更新」/「產生於」 stamp on the page is only as new as the last manual run —
+    # the demo's 今日摘要 was 56 days old under a current-looking title. The dashboard now
+    # carries the fact so its cards can say so instead of the reader having to infer it
+    # from 25 empty next-fire cells on another page.
+    # isinstance, not a bare assignment: a DIRECT (non-HTTP) call to this function omits the
+    # dependency, so the parameter still holds FastAPI's unresolved ``Depends`` marker. The
+    # honest answer there is None = 「不明」 — the model's own default — never False, which
+    # would report a healthy instance's scheduler as off.
+    payload["freshness"]["scheduler_running"] = (
+        scheduler_running if isinstance(scheduler_running, bool) else None
+    )
 
     # alerts: the SAME rule engine as GET /api/alerts, run over the already-built `data`
     # (no second build_dashboard) so the embedded array can never diverge from the endpoint.
@@ -75,13 +111,12 @@ def dashboard(
         quota_threshold=get_alert_threshold(conn),
         ai_active=ai_on,
         calib_gap=calib,
-        account_names=account_display_names(conn),  # FH2: same display names as GET /api/alerts
         symbol_metrics=fed.symbol_metrics,
         target_weights=fed.target_weights,
         consensus_deltas=fed.consensus_deltas,
         target_levels=fed.target_levels,  # FU-D28: keep the embed identical to GET /api/alerts
     )
-    payload["alerts"] = to_wire([a.model_dump() for a in alerts])
+    payload["alerts"] = alerts_wire(alerts)   # I-16: + scope / subject
 
     # insights: the latest N real non-shadow cards (spec 08/04 I3). Router-fed (the pure
     # build_dashboard returns insights=[] — it does not read the insights table), overwriting
@@ -105,6 +140,9 @@ def dashboard(
             "model": c.model,
             "tokens_in": c.tokens_in,
             "tokens_out": c.tokens_out,
+            # M7-08: the stored prediction could not be read back; the card is served
+            # (title + summary intact) and the page draws a 待釐清 pill. Flagged, not hidden.
+            "unreadable": c.unreadable,
         }
         for c in cards
     ]

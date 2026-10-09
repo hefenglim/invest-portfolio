@@ -177,8 +177,9 @@ def test_fx_drift_fires() -> None:
     assert "10.0%" in fd.detail and "門檻" in fd.detail  # FH2 display percent
 
 
-def test_fx_drift_uses_account_display_name() -> None:
-    # FH2 fix: the bell shows the accounts table's display name, not the raw id.
+def test_fx_drift_names_the_account_by_token() -> None:
+    # FH2 fixed the raw id; I-16 (2026-09-23) replaced the English accounts.name it used with
+    # the account TOKEN, which web/api.js resolves to the zh display name (names.js).
     acct = AccountFXResult(
         account_id="moomoo_my", home_ccy=Currency.MYR, foreign_ccy=Currency.USD,
         avg_rate=Decimal("4.0"), current_spot=Decimal("4.6"),
@@ -188,11 +189,10 @@ def test_fx_drift_uses_account_display_name() -> None:
                    reporting_realized_fx=Decimal("0"), reporting_unrealized_fx=Decimal("0"))
     data = _minimal_data(fx=fx, calendar=[])
     alerts = compute_alerts_from(
-        data, DEFAULT_RULES, quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
-        account_names={"moomoo_my": "Moomoo MY (US)"})
+        data, DEFAULT_RULES, quota_remaining=Decimal("5"), quota_threshold=Decimal("1"))
     fd = next(a for a in alerts if a.id == "fx_drift:moomoo_my")
-    assert "Moomoo MY (US)" in fd.title
-    assert "moomoo_my" not in fd.title
+    assert fd.title == "{account:moomoo_my} 匯率偏離成本"
+    assert (fd.scope, fd.subject) == ("account", "moomoo_my")
 
 
 def test_exdiv_upcoming_fires() -> None:
@@ -213,7 +213,8 @@ def test_calib_gap_fires_above_threshold() -> None:
                                  quota_remaining=Decimal("5"), quota_threshold=Decimal("1"),
                                  calib_gap=Decimal("20"))
     cg = next(a for a in alerts if a.id == "calib_gap")
-    assert cg.sev == "warn" and cg.rule == "calib_gap" and cg.href == "/settings"
+    assert cg.sev == "warn" and cg.rule == "calib_gap"
+    assert cg.href == "/settings#prompts/evolution"   # I-15: lands on its block
     assert "20pp" in cg.detail and "15pp" in cg.detail
     assert "門檻" in cg.detail  # FH2: display copy is zh, not a debug log
 

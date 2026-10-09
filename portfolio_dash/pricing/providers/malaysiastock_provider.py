@@ -8,7 +8,6 @@ for monkeypatching (the repo bans sockets in tests).
 """
 
 import re
-from datetime import date
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -18,6 +17,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 _URL = "https://www.malaysiastock.biz/Corporate-Infomation.aspx?securityCode={code}"
@@ -66,7 +66,7 @@ class MalaysiaStockProvider(ProviderBase):
             if not close.is_finite():
                 continue
             out.append(PriceRow(
-                instrument=ref.symbol, market=Market.MY, as_of=date.today(),
+                instrument=ref.symbol, market=Market.MY, as_of=app_now().date(),
                 close=close, source=self.name,
             ))
         return out

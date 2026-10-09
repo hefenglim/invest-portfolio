@@ -143,4 +143,219 @@
 
   if (refreshBtn) refreshBtn.addEventListener('click', load);
   load();
+
+  // --- AI extraction failure log (AI-D64) --------------------------------------
+  // A bounded ring the LLM seam writes to on failure. The panel exists so the ring is
+  // visible: rows roll off silently at capacity, so `oldest` is the cue to download
+  // before the tail is lost.
+  var flBody = document.getElementById('fl-body');
+  var flNote = document.getElementById('fl-note');
+  var flCap = document.getElementById('fl-cap');
+  var flRefresh = document.getElementById('fl-refresh');
+  var flDownload = document.getElementById('fl-download');
+  var flClear = document.getElementById('fl-clear');
+
+  function flRow(r) {
+    var tr = document.createElement('tr');
+    var a = document.createElement('td');
+    a.className = 'col-text';
+    a.textContent = r.agent;
+    var n = document.createElement('td');
+    n.className = 'num';
+    n.textContent = String(r.n);
+    var o = document.createElement('td');
+    o.className = 'num';
+    // An empty table shows an em-dash, never a 0 that reads as "measured zero".
+    o.textContent = r.oldest ? String(r.oldest).slice(0, 19).replace('T', ' ') : '—';
+    tr.appendChild(a); tr.appendChild(n); tr.appendChild(o);
+    return tr;
+  }
+
+  function flRender(resp) {
+    if (!flBody) return;
+    flBody.textContent = '';
+    var rows = (resp && resp.by_agent) || [];
+    if (!rows.length) {
+      var tr = document.createElement('tr');
+      var td = document.createElement('td');
+      td.colSpan = 3;
+      td.className = 'panel-sub';
+      td.textContent = '目前沒有失敗記錄。';
+      tr.appendChild(td); flBody.appendChild(tr);
+    } else {
+      rows.forEach(function (r) { flBody.appendChild(flRow(r)); });
+    }
+    var total = (resp && resp.total) || 0;
+    var cap = (resp && resp.capacity) || 0;
+    if (flCap) flCap.textContent = total + ' / ' + cap + ' 筆';
+    if (flNote) {
+      flNote.textContent = total >= cap
+        ? '已達上限：最舊的記錄正在被覆寫，需要保留請先下載 .jsonl。'
+        : '抽取或解析失敗時即時留存完整提示詞與模型原始回覆，供分析、重測或微調語料使用。';
+    }
+    if (flDownload) flDownload.disabled = !total;
+    if (flClear) flClear.disabled = !total;
+  }
+
+  function flLoad() {
+    if (!flBody || !window.pdApi) return;
+    if (flRefresh) flRefresh.disabled = true;
+    window.pdApi.get('/api/llm-fail-log').then(flRender).catch(function (err) {
+      if (flNote) flNote.textContent = '失敗記錄載入失敗' + ((err && err.message) ? '：' + err.message : '');
+    }).then(function () {
+      if (flRefresh) flRefresh.disabled = false;
+    });
+  }
+
+  if (flRefresh) flRefresh.addEventListener('click', flLoad);
+
+  if (flDownload) {
+    flDownload.addEventListener('click', function () {
+      var restore = window.pdBusy ? window.pdBusy(flDownload, '打包中…') : function () {};
+      window.pdApi.download('/api/llm-fail-log/export', {}).catch(function (err) {
+        if (window.toast) window.toast(err.message, 'fail', err.code);
+      }).then(function () { restore(); });
+    });
+  }
+
+  if (flClear) {
+    flClear.addEventListener('click', function () {
+      // Native dialogs are banned (tests/contract/test_web_native_dialogs.py); and the
+      // copy names what SURVIVES, because the neighbouring table is the billing record
+      // and deleting that would hand back spent budget.
+      var run = function () {
+        var restore = window.pdBusy ? window.pdBusy(flClear, '清除中…') : function () {};
+        window.pdApi.del('/api/llm-fail-log').then(function (resp) {
+          if (window.toast) window.toast('已清除 ' + ((resp && resp.deleted) || 0) + ' 筆失敗記錄', 'ok');
+          flLoad();
+        }).catch(function (err) {
+          if (window.toast) window.toast(err.message, 'fail', err.code);
+        }).then(function () { restore(); });
+      };
+      if (!window.confirmDialog) { run(); return; }
+      window.confirmDialog({
+        title: '清除 AI 抽取失敗記錄',
+        body: '將永久刪除所有已留存的失敗情境（提示詞、模型原始回覆、錯誤原因）。'
+            + '若還需要作為分析或微調語料，請先下載 .jsonl。'
+            + 'AI 請求明細與額度不受影響，一筆都不會刪。',
+        confirmLabel: '永久清除',
+        danger: true,
+        onConfirm: run
+      });
+    });
+  }
+
+  flLoad();
+
+  // --- 帳本操作稽核 (post-closure item 10, owner 2026-09-30) ------------------------------
+  // The read-only reader of `ledger_audit`: every edit / delete of a ledger row, newest
+  // first, with the row as it was BEFORE the change. The server presents every string — the
+  // zh ledger and action names, labelled fields, accounts as {account:<id>} tokens that
+  // api.js resolves to the display name (DEF-044) — so this code only lays them out and
+  // pages. Nothing here computes a number; the only arithmetic is the pager's offset.
+  var laBody = document.getElementById('la-body');
+  var laCount = document.getElementById('la-count');
+  var laRefresh = document.getElementById('la-refresh');
+  var LA_PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
+  var laOffset = 0;
+  var laPager = null;
+
+  function laCell(cls, text) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    if (text !== undefined) td.textContent = text;
+    return td;
+  }
+
+  /* The before-image, collapsed to its one-line summary; the <details> opens onto every
+     field as label / value — never a raw JSON blob. A NULL reads as the null glyph, not as
+     an empty cell that could be mistaken for an empty string. */
+  function laBefore(r) {
+    var td = laCell('col-text la-before-cell');
+    var det = document.createElement('details');
+    det.className = 'la-before';
+    var sum = document.createElement('summary');
+    sum.textContent = r.summary || '展開查看';
+    det.appendChild(sum);
+    var dl = document.createElement('dl');
+    dl.className = 'la-fields';
+    (r.fields || []).forEach(function (fd) {
+      var dt = document.createElement('dt');
+      dt.textContent = fd.label;
+      var dd = document.createElement('dd');
+      if (fd.value === null || fd.value === undefined) {
+        dd.textContent = f.NULL_GLYPH;
+        dd.classList.add('sign-nil');
+      } else {
+        dd.textContent = fd.value;
+      }
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+    det.appendChild(dl);
+    td.appendChild(det);
+    return td;
+  }
+
+  function laRow(r) {
+    var tr = document.createElement('tr');
+    tr.dataset.auditId = String(r.id);
+    tr.appendChild(laCell('num', f.datetime(r.at)));
+    tr.appendChild(laCell('col-text', r.table_label));
+    tr.appendChild(laCell('col-text la-row', r.row_label));
+    var act = laCell('col-text');
+    var verb = document.createElement('span');
+    verb.className = 'la-act la-act-' + r.action;
+    verb.textContent = r.action_label;
+    act.appendChild(verb);
+    if (r.source) {  // DEF-049: a bulk door (批次復原 #id), not the row's own ledger tab
+      var src = document.createElement('span');
+      src.className = 'la-source';
+      src.textContent = r.source;
+      act.appendChild(src);
+    }
+    tr.appendChild(act);
+    tr.appendChild(laBefore(r));
+    return tr;
+  }
+
+  function laRender(resp) {
+    laBody.replaceChildren();
+    var rows = (resp && resp.rows) || [];
+    var total = (resp && resp.total_count) || 0;
+    if (!rows.length) {
+      var tr = document.createElement('tr');
+      var td = laCell('panel-sub', '目前沒有任何帳本編輯或刪除紀錄。');
+      td.colSpan = 5;
+      tr.appendChild(td);
+      laBody.appendChild(tr);
+    } else {
+      rows.forEach(function (r) { laBody.appendChild(laRow(r)); });
+    }
+    if (laCount) laCount.textContent = '共 ' + f.num(total) + ' 筆';
+    if (laPager) laPager.update({ offset: laOffset, totalCount: total });
+  }
+
+  function laLoad() {
+    if (!laBody) return;
+    if (laRefresh) laRefresh.disabled = true;
+    window.pdApi.get('/api/ledger-audit', { limit: LA_PAGE, offset: laOffset })
+      .then(laRender)
+      .catch(function (err) {
+        if (laPager) laPager.update({});
+        if (window.toast) window.toast('帳本操作稽核載入失敗', 'fail', (err && err.message) || undefined);
+      }).then(function () {
+        if (laRefresh) laRefresh.disabled = false;
+      });
+  }
+
+  if (laBody && window.pdPager) {
+    laPager = window.pdPager.create({
+      host: document.getElementById('la-pager'),
+      limit: LA_PAGE, offset: 0, totalCount: 0,
+      onPage: function (offset) { laOffset = offset; laLoad(); }
+    });
+  }
+  if (laRefresh) laRefresh.addEventListener('click', laLoad);
+  laLoad();
 })();

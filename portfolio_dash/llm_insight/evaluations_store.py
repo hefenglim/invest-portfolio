@@ -21,10 +21,13 @@ float — ``actual_value`` persists as a canonical Decimal string; ``narrative_s
 
 import sqlite3
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel
+
+from portfolio_dash.llm_insight import scoring  # same package; scoring imports only cards
+from portfolio_dash.shared.wire import decimal_str
 
 EvalStatus = Literal["pending_data", "scored", "undetermined"]
 
@@ -36,6 +39,39 @@ _BUCKETS: tuple[tuple[str, int, int], ...] = (
     ("60-80", 60, 80),
     ("80-100", 80, 100),
 )
+
+
+def _insights_exists(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insights'"
+    ).fetchone() is not None
+
+
+def _predicted_clause(conn: sqlite3.Connection, col: str = "insight_id") -> str:
+    """SQL predicate: the evaluation's card is NOT a card stored without a prediction.
+
+    DEF-003 (owner ruling 2026-09-24): ``prediction`` decides — a card with no prediction
+    carries no confidence and never enters the calibration curve, the calibration gap, the
+    rolling gap or the ceiling-violation rate. Evaluation rows copy the card's confidence at
+    scoring time, so a row scored from such a card (a legacy narrative card, or one scored
+    before :func:`due_insights` stopped handing its confidence on) still holds the stored
+    value; this predicate is the ONE read-side exclusion every confidence population applies.
+    An evaluation whose card row does not exist (a card deleted by
+    ``scripts/delete_insight_cards.py``, or a test fixture) is not KNOWN to be
+    prediction-less and stays in. Without an ``insights`` table (an evaluations-only
+    connection — architecture.md: a cross-table read degrades to "no rows") nothing is known,
+    so the predicate is a no-op.
+    """
+    if not _insights_exists(conn):
+        return "1 = 1"
+    return f"{col} NOT IN (SELECT id FROM insights WHERE prediction IS NULL)"
+
+
+def _predictionless_ids(conn: sqlite3.Connection) -> set[int]:
+    """Ids of cards stored without a prediction (DEF-003) — empty without the table."""
+    if not _insights_exists(conn):
+        return set()
+    return {int(r[0]) for r in conn.execute("SELECT id FROM insights WHERE prediction IS NULL")}
 
 
 class Evaluation(BaseModel):
@@ -294,7 +330,10 @@ def due_insights(
             symbol=r["symbol"],
             calibration_version=r["calibration_version"],
             is_shadow=bool(r["is_shadow"]),
-            confidence=r["confidence"],
+            # DEF-003: the source of every evaluation row's confidence. A card stored without
+            # a prediction hands none on, so its evaluation can never join a confidence
+            # population (the scorer copies this value into the row).
+            confidence=r["confidence"] if r["prediction"] is not None else None,
             prediction=r["prediction"],
             due_at=r["due_at"],
             created_at=r["created_at"],
@@ -334,6 +373,43 @@ def combo_score(
         "WHERE insight_type_id = ? AND is_shadow = ? AND status = 'scored'",
         (insight_type_id, 1 if is_shadow else 0),
     ).fetchall()
+    return _score_from_rows(insight_type_id, is_shadow, rows)
+
+
+def version_score(
+    conn: sqlite3.Connection, insight_type_id: int, *, version: int | None
+) -> dict[str, Any]:
+    """Accumulated score of ONE calibration version of a combo (Loop 4 promotion, DEF-070).
+
+    A version is judged on its OWN record: every scored evaluation stamped with that
+    ``calibration_version``, in either lane — a version's shadow-period cards and its
+    active-period cards were generated with the same calibration layer. ``version=None`` is
+    "no calibration layer" (the shown cards of a task with no active version; a shadow card
+    always carries its version, so that record is active-lane only).
+
+    :func:`combo_score` with ``is_shadow=True`` is NOT a version's score: it pools every
+    shadow card the task has ever produced, so after v2's promotion a brand-new v3 inherited
+    v2's shadow evaluations and could be promoted on evidence it never produced (R6 DEF-070).
+    Same row shape as :func:`combo_score` (``is_shadow`` is reported as ``False`` — the
+    record spans both lanes). Reads as an empty record when the table does not exist yet (a
+    read path must never create it — architecture.md, DEF-065).
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insight_evaluations'"
+    ).fetchone() is None:
+        return _score_from_rows(insight_type_id, False, [])
+    rows = conn.execute(
+        "SELECT quant_hit, narrative_score, miss FROM insight_evaluations "
+        "WHERE insight_type_id = ? AND calibration_version IS ? AND status = 'scored'",
+        (insight_type_id, version),
+    ).fetchall()
+    return _score_from_rows(insight_type_id, False, rows)
+
+
+def _score_from_rows(
+    insight_type_id: int, is_shadow: bool, rows: list[sqlite3.Row]
+) -> dict[str, Any]:
+    """The one rollup shape over a set of scored evaluation rows (Decimal-string rates)."""
     n = len(rows)
     miss_count = sum(1 for r in rows if r["miss"])
     quant_rows = [r for r in rows if r["quant_hit"] is not None]
@@ -396,9 +472,13 @@ def calibration_bins(
     For each non-empty 0-20..80-100 confidence bucket: the average claimed confidence
     (``claimed_pct``) vs the actual hit rate (``actual_pct``, miss == not-hit), and their
     absolute difference in percentage points (``calibration_error_pp``). Active (non-shadow)
-    scored rows with a stated confidence only. All percentages are Decimal STRINGS.
+    scored rows with a stated confidence only, and never a row whose card has no prediction
+    (DEF-003, :func:`_predicted_clause`). All percentages are Decimal STRINGS.
     """
-    where = "is_shadow = 0 AND status = 'scored' AND confidence IS NOT NULL"
+    where = (
+        "is_shadow = 0 AND status = 'scored' AND confidence IS NOT NULL AND "
+        + _predicted_clause(conn)
+    )
     params: tuple[Any, ...] = ()
     if insight_type_id is not None:
         where += " AND insight_type_id = ?"
@@ -417,10 +497,15 @@ def calibration_bins(
             continue
         n = len(bucket)
         hit_count = sum(1 for r in bucket if not r["miss"])
-        claimed = sum(int(r["confidence"]) for r in bucket) / n
-        actual = (hit_count / n) * 100
-        claimed_dec = Decimal(str(claimed)).quantize(Decimal("0.01"))
-        actual_dec = Decimal(str(actual)).quantize(Decimal("0.01"))
+        # Pure Decimal + ROUND_HALF_UP (W7, AI-D36): the old path (float sum/n → str →
+        # context-default HALF_EVEN) was a second rounding vocabulary on the same prompt
+        # surface as the W6 variables' ROUND_HALF_UP.
+        claimed_dec = (
+            Decimal(sum(int(r["confidence"]) for r in bucket)) / n
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        actual_dec = (Decimal(hit_count * 100) / n).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         out.append({
             "bucket": label,
             "n": n,
@@ -443,19 +528,236 @@ def scored_confidence_hits(conn: sqlite3.Connection) -> list[tuple[int, bool]]:
     """
     rows = conn.execute(
         "SELECT confidence, miss FROM insight_evaluations "
-        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL"
+        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL AND "
+        + _predicted_clause(conn)  # DEF-003
     ).fetchall()
     return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
+
+
+def recent_confidence_hits(
+    conn: sqlite3.Connection, *, limit: int = 20
+) -> list[tuple[int, bool]]:
+    """The most recent ``limit`` scored ``(confidence, hit)`` pairs, newest first.
+
+    The rolling-window input for ``calibration_gap_json`` (W6, AI-D31) — the SAME
+    anti-poison population as :func:`scored_confidence_hits` (active, scored, stated
+    confidence), windowed by recency instead of all-time. ``id DESC`` is insertion order =
+    chronological (no ``evaluated_at`` nullability to trip on). Returns fewer than
+    ``limit`` when the scored population is smaller — the caller gates on the count.
+    """
+    rows = conn.execute(
+        "SELECT confidence, miss FROM insight_evaluations "
+        "WHERE status = 'scored' AND is_shadow = 0 AND confidence IS NOT NULL AND "
+        + _predicted_clause(conn)  # DEF-003 — filtered BEFORE the window, never after
+        + " ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [(int(r["confidence"]), not bool(r["miss"])) for r in rows]
+
+
+# The rolling gap's honesty gate (W6 AI-D31; shared with the ai-score API in W7, AI-D36):
+# a signed gap over a handful of samples is noise theatre — the design mock's 「樣本 <8」
+# confidence-cap rule. ONE definition for both surfaces, so they cannot drift.
+ROLLING_GAP_MIN_SCORED = 8
+ROLLING_GAP_WINDOW = 20
+
+_GAP_Q = Decimal("0.001")
+
+
+class RollingGap(BaseModel):
+    """The rolling signed calibration gap over the latest scored evaluations."""
+
+    gap: Decimal | None  # None below the gate — the count is still reported honestly
+    window_n: int
+
+
+def rolling_calibration_gap(
+    conn: sqlite3.Connection,
+    *,
+    window: int = ROLLING_GAP_WINDOW,
+    min_scored: int = ROLLING_GAP_MIN_SCORED,
+) -> RollingGap:
+    """``actual_hit_rate − mean_claimed`` over the latest ``window`` scored evaluations.
+
+    Sign convention (AI-D31): POSITIVE = the model is UNDER-confident (actual exceeds
+    claimed). Returned UNQUANTIZED — wire shaping is :func:`gap_wire`'s job, so the prompt
+    variable and the API render the same number. Below ``min_scored`` rows the gap is
+    honestly None while ``window_n`` still reports the population seen.
+    """
+    pairs = recent_confidence_hits(conn, limit=window)
+    if len(pairs) < min_scored:
+        return RollingGap(gap=None, window_n=len(pairs))
+    claimed_total = Decimal(0)  # explicit — sum() over Decimals types as Decimal|float
+    for confidence, _ in pairs:
+        claimed_total += Decimal(confidence)
+    claimed = claimed_total / (100 * len(pairs))
+    actual = Decimal(sum(1 for _, hit in pairs if hit)) / len(pairs)
+    return RollingGap(gap=actual - claimed, window_n=len(pairs))
+
+
+def gap_quantized(gap: Decimal) -> Decimal:
+    """The ONE rounding for a calibration gap: 0.001, ROUND_HALF_UP.
+
+    Split out from :func:`gap_wire` (W7.1) so the plain-language ``reading`` beside the
+    number is derived from the SAME value the number shows. Deriving it from the raw
+    Decimal put ``"gap": "-0.466"`` next to 「高估自己 46.550 個百分點」 in one payload —
+    two renderings of one quantity disagreeing by 0.05pp, which is the same defect class
+    this whole change is about.
+    """
+    return gap.quantize(_GAP_Q, rounding=ROUND_HALF_UP)
+
+
+def ceiling_violations(conn: sqlite3.Connection) -> dict[str, Any]:
+    """How often a card claimed MORE confidence than its own record supported (⑫c).
+
+    AI-D38 step three. The anchoring law hands each card a ``confidence_ceiling`` and asks
+    the model to stay at or below it; nothing clamps the answer (AI-D33's red line — a
+    validator rewriting the model's stated confidence would be the defect, not the fix).
+    So the only way the rule can mean anything is to MEASURE obedience, which is what this
+    is. Reads ``insights`` directly — the create-time facts live there, and this store
+    already reads that table for ``due_insights``.
+
+    Population (owner ruling 2026-08-26): every non-shadow card carrying BOTH a stated
+    confidence and a recorded ceiling — and a prediction (DEF-003, owner ruling 2026-09-24:
+    a card without one carries no confidence, so it cannot have claimed too much).
+
+    * **Not restricted to scored cards.** A violation is a fact about the moment of
+      creation; gating it on evaluation would lag the number by a full horizon and would
+      permanently exclude every card that ends ``undetermined`` — cards that could have
+      violated just the same.
+    * **A card with no recorded ceiling is OUTSIDE the population, not compliant.** Legacy
+      rows, and any card generated while ``backtest_json`` was unavailable, were never
+      governed by a ceiling; counting them as obedient would flatter the rate with rows
+      the rule never applied to.
+    * **Global, like ``calibration_bins`` and ``rolling_gap``** — this is a diagnostic
+      about the model's behaviour, not a per-task scoreboard, so archived tasks are not
+      excluded.
+
+    ``rate`` is ``None`` on an empty population: 0% compliance and 「no comparable cards
+    yet」 are different facts, and a reassuring 0.00% must not stand in for the second.
+
+    Degrades to the empty population when ``insights`` does not exist (architecture.md: a
+    cross-table read must read as "no rows", never as ``OperationalError``) — an
+    evaluations-only connection is a real shape in this codebase.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insights'"
+    ).fetchone()
+    if exists is None:
+        return {"n": 0, "violations": 0, "rate": None}
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, "
+        "       SUM(CASE WHEN confidence > ceiling_at_create THEN 1 ELSE 0 END) AS v "
+        "FROM insights "
+        "WHERE is_shadow = 0 AND confidence IS NOT NULL "
+        "  AND ceiling_at_create IS NOT NULL AND prediction IS NOT NULL"
+    ).fetchone()
+    n = int(row["n"] or 0)
+    violations = int(row["v"] or 0)
+    return {
+        "n": n,
+        "violations": violations,
+        "rate": _ratio_str(violations, n) if n else None,
+    }
+
+
+def gap_wire(gap: Decimal) -> str:
+    """The ONE wire shape for a calibration gap: 0.001, ROUND_HALF_UP, explicit sign."""
+    rounded = gap_quantized(gap)
+    return ("+" if rounded >= 0 else "") + decimal_str(rounded)
+
+
+class CalibrationWindow(BaseModel):
+    """The evidence Loop 3 may act on for one task (R6 DEF-080). See :func:`calibration_window`."""
+
+    n: int
+    miss_count: int
+    streak: int
+    miss_ids: list[int]
+
+
+def _aware(stamp: str) -> datetime:
+    """An ISO timestamp as an aware datetime (a legacy naive stamp is read as UTC)."""
+    at = datetime.fromisoformat(stamp)
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def calibration_window(
+    conn: sqlite3.Connection, insight_type_id: int, *, version: int | None,
+    since: datetime | None,
+) -> CalibrationWindow:
+    """The scored evaluations Loop 3 is allowed to act on (spec 4.5; R6 DEF-079 / DEF-080).
+
+    * ``version`` — the task's ACTIVE calibration version: only the cards generated with it
+      measure it (``calibration_version IS version``, either lane — its shadow period is its
+      record too). ``None`` = the cards with no calibration layer.
+    * ``since`` — when the task's newest calibration version was written (archived
+      included): the evaluations that existed then are the evidence that version was built
+      from, so only those scored AFTER it count. Without this the same old misses satisfied
+      the trigger again every week and a task grew a version per week for ever (DEF-080).
+      ``None`` (no version yet) = the whole record.
+
+    ``streak`` is the run of trailing misses (newest first, by evaluation id); ``miss_ids``
+    are the misses in the window, oldest first — exactly the samples the master is handed
+    (:func:`miss_samples_by_ids`), so the evidence that triggers a version and the evidence
+    it is written from are one set (DEF-079).
+    """
+    rows = conn.execute(
+        "SELECT id, miss, evaluated_at FROM insight_evaluations "
+        "WHERE insight_type_id = ? AND calibration_version IS ? AND status = 'scored' "
+        "ORDER BY id DESC",
+        (insight_type_id, version),
+    ).fetchall()
+    kept = [r for r in rows if since is None or _aware(str(r["evaluated_at"])) > since]
+    streak = 0
+    for r in kept:
+        if not r["miss"]:
+            break
+        streak += 1
+    misses = [int(r["id"]) for r in kept if r["miss"]]
+    return CalibrationWindow(
+        n=len(kept), miss_count=len(misses), streak=streak, miss_ids=sorted(misses),
+    )
+
+
+def miss_samples_by_ids(
+    conn: sqlite3.Connection, evaluation_ids: list[int]
+) -> list[dict[str, Any]]:
+    """The miss samples for exactly these evaluation rows (oldest first) — Loop 3's input.
+
+    Same sample shape as :func:`miss_samples_for_version` (the card's own claim rides along).
+    """
+    if not evaluation_ids:
+        return []
+    placeholders = ",".join("?" * len(evaluation_ids))
+    return _miss_samples(
+        conn, f"e.id IN ({placeholders}) AND e.miss = 1", list(evaluation_ids),
+    )
 
 
 def miss_samples_for_version(
     conn: sqlite3.Connection, *, insight_type_id: int, version: int
 ) -> list[dict[str, Any]]:
-    """The miss-evaluation samples recorded under a calibration version (spec 4.5 / 4.7).
+    """The miss-evaluation samples recorded UNDER a calibration version (spec 4.7 route).
 
-    These are the failures that drive (or drove) a calibration version. Returns the raw
-    sample dicts the master uses for the next version + the frontend's version manager.
+    I.e. the failures of the cards generated with that version (either lane). Loop 3 no
+    longer reads this: it writes a version from its trigger window's misses
+    (:func:`calibration_window` + :func:`miss_samples_by_ids`), which for a task with no
+    active version are cards stamped NULL — a ``version`` this function cannot even name
+    (R6 DEF-079: the first version was written from zero samples).
     """
+    return _miss_samples(
+        conn,
+        "e.insight_type_id = ? AND e.calibration_version = ? AND e.status = 'scored' "
+        "AND e.miss = 1",
+        [insight_type_id, version],
+    )
+
+
+def _miss_samples(
+    conn: sqlite3.Connection, where: str, params: list[Any]
+) -> list[dict[str, Any]]:
+    """The one miss-sample read + wire shape behind the two public readers above."""
     from portfolio_dash.llm_insight import insights_store as istore  # no cycle: one-way
 
     istore.ensure_tables(conn)  # the LEFT JOIN needs the insights table to exist
@@ -465,9 +767,8 @@ def miss_samples_for_version(
         "i.symbol AS card_symbol, i.title AS card_title, i.summary AS card_summary, "
         "i.prediction AS card_prediction "
         "FROM insight_evaluations e LEFT JOIN insights i ON i.id = e.insight_id "
-        "WHERE e.insight_type_id = ? AND e.calibration_version = ? "
-        "AND e.status = 'scored' AND e.miss = 1 ORDER BY e.id",
-        (insight_type_id, version),
+        f"WHERE {where} ORDER BY e.id",
+        params,
     ).fetchall()
     # Card context (symbol/title/summary/prediction) rides along so the Loop-3 master
     # rewrites rules from the ACTUAL failed claims, not just second-hand notes
@@ -478,7 +779,12 @@ def miss_samples_for_version(
             "insight_id": r["insight_id"],
             "narrative_score": r["narrative_score"],
             "quant_hit": _opt_bool(r["quant_hit"]),
-            "confidence": r["confidence"],
+            # DEF-003: a card stored without a prediction carries no confidence — the master
+            # must not rewrite rules against a number the card never stood behind.
+            "confidence": (
+                None if r["card_title"] is not None and r["card_prediction"] is None
+                else r["confidence"]
+            ),
             "actual_value": r["actual_value"],
             "notes": r["notes"],
             "evaluated_at": r["evaluated_at"],
@@ -491,7 +797,7 @@ def miss_samples_for_version(
     ]
 
 
-def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
+def _row_wire(r: sqlite3.Row, predictionless: set[int]) -> dict[str, Any]:
     return {
         "id": r["id"],
         "insight_id": r["insight_id"],
@@ -503,19 +809,38 @@ def _row_wire(r: sqlite3.Row) -> dict[str, Any]:
         "narrative_score": r["narrative_score"],
         "miss": bool(r["miss"]),
         "actual_value": r["actual_value"],
-        "confidence": r["confidence"],
+        # DEF-003: the 預測明細 row (and its CSV export) of a prediction-less card shows no
+        # confidence, exactly as the card itself does.
+        "confidence": None if int(r["insight_id"]) in predictionless else r["confidence"],
         "evaluated_at": r["evaluated_at"],
     }
+
+
+def _combo_calib_error_pp(bins: list[dict[str, Any]]) -> Decimal | None:
+    """Sample-weighted mean of a combo's bucket calibration errors (pp), 0.01 HALF_UP.
+
+    ``bins`` are the wire-shape rows of :func:`calibration_bins` for ONE combo; the weight
+    is each bucket's sample count. No confidence-stated rows → ``None`` (the tier reads
+    that as "calibration unknown", never as zero error).
+    """
+    total_n = sum(int(b["n"]) for b in bins)  # int() boxes the Any at the boundary
+    if total_n == 0:
+        return None
+    acc = Decimal(0)
+    for b in bins:
+        acc += Decimal(str(b["calibration_error_pp"])) * int(b["n"])  # keep Any boxed
+    return (acc / total_n).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def ai_score(
     conn: sqlite3.Connection,
     *,
+    min_samples: int,
     exclude_type_ids: set[int] | None = None,
     rows_limit: int | None = None,
     rows_offset: int = 0,
 ) -> dict[str, Any]:
-    """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], rows[]}``.
+    """The battle-record table (spec 4.7): ``{totals, by_combo[], calibration_bins[], …}``.
 
     ``totals``/``by_combo`` reflect the DISPLAYED active score (non-shadow scored rows);
     shadow rows are excluded from the displayed totals but kept in ``rows`` (and reachable
@@ -528,6 +853,14 @@ def ai_score(
     the archived-task exclusion so page boundaries are honest); the AGGREGATES always
     cover the whole set. ``rows_total_count`` reports the filtered total.
     ``rows_limit=None`` keeps the legacy everything-in-one shape for internal callers.
+
+    W7 (AI-D36) — the decision-quality fields: ``min_samples`` is a REQUIRED injected
+    argument (the value lives in the composer config; this layer must not read it), echoed
+    per combo with ``resolved_n``/``gate_open``; each combo carries ``calib_error_pp``
+    (sample-weighted over its own bins) and a ``tier`` stamp (``scoring.trust_tier`` —
+    hit rate × calibration error × sample count, computed HERE so the web layer renders a
+    string and never computes). Top level: ``rolling_gap`` — the SAME
+    :func:`rolling_calibration_gap` definition the prompt variable serves.
     """
     excluded = exclude_type_ids or set()
     combo_ids = [
@@ -538,7 +871,30 @@ def ai_score(
         )
         if int(r["insight_type_id"]) not in excluded
     ]
-    by_combo = [combo_score(conn, cid) for cid in combo_ids]
+    by_combo: list[dict[str, Any]] = []
+    for cid in combo_ids:
+        combo = combo_score(conn, cid)
+        calib_error = _combo_calib_error_pp(calibration_bins(conn, cid))
+        quant_rate = (
+            Decimal(combo["quant_hit_rate"]) if combo["quant_n"] > 0 else None
+        )
+        narrative_rate = (
+            Decimal(1) - Decimal(combo["miss_rate"]) if combo["n"] > 0 else None
+        )
+        combo["min_samples"] = min_samples
+        combo["resolved_n"] = combo["n"]
+        combo["gate_open"] = combo["n"] >= min_samples
+        combo["calib_error_pp"] = (
+            decimal_str(calib_error) if calib_error is not None else None
+        )
+        combo["tier"] = scoring.trust_tier(
+            n=combo["n"],
+            quant_n=combo["quant_n"],
+            quant_hit_rate=quant_rate,
+            narrative_success_rate=narrative_rate,
+            calib_error_pp=calib_error,
+        )
+        by_combo.append(combo)
     total_n = sum(c["n"] for c in by_combo)
     total_miss = sum(c["miss_count"] for c in by_combo)
     total_quant_hit = sum(c["quant_hit_count"] for c in by_combo)
@@ -559,18 +915,27 @@ def ai_score(
         "quant_hit_rate": _ratio_str(total_quant_hit, total_quant_n),
         "avg_narrative": _avg_str(total_narr_sum, total_narr_n),
     }
+    predictionless = _predictionless_ids(conn)
     all_rows = [
-        _row_wire(r)
+        _row_wire(r, predictionless)
         for r in conn.execute(
             "SELECT * FROM insight_evaluations ORDER BY id DESC"
         )
         if int(r["insight_type_id"]) not in excluded
     ]
     rows = all_rows if rows_limit is None else all_rows[rows_offset:rows_offset + rows_limit]
+    gap = rolling_calibration_gap(conn)
     return {
         "totals": totals,
         "by_combo": by_combo,
         "calibration_bins": calibration_bins(conn),
+        "rolling_gap": {
+            "gap": gap_wire(gap.gap) if gap.gap is not None else None,
+            "window_n": gap.window_n,
+            "min_scored": ROLLING_GAP_MIN_SCORED,
+        },
+        # ⑫c (AI-D38): recorded, never enforced — see :func:`ceiling_violations`.
+        "ceiling_violations": ceiling_violations(conn),
         "rows": rows,
         "rows_total_count": len(all_rows),
     }

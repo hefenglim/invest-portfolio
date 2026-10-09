@@ -26,6 +26,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.shared.alert_rule_names import rule_name
+from portfolio_dash.shared.money import usd_display
 
 Verdict = Literal["blocked", "degraded", "clean"]
 GateLevel = Literal["info", "warn", "block"]
@@ -88,6 +90,15 @@ def _r1_violations(scope: str, bodies: list[str]) -> list[str]:
 # Mirrors alerts_bridge._SIGNAL_RULE_PREFIX.
 _SIGNAL_RULE_PREFIX = "signal_"
 
+# DEF-053 (2026-09-25): a gate message names a task's scope the way the wizard's own buttons
+# do — never by its identifier (`portfolio`, `on_alert` …), which R1 used to interpolate raw.
+_SCOPE_ZH: dict[str, str] = {
+    "per_symbol": "單一標的",
+    "per_market": "單一市場",
+    "portfolio": "全組合",
+    "on_alert": "預警觸發",
+}
+
 
 def _alert_matches(alert_rules: str | list[str] | None, fired_rule: str | None) -> bool:
     """R7 filter: an explicit list matches its members (incl. ``signal_*``); the 'all'
@@ -122,7 +133,8 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
         blocked = True
         gates.append(GateFinding(
             id="R1", lv="block",
-            msg=f"per_symbol 變數 {token} 不可用於 {ctx.scope} 範圍組合",
+            msg=(f"「單一標的」變數 {token} 不可用於範圍為"
+                 f"「{_SCOPE_ZH.get(ctx.scope, ctx.scope)}」的任務"),
             reason="R1_scope_mismatch",
         ))
 
@@ -154,7 +166,9 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
     if ctx.budget_remaining <= 0:
         blocked = True
         gates.append(GateFinding(
-            id="R6", lv="block", msg=f"額度耗盡（剩餘 ${ctx.budget_remaining}）",
+            # DEF-085: 2 dp via the shared formatter — it printed the raw Decimal
+            # (「$-0.01000」) beside the pipeline node's 「餘 $-0.01」 for the same balance.
+            id="R6", lv="block", msg=f"額度耗盡（剩餘 {usd_display(ctx.budget_remaining)}）",
             reason="R6_quota",
         ))
 
@@ -165,7 +179,9 @@ def evaluate_gates(ctx: GateContext) -> GateResult:
             blocked = True
             gates.append(GateFinding(
                 id="R7", lv="block",
-                msg=f"觸發規則 {ctx.fired_rule} 不在此組合的訂閱規則內",
+                # DEF-062: the rule by its name (the one table), never its id.
+                msg=(f"觸發規則「{rule_name(ctx.fired_rule) if ctx.fired_rule else '（未記錄）'}」"
+                     "不在此組合的訂閱規則內"),
                 reason="R7_rule_not_matched",
             ))
         else:

@@ -8,7 +8,7 @@ from portfolio_dash.portfolio.returns import total_return
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.enums import Side
-from portfolio_dash.shared.models.ledger import FXConversion, Transaction
+from portfolio_dash.shared.models.ledger import FXConversion, LedgerBundle, Transaction
 
 SCHWAB = Account(account_id="schwab", name="Schwab", broker="Schwab",
                  settlement_ccy=Currency.USD, funding_ccy=Currency.TWD,
@@ -98,7 +98,7 @@ def test_decomposition_identity_no_double_count() -> None:
     txs = [Transaction(account_id="schwab", symbol="AAPL", side=Side.BUY, quantity=Decimal("90"),
                        price=Decimal("100"), fees=Decimal("0"), tax=Decimal("0"),
                        trade_date=date(2025, 1, 2))]
-    book = build_book(txs, [], [], INSTR)
+    book = build_book(LedgerBundle(txs, instruments=INSTR))
     valued = value_holdings(book.holdings, {"AAPL": Decimal("120")})
     rs = total_return(book, valued, _spot, Currency.TWD)
     one_total = rs.reporting_total_return

@@ -9,7 +9,6 @@ without a key.
 
 import os
 from collections.abc import Callable
-from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -19,6 +18,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 _QUOTE_URL = "https://finnhub.io/api/v1/quote"
@@ -45,9 +45,11 @@ class FinnhubProvider(ProviderBase):
         return self._token
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
+        # FUNDAMENTALS (AI-D13): Finnhub's /stock/metric block, US-only, key-gated like
+        # the rest of this adapter. Fetch/parse lives in pricing/fundamentals_source.py.
         return (
             self._resolve_token() is not None
-            and data_type in {DataType.QUOTE_LATEST, DataType.DIVIDEND}
+            and data_type in {DataType.QUOTE_LATEST, DataType.DIVIDEND, DataType.FUNDAMENTALS}
             and market is Market.US
         )
 
@@ -75,7 +77,7 @@ class FinnhubProvider(ProviderBase):
             if close is None:
                 continue
             out.append(PriceRow(
-                instrument=ref.symbol, market=Market.US, as_of=date.today(),
+                instrument=ref.symbol, market=Market.US, as_of=app_now().date(),
                 close=close, source=self.name,
             ))
         return out

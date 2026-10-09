@@ -9,7 +9,7 @@ from portfolio_dash.pricing.refresh import refresh_quotes
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import FxRow, PriceRow
-from portfolio_dash.pricing.store import get_fx, get_latest_price
+from portfolio_dash.pricing.store import _no_factor, get_fx, get_latest_price
 from portfolio_dash.shared.enums import Currency, Market
 
 _NOW = datetime(2026, 6, 8, 12, 0, 0)
@@ -41,7 +41,9 @@ def _reg(provider: ProviderBase) -> Registry:
 
 
 def test_refresh_quotes_stores_and_summarizes(conn: sqlite3.Connection) -> None:
-    summary = refresh_quotes(conn, _reg(FakeAll()), [_AAPL], [_PAIR], now=_NOW)
+    summary = refresh_quotes(
+        conn, _reg(FakeAll()), [_AAPL], [_PAIR], now=_NOW, factor_of=_no_factor,
+    )
     assert summary.ok == {"AAPL": "fake", "USDTWD": "fake"} and summary.failed == []
     price = get_latest_price(conn, "AAPL", now=_NOW)
     fx = get_fx(conn, Currency.USD, Currency.TWD, now=_NOW)
@@ -51,7 +53,9 @@ def test_refresh_quotes_stores_and_summarizes(conn: sqlite3.Connection) -> None:
 
 def test_refresh_quotes_all_fail_no_raise(conn: sqlite3.Connection) -> None:
     empty = Registry(providers={}, order={})
-    summary = refresh_quotes(conn, empty, [_AAPL], [_PAIR], now=_NOW)
+    summary = refresh_quotes(
+        conn, empty, [_AAPL], [_PAIR], now=_NOW, factor_of=_no_factor,
+    )
     assert set(summary.failed) == {"AAPL", "USDTWD"} and summary.ok == {}
     assert get_latest_price(conn, "AAPL", now=_NOW) is None
 

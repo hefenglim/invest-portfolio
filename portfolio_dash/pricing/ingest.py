@@ -4,8 +4,8 @@ Each function calls a single-source client and appends raw responses to
 ``external_snapshots`` (append-only; spec 20.4). They take injectable client
 callables (defaulting to the real clients) so tests monkeypatch without network.
 
-Layering: the TW symbol universe is read here by **direct SQL** on ``instruments``
-(``SELECT symbol FROM instruments WHERE market='TW'``) — ingest must not depend on
+Layering: the symbol universes are read through ``shared/instrument_scope.py`` — direct SQL
+on ``instruments`` (TRACKED rows only, DEF-064) — so ingest never depends on
 ``data_ingestion``. Nothing is converted to money here; the raw payload is stored
 verbatim (Decimal discipline lives in ``portfolio/external_signals.py``). FinMind
 ``Decimal`` values that arrive from the sentiment/index clients are serialized as
@@ -13,17 +13,28 @@ canonical strings (``str(Decimal)``) so no float ever reaches storage.
 """
 
 import sqlite3
+from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from portfolio_dash.pricing import consensus_source, index_source, sentiment_source
+from portfolio_dash.pricing import (
+    consensus_source,
+    datasources_store,
+    fundamentals_source,
+    index_source,
+    sentiment_source,
+)
 from portfolio_dash.pricing import snapshots_store as S
+from portfolio_dash.pricing.defaults import default_registry
+from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.finmind_datasets import fetch_dataset
 from portfolio_dash.pricing.providers.yfinance_provider import yf_symbol
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.instrument_scope import tracked_instruments, tracked_symbols
 
 # Default lookback window for FinMind date-range batch fetches.
 _FINMIND_START = "2025-01-01"
@@ -42,26 +53,30 @@ def _resolve_fetch_dataset(override: "FetchDataset | None") -> FetchDataset:
 
 
 def tw_universe(conn: sqlite3.Connection) -> list[str]:
-    """TW symbols (holdings + watchlist) via direct SQL — no data_ingestion import."""
-    rows = conn.execute(
-        "SELECT symbol FROM instruments WHERE market = 'TW' ORDER BY symbol"
-    ).fetchall()
-    return [r["symbol"] for r in rows]
+    """TRACKED TW symbols (holdings + active watchlist) — no data_ingestion import.
+
+    DEF-064 (owner ruling ⑦, 2026-09-25): an ARCHIVED symbol is out. This read took every
+    TW row of ``instruments``, so the three FinMind jobs built on it (chips, valuation,
+    fundamentals) kept fetching for symbols the owner had stopped tracking. The filter is
+    the one shared definition (``shared/instrument_scope.py``) the quote worklist, the
+    insight / signal / news / alert universes read; a held symbol is never archived, so it
+    is never dropped here.
+    """
+    return tracked_symbols(conn, market=Market.TW)
 
 
 def all_universe(conn: sqlite3.Connection) -> list[InstrumentRef]:
-    """Every registered instrument as an InstrumentRef, via direct SQL (all markets).
+    """Every TRACKED instrument as an InstrumentRef (all markets).
 
     Consensus is fetched across US/TW/MY (unlike the TW-only FinMind chips), so this
-    reads the full ``instruments`` table. ``board`` carries the TPEx flag so ``yf_symbol``
-    maps櫃買 counters to ``.TWO``. No ``data_ingestion`` import (layering, spec 20.3).
+    spans every market. ``board`` carries the TPEx flag so ``yf_symbol`` maps櫃買 counters
+    to ``.TWO``. No ``data_ingestion`` import (layering, spec 20.3). DEF-064: archived
+    symbols are out, exactly as in :func:`tw_universe` (consensus + the daily fundamentals
+    union read this).
     """
-    rows = conn.execute(
-        "SELECT symbol, market, board FROM instruments ORDER BY symbol"
-    ).fetchall()
     return [
-        InstrumentRef(symbol=r["symbol"], market=Market(r["market"]), board=r["board"] or "")
-        for r in rows
+        InstrumentRef(symbol=t.symbol, market=t.market, board=t.board)
+        for t in tracked_instruments(conn)
     ]
 
 
@@ -204,6 +219,55 @@ def ingest_index(
     return 1
 
 
+@dataclass(frozen=True)
+class SnapshotSweep:
+    """What a per-symbol snapshot ingest did with each key it was sent for.
+
+    A key is one (symbol, source) fetch. ``written`` stored a snapshot. ``empty`` is a
+    source that ANSWERED with nothing — no analyst coverage, no Alpha Vantage OVERVIEW for
+    an ETF — which is not a lost key (DEF-067). ``failed`` is a fetch that raised, plus
+    ``unproven``: empty answers that prove nothing (:data:`_EMPTY_NEEDS_PROOF`).
+
+    Owner 2026-09-30 (item 12): both ingests returned ONE count, so a run in which every
+    fetch failed and a run in which no symbol had coverage were the same ``0``, and
+    ``consensus_daily`` / ``fundamentals_daily`` / ``fundamentals_av_weekly`` wrote 成功.
+    """
+
+    written: int = 0
+    empty: int = 0
+    failed: int = 0
+    #: Already counted in ``failed``; kept apart so the run detail can say why.
+    unproven: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.written + self.empty + self.failed
+
+
+# Sources whose EMPTY answer is no evidence they answered (owner 2026-09-30, item 12).
+# yfinance reports a failed HTTP call as an empty result, not an exception
+# (``YfConfig.debug.hide_exceptions``), and its legs here degrade every endpoint error to
+# ``None`` because it also RAISES for plain "no coverage" (a quote summary without an
+# analyst module). DEF-067 ④'s rule for ``history_daily`` therefore applies: its empties
+# count as answers only when the same run stored at least one of its snapshots. The keyed
+# legs (finnhub, alphavantage) raise on a failed request, so their empty IS an answer.
+_EMPTY_NEEDS_PROOF = frozenset({"yfinance"})
+
+_WRITTEN, _EMPTY, _FAILED = "written", "empty", "failed"
+
+
+def _sweep_of(tally: Counter[tuple[str, str]]) -> SnapshotSweep:
+    """Fold per-(source, outcome) counts into one :class:`SnapshotSweep`."""
+    written = empty = failed = unproven = 0
+    for source in {s for s, _ in tally}:
+        w, e, f = tally[source, _WRITTEN], tally[source, _EMPTY], tally[source, _FAILED]
+        if source in _EMPTY_NEEDS_PROOF and w == 0:
+            unproven += e
+            f, e = f + e, 0
+        written, empty, failed = written + w, empty + e, failed + f
+    return SnapshotSweep(written=written, empty=empty, failed=failed, unproven=unproven)
+
+
 FetchConsensus = Callable[..., dict[str, Any] | None]
 
 
@@ -212,36 +276,124 @@ def ingest_consensus(
     *,
     now: datetime,
     fetch_consensus: FetchConsensus | None = None,
-) -> int:
+) -> SnapshotSweep:
     """Ingest analyst-consensus snapshots per registered instrument (all markets).
 
     Maps each instrument to its yfinance symbol (``yf_symbol`` — reuses the TPEx
     ``.TWO`` mapping), fetches the consensus payload, and appends a snapshot keyed by the
     PORTFOLIO symbol (not the yf symbol) so the variable layer looks it up by the same
     symbol it renders per-symbol cards for. A per-symbol failure/absence writes no row
-    and never stops the rest (per-symbol isolation). Returns rows written.
+    and never stops the rest (per-symbol isolation) — but the two are COUNTED apart
+    (:class:`SnapshotSweep`, owner 2026-09-30).
 
     The client resolves to the live ``consensus_source.fetch_consensus`` at call time
     when not overridden, so a monkeypatch of the module is honoured (scheduler-job tests).
     """
     fetch = fetch_consensus or consensus_source.fetch_consensus
     as_of = now.date()
-    written = 0
+    source = consensus_source.SOURCE
+    tally: Counter[tuple[str, str]] = Counter()
     for ref in all_universe(conn):
         try:
             payload = fetch(yf_symbol(ref), as_of=as_of)
         except Exception:  # noqa: BLE001 — one bad symbol must not drop the rest
+            tally[source, _FAILED] += 1  # a lost fetch — never "no coverage"
             continue
         if not payload:
+            tally[source, _EMPTY] += 1
             continue
         S.add_snapshot(
             conn,
-            source=consensus_source.SOURCE,
+            source=source,
             dataset=consensus_source.DATASET,
             symbol=ref.symbol,
             as_of=as_of,
             payload=payload,
             fetched_at=now,
         )
-        written += 1
-    return written
+        tally[source, _WRITTEN] += 1
+    return _sweep_of(tally)
+
+
+FetchFundamentals = Callable[..., dict[str, Any] | None]
+
+
+def ingest_fundamentals_union(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    sources: tuple[str, ...] | None = None,
+    universe: list[InstrumentRef] | None = None,
+    fetchers: dict[str, FetchFundamentals] | None = None,
+) -> SnapshotSweep:
+    """Ingest fundamentals snapshots with UNION semantics (W3, AI-D13/D14).
+
+    Unlike every quote/FX/dividend fetch (first-success-wins fallback chain), EVERY
+    enabled provider in ``sources`` writes its own ``external_snapshots`` row per symbol —
+    the table's ``(source, dataset, symbol, as_of)`` key already keeps them apart, and the
+    variable layer assembles one block per source (no merge, never averaged).
+
+    "Enabled" = the registry's ``capable_ids(DataType.FUNDAMENTALS, market)`` — provider
+    capability AND the key gate in one check, so a keyless Finnhub/Alpha Vantage writes
+    nothing and raises nothing. ``sources`` restricts the union per job (the daily job
+    runs yfinance + finnhub; the Saturday job runs alphavantage alone — its free quota
+    cannot survive a full-universe pass). ``universe`` restricts the symbols (the AV leg
+    covers HELD symbols only; the held set is a ``portfolio/`` replay result, computed by
+    the api layer and INJECTED — pricing/ must not derive it, per the injection convention
+    in architecture.md). Per-(symbol, source) isolation: one failure/absence writes no
+    row and never stops the rest; each (symbol, source) is one key of the returned
+    :class:`SnapshotSweep`, a raised fetch counted apart from an empty answer.
+    """
+    wanted = sources if sources is not None else fundamentals_source.SOURCES
+    fetch_map = fetchers if fetchers is not None else fundamentals_source.FETCHERS
+    refs = universe if universe is not None else all_universe(conn)
+    as_of = now.date()
+    # Resolve the enabled sources ONCE per market (not per symbol). A ledger-only DB
+    # (bootstrap_db) has no data_sources table, so the keyed providers' token getters
+    # raise OperationalError inside supports() — degrade to the key-less yfinance leg,
+    # mirroring the "degrade if the table is absent" convention in architecture.md.
+    enabled: dict[Market, list[str]] = {}
+    try:
+        registry = default_registry(conn)
+        for market in {ref.market for ref in refs}:
+            enabled[market] = [
+                s for s in registry.capable_ids(DataType.FUNDAMENTALS, market)
+                if s in wanted
+            ]
+    except sqlite3.OperationalError:
+        enabled = {
+            market: (["yfinance"] if "yfinance" in wanted else [])
+            for market in {ref.market for ref in refs}
+        }
+    tally: Counter[tuple[str, str]] = Counter()
+    for ref in refs:
+        for source in enabled.get(ref.market, []):
+            fetch = fetch_map.get(source)
+            if fetch is None:
+                continue
+            # The token string for keyed sources; the fetch seams also fall back to the
+            # env var, mirroring the provider ctors (same row, same convention). The
+            # table can be absent on a ledger-only DB — same degrade as above.
+            try:
+                token = datasources_store.get_api_key(conn, source)
+            except sqlite3.OperationalError:
+                token = None
+            try:
+                payload = fetch(ref, as_of=as_of, token=token)
+            except Exception:  # noqa: BLE001 — one bad (symbol, source) drops no other
+                tally[source, _FAILED] += 1  # a lost fetch — never "no coverage"
+                continue
+            if not payload:
+                tally[source, _EMPTY] += 1
+                continue
+            S.add_snapshot(
+                conn,
+                source=source,
+                dataset=fundamentals_source.DATASET,
+                symbol=ref.symbol,
+                as_of=as_of,
+                payload=payload,
+                fetched_at=now,
+            )
+            tally[source, _WRITTEN] += 1
+    return _sweep_of(tally)

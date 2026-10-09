@@ -27,13 +27,17 @@ The single source of truth for the prompt "Lego blocks". Three pieces:
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from portfolio_dash.portfolio import market_view, technicals
 from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.position_aggregate import (
+    AggregatePosition,
+    aggregate_position,
+)
 from portfolio_dash.shared.wire import to_wire
 
 Scope = Literal["portfolio", "per_symbol"]
@@ -63,7 +67,7 @@ class VarSpec:
     token: str
     name: str
     category: str  # vars.js category id:
-    # position|price|dividend|fx|chips|consensus|news|sentiment|ai|system
+    # position|price|dividend|fx|chips|consensus|fundamentals|news|sentiment|ai|system
     scope: Scope
     available: bool
     desc: str
@@ -105,6 +109,17 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"MYR":{"total_return":"688.30","rate":"0.0973"}}',
     ),
     VarSpec(
+        "benchmark_counterfactual_json", "基準對照（同一筆錢買指數）", "position", "portfolio",
+        True,
+        "把每一筆淨投入按其自身日期改買該市場的指數，算到今日的價值，並與含匯兌總損益（B）"
+        "相比。⚠ uncovered_ratio > 0 表示只涵蓋部分資金（例如某市場無基準，或流量早於指數"
+        "的儲存歷史）——此時 excess 不得被稱為「超額報酬」，coverage_note 會說明",
+        '{"available":true,"benchmark_return":"241800","excess":"66730",'
+        '"uncovered_ratio":"0","by_market":[{"market":"TW","label":"元大台灣50",'
+        '"benchmark_return":"128400"},{"market":"US","label":"S&P 500",'
+        '"benchmark_return":"113400"}]}',
+    ),
+    VarSpec(
         "realized_json", "已實現損益明細", "position", "portfolio", True,
         "每筆賣出的淨收款、調整成本移除、已實現損益",
         '[{"symbol":"2330","shares_sold":200,"proceeds_net":"119350","realized":"21350",'
@@ -112,9 +127,10 @@ REGISTRY: tuple[VarSpec, ...] = (
     ),
     VarSpec(
         "symbol_detail_json", "單一標的全檔", "position", "per_symbol", True,
-        "per_symbol 範圍專用：該標的部位、成本、配息史、交易事件、已實現記錄",
+        "單一標的範圍專用：該標的部位、成本、配息史、交易事件、已實現記錄；"
+        "跨帳戶持有時另附 combined（全部帳戶合計）",
         '{"symbol":"2330","shares":1000,"adjusted_avg":"495.00","dividend_events":[…],'
-        '"trade_events":[…]}',
+        '"trade_events":[…],"combined":{"account_count":2,"shares":"40",…}}',
     ),
     # --- price (價格與技術) — all available ---
     VarSpec(
@@ -130,6 +146,16 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"price_vs_ma60":"+0.0723"}',
     ),
     VarSpec(
+        "weekly_signals_json", "週線視角", "price", "per_symbol", True,
+        "把日線收盤重採樣成週線（每週最後一個收盤）後的均線與報酬。⚠ 每個數字都以「週」為單位"
+        "命名（ma10w = 10 週均線），與其他變數的日線數字不可混用、不可互相比較；weeks 是可用的"
+        "週數，不足時該欄為 null 而非估算",
+        '{"timeframe":"weekly","weeks":64,"last_close":"205.00",'
+        '"ma10w":"198.40","price_vs_ma10w":"0.0333","ma20w":"190.10",'
+        '"price_vs_ma20w":"0.0784","ma40w":"176.25","price_vs_ma40w":"0.1631",'
+        '"return_13w":"0.0812","return_52w":"0.2140"}',
+    ),
+    VarSpec(
         "volatility_json", "波動度", "price", "per_symbol", True,
         "30 日年化波動率與最大回撤",
         '{"vol_30d_annualized":"0.284","max_drawdown_90d":"-0.062"}',
@@ -141,17 +167,20 @@ REGISTRY: tuple[VarSpec, ...] = (
     ),
     VarSpec(
         "technical_signals_json", "技術訊號", "price", "per_symbol", True,
-        "整合技術訊號：RSI(14)、20/60 均線交叉＋距今天數、52 週位階、趨勢結構（量能有料才附）",
-        '{"rsi14":"58.3","ma_cross":{"cross":"golden","days_ago":4},'
+        "整合技術訊號：RSI(14)、**短窗 20/60** 均線交叉（ma_cross_short）＋距今天數、52 週位階、"
+        "趨勢結構（量能有料才附）。**這個「交叉」是 20/60，不是法則引擎的 50/200**——兩者不同，"
+        "引用時請區分",
+        '{"rsi14":"58.3","ma_cross_short":{"cross":"golden","days_ago":4},'
         '"week52":{"pct_from_high":"-0.061","pct_from_low":"+0.452","window_days":180},'
         '"trend":{"structure":"uptrend","window_days":60}}',
     ),
     VarSpec(
         "rule_signals_json", "法則訊號", "price", "per_symbol", True,
         "四法則引擎訊號（與 /api/signals 同形狀，單一事實來源）：TechScore(0-100)＋各法則貢獻"
-        "分解、趨勢濾網／均線交叉／12-1 動能／RSI 情境四法則各自狀態與關鍵證據數字、涵蓋度、"
-        "條件語（evaluation_context）、params_version、held 旗標（未持倉＝建倉評估視角）。"
-        "數字由 api 層評估後餵入，LLM 僅詮釋不重算；價格歷史不足時如實降級。",
+        "分解、趨勢濾網／**50/200 均線交叉（ma_cross）**／12-1 動能／RSI 情境四法則各自狀態與關鍵"
+        "證據數字、涵蓋度、條件語（evaluation_context）、params_version、held 旗標"
+        "（未持倉＝建倉評估視角）。**這個「交叉」是 50/200，不是技術訊號變數的 20/60**——兩者不同，"
+        "引用時請區分。數字由 api 層評估後餵入，AI 僅詮釋不重算；價格歷史不足時如實降級。",
         '{"symbol":"2330","held":true,"as_of":"2026-06-11","params_version":"rules-v1",'
         '"composite":{"tech_score":"82.5","coverage":"4/4","evaluation_context":"trend_up",'
         '"context_note":"…","missing":[],"contributions":{"trend_filter":"25.00"},'
@@ -168,7 +197,8 @@ REGISTRY: tuple[VarSpec, ...] = (
     # --- dividend (股利) — all available ---
     VarSpec(
         "dividends_json", "配息史", "dividend", "portfolio", True,
-        "帳本全部股利記錄（type/gross/net/再投資，含幣別）",
+        "帳本全部股利記錄（type/gross/net/再投資，含幣別；重算無法入帳的列另標 "
+        "unbooked「未入帳（待釐清）」與原因代碼，不是收入）",
         '[{"symbol":"0056","date":"2026-04-15","type":"cash","net":"8500","ccy":"TWD"}, …]',
     ),
     VarSpec(
@@ -235,6 +265,18 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"total":32},"rating_score":"1.76","upside_vs_mean_pct":"0.1440",'
         '"source":"yfinance"}',
     ),
+    # --- fundamentals (基本面多來源聯集) — live from external_snapshots (W3, AI-D13..D16) ---
+    VarSpec(
+        "fundamentals_json", "基本面（多來源）", "fundamentals", "per_symbol", True,
+        "PE/PB/EPS(ttm)/市值/殖利率/beta/ROE/營收YoY 八欄，每來源一塊（yfinance／finnhub／"
+        "alphavantage，台股另含 finmind），各塊自帶 as_of 與 currency；不同來源數字可能不同"
+        "——並陳標來源，不取平均；缺塊＝該來源無覆蓋",
+        '{"symbol":"AAPL","last_as_of":"2026-08-17","sources":{"yfinance":{"as_of":'
+        '"2026-08-17","currency":"USD","pe_ratio":"28.4","pb_ratio":"45.06","eps_ttm":'
+        '"6.58","market_cap":"4210000000000","dividend_yield_pct":"0.4","roe_pct":"151.4",'
+        '"revenue_growth_yoy_pct":"7.8"},"finnhub":{"as_of":"2026-08-17","currency":"USD",'
+        '"pe_ratio":"28.02","beta":"1.1"}}}',
+    ),
     # --- sentiment (市場情緒) — live from external_snapshots (spec 20.2) ---
     VarSpec(
         "market_sentiment_json", "情緒指標", "sentiment", "portfolio", True,
@@ -261,23 +303,62 @@ REGISTRY: tuple[VarSpec, ...] = (
         '"title":"台積電法說 7/16 登場","summary":"聚焦全年成長…","source":"中央社",'
         '"lang":"zh","link":"https://…"}],"count":1}',
     ),
-    # --- ai (AI 自身 / 校正用) — available=False until spec 04 ---
+    # --- ai (AI 自身 / 校正用) — spec 04 evaluations（W6 點亮, AI-D31） ---
     VarSpec(
-        "backtest_json", "回測命中分佈", "ai", "portfolio", False,
-        "該洞察組合的歷史命中率信心分桶 — 校正提示詞錨定信心值用",
-        '{"bins":[{"conf":"0.7-0.8","actual_rate":"0.66","n":6}],'
-        '"overall_hit_rate":"0.625"}',
+        "backtest_json", "回測命中分佈", "ai", "portfolio", True,
+        "全體洞察評分的信心校準分桶（本地計分結果，非 AI 自報）：每個信心桶的樣本數 n、"
+        "hit_count、平均宣告信心 claimed_pct、實際命中率 actual_pct、絕對誤差 "
+        "calibration_error_pp（皆百分比字串），外加 overall_hit_rate（全域命中率，"
+        "分數字串）——校正提示詞錨定信心值用：宣告信心不應長期高於同桶實際命中率。"
+        "**confidence_ceiling**（W7.1；法則於 AI-D39／2026-08-25 修訂）是本系統依這份分桶"
+        "算好的信心上限整數；滾動缺口**不再參與**（分桶上限本身已是校準修正，再扣一次"
+        "等於同一個誤差算兩次），無樣本區間改用整體命中率＋5。"
+        "提示詞直接引用它，模型不必自己走 bins 推算（0 代表戰績不支持任何方向性信心）。"
+        "無已評分樣本時 unavailable。",
+        '{"bins":[{"bucket":"60-80","n":6,"hit_count":4,"claimed_pct":"68.50",'
+        '"actual_pct":"66.67","calibration_error_pp":"1.83"}],"overall_hit_rate":"0.625",'
+        '"confidence_ceiling":71,"confidence_ceiling_note":"…"}',
     ),
     VarSpec(
-        "calibration_gap_json", "校準誤差", "ai", "portfolio", False,
-        "該組合信心 vs 實際命中的 rolling 偏差",
-        '{"gap":"+0.085","window_n":16}',
+        "calibration_gap_json", "校準誤差", "ai", "portfolio", True,
+        "最近 20 筆已評分洞察的滾動校準缺口：gap＝實際命中率 − 平均宣告信心"
+        "（帶號分數字串，0.001 量化；正＝模型低估自己、負＝高估），window_n＝窗內實際"
+        "樣本數（≤20）。**reading**（W7.1）是同一件事的白話版（「最近 N 筆平均高估／低估自己 "
+        "X 個百分點」）——提示詞照抄它，不要自己從正負號推方向：一份實測卡把 −0.466 讀成"
+        "「低估自身表現」，而模板就在同一段寫明了慣例。已評分樣本 <8 時誠實 unavailable"
+        "（個位數樣本的缺口是噪聲）。",
+        '{"gap":"+0.085","window_n":16,"reading":"最近 16 筆平均低估自己 8.500 個百分點"}',
+    ),
+    # --- price (訊號回測) — W6 事件研究（AI-D31：per-symbol，與 rule_signals_json 同類） ---
+    VarSpec(
+        "signal_backtest_json", "訊號回測", "price", "per_symbol", True,
+        "該標的的事件研究回測（本地計算，非 AI 生成）：法則訊號符號轉換（四法則各自 "
+        "bullish/bearish）與 TechScore 狀態帶（65/35，與 evaluation_context 同一套門檻）"
+        "穿越事件發生後，+10/+20/+60/+120 交易日的前向報酬分布（n／mean／median／"
+        "pct_positive，分數字串——payload 的 units 欄同樣註明，因為這份 desc 模型看不到）"
+        "vs 同標的無條件基線（baseline）。誠實防護：n<8 的格子"
+        "只回 insufficient 不給數字；重疊樣本（n_overlapping）與右刪失（n_censored）"
+        "如實註記；不年化。歷史不足（訊號歷史尚未累積）時 unavailable。",
+        '{"symbol":"2330","units":{"mean":"fraction — 0.1336 means +13.36%",'
+        '"median":"fraction — same scale as mean",'
+        '"pct_positive":"fraction — 0.8182 means 81.82% of events"},'
+        '"history":{"first":"2024-10-02","last":"2026-06-11","rows":406,'
+        '"params_version":"rules-v1"},"windows":[20,60,120],'
+        '"groups":[{"kind":"momentum_12_1","direction":"bullish","events":14,'
+        '"per_window":{"20":{"n":12,"mean":"0.0312","median":"0.0244",'
+        '"pct_positive":"0.7500","n_overlapping":3,"n_censored":2},'
+        '"60":{"n":7,"insufficient":true,"n_overlapping":1,"n_censored":5}}}],'
+        '"baseline":{"20":{"n":592,"mean":"0.0041","median":"0.0030",'
+        '"pct_positive":"0.5500"}},"events_without_price":0}',
     ),
     # --- system (系統狀態) — all available ---
     VarSpec(
         "freshness_json", "資料新鮮度", "system", "portfolio", True,
-        "缺價/過期標的清單 — 讓 AI 知道哪些數字不可信",
-        '{"missing_prices":["00919"],"stale":[{"symbol":"MSFT","as_of":"2026-06-06"}]}',
+        "缺價/過期標的清單，加上每個外部資料來源的基準日與已幾天 — 讓 AI 知道哪些數字不可信",
+        '{"missing_prices":["00919"],"stale":[{"symbol":"MSFT","as_of":"2026-06-06"}],'
+        '"sources":[{"token":"consensus_json","last_as_of":"2026-06-04","age_days":7,'
+        '"unavailable":false},{"token":"news_json","last_as_of":null,"age_days":null,'
+        '"unavailable":true}]}',
     ),
     VarSpec(
         "as_of", "資料時間", "system", "portfolio", True,
@@ -438,9 +519,60 @@ class VarContext:
     # Per-token degrade reasons fed by the router from data_source_health (spec 20.15.4),
     # e.g. "需要 Backer 方案" / "額度已滿". llm_insight does NOT read health itself.
     external_reasons: dict[str, str] = field(default_factory=dict)
+    # ⑬ — token → that source's own basis date (ISO or None), derived by the router from
+    # the SAME payloads it already built (:func:`external_as_of_map`). Fed rather than
+    # computed here for the fx_rates reason: the api layer reads conn, this one must not.
+    external_as_of: dict[str, str | None] = field(default_factory=dict)
 
 
 _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
+
+
+def external_as_of_map(external_vars: dict[str, Any]) -> dict[str, str | None]:
+    """Token → the basis date the producer stamped on its own payload, or ``None``.
+
+    ⑬ — every external producer already records when its data is from: the
+    ``portfolio.external_signals`` builders write ``last_as_of``, and the signals wire
+    writes ``as_of``. This reads what is already there — **no new query** — so that
+    ``freshness_json`` can answer 「這份資料是什麼時候的」 for every fed source instead of
+    only for prices and FX, which is all ``FreshnessReport`` covers while four official
+    templates instruct the model to check 新鮮度 against it.
+
+    Deliberately NOT a staleness verdict. A price has a market calendar to be judged
+    against; a fundamentals snapshot does not, and inventing a 「good for N days」 threshold
+    would be the guess this project forbids everywhere else. The date is reported; the
+    judgement belongs to the prompt.
+    """
+    out: dict[str, str | None] = {}
+    for token, value in external_vars.items():
+        stamp: object = None
+        if isinstance(value, dict):
+            stamp = value.get("last_as_of") or value.get("as_of")
+        out[token] = stamp if isinstance(stamp, str) else None
+    return out
+
+
+def unavailable_tokens(external_vars: dict[str, Any]) -> list[str]:
+    """Which injected variables came back as the documented "no data" shape.
+
+    ``{"unavailable": true}`` is this module's contract for a producer that had nothing to
+    give (see the module docstring); this reads it back so a CALLER can act on it. The one
+    caller that must is ``api/insight_service``, which fills
+    ``RunInputs.unavailable_vars`` → ``GateContext`` → gate **R5**.
+
+    That field existed, was threaded end to end, and was populated at NONE of the four
+    ``RunInputs`` construction sites (found 2026-08-25), so R5 had never fired in production:
+    a run whose every external input was missing was recorded as clean, and the one signal
+    saying "this batch was synthesised from absent data" never reached ``job_runs``.
+
+    Sorted, because R5 joins these into user-visible text and dict order would churn the
+    stored reason. Only the documented DICT shape counts — a list, ``None`` or the string
+    ``"unavailable"`` is a producer's ordinary output, not a declaration of absence.
+    """
+    return sorted(
+        token for token, value in external_vars.items()
+        if isinstance(value, dict) and value.get("unavailable") is True
+    )
 
 # Chips/sentiment/consensus/signal tokens whose value is fed via VarContext.external_vars.
 # ``rule_signals_json`` is external-fed like chips/consensus: the api seam evaluates it via
@@ -449,12 +581,44 @@ _UNAVAILABLE: dict[str, Any] = {"unavailable": True}
 _EXTERNAL_TOKENS: frozenset[str] = frozenset({
     "institutional_json", "margin_json", "monthly_revenue_json", "valuation_json",
     "financials_json", "market_sentiment_json", "index_quotes_json", "fear_greed_json",
-    "symbol_news_json", "consensus_json", "rule_signals_json",
+    "symbol_news_json", "consensus_json", "rule_signals_json", "fundamentals_json",
+    "backtest_json", "calibration_gap_json", "signal_backtest_json",
 })
 
 
 def _holdings_for_symbol(data: DashboardData, symbol: str) -> list[Any]:
     return [h for h in data.holdings if h.symbol == symbol]
+
+
+#: The aggregate's fields the prompt carries — the ones a card narrates as 「總計」.
+_COMBINED_FIELDS: frozenset[str] = frozenset({
+    "account_count", "shares", "original_avg", "adjusted_avg", "original_cost_total",
+    "adjusted_cost_total", "dividend_portion", "payback_ratio", "market_price",
+    "market_value", "unrealized_pnl", "unrealized_pct", "capital_gain", "weight",
+})
+
+
+def _combined_block(agg: AggregatePosition) -> dict[str, Any]:
+    """The symbol's cross-account totals, from the drawer's own definition
+    (``portfolio/position_aggregate.py``), for a symbol held in more than one account.
+
+    Second re-verification 2026-09-17 (audit M9): the prompt handed the model the
+    per-account rows alone, so a card describing the whole position added them itself —
+    「總計 95.0457 股，總成本約為 15,916.00 USD」, correct to the digit and flagged 數值待核
+    because no fed number said so. llm-insight.md's rule is that the model narrates the
+    system's numbers and never recomputes them; a prompt that gives the parts and needs
+    the whole breaks that rule on the model's behalf. Handing it the whole fixes both the
+    flag (the total is now in ``prompt_figures``) and the arithmetic risk.
+    """
+    block: dict[str, Any] = {
+        "note": (
+            "totals over EVERY account holding this symbol, server-computed (the top-level "
+            "fields are the largest account's; per-account rows are in positions). Quote "
+            "these for the whole position instead of adding the rows."
+        ),
+    }
+    block.update(agg.model_dump(include=set(_COMBINED_FIELDS)))
+    return block
 
 
 def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
@@ -472,6 +636,7 @@ def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
         return {"symbol": symbol, "unavailable": True}
     # Q1: the account holding the most shares (matches spec-01 cost_basis selection).
     primary = max(rows, key=lambda h: h.shares)
+    combined = aggregate_position(rows)
     realized_rows = [r for r in ctx.data.realized.rows if r.symbol == symbol]
     return {
         "symbol": symbol,
@@ -482,8 +647,22 @@ def _symbol_detail(ctx: VarContext) -> dict[str, Any]:
         "market_value": primary.market_value,
         "unrealized_pnl": primary.unrealized_pnl,
         "payback_ratio": primary.payback_ratio,
+        # M1-03 / D21: whose dividends that ratio is built on. A narrator handed the ratio
+        # alone says 「已回收 12%」 about a SPINOFF child that never paid a cent (llm-insight.md
+        # hard rule 3: the LLM may only believe what it is handed — so hand it the source).
+        "payback_from_symbol": primary.payback_from_symbol,
+        "payback_carried_dividends": primary.payback_carried_dividends,
+        "payback_own_dividends": primary.payback_own_dividends,
         "quote_ccy": primary.quote_ccy,
         "positions": [h.model_dump() for h in rows],
+        # Single-account symbols are unchanged (the top-level fields already are the whole
+        # position, and their prompts stay byte-identical); a multi-account symbol carries
+        # its combined position so the model never has to add rows (see _combined_block).
+        **(
+            {"combined": _combined_block(combined)}
+            if combined is not None and combined.account_count > 1
+            else {}
+        ),
         "realized_rows": [r.model_dump() for r in realized_rows],
     }
 
@@ -534,6 +713,38 @@ def _ma_signals(ctx: VarContext) -> dict[str, Any]:
     if not ctx.closes:
         return {"unavailable": True}
     return technicals.ma_signals(ctx.closes)
+
+
+#: Weekly lookbacks, in WEEKS. 10/20/40 map onto the daily rules' 50/100/200 sessions, so a
+#: reader comparing the two timeframes is comparing the same horizons — but the names never
+#: let them be confused (AI-D2: 「均線交叉」 once meant 20/60 in one place and 50/200 in another,
+#: and one prompt cited both).
+_WEEKLY_MA_WINDOWS: tuple[int, ...] = (10, 20, 40)
+_WEEKLY_RETURN_WINDOWS: tuple[int, ...] = (13, 52)
+
+
+def _weekly_signals(ctx: VarContext) -> dict[str, Any]:
+    """The weekly lens (owner ruling 2026-08-28) — resampled at READ time, stored nowhere.
+
+    Answers the one question the daily-only stack cannot: 「日線轉弱，但週線還沒破」. Every key
+    is named in weeks and the payload states its own ``timeframe``, so no number can be read
+    as a daily one. A window with too little history is ``None``, never a partial-window
+    estimate — the same discipline ``moving_average`` already applies.
+    """
+    weekly = technicals.resample_weekly(ctx.price_points or [])
+    if len(weekly) < 2:
+        return {"unavailable": True}
+    last = weekly[-1]
+    out: dict[str, Any] = {"timeframe": "weekly", "weeks": len(weekly), "last_close": last}
+    for w in _WEEKLY_MA_WINDOWS:
+        ma = technicals.moving_average(weekly, w)
+        out[f"ma{w}w"] = ma
+        out[f"price_vs_ma{w}w"] = None if not ma else (last - ma) / ma
+    for w in _WEEKLY_RETURN_WINDOWS:
+        # w+1 points to span w weeks of change; a zero base is never a denominator.
+        base = weekly[-(w + 1)] if len(weekly) > w else None
+        out[f"return_{w}w"] = None if not base else (last - base) / base
+    return out
 
 
 def _volatility(ctx: VarContext) -> dict[str, Any]:
@@ -650,9 +861,40 @@ def _dividend_projection(data: DashboardData, *, market: str | None = None) -> d
     return out or {"unavailable": True}
 
 
+def _source_rows(ctx: VarContext) -> list[dict[str, Any]]:
+    """One row per FED external source: its basis date, its age, and whether it degraded.
+
+    ⑬ — the consolidated view. Without it the model had to walk 16 separate payloads to
+    notice that one of them was three weeks old, while the 守則 told it to consult
+    ``freshness_json``, which knew only about prices and FX.
+    """
+    today = ctx.now.date() if ctx.now is not None else None
+    rows: list[dict[str, Any]] = []
+    degraded = set(unavailable_tokens(ctx.external_vars))
+    for token in sorted(ctx.external_vars):
+        # A degraded source carries no basis date to misread — it reports None, not the
+        # date of whatever partial payload happened to survive.
+        stamp = None if token in degraded else ctx.external_as_of.get(token)
+        age: int | None = None
+        if stamp is not None and today is not None:
+            try:
+                age = (today - date.fromisoformat(stamp)).days
+            except ValueError:
+                stamp = None  # a producer stamped something that is not a date — say None
+        rows.append({
+            "token": token, "last_as_of": stamp, "age_days": age,
+            "unavailable": token in degraded,
+        })
+    return rows
+
+
 def _freshness(ctx: VarContext) -> dict[str, Any]:
-    """The freshness report; a market card sees only its own market's symbols."""
+    """The freshness report; a market card sees only its own market's symbols.
+
+    ``sources`` (⑬) extends the price/FX legs to every external source the router fed.
+    """
     dump = ctx.data.freshness.model_dump()
+    dump["sources"] = _source_rows(ctx)
     if ctx.market is None:
         return dump
     market_symbols = {
@@ -742,6 +984,27 @@ def value_for(token: str, ctx: VarContext) -> Any:
             return {"scope_note": "以下為全組合彙總，非本市場切片；"
                                   "本市場數字見 holdings_json 與 returns_by_ccy_json", **kpis}
         return kpis
+    if token == "benchmark_counterfactual_json":
+        bench = getattr(data, "benchmark", None)
+        if bench is None or not bench.available:
+            # Honest degradation, with the server's own reason when it gave one — never a
+            # fabricated comparison and never a silent zero.
+            reason = getattr(bench, "reason", None) if bench is not None else None
+            return {"unavailable": True, "reason": reason} if reason else _UNAVAILABLE
+        out = bench.model_dump()
+        if bench.uncovered_ratio and bench.uncovered_ratio > 0:
+            # The red line, carried IN THE DATA rather than trusted to the prompt. When part
+            # of the money has no benchmark, `excess` is not 「超額報酬」 — it is a comparison
+            # over a subset, and `BenchmarkComparison`'s own docstring forbids the bare label.
+            # Same discipline as `covered_ratio` (F2): degrade the claim, do not hide the
+            # number.
+            out["coverage_note"] = (
+                "只有部分資金有基準可對照（未涵蓋："
+                + "、".join(bench.uncovered_markets or ["部分流量"])
+                + "）。excess 是這部分資金的差額，不可稱為「超額報酬」，"
+                  "也不可用來評價整體績效"
+            )
+        return out
     if token == "returns_by_ccy_json":
         return _returns_by_ccy(data, market=ctx.market)
     if token == "realized_json":
@@ -758,6 +1021,8 @@ def value_for(token: str, ctx: VarContext) -> Any:
         return _ma_signals(ctx)
     if token == "volatility_json":
         return _volatility(ctx)
+    if token == "weekly_signals_json":
+        return _weekly_signals(ctx)
     if token == "technical_signals_json":
         return _technical_signals(ctx)
     if token == "price_vs_cost_json":

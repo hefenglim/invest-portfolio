@@ -16,15 +16,20 @@ feeding ``closes`` into the technicals). It:
 """
 
 import sqlite3
-from datetime import datetime, timedelta
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 
-from portfolio_dash.data_ingestion.holdings import current_shares
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.data_ingestion.holdings import held_among, load_action_index
 from portfolio_dash.llm_insight import alerts_bridge
-from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.portfolio.price_basis import series_in
+from portfolio_dash.pricing.store import get_price_history, price_dates
+from portfolio_dash.shared.corporate_actions import ActionIndex
+from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy import signal_states
+from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.rules import engine
 from portfolio_dash.strategy.rules.composite import RULE_ORDER
 from portfolio_dash.strategy.rules.params import (
@@ -82,21 +87,61 @@ def required_calendar_days(params: RulesParams) -> int:
     return int(days)
 
 
+@dataclass(frozen=True)
+class SeriesRead:
+    """The evaluation window read for one symbol: closes, aligned volumes, and the DATA DATE.
+
+    ``last_date`` is the ``as_of`` of the newest close inside the window — ``None`` when the
+    window holds no prices at all.
+
+    ⚠ W7 step 0(b) REMOVED this third value as dead code, and it was: nothing consumed it.
+    ⑬ (2026-08-26) is the reason it is back, and the reason it must not be removed again —
+    it is now the ONLY honest source for the ``as_of`` that ``signal_states`` stores and
+    that ``/api/signals`` + ``rule_signals_json`` publish. Both used ``now.date()`` before,
+    so a series whose last close was five days old still announced 「資料基準＝今天」 and the
+    prompt 守則 propagated that date onto the card. A dataclass rather than a bare tuple so
+    the third element names itself at every call site.
+    """
+
+    closes: list[Decimal]
+    volumes: list[Decimal | None] | None
+    last_date: date | None
+
+
 def _read_series(
-    conn: sqlite3.Connection, symbol: str, *, now: datetime, params: RulesParams
-) -> tuple[list[Decimal], list[Decimal | None] | None]:
+    conn: sqlite3.Connection, symbol: str, *, now: datetime, params: RulesParams,
+    actions: ActionIndex,
+) -> SeriesRead:
     """Read the derived-window closes + aligned volumes for ``symbol`` from stored prices.
 
     Volumes are fed only when at least one session carries volume (so the volume-
     confirmation signal stays honestly absent pre-backfill), mirroring ``insight_service``.
+
+    §5.1(d) / W6c — **this is the highest-consequence series read in the app.** Every rule
+    the engine runs compares closes ACROSS dates (12-1 momentum, MA50/MA200 cross, RSI,
+    52-week position, the MA200 trend filter), and a stored close is as traded on its own
+    date. A split inside the ~583-day window therefore puts the older points in a different
+    denomination: a 7-for-1 makes the pre-split year read 7x higher, the 52-week position
+    collapses to 0, and the scan WRITES an ``alert_events`` row that notifies the owner
+    about a breach that never happened. Re-expressed into ``now``'s share terms first.
+
+    ``actions`` is threaded in, never built here (trap #21): both scan loops call this once
+    per registered symbol.
+
+    ⚠ ``volumes`` is deliberately NOT re-expressed — ``volume`` has no raw column (D39b), so
+    a factor on it could never be restated or reversed. The volume-confirmation signal
+    therefore still compares two denominations across a split; that needs its own stored
+    column, not a read-path divide.
     """
     end = now.date()
     start = end - timedelta(days=required_calendar_days(params))
-    history = get_price_history(conn, symbol, start, end)
+    history = series_in(
+        actions, symbol, get_price_history(conn, symbol, start, end), valued_on=end
+    )
     closes: list[Decimal] = [p.value for p in history]
     raw_volumes: list[Decimal | None] = [p.volume for p in history]
     volumes = raw_volumes if any(v is not None for v in raw_volumes) else None
-    return closes, volumes
+    return SeriesRead(closes, volumes, history[-1].as_of if history else None)
 
 
 def evaluate_symbol(
@@ -105,11 +150,18 @@ def evaluate_symbol(
     *,
     now: datetime,
     params: RulesParams | None = None,
-) -> SymbolSignals | None:
-    """Evaluate one symbol's signals from stored prices (single-symbol drawer path)."""
+) -> tuple[SymbolSignals | None, date | None]:
+    """Evaluate one symbol's signals from stored prices (single-symbol drawer path).
+
+    Returns ``(signals, price_as_of)`` — the second element is the DATA date the signals
+    describe (⑬), which the caller must hand to :func:`to_wire`. ``None`` when the symbol
+    has no prices in the window.
+    """
     resolved = params if params is not None else default_params()
-    closes, volumes = _read_series(conn, symbol, now=now, params=resolved)
-    return engine.evaluate_symbol(closes, volumes, resolved)
+    read = _read_series(conn, symbol, now=now, params=resolved,
+                        actions=load_action_index(conn))
+    closes, volumes = read.closes, read.volumes
+    return engine.evaluate_symbol(closes, volumes, resolved), read.last_date
 
 
 def _registered_symbols(conn: sqlite3.Connection) -> list[str]:
@@ -121,38 +173,44 @@ def _registered_symbols(conn: sqlite3.Connection) -> list[str]:
 
     Archived symbols (FU-D13) are excluded: a stopped-tracking name is no longer an entry
     candidate, so it drops out of the scan + evaluate_all universe (its money still counts
-    everywhere else — archiving never touches the dashboard)."""
-    return sorted({i.symbol for i in list_instruments(conn) if not i.archived})
+    everywhere else — archiving never touches the dashboard). "Archived" is the one shared
+    predicate (``shared/instrument_scope.py``, DEF-064)."""
+    return tracked_symbols(conn)
 
 
-def _account_ids(conn: sqlite3.Connection) -> list[str]:
-    return [a.account_id for a in list_accounts(conn)]
+def is_held(conn: sqlite3.Connection, symbol: str, *, today: date) -> bool:
+    """Public single-symbol ``held`` check (drawer + rule_signals_json variable feed).
 
-
-def _is_held(conn: sqlite3.Connection, symbol: str, *, account_ids: list[str]) -> bool:
-    """Whether *symbol* carries a live position in any account (cheap holdings check —
-    same precedent as ``instruments._held``: net current_shares > 0, no dashboard build)."""
-    return any(current_shares(conn, aid, symbol) > 0 for aid in account_ids)
-
-
-def is_held(conn: sqlite3.Connection, symbol: str) -> bool:
-    """Public single-symbol ``held`` check (drawer + rule_signals_json variable feed)."""
-    return _is_held(conn, symbol, account_ids=_account_ids(conn))
+    The registry's 「持有」 (``holdings.held_among`` → ``holds_position``: a position today or
+    on any later ledger date) — the watchlist badge's predicate (DEF-075, owner ruling ② B).
+    It was ``current_shares > 0``, which read a position closed only by a FUTURE-dated sale
+    and a declared short as a watch symbol, so the signal fed the LLM ``held: false`` for a
+    position the watchlist called 持有. No dashboard build.
+    """
+    return symbol in held_among(conn, [symbol], today=today)
 
 
 def evaluate_all(
     conn: sqlite3.Connection, *, now: datetime
-) -> list[tuple[str, SymbolSignals | None, bool]]:
+) -> list[tuple[str, SymbolSignals | None, bool, date | None]]:
     """Evaluate every REGISTERED symbol (held + watchlist); returns
-    ``(symbol, signals-or-None, held)`` triples, sorted. Watch symbols get the same honest
-    evaluation as held ones — the API tags each with its ``held`` flag (P2 batch 3)."""
+    ``(symbol, signals-or-None, held, price_as_of)`` tuples, sorted. Watch symbols get the
+    same honest evaluation as held ones — the API tags each with its ``held`` flag (P2 batch
+    3). The fourth element is that symbol's own DATA date (⑬): symbols do not share one, so
+    a market that has not delivered yet cannot borrow a fresher market's basis date."""
     params = default_params()
-    account_ids = _account_ids(conn)
-    out: list[tuple[str, SymbolSignals | None, bool]] = []
-    for symbol in _registered_symbols(conn):
-        closes, volumes = _read_series(conn, symbol, now=now, params=params)
-        signals = engine.evaluate_symbol(closes, volumes, params)
-        out.append((symbol, signals, _is_held(conn, symbol, account_ids=account_ids)))
+    actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
+    symbols = _registered_symbols(conn)
+    # DEF-075: the registry's 「持有」, one index for the whole universe.
+    held = held_among(conn, symbols, today=now.date(), index=actions)
+    out: list[tuple[str, SymbolSignals | None, bool, date | None]] = []
+    for symbol in symbols:
+        read = _read_series(conn, symbol, now=now, params=params, actions=actions)
+        signals = engine.evaluate_symbol(read.closes, read.volumes, params)
+        out.append((
+            symbol, signals, symbol in held,
+            read.last_date,
+        ))
     return out
 
 
@@ -204,11 +262,20 @@ def _composite_wire(composite: Composite) -> dict[str, object]:
 
 
 def to_wire(
-    symbol: str, signals: SymbolSignals | None, *, now: datetime, held: bool = False
+    symbol: str, signals: SymbolSignals | None, *, now: datetime, held: bool = False,
+    price_as_of: date | None,
 ) -> dict[str, object]:
     """The per-symbol ``/api/signals`` wire payload (honest nulls when a rule/composite is
     too thin to judge). ``held`` tags whether the symbol carries a live position (P2 batch
-    3): a watchlist entry serializes identically but with ``held=false``."""
+    3): a watchlist entry serializes identically but with ``held=false``.
+
+    ``price_as_of`` (⑬) is the DATA date these signals describe, and has **no default** —
+    the injection rule: forgetting it is a mypy error and a TypeError, never a silent
+    fallback to the wall clock, which is the exact defect this parameter exists to close.
+    ``None`` (no prices at all) serializes as ``as_of: null`` — an honest gap beats a
+    confident wrong date, the same rule as a labelled stale price. ``evaluated_at`` keeps
+    the wall clock; the two fields were always two different facts.
+    """
     if signals is None:
         rules_wire: dict[str, object | None] = dict.fromkeys(RULE_ORDER, None)
         composite_wire: dict[str, object] | None = None
@@ -223,7 +290,7 @@ def to_wire(
         "symbol": symbol,
         "held": held,
         "evaluated_at": now.isoformat(),
-        "as_of": now.date().isoformat(),
+        "as_of": None if price_as_of is None else price_as_of.isoformat(),
         "params_version": params_version,
         "rules": rules_wire,
         "composite": composite_wire,
@@ -233,7 +300,101 @@ def to_wire(
 # --- transition scan (registered as the signal_scan scheduler runner) -------------------
 
 
-def scan_signals(conn: sqlite3.Connection, *, now: datetime) -> str:
+def _computable_dates(
+    conn: sqlite3.Connection, symbol: str, params: RulesParams
+) -> list[date]:
+    """The price dates whose evaluation window holds ≥ ``required_sessions`` sessions.
+
+    The honest floor (AI-D28): a history row exists only where ALL FOUR rules CAN evaluate,
+    so the event study's rows are uniformly full-coverage and ``tech_score`` is never a
+    two-rule blend pretending to be four. A thinner series honestly starts its history where
+    the window fills (``signal_states`` still tracks it daily). Derived from params, so a
+    recalibration moves the floor with the window.
+    """
+    dates = price_dates(conn, symbol)
+    if not dates:
+        return []
+    floor = required_sessions(params)
+    span = timedelta(days=required_calendar_days(params))
+    return [
+        d for d in dates
+        if bisect_right(dates, d) - bisect_left(dates, d - span) >= floor
+    ]
+
+
+def _fill_signal_history(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    params: RulesParams,
+    actions: ActionIndex,
+    stamped: str,
+) -> tuple[int, int]:
+    """Replay missing history dates for ``symbol`` + refresh the head row; returns
+    ``(rows_written, head_refreshed)``.
+
+    * **Missing-set rule** (AI-D27): fill every computable date NOT already stored — a
+      later deeper price backfill (left-edge hole), a provider gap filled in (middle hole),
+      or an aborted first backfill all self-heal on the next scan, where a max-as_of
+      watermark would hide all three. ⚠ Limitation (W6 review): a provider REVISION to an
+      already-stored date is neither missing nor head — the downstream rows whose windows
+      shift stay stale until ``signal_history.delete_symbol`` + a rescan (the module
+      docstring carries the same note).
+    * **Per-date re-assembly** (deliberate, NOT fetch-once-truncate): each date's window is
+      read and re-expressed at THAT date through the same ``_read_series`` the daily scan
+      uses, so a replayed row is by construction the row a scan on that date would have
+      written. The scale-invariance shortcut (re-express once, slice) rests on an argument
+      about today's four rules that a future rule may not satisfy; the per-date cost is
+      seconds for a full backfill and milliseconds on an incremental day.
+    * **Head-row refresh** — compare-then-skip: the last computable date's row is
+      re-evaluated and rewritten only when content changed (a corrected close), keeping
+      ``updated_at`` stable so a re-scan is a provable no-op.
+    """
+    dates = _computable_dates(conn, symbol, params)
+    if not dates:
+        return 0, 0
+    stored = signal_history.as_of_set(conn, symbol)
+    rows: list[signal_history.SignalHistoryRow] = []
+    for d in dates:
+        if d in stored:
+            continue
+        d_read = _read_series(
+            conn, symbol, now=datetime.combine(d, time.min),
+            params=params, actions=actions,
+        )
+        d_signals = engine.evaluate_symbol(d_read.closes, d_read.volumes, params)
+        if d_signals is None:
+            continue  # an empty window ON a price date — impossible by construction
+            # (the window [d−span, d] contains d's own close); if it ever happened the
+            # date simply stays missing and the next scan retries — honest, never faked.
+        rows.append(signal_history.row_from_signals(
+            symbol, d_signals, as_of=d, updated_at=stamped,
+        ))
+    written = signal_history.upsert_rows(conn, rows)
+    changed = 0
+    head = dates[-1]
+    if head in stored:  # a just-written head is identical by construction — skip it
+        h_read = _read_series(
+            conn, symbol, now=datetime.combine(head, time.min),
+            params=params, actions=actions,
+        )
+        h_signals = engine.evaluate_symbol(h_read.closes, h_read.volumes, params)
+        if h_signals is not None and signal_history.upsert_row_if_changed(
+            conn,
+            signal_history.row_from_signals(
+                symbol, h_signals, as_of=head, updated_at=stamped,
+            ),
+        ):
+            changed = 1
+    return written, changed
+
+
+def scan_signals(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    progress: Callable[[str], None] | None = None,
+) -> str:
     """Evaluate every REGISTERED symbol (held + watchlist), compare with the stored
     ``signal_states`` cache, record transition events, and refresh the cache. Returns a
     short ``job_runs.detail`` summary. Watch symbols seed silently and fire transitions
@@ -253,19 +414,39 @@ def scan_signals(conn: sqlite3.Connection, *, now: datetime) -> str:
       per (rule, symbol) per day (``record_event_ex`` dedups). The cron runs once daily; a
       manual same-day re-run is deliberately conservative (no double-count). The detail's
       transition count therefore counts only INSERTED events, not merely DETECTED ones.
+
+    W6 (AI-D27/AI-D28): the same pass maintains the ``signal_history`` per-day table —
+    replaying missing dates (the first scan after upgrade IS the backfill, minutes in the
+    background; the ``progress`` callback reports per-symbol) and refreshing the head row
+    compare-then-skip. A stale ``params_version`` vintage is pruned first so a future
+    recalibration refills under the new params on the same pass (no-op under rules-v1).
+    The scan still has NO per-symbol error tolerance — one poison symbol aborts the run and
+    the job reports the failure loudly; the missing-set rule makes the NEXT scan resume
+    exactly where it stopped, so loud failure is also self-healing.
     """
     signal_states.ensure_table(conn)
+    signal_history.ensure_table(conn)
     alerts_bridge.ensure_tables(conn)
     params = default_params()
-    as_of = now.date().isoformat()
+    # ⑬: there is no scan-wide as_of any more. Each symbol is stamped with ITS OWN last
+    # close (below), because a market that has not delivered today must not borrow a
+    # fresher market's basis date — which is precisely what one shared now.date() did.
     stamped = now.isoformat()
 
     symbols = _registered_symbols(conn)
+    actions = load_action_index(conn)  # ONE per scan, outside the loop (trap #21)
+    pruned = signal_history.prune_params_version(conn, PARAMS_VERSION)
     seeded = 0
     recorded = 0
-    for symbol in symbols:
-        closes, volumes = _read_series(conn, symbol, now=now, params=params)
-        signals = engine.evaluate_symbol(closes, volumes, params)
+    replayed = 0
+    refreshed = 0
+    for pos, symbol in enumerate(symbols, start=1):
+        read = _read_series(conn, symbol, now=now, params=params, actions=actions)
+        signals = engine.evaluate_symbol(read.closes, read.volumes, params)
+        # The DATA date this state describes. A symbol with no prices at all has none —
+        # fall back to the scan date rather than write NULL into a NOT NULL column; the
+        # state it carries is "nothing evaluable", which no date would make truer.
+        as_of = (read.last_date or now.date()).isoformat()
         new_state = signal_states.extract_state(signals)
         stored = signal_states.get_state(conn, symbol)
 
@@ -276,18 +457,31 @@ def scan_signals(conn: sqlite3.Connection, *, now: datetime) -> str:
                 params_version=PARAMS_VERSION, as_of=as_of, updated_at=stamped,
             )
             seeded += 1
-            continue
-
-        result = signal_states.detect_transitions(stored.derived, new_state, stored.hold)
-        for rule_id in result.events:
-            _, inserted = alerts_bridge.record_event_ex(
-                conn, rule_id=rule_id, symbol=symbol, now=now
+        else:
+            result = signal_states.detect_transitions(stored.derived, new_state, stored.hold)
+            for rule_id in result.events:
+                # I-16: the subject IS a symbol — said so, so no consumer has to guess.
+                _, inserted = alerts_bridge.record_event_ex(
+                    conn, rule_id=rule_id, symbol=symbol, now=now, scope="symbol"
+                )
+                if inserted:  # coalesced same-day repeats do not inflate the count (F2)
+                    recorded += 1
+            signal_states.upsert_state(
+                conn, symbol, new_state, hold=result.hold,
+                params_version=PARAMS_VERSION, as_of=as_of, updated_at=stamped,
             )
-            if inserted:  # coalesced same-day repeats do not inflate the count (F2)
-                recorded += 1
-        signal_states.upsert_state(
-            conn, symbol, new_state, hold=result.hold,
-            params_version=PARAMS_VERSION, as_of=as_of, updated_at=stamped,
-        )
 
-    return f"{len(symbols)} symbol(s), {seeded} seeded, {recorded} transition event(s)"
+        written, changed = _fill_signal_history(
+            conn, symbol, params=params, actions=actions, stamped=stamped,
+        )
+        replayed += written
+        refreshed += changed
+        if written and progress is not None:
+            progress(f"回填訊號歷史 {symbol}（+{written} 列）（{pos}/{len(symbols)}）")
+
+    # DEF-073: zh — it read 「9 symbol(s), 0 seeded, 1 transition event(s), …」.
+    detail = (f"掃描 {len(symbols)} 檔：首次建立狀態 {seeded} 檔，訊號轉折事件 {recorded} 筆，"
+              f"回填訊號歷史 {replayed} 列，更新最新一列 {refreshed} 列")
+    if pruned:
+        detail += f"，清除舊參數版本 {pruned} 列"
+    return detail

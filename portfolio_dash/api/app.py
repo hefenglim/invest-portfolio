@@ -17,20 +17,27 @@ from portfolio_dash.api.alert_inputs import scan_alert_compute
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.digest_service import run_digest
+from portfolio_dash.api.dividend_inbox import ensure_tables as ensure_dividend_inbox_tables
 from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
+from portfolio_dash.api.fundamentals_service import run_fundamentals_av
 from portfolio_dash.api.insight_service import (
     evaluate_due as insight_evaluate_due,
 )
 from portfolio_dash.api.insight_service import (
     generate_calibrations_for_all as insight_generate_calibrations,
 )
+from portfolio_dash.api.insight_service import (
+    held_symbols_for_alerts as insight_held_symbols_for_alerts,
+)
 from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
 from portfolio_dash.api.news_service import run_news_daily
+from portfolio_dash.api.rebates import ensure_tables as ensure_rebate_tables
 from portfolio_dash.api.routers import (
     accounts,
     actions,
     auth,
+    broker_import,
     cash,
     dashboard,
     datasources,
@@ -43,7 +50,9 @@ from portfolio_dash.api.routers import (
     input_center,
     insights,
     instruments,
+    ledger_audit,
     ledgers,
+    llm_fail_log,
     llm_settings,
     news,
     notify,
@@ -61,6 +70,7 @@ from portfolio_dash.api.routers import (
     whatsnew,
 )
 from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
+from portfolio_dash.api.snapshots import ensure_table as ensure_snapshots_table
 from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -75,6 +85,7 @@ from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
 from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
+from portfolio_dash.news.store import get_news_connection
 from portfolio_dash.ops import digest as digest_ops
 from portfolio_dash.ops import notify as notify_ops
 from portfolio_dash.ops.backup import pre_write_snapshot
@@ -83,10 +94,13 @@ from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
     register_alert_compute_runner,
+    register_alert_held_fn,
     register_calibration_runner,
     register_digest_runner,
     register_dividend_scan_runner,
     register_evaluation_runner,
+    register_fundamentals_runner,
+    register_held_symbols_fn,
     register_insight_runner,
     register_news_runner,
     register_signal_scan_runner,
@@ -95,8 +109,16 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.db import session
+from portfolio_dash.shared.llm_fail_log import (
+    ensure_table as ensure_llm_fail_log_table,
+)
 from portfolio_dash.shared.logging_config import configure_logging
+from portfolio_dash.shared.ui_prefs import ensure_ui_prefs_seeded
+from portfolio_dash.shared.whatsnew import ensure_whatsnew_seeded
 from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
+from portfolio_dash.strategy.signal_history import (
+    ensure_table as ensure_signal_history_table,
+)
 from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_states_table
 from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 
@@ -171,11 +193,31 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         suppress_stale_quota_low(conn, now=app_now())
         ensure_evaluations_tables(conn)  # insight_evaluations table (spec 04c)
         ensure_signal_states_table(conn)  # signal_states derived cache (P2 batch 2)
+        ensure_signal_history_table(conn)  # signal_history per-day states (W6, AI-D27)
+        ensure_llm_fail_log_table(conn)  # llm_fail_log capture ring (AI-D64)
         notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)
         digest_ops.ensure_seeded(conn)  # digests + digest_config single-row (P3 batch 3)
+        # DEF-065: every table a GET reads is created HERE, never by the GET. These six were
+        # created (and ui_prefs / whatsnew SEEDED) by their first request — a write on a read
+        # path, and for the two config_store categories a race: settings.html fires three
+        # GET /api/ui-prefs at once, and two first seeds collided on settings_meta (500).
+        # tests/contract/test_def065_get_never_writes.py boots a fresh DB and calls every GET
+        # route to keep it that way.
+        ensure_ui_prefs_seeded(conn)
+        ensure_whatsnew_seeded(conn)
+        ensure_dividend_inbox_tables(conn)  # pending_dividend_skips
+        ensure_rebate_tables(conn)  # rebate_skips
+        ensure_snapshots_table(conn)  # portfolio_snapshots (月度快照)
+        action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
+    # The news library lives in its own file (news/store.py); its first open creates and
+    # migrates it, so open it once here rather than inside the first GET /api/news.
+    get_news_connection().close()
     # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
     # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
     register_insight_runner(insight_run_for_id)
+    # DEF-041: the on_alert 持倉提點 card is dispatched only for HELD symbols; "held" is the
+    # computed book's answer, which scheduler/ cannot replay — bound here, next to the runner.
+    register_alert_held_fn(insight_held_symbols_for_alerts)
     # Wire the Loop-2/3 evolution runners (price-/master-bearing reads live in the api seam).
     register_evaluation_runner(insight_evaluate_due)
     register_calibration_runner(insight_generate_calibrations)
@@ -192,6 +234,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Alert-compute (P3 batch 2): the FULL rule set (market-risk rules need pricing/consensus
     # reads that live in the api seam) — the scheduler's alert_scan runs through this.
     register_alert_compute_runner(scan_alert_compute)
+    # Fundamentals AV leg (W3, AI-D16): the Saturday job covers HELD symbols only; the
+    # held set is computed here (scheduler/ + pricing/ cannot replay the book).
+    register_fundamentals_runner(run_fundamentals_av)
+    # Quote-job partial threshold (M10-02): "did a HELD instrument fail?" — the held set is
+    # computed here for the same reason as the line above. Unregistered, the verdict counts
+    # every lost instrument (over-reports, never hides).
+    register_held_symbols_fn(actions.held_symbols)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
@@ -232,6 +281,9 @@ def create_app() -> FastAPI:
                     conn_w, ts=datetime.now(UTC), username=username,
                     method=request.method, path=request.url.path,
                     status=response.status_code, duration_ms=duration_ms,
+                    # DEF-049: the route's own words for what it did (the batch undo's
+                    # batch / rows / acknowledgements), when it set any.
+                    detail=getattr(request.state, action_log.DETAIL_ATTR, None),
                 )
 
             # Respect the get_conn dependency override so the log lands in the SAME
@@ -253,6 +305,7 @@ def create_app() -> FastAPI:
     app.include_router(instruments.router, prefix="/api")
     app.include_router(ledgers.router, prefix="/api")
     app.include_router(input_center.router, prefix="/api")
+    app.include_router(broker_import.router, prefix="/api")
     app.include_router(dividend_inbox.router, prefix="/api")
     app.include_router(cash.router, prefix="/api")
     app.include_router(rebates.router, prefix="/api")
@@ -266,8 +319,10 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
     app.include_router(signals.router, prefix="/api")
+    app.include_router(llm_fail_log.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
     app.include_router(db_stats.router, prefix="/api")
+    app.include_router(ledger_audit.router, prefix="/api")
     app.include_router(ui_prefs.router, prefix="/api")
     app.include_router(snapshots_router.router, prefix="/api")
     app.include_router(prompts.router, prefix="/api")

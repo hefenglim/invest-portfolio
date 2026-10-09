@@ -9,7 +9,9 @@ AI-implemented by Claude Code from human specifications (spec-first).
 
 ## Status
 
-**v0.1.1 — first usable release** (see `CHANGELOG.md`). The calculation core (cost basis,
+**v0.1.28** (see `CHANGELOG.md`; the `feat/corporate-actions` branch carries the unreleased
+2026-08/09 work — corporate actions, the AI assistant, the site-wide stability round). The
+calculation core (cost basis,
 realized / unrealized P&L, returns / XIRR, sector allocation, FX attribution, per-account
 dividend models), data ingestion, pricing + in-process scheduler, and LLM-insight are
 implemented — served through a FastAPI JSON API + a static vanilla-JS dashboard, and
@@ -21,8 +23,9 @@ under `[Unreleased]` / Planned.
 ## Stack
 
 Python 3.12 monolith — a **FastAPI JSON API** (`/api/*`) serving a **static vanilla-JS
-frontend** (`web/`; no framework, no build step) with **ECharts** (CDN); **SQLite**;
-`Decimal` money (never `float`); pandas / numpy + pyxirr (XIRR); **LiteLLM**;
+frontend** (`web/`; no framework, no build step) with **ECharts** (vendored at
+`web/echarts.min.js`, byte-pinned by a contract test); **SQLite**; `Decimal` money (never
+`float`) + `pyxirr` for irregular-cashflow XIRR (no pandas / numpy); **LiteLLM**;
 **APScheduler**. Type-checked with mypy (strict); tested with pytest + httpx + Playwright.
 (The web layer is JSON + static JS per decision (B); the earlier Jinja2 / HTMX / Alpine
 plan was superseded — see `CHANGELOG.md`.) See `.claude/rules/stack.md`.

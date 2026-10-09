@@ -16,19 +16,22 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.instrument_service import (
     QuickRegisterError,
+    auto_aliases,
+    checked_aliases,
+    checked_name,
     gap_backfill,
     last_price_date,
     lookup_instrument,
     quick_register,
     restore_archived,
 )
-from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.holdings import holds_position, load_action_index
 from portfolio_dash.data_ingestion.store import (
     delete_instrument,
     get_instrument,
     has_ledger_history,
-    list_accounts,
     list_instruments,
+    set_instrument_aliases,
     set_instrument_archived,
     upsert_instrument,
 )
@@ -36,10 +39,13 @@ from portfolio_dash.llm_insight.official_templates import (
     AI_INSTRUMENT_RESOLVE_PROMPT,
     AI_INSTRUMENT_RESOLVE_PROMPT_VERSION,
 )
+from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_names import AliasError, has_cjk, normalize_aliases
 from portfolio_dash.shared.llm import complete_structured
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.sectors import (
@@ -52,8 +58,24 @@ from portfolio_dash.shared.wire import decimal_str
 router = APIRouter()
 
 
-def _held(conn: sqlite3.Connection, account_ids: list[str], symbol: str) -> bool:
-    return any(current_shares(conn, aid, symbol) > 0 for aid in account_ids)
+def _held(conn: sqlite3.Connection, symbol: str, now: datetime,
+          *, actions: ActionIndex | None = None) -> bool:
+    """THE 「持有」 of this router: the symbol holds a position today or on a later ledger date
+    (``holds_position`` — DEF-064). ONE predicate behind all four doors that answer it: the
+    watchlist badge (``held``), 封存, 移除 and 永久移除.
+
+    DEF-075 (owner ruling ② B, 2026-09-26): the badge and 永久移除 used to read
+    ``current_shares > 0`` — the net over ALL dates, long only — while 封存 / 移除 read
+    ``holds_position`` (DEF-064). A position closed only by a FUTURE-dated sale therefore
+    showed 「觀察」 and then refused 移除 as 「持倉中」 (measured on 3be67db: 0056, 5,000 shares
+    + a 2026-10-15 sale of 5,000). Owner's reason: a sale that has not happened yet leaves the
+    position held. A declared short is held by the same predicate (it is a live, priced
+    position — the drawer / dashboard carry its ``short_open`` flag; the badge only answers
+    "is there a position"), and so is a position whose only rows are still ahead: 移除 refuses
+    it, so the badge must not invite it. The write side re-activates with the same predicate
+    (``store._reactivate_if_held``), so 「持有 ⇒ 未封存」 is one rule, not two.
+    """
+    return holds_position(conn, symbol, today=now.date(), index=actions)
 
 
 def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
@@ -66,24 +88,47 @@ def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
     return inst.board
 
 
-def _element(conn: sqlite3.Connection, inst: Instrument, account_ids: list[str],
-             now: datetime) -> dict[str, Any]:
+def _element(conn: sqlite3.Connection, inst: Instrument,
+             now: datetime, *, actions: ActionIndex) -> dict[str, Any]:
+    """One watchlist/registry row. ``actions`` is built ONCE by the caller (trap #21).
+
+    §5.1(d) / W6c: ``chg_pct`` divides two closes dated one session apart, so a split
+    between them reports the ratio as a day move (a 7-for-1 as −86% in the watchlist). Both
+    closes AND ``last`` are re-expressed into ``now``'s share terms — the same day the
+    dashboard values its holdings in (W6b) — so the registry's 現價 and the dashboard's
+    price cannot disagree, and the corrected series is never mixed with a raw quote.
+    """
+    valued_on = now.date()
     pr = get_latest_price(conn, inst.symbol, now=now)
-    last = decimal_str(pr.value) if pr is not None else None
+    last = (
+        decimal_str(price_in(actions, inst.symbol, pr.value,
+                             priced_on=pr.as_of, valued_on=valued_on))
+        if pr is not None else None
+    )
     chg_pct: str | None = None
     if pr is not None:
-        hist = get_price_history(conn, inst.symbol, pr.as_of.replace(day=1), pr.as_of)
+        hist = series_in(
+            actions, inst.symbol,
+            get_price_history(conn, inst.symbol, pr.as_of.replace(day=1), pr.as_of),
+            valued_on=valued_on,
+        )
         if len(hist) >= 2 and hist[-2].value != 0:
             chg_pct = decimal_str((hist[-1].value - hist[-2].value) / hist[-2].value)
     return {
-        "symbol": inst.symbol, "name": inst.name, "market": inst.market.value,
+        "symbol": inst.symbol, "name": inst.name,
+        # Owner 2026-09-30, item 8: the other names a card may use for this instrument.
+        "aliases": list(inst.aliases),
+        "market": inst.market.value,
         "board": _board_wire(conn, inst), "sector": inst.sector,
         "industry": inst.industry,  # R6: GICS industry passthrough (null until next-wave fill)
-        "ccy": inst.quote_ccy.value, "held": _held(conn, account_ids, inst.symbol),
+        "ccy": inst.quote_ccy.value, "held": _held(conn, inst.symbol, now, actions=actions),
         "last": last, "chg_pct": chg_pct,
         "target_low": decimal_str(inst.target_low) if inst.target_low is not None else None,
         "target_high": decimal_str(inst.target_high) if inst.target_high is not None else None,
         "is_etf": inst.is_etf,
+        # AI-D40: True means the flag was never answered (auto-registration), so the UI can
+        # show 待確認 rather than presenting an assumed False as a decision.
+        "etf_flag_unknown": inst.etf_flag_unknown,
         "archived": inst.archived,
         # FU-D32: any permanent ledger history (incl. closed positions) — the watchlist
         # dialog pre-disables 永久移除 (purge) for these (~3 LIMIT-1 queries; fine at scale).
@@ -96,8 +141,9 @@ def list_all(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    items = [_element(conn, inst, account_ids, now) for inst in list_instruments(conn)]
+    actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
+    items = [_element(conn, inst, now, actions=actions)
+             for inst in list_instruments(conn)]
     return {"as_of": now.isoformat(), "list": items}
 
 
@@ -259,6 +305,12 @@ class AiInstrumentResolveReply(BaseModel):
     confidence: str = "low"
     candidates: list[AiResolveCandidate] = Field(default_factory=list)
     not_found: bool = False
+    # Owner 2026-09-30, item 8: the common (Chinese) names this instrument goes by — 微軟 for
+    # MSFT, 大立光 for 3008. Advisory like everything else here: the endpoint normalizes them,
+    # drops any another instrument already answers to, and serves them only on a RESOLVED
+    # (confident + provider-verified) reply, so an uncertain guess never teaches the registry
+    # a name.
+    aliases: list[str] = Field(default_factory=list)
 
 
 @router.post("/instruments/ai-resolve")
@@ -301,6 +353,7 @@ def ai_resolve(
                     "status": "resolved",
                     "symbol": existing.symbol,
                     "name": existing.name,
+                    "aliases": list(existing.aliases),
                     "sector": existing.sector,
                     "industry": existing.industry,
                     "confidence": "high",
@@ -357,10 +410,23 @@ def ai_resolve(
             provider_name = lk.name
 
         if verified and confidence == "high":
+            resolved_name = provider_name or reply.name.strip()  # prefer the provider's name
             result = {
                 "status": "resolved",
                 "symbol": primary_symbol,
-                "name": provider_name or reply.name.strip(),  # prefer the provider's name
+                "name": resolved_name,
+                # item 8: the dialog carries these into its 別名 field and the register door
+                # stores them; unusable / taken ones are dropped here, silently. A Chinese
+                # model name leads (DEF-088): a TW provider name is the exchange short name
+                # (長榮航), the prompt's example puts the short name in ``aliases`` and the
+                # full one (長榮航空) in ``name`` — so replacing the name dropped the full one
+                # and the short one then equalled the name: every TW reply stored no alias.
+                # A Latin model name needs no row: the name check reads the registered
+                # Latin name's word forms ("Microsoft" for Microsoft Corporation).
+                "aliases": auto_aliases(
+                    conn, symbol=primary_symbol, name=resolved_name,
+                    candidates=[*([reply.name] if has_cjk(reply.name) else []),
+                                *reply.aliases]),
                 "sector": sector,
                 "industry": industry,
                 "confidence": "high",
@@ -415,6 +481,9 @@ class RegisterBody(BaseModel):
     target_low: Decimal | None = None
     target_high: Decimal | None = None
     is_etf: bool = False
+    # Owner 2026-09-30, item 8: the dialog's 別名 field (pre-filled from the lookup / AI
+    # resolve). Checked like the edit door's; an empty list stores only what auto-fill finds.
+    aliases: list[str] = Field(default_factory=list)
 
 
 class UpdateBody(BaseModel):
@@ -425,6 +494,21 @@ class UpdateBody(BaseModel):
     target_low: Decimal | None = None
     target_high: Decimal | None = None
     is_etf: bool | None = None
+    # Owner 2026-09-30, item 8: None (or omitted) = leave the stored aliases unchanged;
+    # [] = clear them; a list = replace them (normalized, refused whole on any conflict).
+    aliases: list[str] | None = None
+
+
+def _aliases_refused(exc: AliasError) -> JSONResponse:
+    """The 422 both owner-facing alias doors answer with — the sentence names the alias."""
+    return JSONResponse(status_code=422, content=error_body(
+        "validation_error", str(exc), field="aliases"))
+
+
+def _name_refused(exc: AliasError) -> JSONResponse:
+    """The 422 for a typed name that is another instrument's alias (item 8)."""
+    return JSONResponse(status_code=422, content=error_body(
+        "validation_error", str(exc), field="name"))
 
 
 def _apply_extras(
@@ -484,18 +568,31 @@ def register(
     # via UpdateBody + exclude_unset, is the path that can explicitly clear it).
     industry = (body.industry or "").strip() or None
     existing = get_instrument(conn, sym)
+    # Item 8: checked BEFORE anything is written, so a refused list registers nothing.
+    try:
+        checked_name(conn, symbol=sym, name=body.name)
+    except AliasError as exc:
+        return _name_refused(exc)
+    try:
+        aliases = checked_aliases(conn, symbol=sym, raw=body.aliases,
+                                  name=body.name.strip() or (existing.name if existing else ""))
+    except AliasError as exc:
+        return _aliases_refused(exc)
     if existing is not None and existing.archived:
         saved = restore_archived(
             conn, existing, name=body.name, sector=body.sector,
             board=body.board or None, quote_ccy=body.quote_ccy,
             target_low=body.target_low, is_etf=body.is_etf,
         )
+        if aliases:  # blank keeps the archived row's list, like every other restore field
+            set_instrument_aliases(conn, sym, normalize_aliases(
+                aliases, symbol=sym, name=saved.name))
+            saved = get_instrument(conn, sym) or saved
         # FU-D28 (target_high) + R6 (industry): the onboarding service carries neither.
         saved = _apply_extras(conn, saved, target_high=body.target_high, industry=industry)
         last_date = last_price_date(conn, sym)  # read BEFORE the backfill runs
         background_tasks.add_task(gap_backfill, sym, now=now)
-        account_ids = [a.account_id for a in list_accounts(conn)]
-        elem = _element(conn, saved, account_ids, now)
+        elem = _element(conn, saved, now, actions=load_action_index(conn))
         elem["restored"] = True
         elem["last_price_date"] = last_date
         return elem
@@ -504,7 +601,7 @@ def register(
             conn, symbol=body.symbol, market=body.market, now=now, name=body.name,
             sector=body.sector, board=body.board or None, quote_ccy=body.quote_ccy,
             target_low=body.target_low, is_etf=body.is_etf, force=True,
-            backfill_history=False,
+            backfill_history=False, aliases=aliases,
         )
     except QuickRegisterError as exc:
         return JSONResponse(status_code=exc.status,
@@ -517,8 +614,7 @@ def register(
     saved = _apply_extras(  # FU-D28 (target_high) + R6 (industry)
         conn, outcome.instrument, target_high=body.target_high, industry=industry
     )
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now)
+    return _element(conn, saved, now, actions=load_action_index(conn))
 
 
 class QuickBody(BaseModel):
@@ -550,8 +646,8 @@ def quick(
     except QuickRegisterError as exc:
         return JSONResponse(status_code=exc.status,
                             content=error_body(exc.code, exc.message))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    elem = _element(conn, outcome.instrument, account_ids, now)
+    elem = _element(conn, outcome.instrument, now,
+                    actions=load_action_index(conn))
     elem["board_label"] = (
         _QUICK_BOARD_LABEL.get(outcome.board or "", "板別未解析（暫以 TWSE 抓報價）")
         if body.market is Market.TW
@@ -583,6 +679,34 @@ def update(
     # null = remove the alert) — the old exclude_none silently dropped it, so
     # clearing a target price never worked.
     fields = body.model_dump(exclude_unset=True)
+    # Item 8 (owner 2026-09-30): aliases have ONE writer (``set_instrument_aliases``), never
+    # the upsert — so they leave ``fields`` here and are checked against the name the row is
+    # about to carry, BEFORE anything is written (a refused list changes nothing at all).
+    raw_aliases = fields.pop("aliases", None)
+    aliases: list[str] | None = None
+    if fields.get("name") is not None and fields["name"].strip() != existing.name:
+        try:
+            checked_name(conn, symbol=symbol, name=fields["name"])
+        except AliasError as exc:
+            return _name_refused(exc)
+    if raw_aliases is not None:
+        new_name = fields["name"] if fields.get("name") is not None else existing.name
+        try:
+            aliases = checked_aliases(conn, symbol=symbol, name=new_name, raw=raw_aliases)
+        except AliasError as exc:
+            return _aliases_refused(exc)
+    elif fields.get("name") is not None and existing.aliases:
+        # A rename onto one of its own aliases: the alias is now the name, so the list drops
+        # it — one name is kept in one place.
+        kept = normalize_aliases(existing.aliases, symbol=symbol, name=fields["name"])
+        if kept != existing.aliases:
+            aliases = kept
+    if fields.get("is_etf") is not None:
+        # AI-D40: a human just answered the question, so the row stops being unanswered.
+        # Without this the 待確認 issue would keep firing on every sell AFTER the owner
+        # had already told the app the answer — a warning that cannot be cleared is a
+        # warning that gets ignored, which is how the 0.3%/0.1% mistake survives a fix.
+        fields["etf_flag_unknown"] = False
     updated = existing.model_copy(update=fields)
     upsert_instrument(conn, updated)
     # An explicit board set on a TW instrument resolves its board_status (the
@@ -592,10 +716,11 @@ def update(
         conn.execute("UPDATE instruments SET board_status='resolved' WHERE symbol=?",
                      (symbol,))
         conn.commit()
+    if aliases is not None:
+        set_instrument_aliases(conn, symbol, aliases)
     saved = get_instrument(conn, symbol)
     assert saved is not None
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    return _element(conn, saved, account_ids, now)
+    return _element(conn, saved, now, actions=load_action_index(conn))
 
 
 class ArchiveBody(BaseModel):
@@ -622,8 +747,7 @@ def archive(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    if body.archived and _held(conn, account_ids, symbol):
+    if body.archived and _held(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, body.archived)
@@ -638,6 +762,7 @@ def archive(
 def remove(
     symbol: str,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """SOFT-delete (archive) any non-held symbol — accumulative watchlist (FU-D18).
 
@@ -651,8 +776,7 @@ def remove(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    if _held(conn, account_ids, symbol):
+    if _held(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可移除或封存", field="symbol"))
     set_instrument_archived(conn, symbol, True)
@@ -678,6 +802,7 @@ _HAS_HISTORY_MSG = (
 def purge(
     symbol: str,
     conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """HARD-delete (永久移除) a never-traded watch symbol + all its personal artifacts (FU-D32).
 
@@ -694,8 +819,7 @@ def purge(
     if get_instrument(conn, symbol) is None:
         return JSONResponse(status_code=404,
                             content=error_body("not_found", f"{symbol} 不存在"))
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    if _held(conn, account_ids, symbol):
+    if _held(conn, symbol, now):
         return JSONResponse(status_code=422, content=error_body(
             "held", "持倉中的標的不可永久移除，請先清空持倉", field="symbol"))
     if has_ledger_history(conn, symbol):

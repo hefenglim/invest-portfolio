@@ -302,8 +302,10 @@ def test_format_event_with_symbol() -> None:
 def test_format_event_global_and_unknown() -> None:
     title, _, sev = notify.format_event("quota_low", None)
     assert "AI 額度偏低" in title and sev == "warn"
-    t2, _, sev2 = notify.format_event("mystery_rule", None)
-    assert "mystery_rule" in t2 and sev2 == "info"  # honest fallback, never crash
+    t2, b2, sev2 = notify.format_event("mystery_rule", None)
+    # DEF-062: the honest fallback is 「未命名規則」 — never the raw id on the phone — never crash
+    assert "未命名規則" in t2 and sev2 == "info"
+    assert "mystery_rule" not in t2 and "mystery_rule" not in b2
 
 
 # --- quiet hours --------------------------------------------------------------
@@ -427,8 +429,9 @@ _BASE = "https://invest.example.com"
     ("/symbol/2330", "/index.html#sym=2330"),           # per-symbol → drawer anchor
     ("/symbol/^GSPC", "/index.html#sym=%5EGSPC"),        # encodeURIComponent-equivalent (^)
     ("index.html#sym=2330", "/index.html#sym=2330"),     # already anchored → pass through
-    ("/settings", "/settings.html"),
+    ("/settings", "/settings.html#alerts"),             # legacy bare href (I-15)
     ("/settings#llm", "/settings.html#llm"),
+    ("/settings#prompts/evolution", "/settings.html#prompts/evolution"),   # anchor kept
     ("/insights", "/insights.html"),
     ("/pipeline", "/pipeline-hub.html"),
     ("settings.html#alerts", "/settings.html#alerts"),   # already a static page → pass through
@@ -444,7 +447,8 @@ def test_frontend_url_none_when_base_empty() -> None:
 
 
 def test_frontend_url_strips_trailing_slash_on_base() -> None:
-    assert notify.frontend_url("https://x.co/", "/settings") == "https://x.co/settings.html"
+    assert notify.frontend_url("https://x.co/", "/settings#llm") == (
+        "https://x.co/settings.html#llm")
 
 
 # --- normalize_base_url validation (FU-D17) -----------------------------------

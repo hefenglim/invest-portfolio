@@ -8,15 +8,31 @@ import pytest
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.store import (
+    insert_corporate_action,
     insert_dividend,
     insert_fx_conversion,
     insert_transaction,
+    load_ledger_bundle,
     upsert_instrument,
 )
-from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRow
+from portfolio_dash.portfolio import cost_basis, dashboard, price_basis
+from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.dashboard import (
+    _unapplied_action_reason,
+    build_dashboard,
+)
+from portfolio_dash.portfolio.results import UnappliedAction
+from portfolio_dash.portfolio.returns import xirr_reporting
+from portfolio_dash.pricing.benchmarks import BENCHMARKS
+from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRead, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
-from portfolio_dash.pricing.store import upsert_dividend_events, upsert_fx, upsert_prices
+from portfolio_dash.pricing.store import (
+    get_price_history,
+    upsert_dividend_events,
+    upsert_fx,
+    upsert_prices,
+)
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
@@ -107,7 +123,7 @@ def test_build_dashboard_happy_path(conn: sqlite3.Connection) -> None:
     by_symbol = {h.symbol: h for h in data.holdings}
     tsmc = by_symbol["2330"]
     assert tsmc.name == "TSMC" and tsmc.sector == "Semiconductors"
-    assert tsmc.board == "TWSE" and tsmc.account_name == "TW Broker"
+    assert tsmc.board == "TWSE" and tsmc.account_name == "{account:tw_broker}"   # I-10
     assert tsmc.market_value == Decimal("600000")
     assert tsmc.unrealized_pnl == Decimal("105000")
     assert tsmc.price_as_of == date(2026, 6, 9) and tsmc.price_stale is False
@@ -357,3 +373,355 @@ def test_dividend_ttm_net_excludes_events_older_than_365_days(
     # trailing 12 months drops the 2025-01-15 event, keeps the on-cutoff 2025-06-10 one;
     # never summed across currencies (TWD and USD stay separate keys).
     assert dv.ttm_net == {TWD: Decimal("6000"), USD: Decimal("70")}
+
+
+# ===================== Unapplied corporate actions (audit F-47 / F-49 / F-50) ===========
+
+
+def _seed_unapplied_action(conn: sqlite3.Connection) -> None:
+    """A ledger whose only problem is one corporate action the replay cannot apply.
+
+    2330 is exchanged into 6505, which carries an open DECLARED short — E18 refuses to merge
+    a long into a short position, so 2330 keeps its PRE-action 1,000 shares while every price
+    in the DB is post-action. Nothing here is 賣超: ``has_oversold`` is False, so this
+    exercises the new gate and not the pre-existing one.
+    """
+    for sym, name in (("2330", "TSMC"), ("2454", "MTK"), ("6505", "FPCC")):
+        upsert_instrument(conn, Instrument(symbol=sym, market=Market.TW, quote_ccy=TWD,
+                                           sector="Semiconductors", name=name,
+                                           board="TWSE"))
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                       quantity=Decimal("1000"), price=Decimal("500"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 5))
+    insert_transaction(conn, account_id="tw_broker", symbol="2454", side=Side.BUY,
+                       quantity=Decimal("100"), price=Decimal("300"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 6))
+    insert_transaction(conn, account_id="tw_broker", symbol="6505", side=Side.SELL,
+                       quantity=Decimal("1"), price=Decimal("100"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 2, 2), short_sale=True)
+    insert_corporate_action(conn, account_id="tw_broker", action_date=date(2026, 3, 2),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="2330",
+                            to_symbol="6505", ratio_to=Decimal("2"),
+                            ratio_from=Decimal("1"))
+    upsert_prices(conn, [
+        PriceRow(instrument="2330", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("600"), source="test"),
+        PriceRow(instrument="2454", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("356"), source="test"),
+        PriceRow(instrument="6505", market=Market.TW, as_of=date(2026, 6, 9),
+                 close=Decimal("100"), source="test"),
+    ], fetched_at=NOW)
+    upsert_fx(conn, [FxRow(base=USD, quote=TWD, as_of=date(2026, 6, 9),
+                           rate=Decimal("32"), source="test")], fetched_at=NOW)
+
+
+def test_an_unapplied_action_is_excluded_from_every_aggregate(
+    conn: sqlite3.Connection,
+) -> None:
+    """AUDIT F-49, the measured leak. Before the fix, on exactly this ledger: the flagged
+    2330 kept ``market_value 600,000`` at ``weight 0.944``, the KPI band reported
+    ``total_market_value 635,600``, and XIRR came out ``0.5301`` with ``xirr_reason: None``
+    — presented as trustworthy off a terminal value 94% composed of one poisoned row.
+
+    Containment (owner requirement 2026-08-10): the OTHER two positions keep valuing
+    normally. Only the symbol carrying the corporate action loses its numbers.
+    """
+    _seed_unapplied_action(conn)
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    rows = {h.symbol: h for h in data.holdings}
+
+    poisoned = rows["2330"]
+    assert poisoned.unbookable_action is True
+    assert poisoned.oversold is False           # NOT 賣超 — a different problem
+    assert poisoned.shares == Decimal("1000")   # pre-action shares, reported honestly
+    assert poisoned.market_value is None        # ...never multiplied by a post-action price
+    assert poisoned.unrealized_pnl is None
+    assert poisoned.weight is None
+    assert poisoned.unrealized_pct is None
+
+    # Contained: the untouched symbols are completely unaffected.
+    assert rows["2454"].market_value == Decimal("35600")
+    assert rows["6505"].market_value == Decimal("-100")
+
+    # 635,500 − 600,000: the poisoned row is out of the KPI and out of the 合計 footer cell,
+    # and the two still agree by construction.
+    assert data.kpis.total_market_value == Decimal("35500")
+    grand = next(s for s in data.holdings_subtotals
+                 if s.account_id is None and s.market is None)
+    assert grand.total_market_value == data.kpis.total_market_value
+
+
+def test_an_unapplied_action_blanks_xirr_and_names_the_row(
+    conn: sqlite3.Connection,
+) -> None:
+    """The XIRR gate — the one figure that legitimately blanks portfolio-wide, so its reason
+    must point at the single ledger row responsible (owner requirement 2026-08-10).
+
+    ``xirr_reporting`` multiplies ``price * h.shares`` itself rather than reading
+    ``market_value``, so nulling the valuation is NOT enough: without this gate the terminal
+    value silently keeps the pre-action share count.
+    """
+    _seed_unapplied_action(conn)
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    reason = data.freshness.xirr_unavailable_reason
+    assert data.kpis.xirr is None
+    assert reason is not None
+    assert "2330" in reason and "tw_broker" in reason and "2026-03-02" in reason
+    assert "公司行動" in reason
+    assert "賣超" not in reason, "must be distinguishable from the oversold reason"
+
+
+def test_an_unapplied_action_blanks_xirr_even_with_no_holding_to_flag(
+    conn: sqlite3.Connection,
+) -> None:
+    """The reason the gate reads ``Book.unapplied_actions`` and not ``any(h.unbookable_action)``.
+
+    Here the source never existed (E1), so no holding carries a flag — yet an action in the
+    ledger went unapplied and the book is still 待釐清. A holdings-based gate is blind to it
+    (audit F-47 / E1).
+    """
+    _seed_usd_only(conn)
+    upsert_instrument(conn, Instrument(symbol="GHOST", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Ghost"))
+    upsert_instrument(conn, Instrument(symbol="GHOST2", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Ghost 2"))
+    insert_corporate_action(conn, account_id="schwab", action_date=date(2026, 3, 2),
+                            kind=CorporateActionKind.EXCHANGE, from_symbol="GHOST",
+                            to_symbol="GHOST2", ratio_to=Decimal("1"),
+                            ratio_from=Decimal("1"))
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 9), close=Decimal("120"),
+                                  source="test")], fetched_at=NOW)
+    upsert_fx(conn, [FxRow(base=USD, quote=TWD, as_of=date(2026, 1, 10),
+                           rate=Decimal("32"), source="test")], fetched_at=NOW)
+
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+    assert not any(h.unbookable_action for h in data.holdings), "no carrier — that is the point"
+    assert data.kpis.xirr is None
+    reason = data.freshness.xirr_unavailable_reason
+    assert reason is not None and "GHOST" in reason
+
+
+def test_the_xirr_reason_caps_the_list_but_never_drops_a_row() -> None:
+    """A KPI badge cannot render twenty rows; it must still account for all of them."""
+    many = [
+        UnappliedAction(account_id="schwab", date=date(2026, 3, i + 1),
+                        kind=CorporateActionKind.SPLIT, from_symbol=f"S{i}",
+                        to_symbol=f"S{i}", reason="x")
+        for i in range(5)
+    ]
+    reason = _unapplied_action_reason(many)
+    assert "5 筆" in reason and "另有 2 筆" in reason
+    assert "S0" in reason and "S2" in reason and "S3" not in reason
+    assert "另有" not in _unapplied_action_reason(many[:1])
+
+
+def test_a_spinoff_child_gets_price_history_so_the_trend_does_not_flatten(
+    conn: sqlite3.Connection,
+) -> None:
+    """AUDIT F-50. The child appears in NO other ledger, so a ``ledger_symbols`` built from
+    transactions / dividends / openings alone loaded no prices for it — and a CORRECTLY
+    booked spinoff then marked every subsequent day ``incomplete``, flattening the trend at
+    the parent-only value. Measured before the fix on this exact ledger: from 2026-06-05
+    onward, ``total=1000, incomplete=True``.
+    """
+    for sym in ("PARENT", "CHILD"):
+        upsert_instrument(conn, Instrument(symbol=sym, market=Market.US, quote_ccy=USD,
+                                           sector="Tech", name=sym))
+    insert_transaction(conn, account_id="schwab", symbol="PARENT", side=Side.BUY,
+                       quantity=Decimal("100"), price=Decimal("10"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 6, 1))
+    insert_corporate_action(conn, account_id="schwab", action_date=date(2026, 6, 5),
+                            kind=CorporateActionKind.SPINOFF, from_symbol="PARENT",
+                            to_symbol="CHILD", ratio_to=Decimal("1"),
+                            ratio_from=Decimal("2"), cost_carry=Decimal("0.2"))
+    upsert_prices(conn, [
+        PriceRow(instrument=sym, market=Market.US, as_of=day, close=close, source="test")
+        for sym, close in (("PARENT", Decimal("10")), ("CHILD", Decimal("4")))
+        for day in (date(2026, 6, 1), date(2026, 6, 5), date(2026, 6, 9))
+    ], fetched_at=NOW)
+
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+    # Booked cleanly: nothing went unapplied. (The XIRR reason present here is the
+    # unrelated 9-day short-window withhold, so assert on the corporate-action gate only.)
+    assert "公司行動" not in (data.freshness.xirr_unavailable_reason or "")
+    after = [p for p in data.trend.points if p.date >= date(2026, 6, 5)]
+    assert after and not any(p.incomplete for p in after)
+    # 100 x 10 (the parent keeps its shares through a spinoff) + 50 x 4 (child) = 1,200.
+    assert after[0].total_value == Decimal("1200")
+
+
+def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEADLINE ACCEPTANCE (owner requirement 2026-08-10).
+
+    A symbol with no corporate action must behave exactly as it did before this feature
+    existed, so that a defect in the new flow is contained to the one stock that has an
+    action and is cheap to fix afterwards.
+
+    Proved STRUCTURALLY — "the new code did not execute" — rather than by equality of
+    results, because code that does not run cannot drift while code that happens to compute
+    an equal answer can. Three land mines are planted on the three new branches:
+
+    * ``cost_basis._reject`` — the only writer of ``Book.unapplied_actions`` and of
+      ``unbookable_action``;
+    * ``dashboard._unapplied_action_reason`` — the new XIRR branch;
+    * ``pnl.value_holdings``'s new disjunct, checked by asserting that no holding carries
+      the flag, which makes ``h.oversold or h.unbookable_action`` identical to the
+      pre-change ``h.oversold`` by construction.
+    * ``price_basis.split_factor`` — W6b's read-path re-expression (§5.1(d)), reached from
+      BOTH the ``price_map`` seam and the trend's per-day lookup. ``price_in`` short-circuits
+      on ``index.splits_on(symbol)`` being empty, so with no action in the ledger the
+      arithmetic never runs and ``price_map`` is byte-for-byte the pre-change dict.
+
+    ``ledger_symbols`` is observed through the symbols ``get_price_history`` is actually
+    asked for: with no actions the two added set comprehensions are empty, so the requested
+    set must be exactly the transaction / dividend / opening symbols.
+    """
+    def _boom(*a: object, **k: object) -> None:
+        raise AssertionError("new corporate-action code ran on an action-free ledger")
+
+    requested: list[str] = []
+
+    def _spy(conn_: sqlite3.Connection, instrument: str, start: date,
+             end: date) -> list[PriceRead]:
+        requested.append(instrument)
+        return get_price_history(conn_, instrument, start, end)
+
+    monkeypatch.setattr(cost_basis, "_reject", _boom)
+    monkeypatch.setattr(dashboard, "_unapplied_action_reason", _boom)
+    monkeypatch.setattr(price_basis, "split_factor", _boom)
+    monkeypatch.setattr(dashboard, "get_price_history", _spy)
+
+    _seed_full(conn)            # the rich fixture: two markets, a dividend, an FX conversion
+    # A registered instrument that appears in NO ledger. Without it the ledger_symbols
+    # assertion below cannot tell "the three ledgers' symbols" apart from "every registered
+    # instrument", and a widened set passes unnoticed (measured: mutation 11 stayed green).
+    upsert_instrument(conn, Instrument(symbol="UNUSED", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Never traded"))
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+
+    # 1. Structure: no refusal machinery ran, and the book carries no new state.
+    book = build_book(load_ledger_bundle(conn), allow_oversell=True)
+    assert book.unapplied_actions == []
+    assert not any(h.unbookable_action for h in data.holdings)
+
+    # 2. ledger_symbols is unchanged: exactly the three non-action ledgers' symbols.
+    #
+    # R4 (2026-08-26) added benchmark reads to build_dashboard (0050 / ^GSPC — the index
+    # counterfactual). Those are NOT ledger symbols and must not weaken this guard, so the
+    # two sets are asserted SEPARATELY rather than the whole list being widened: a
+    # corporate-action change that pulls an extra LEDGER symbol still fails here, which is
+    # the property this test exists for. Benchmark keys are enumerated from the registry so
+    # the exclusion cannot silently grow either.
+    bench_keys = {b.storage_key for b in BENCHMARKS}
+    requested_set = set(requested)
+    assert sorted(requested_set - bench_keys) == ["2330", "AAPL"]
+    assert requested_set & bench_keys, "the benchmark counterfactual must have read an index"
+
+    # 3. The values the change touches are the pre-change values (pinned from
+    #    test_build_dashboard_happy_path, which predates this feature).
+    rows = {h.symbol: h for h in data.holdings}
+    assert rows["2330"].market_value == Decimal("600000")
+    assert rows["2330"].unrealized_pnl == Decimal("105000")   # (600 - 495) x 1000
+    assert rows["2330"].capital_gain == Decimal("100000")     # (600 - 500) x 1000
+    assert rows["AAPL"].market_value == Decimal("1200")
+    assert data.kpis.total_market_value == Decimal("639600")  # 600,000 + 1,200 x 33
+    assert data.kpis.xirr is not None
+    assert data.freshness.xirr_unavailable_reason is None
+
+
+# --- §5.1(d) at the dashboard's price_map seam (trap #3 · W6b) ------------------------
+
+
+def _seed_split_with_a_stale_price(conn: sqlite3.Connection) -> None:
+    """10 AAPL bought at 100, a 20-for-1 on 6/8, and the newest stored price dated 6/5.
+
+    The price is as traded on 6/5 (100 x pre-split terms); the book's share count on
+    NOW (6/10) is already post-split. That gap is the whole artifact.
+    """
+    upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US, quote_ccy=USD,
+                                       sector="Tech", name="Apple"))
+    insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                       quantity=Decimal("10"), price=Decimal("100"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 1, 10))
+    insert_corporate_action(conn, account_id="schwab", action_date=date(2026, 6, 8),
+                            kind=CorporateActionKind.SPLIT, from_symbol="AAPL",
+                            to_symbol="AAPL", ratio_to=Decimal("20"),
+                            ratio_from=Decimal("1"))
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 5), close=Decimal("120"),
+                                  source="test")], fetched_at=NOW)
+    upsert_fx(conn, [FxRow(base=USD, quote=TWD, as_of=date(2026, 1, 10),
+                           rate=Decimal("32"), source="test")], fetched_at=NOW)
+
+
+def test_a_split_re_expresses_the_price_for_valuation_and_xirr_from_one_seam(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TRAP #3 — the correction belongs at the ``price_map`` assignment, not inside
+    ``value_holdings``.
+
+    ``price_map`` is the ONE dict fed to both ``value_holdings`` and ``xirr_reporting``, and
+    the latter multiplies ``price x h.shares`` itself rather than reading ``market_value``.
+    Correcting only the valuation would leave the XIRR terminal value on the raw price, so
+    market value and XIRR would disagree by the whole ratio — two numbers on one screen.
+    The spy asserts the price XIRR actually received, which is the only way to tell the two
+    placements apart from the outside.
+    """
+    _seed_split_with_a_stale_price(conn)
+    seen: dict[str, Decimal] = {}
+
+    def spy(*args: object, **kwargs: object) -> object:
+        price_map = args[6]  # the price_map positional (see build_dashboard step 4)
+        assert isinstance(price_map, dict)
+        seen.update(price_map)
+        return xirr_reporting(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dashboard, "xirr_reporting", spy)
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+
+    row = next(h for h in data.holdings if h.symbol == "AAPL")
+    assert row.shares == Decimal("200")          # 10 x 20, re-denominated by the replay
+    assert row.market_value == Decimal("1200")   # 200 x (120 / 20) — NOT 200 x 120
+    assert data.kpis.total_market_value == Decimal("1200")
+    # ...and XIRR was handed the SAME corrected price, from the same dict.
+    assert seen == {"AAPL": Decimal("6")}
+
+
+def test_without_the_reexpression_the_dashboard_inflates_by_the_ratio(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DETECTION POWER — the pre-fix behaviour on the REAL code path (F-11).
+
+    ``price_in`` is neutered to the identity, which is exactly the statement this package
+    replaced (``price_map = {sym: pr.value ...}``). Both the holding and the KPI band then
+    report 20x the position's actual worth, and nothing anywhere is flagged — a wrong
+    number that looks entirely right.
+    """
+    _seed_split_with_a_stale_price(conn)
+    monkeypatch.setattr(
+        dashboard, "price_in",
+        lambda index, symbol, price, *, priced_on, valued_on: price,
+    )
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+    row = next(h for h in data.holdings if h.symbol == "AAPL")
+    assert row.market_value == Decimal("24000")   # 200 x 120
+    assert row.unbookable_action is False         # ...and unflagged, which is the danger
+    assert data.freshness.xirr_unavailable_reason is None
+
+
+def test_a_post_split_price_needs_no_correction_at_the_dashboard_either(
+    conn: sqlite3.Connection,
+) -> None:
+    """Self-cancelling: once a genuine post-split row exists, ``pd >= a.date`` empties the
+    window and the stored close is used exactly as it is. Nobody switches the correction
+    off; it stops applying on its own."""
+    _seed_split_with_a_stale_price(conn)
+    upsert_prices(conn, [PriceRow(instrument="AAPL", market=Market.US,
+                                  as_of=date(2026, 6, 9), close=Decimal("6"),
+                                  source="test")], fetched_at=NOW)
+    data = build_dashboard(conn, now=NOW, reporting=USD)
+    row = next(h for h in data.holdings if h.symbol == "AAPL")
+    assert row.market_value == Decimal("1200")    # 200 x 6, untouched

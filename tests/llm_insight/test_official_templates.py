@@ -7,11 +7,14 @@ guardrail, frame unheld symbols as 建倉評估, and NOT change the task presets
 reference strategies BY NAME, so a version bump needs no preset change).
 """
 
+import json
+import re
+
 from portfolio_dash.llm_insight import official_templates as ot
 
 
-def test_library_version_is_official_v11() -> None:
-    assert ot.LIBRARY_VERSION == "official-v11 (2026-07-22)"
+def test_library_version_is_official_v15() -> None:
+    assert ot.LIBRARY_VERSION == "official-v27 (2026-10-01)"
 
 
 def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
@@ -22,34 +25,87 @@ def test_ai_input_prompt_is_code_owned_here_not_in_library_wire() -> None:
     for placeholder in ("{accounts}", "{today}", "{text}"):
         assert placeholder in body
     # literal JSON braces stay escaped so only those placeholders interpolate.
-    assert '{{"drafts"' in body
+    assert '{{"rows"' in body
     assert "recent PAST occurrence" in body       # date-anchor rule preserved
-    assert "MULTIPLE transactions" in body        # the screenshot extension
+    assert "MULTIPLE rows" in body                # the screenshot extension (v6 wording)
     # deliberately NOT exposed in the user-facing library payload.
     wire = ot.library_wire()
     assert "AI_INPUT_PROMPT_BODY" not in wire
     assert body not in str(wire.get("system_prompt", "")) + str(wire.get("strategies", ""))
 
 
-def test_ai_input_prompt_v5_pins_local_exchange_code_rule() -> None:
+def test_ai_input_prompt_v6_pins_local_exchange_code_rule() -> None:
     # FU-D41 (owner bug): 「前天聯電買入1張」 on a tw_broker row parsed to the US ADR
     # ticker "UMC" → dead lookup. The prompt must carry the explicit LOCAL-exchange-code
     # rule with the numeric-code examples and the ADR counter-example. v4 (W1 batch-A) adds
     # the parity MY (Bursa) guidance (pinned by test_prompts_v2_carry_my_bursa_guidance);
-    # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field.
-    assert ot.AI_INPUT_PROMPT_VERSION == "v5"
+    # v5 (W3 batch-B) adds the merged multi-market clause + optional ``market`` output field;
+    # v6 (W4, AI-D17/D19) turns the door into the three-kind discriminated union.
+    assert ot.AI_INPUT_PROMPT_VERSION == "v8"
+    # v8 IS the DEF-036 stated_amount rule + its CONTRASTIVE one-shot: one total that
+    # agrees with shares × price and one that does not, BOTH copied verbatim. Pin the
+    # example and the two prohibitions, not just the version string — a prose-only rule
+    # did not hold for daytrade, and a lone agreeing example would teach "make it fit".
+    body8 = ot.AI_INPUT_PROMPT_BODY
+    assert '"market","stated_amount"}}' in body8        # in the txn row shape itself
+    assert '"stated_amount":"21000"' in body8 and '"stated_amount":"5180"' in body8
+    assert '"shares":"1000","price":"52"' in body8      # left as written, not bent
+    assert "NEVER compute it from shares" in body8
+    assert "NEVER change shares or price" in body8
+    # v7.1 IS the negative one-shot: the W4 live corpus measured the prose rule
+    # 「never infer it from two same-day opposite drafts」 failing on the exact case it
+    # names (daytrade 0/2 before, 11/11 after). A wrongly-set daytrade halves the TW
+    # sell tax, so pin the example itself, not just the version string.
+    assert "5/9 上午買 2412" in ot.AI_INPUT_PROMPT_BODY
+    assert '"daytrade":false' in ot.AI_INPUT_PROMPT_BODY  # R6 added div ex_date
+    # The dividend one-shots must stay a CONTRASTIVE PAIR (owner technique 2). A lone
+    # gross="0" example teaches the model to zero `gross` on every dividend type --
+    # measured 2026-08-28: div-my-net fell 11/11 -> 3/11, a real RM88.50 written as 0.
+    # Deleting EITHER of these reintroduces that regression, so both are pinned.
     body = ot.AI_INPUT_PROMPT_BODY
+    assert '3/12 2891 股票股利配股 120 股' in body   # STOCK: gross 0
+    assert '4/20 moomoo 馬股 5347' in body           # NET: gross is the stated amount
+    assert '"gross":"42.75"' in body               # the contrast, spelled out
+    # B1 (measured live 2026-08-28): an option premium came back as a $300 CASH
+    # dividend on TSLA. The prose rule naming options already existed and did not
+    # hold. Both halves ride in ONE example so the lesson is 'a premium is not a
+    # dividend' rather than 'avoid dividends'.
+    assert '9/14 NVDA 9月 put 權利金收入 180 美元' in body
+    assert 'option premium is not a dividend' in body
+    assert '"symbol":"PG"' in body            # the positive half, booked
+    assert 'emit ccy on a div row' in body
     assert "LOCAL exchange code" in body
     assert "聯電⇒2303" in body and "台積電⇒2330" in body and "鴻海⇒2317" in body
     assert "UMC" in body and "TSM" in body        # the never-an-ADR counter-example
     assert "Bursa" in body                        # MY accounts take the Bursa code
     # v5 merged multi-market guidance + the optional market output field in the schema.
-    assert "merged account" in body and "STOCK'S market" in body
-    assert '"market"}}]}}' in body                # schema carries the optional market field
-    assert "market\nfield to that market's value (US/TW/MY)" in body
+    # ("merged account" is wrap-tolerant: the prompt's line breaks are not the contract.)
+    assert "merged" in body and "MULTIPLE markets" in body and "STOCK'S market" in body
+    assert '"market"' in body                     # schema carries the optional market field
+    assert "field to that market's value" in body
+    # v6 (AI-D17): the union's three discriminators + the unparsed confession list.
+    assert '"kind":"txn"' in body and '"kind":"div"' in body and '"kind":"cash"' in body
+    assert "unparsed" in body
+    # v6 (AI-D19): the two flags teach their EXPLICIT-only semantics.
+    assert "explicitly says 當沖" in body
+    assert "放空／融券／short sell" in body
     # the rule text must survive .format (no stray placeholders were introduced).
     rendered = body.format(accounts="a=b (USD:US＋MYR:MY)", today="2026-07-19", text="x")
     assert "聯電⇒2303" in rendered and "STOCK'S market" in rendered
+
+
+def test_ai_input_prompt_example_outputs_are_valid_json() -> None:
+    """Every ``<example_output>`` must parse as strict JSON — the one-shot example is the
+    model's strongest anchor (llm-insight.md), and the completion layer parses STRICTLY.
+    The v6 cash example shipped a raw newline INSIDE a string value (a Python string
+    concatenation break mid-token), teaching by an example the parser itself would reject.
+    Line breaks BETWEEN tokens are fine; inside a string they are not."""
+    rendered = ot.AI_INPUT_PROMPT_BODY.format(
+        accounts="a=b (TWD)", today="2026-08-18", text="x")
+    blocks = re.findall(r"<example_output>(.*?)</example_output>", rendered, re.S)
+    assert blocks, "the prompt lost its one-shot examples entirely"
+    for blk in blocks:
+        json.loads(blk)  # raises on any invalid example
 
 
 def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
@@ -57,7 +113,7 @@ def test_ai_instrument_resolve_prompt_is_registered_and_versioned() -> None:
     # prompts. It lives in the registry (code-owned), carries the local-exchange-code rules +
     # the embedded GICS sector vocabulary + all reply-schema fields, and states that the real
     # lookup re-verifies (so the model claims no authority).
-    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v2"
+    assert ot.AI_INSTRUMENT_RESOLVE_PROMPT_VERSION == "v3"
     body = ot.AI_INSTRUMENT_RESOLVE_PROMPT
     for placeholder in ("{query}", "{market}"):
         assert placeholder in body
@@ -102,9 +158,13 @@ def test_prompts_v2_carry_my_bursa_guidance() -> None:
     assert "0166" in body.format(accounts="a=b", today="2026-07-21", text="x")
 
 
-def test_checkup_strategy_advances_to_v25_citing_rule_signals() -> None:
+def test_checkup_strategy_advances_to_v26_citing_rule_signals() -> None:
     checkup = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.5"
+    assert checkup["version"] == "v2.9"
+    # v2.9's content: the weekly lens, WITH the do-not-mix-timeframes instruction. A weekly
+    # number quotable beside a daily one with no boundary is AI-D2's defect in a new place.
+    if "{{weekly_signals_json}}" in checkup["body"]:
+        assert "不可互相比較" in checkup["body"]
     body = checkup["body"]
     assert "{{rule_signals_json}}" in body                 # the new section cites the var
     assert "TechScore" in body                             # cite TechScore + coverage
@@ -120,16 +180,151 @@ def test_presets_reference_strategies_by_name_no_preset_change() -> None:
     template_names = {t["name"] for t in ot.STRATEGY_TEMPLATES}
     for preset in ot.TASK_PRESETS:
         assert preset["strategy"] in template_names
-    # the checkup preset specifically still points at the (now v2.5) 個股健檢策略.
+    # the checkup preset specifically still points at the (now v2.9) 個股健檢策略.
     checkup_preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "checkup")
     assert checkup_preset["strategy"] == "個股健檢策略"
 
 
-def test_library_wire_exposes_v25_checkup() -> None:
+def test_library_wire_exposes_v26_checkup() -> None:
     wire = ot.library_wire()
-    assert wire["library_version"] == "official-v11 (2026-07-22)"
+    assert wire["library_version"] == "official-v27 (2026-10-01)"
     strategies = wire["strategies"]
     assert isinstance(strategies, list)
     checkup = next(t for t in strategies if t["name"] == "個股健檢策略")
-    assert checkup["version"] == "v2.5"
+    assert checkup["version"] == "v2.9"
     assert "{{rule_signals_json}}" in checkup["body"]
+
+
+# --- W2: the assistant — 持倉建議與提點 + the 提點 on_alert card (AI-D1/D5, 2026-08-16) -------
+
+
+def test_advice_template_holds_the_product_red_lines() -> None:
+    """AI-D8: advice is directional + conditional, never a size or an order. The body must
+    forbid position sizing, and AI-D10 leaves prediction FREE (the schema already requires a
+    confidence whenever one is present — that guard is in cards.py, not here)."""
+    advice = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")
+    assert advice["scope"] == "per_symbol"
+    body = advice["body"]
+    assert "不給部位大小" in body and "不給買賣金額" in body
+    # The two moving-average crosses are named apart (AI-D2): the prompt must tell the model
+    # which window is which, or the assistant quotes one as the other.
+    assert "ma_cross_short" in body and "20/60" in body
+    assert "ma_cross" in body and "50/200" in body
+    # AI-D10: prediction is the model's to give or withhold, never forced.
+    assert "prediction 由你決定" in body and "confidence" in body
+
+
+def test_advice_template_v3_carries_fundamentals_with_the_never_average_rule() -> None:
+    """W3 (AI-D14/15): the advice body cites {{fundamentals_json}}, names the per-source
+    blocks, and carries the red line in its prompt-enforced form — different values across
+    sources are reported side by side with their sources, NEVER averaged or reconciled."""
+    advice = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")
+    assert advice["version"] == "v3.2"
+    body = advice["body"]
+    assert "{{fundamentals_json}}" in body
+    assert "不得取平均" in body
+    assert "標注來源" in body
+    # The canonical field names the model will see (the block key is the provenance).
+    assert "pe_ratio" in body and "roe_pct" in body
+    preset = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "advice")
+    assert preset["version"] == "v3.2"
+
+
+def test_advice_template_v3_cites_the_backtest_and_anchors_confidence() -> None:
+    """W7 (AI-D33) + W7.1: the advice body cites all three W6 variables under the citation
+    discipline, and anchors confidence on the PRECOMPUTED ceiling."""
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")["body"]
+    assert "{{signal_backtest_json}}" in body
+    assert "{{backtest_json}}" in body and "{{calibration_gap_json}}" in body
+    # The citation law: verbatim numbers, n<8 cites nothing, sample count + baseline.
+    assert "樣本不足" in body and "基線" in body
+    # W7.1 — the law now points at ONE number the backend computed. The three-step walk over
+    # the bins table is gone: the first live run had 0 of 13 cards execute it.
+    assert "confidence_ceiling" in body
+    assert "不得超過 confidence_ceiling" in body
+    # AI-D39 (2026-08-25): the old assertion pinned 「為 0 時」. With the rolling-gap step
+    # removed the ceiling can no longer reach 0 (CEILING_HEADROOM puts the minimum at 5),
+    # so that branch became text the model reads and can never act on. The degenerate
+    # case is still spelled out — it now keys on a LOW ceiling, which is reachable.
+    assert "為 0 時" not in body, "an unreachable branch must not stay in a prompt"
+    assert "偏低" in body and "情境與觸發條件" in body
+    # And it still forbids the failure mode that clause exists to prevent.
+    assert "不要為了讓卡片看起來有用" in body
+    # The pre-existing red lines survive the rewrite.
+    assert "不給部位大小" in body and "prediction 由你決定" in body
+
+
+def test_advice_template_states_the_return_unit_and_forbids_substitution() -> None:
+    """W7.1 — the two output defects the first live run produced, closed in the prompt.
+
+    The unit existed ONLY in the variable registry's `desc` (UI documentation the model
+    never sees), so a fraction was printed as 「0.1336%」 — the true value 100× smaller. And
+    a sub-gate cell with no mean had its same-window BASELINE printed as the event return.
+    """
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉建議與提點策略")["body"]
+    assert "0.1336" in body and "+13.36%" in body      # the unit, by worked example
+    assert "分數，不是百分比" in body
+    assert "不得改用同窗" in body and "baseline" in body  # no substitution
+    assert "輸入裡沒有的數字一律不得出現" in body        # no fabrication
+
+
+def test_checkup_v26_cites_the_event_study() -> None:
+    """W7 (AI-D33): the checkup cites the per-symbol event study (no anchoring — its
+    confidence law stays the plain 寧可保守 one). W7.1 adds the unit + no-substitution rule,
+    because the same 100× defect appeared in the checkup cards too."""
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "個股健檢策略")["body"]
+    assert "{{signal_backtest_json}}" in body
+    assert "尚無回測歷史" in body
+    assert "分數不是百分比" in body
+    assert "不得改用 baseline 的數字" in body
+
+
+def test_weekly_template_v22_cites_ai_track_record() -> None:
+    """W7 (AI-D34): the weekly report narrates the AI's own calibration — both
+    portfolio-scope vars cited; the pure-narrative law (no prediction) is intact."""
+    weekly = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉週報策略")
+    assert weekly["version"] == "v2.5"
+    # v2.5's whole content: R4's counterfactual, and the coverage red line WITH it. A
+    # benchmark comparison the model can quote without the partial-coverage caveat is how
+    # 「打敗大盤」 gets written about a number that only covers part of the money.
+    body = weekly["body"]
+    assert "{{benchmark_counterfactual_json}}" in body
+    assert "coverage_note" in body and "超額報酬" in body
+    assert "含匯兌總損益" in body, "must say WHICH return figure the excess is measured against"
+    body = weekly["body"]
+    assert "{{backtest_json}}" in body and "{{calibration_gap_json}}" in body
+    assert "prediction 留空" in body  # the weekly stays narrative-only
+    # W7.1 — the live v2.2 card read gap −0.466 as 「低估自身表現」 (the opposite) even though
+    # this same section states the convention. The direction now ships as copyable text.
+    assert "照抄 calibration_gap_json.reading" in body
+
+
+def test_advice_and_alert_presets_resolve_and_subscribe() -> None:
+    """The two W2 presets reference real strategies, and the 提點 one carries its six-rule
+    subscription (AI-D11) — an on_alert task with no alert_rules subscribes to nothing, so the
+    subscription has to be pinned here, not assumed."""
+    template_names = {t["name"] for t in ot.STRATEGY_TEMPLATES}
+    advice = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "advice")
+    assert advice["strategy"] in template_names
+    assert advice["scope"] == "per_symbol" and advice["self_correct"] is True
+    alert = next(p for p in ot.TASK_PRESETS if p["preset_key"] == "alert_advice")
+    assert alert["scope"] == "on_alert"
+    assert alert["strategy"] == "持倉提點策略"
+    assert set(alert["alert_rules"]) == {
+        "target_cross", "single_weight", "fx_drift",
+        "drawdown_from_peak", "vol_spike", "consensus_change",
+    }
+    # The wildcard and the data-health rules are deliberately NOT subscribed (AI-D11).
+    assert "all" not in alert["alert_rules"]
+    assert "missing_price" not in alert["alert_rules"]
+    assert "quota_low" not in alert["alert_rules"]
+    # The alert card's addendum applies the ≤3-trading-day window; the preset horizon agrees.
+    assert alert["horizon_days"] == 3
+
+
+def test_on_alert_advice_body_is_short_horizon_and_no_sizing() -> None:
+    body = next(t for t in ot.STRATEGY_TEMPLATES if t["name"] == "持倉提點策略")["body"]
+    assert "≤3 個交易日" in body
+    assert "不給部位大小" in body
+    assert "ma_cross_short" in body  # the cross disambiguation carries into the alert card too
+

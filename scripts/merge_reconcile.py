@@ -121,6 +121,7 @@ from portfolio_dash.data_ingestion.schema import create_tables
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.twr import twr_index
+from portfolio_dash.shared import ledger_registry
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
 
@@ -131,14 +132,9 @@ APP_TZ = ZoneInfo("Asia/Taipei")  # the app's day-anchor tz (deps.APP_TZ); naive
 
 _MERGED_ID = "moomoo_my"
 _LEGACY_IDS: tuple[str, ...] = ("moomoo_my_us", "moomoo_my_my")
-# Per-account row-count tables (the 4 flow ledgers + opening_inventory).
-_COUNT_TABLES: tuple[str, ...] = (
-    "transactions",
-    "dividends",
-    "fx_conversions",
-    "cash_movements",
-    "opening_inventory",
-)
+# Per-account row-count tables: every ledger, from shared/ledger_registry.py. A ledger
+# missing here made the reconciliation report PASS over rows the merge had left behind.
+_COUNT_TABLES: tuple[str, ...] = ledger_registry.TABLE_NAMES
 # Holding fields that are additive across a same-symbol fold (weighted-avg cost is additive
 # in shares & total cost; market_value = shares * price is likewise additive at a shared price).
 _ADDITIVE_HOLDING_FIELDS: tuple[str, ...] = (

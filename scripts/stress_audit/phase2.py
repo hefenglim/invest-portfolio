@@ -15,6 +15,7 @@ is reconciled exactly.
 from __future__ import annotations
 
 import time
+from datetime import date
 from decimal import Decimal
 
 import common as C
@@ -239,8 +240,11 @@ def _j(r):
 # ------------------------------------------------------------------ reconciliation
 def snapshot(api: C.Api):
     facts = C.load_facts_from_api(api)
-    res = O.replay(facts)
     dash = api.get("/api/dashboard").json()
+    # DEF-016 / DEF-056: every row counts from its own date — replay what has happened by the
+    # app's as_of.
+    as_of = date.fromisoformat(str(dash["as_of"])[:10])
+    res = O.replay(O.facts_valued_as_of(facts, as_of))
     cash = api.get("/api/cash", limit=500).json()
     reported_hold = {(h["account_id"], h["symbol"]): h for h in dash["holdings"]}
     reported_cash = {(b["account_id"], b["ccy"]): dec(b["amount"]) for b in cash["balances"]}
@@ -298,7 +302,7 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
     for pool in sorted(set(res.cash) | set(app_bal)):
         ev.check("cash.balance", "|".join(pool), res.cash.get(pool, O.ZERO),
                  app_bal.get(pool, O.ZERO), phase)
-    _cash_statement(ev, snap["facts"], app_bal, phase)
+    _cash_statement(ev, snap["facts"], app_bal, phase, refused=res.refused_dividend_ids)
 
     # realized rows
     app_real = dash["realized"]["rows"]
@@ -368,16 +372,17 @@ def reconcile_abs(ev: C.Evidence, api: C.Api, label: str, snap):
     return res
 
 
-def _cash_statement(ev, facts, app_bal, phase):
+def _cash_statement(ev, facts, app_bal, phase, *, refused):
     lines: dict[tuple, list] = {}
 
     def add(key, delta):
         lines.setdefault(key, []).append(delta)
 
     for m in facts.cash:
-        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
+        # Debits reduce the pool (audit C4); every other kind credits it. The set is
+        # oracle.py's, re-derived there independently of the app's own table.
         add((m.account_id, m.ccy),
-            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
+            -m.amount if m.kind.upper() in O.DEBIT_KINDS else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), -c.from_amt)
         add((c.account_id, c.to_ccy), c.to_amt)
@@ -385,12 +390,14 @@ def _cash_statement(ev, facts, app_bal, phase):
         inst = facts.instruments.get(t.symbol)
         if inst is None:
             continue
-        d = -(t.qty * t.price + t.fee + t.tax) if t.side == "BUY" \
-            else (t.qty * t.price - t.fee - t.tax)
+        gross = O.settled(t.qty, t.price, inst.quote_ccy)  # the settled 價金 (2026-09-30)
+        d = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         add((t.account_id, inst.quote_ccy), d)
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)
         if inst is None or dv.type not in O.CASH_DIVIDEND_TYPES:
+            continue
+        if dv.id in refused:   # ⑪: a payout the oracle's replay refused moves no balance
             continue
         add((dv.account_id, inst.quote_ccy), dv.net)
     for key in sorted(set(lines) | set(app_bal)):

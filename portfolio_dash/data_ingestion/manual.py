@@ -7,7 +7,14 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
-from portfolio_dash.data_ingestion.fees import FeeComputationError, compute_fees
+from portfolio_dash.data_ingestion.fees import (
+    ETF_FLAG_UNKNOWN_MESSAGE,
+    FeeComputationError,
+    compute_fees,
+    etf_flag_issue_applies,
+    resolve_etf_flag,
+    supplied_snapshot,
+)
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.resolve import (
     ResolutionStatus,
@@ -15,7 +22,7 @@ from portfolio_dash.data_ingestion.resolve import (
     suggestion_tail,
 )
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
-from portfolio_dash.data_ingestion.store import insert_transaction
+from portfolio_dash.data_ingestion.store import StoredTransaction, insert_transaction
 from portfolio_dash.data_ingestion.validate import Issue, TxnInput, validate_transaction
 from portfolio_dash.shared.models.assets import Instrument
 
@@ -44,6 +51,7 @@ def enter_transaction(
     *,
     confirm: bool = False,
     today: date | None = None,
+    replacing: StoredTransaction | None = None,
 ) -> TxnDraft:
     """Run the full manual-entry pipeline for a single transaction.
 
@@ -61,13 +69,21 @@ def enter_transaction(
         inp:      Validated :class:`TxnInput` from the caller.
         confirm:  When True, write the transaction if no hard issues block it.
                   Soft issues (``needs_confirm=True``) are bypassed on confirm.
+        replacing: The stored row a ledger EDIT is previewing a replacement for (DEF-042);
+                  handed to ``validate_transaction`` so the findings are those of the ledger
+                  without that row. A preview only — combining it with ``confirm`` would
+                  INSERT a second row, so that is refused.
 
     Returns:
         A :class:`TxnDraft` capturing the resolved instrument, computed
         fee/tax, all issues found, and the write outcome.
     """
+    if confirm and replacing is not None:
+        raise ValueError("replacing is a preview-only argument; an edit writes through the "
+                         "ledger correction door, never through an insert")
     # --- 1. Validate ---
-    issues: list[Issue] = list(validate_transaction(conn, inp, today=today))
+    issues: list[Issue] = list(
+        validate_transaction(conn, inp, today=today, replacing=replacing))
 
     # --- 2. Resolve symbol ---
     res = resolve(conn, inp.symbol)
@@ -100,11 +116,11 @@ def enter_transaction(
         (inp.account_id,),
     ).fetchone()
     if acc is not None and (fee is None or tax is None):
-        # The instrument REGISTRY is authoritative for the ETF flag (it drives the TW
-        # sell-tax rate); the input flag is only a fallback for unregistered symbols.
-        # Stress-audit finding 2026-07-15: entry paths defaulted is_etf=False, taxing
-        # ETF sells at the 現股 0.3% rate instead of 0.1%.
-        is_etf = instrument.is_etf if instrument is not None else inp.is_etf
+        # Registry-authoritative ETF flag + its third state — ONE definition, shared with
+        # csv_import (fees.resolve_etf_flag). Stress-audit 2026-07-15 made the registry win
+        # over the input flag; AI-D40 (2026-08-24) closed the hole underneath it, where the
+        # value SEEDING the registry was an unanswered False.
+        is_etf, etf_unknown = resolve_etf_flag(instrument, inp.is_etf)
         # Market-aware fee rule (Batch B): a resolved instrument selects the rule set bound to
         # (account, its market); an unregistered symbol (instrument None) keeps the account
         # scalar exactly as before. Snapshot semantics are unchanged — today's single-market
@@ -122,7 +138,7 @@ def enter_transaction(
             if stamp_fx is None:
                 issues.append(Issue(
                     kind="stamp_fx_missing", needs_confirm=True,
-                    message="無 USD/MYR 匯率,印花稅未計"))
+                    message="無 USD/MYR 匯率，印花稅未計"))
         try:
             fr = compute_fees(
                 rules,
@@ -139,11 +155,33 @@ def enter_transaction(
             # for any path that reaches the quantize with a pathological value.
             issues.append(Issue(kind="fee_overflow", message=str(exc)))
         else:
+            if etf_flag_issue_applies(rules, inp.side, etf_unknown):
+                # Only when the unresolved flag actually MOVES the tax: a buy carries
+                # no TW transaction tax, and a rule set whose two rates coincide gives
+                # the same answer either way. Noise is how a real warning gets clicked
+                # through, so this stays narrow.
+                issues.append(Issue(
+                    kind="etf_flag_unknown", needs_confirm=True,
+                    message=ETF_FLAG_UNKNOWN_MESSAGE))
             if fee is None:
                 fee = fr.fee
             if tax is None:
                 tax = fr.tax
-            snapshot = fr.snapshot
+            snapshot = dict(fr.snapshot)
+            if etf_unknown:
+                # The assumption travels with the numbers, so a later audit of this row
+                # can see the rate was assumed rather than established.
+                snapshot["etf_flag"] = "unknown"
+            supplied = [k for k, v in (("fee", inp.fee), ("tax", inp.tax))
+                        if v is not None]
+            if supplied:
+                # PARTIAL auto-fill: the snapshot describes the regime, but one of the
+                # two numbers came from the caller, not from it. Say which.
+                snapshot["supplied"] = ",".join(supplied)
+    elif fee is not None and tax is not None:
+        # Both supplied — record the provenance instead of leaving {} (which reads as
+        # "no rule applied"). Same helper as csv_import so the two cannot drift.
+        snapshot = supplied_snapshot(fee, tax)
 
     # Guarantee non-None for the draft (fallback to zero if account unknown)
     resolved_fee: Decimal = fee if fee is not None else Decimal("0")

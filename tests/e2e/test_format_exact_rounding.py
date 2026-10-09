@@ -69,6 +69,17 @@ _CASES: list[tuple[str, str, object, str]] = [
     ("shares", "95.04571227709218320061723668", None, "95.045712"),
     # below the 6-dp cut-off the whole value legitimately reads as zero
     ("shares", "0.0000001", None, "0"),
+    # --- FX rates at a FIXED precision (M3-08, 2026-09-06) -----------------------
+    # `rate()` switches 4 dp / 2 dp on magnitude, so one 隱含匯率 column showed 4.6000 beside
+    # 28.00 — and 28.00 is a rate rounded like money. `rateExact` is the 換匯 ledgers' column
+    # format: 4 dp whatever the magnitude; `rate()` itself is unchanged (the dashboard's FX
+    # card keeps 2 dp by owner ruling).
+    ("rateExact", "27.99998642424900642472415771", 4, "28.0000"),
+    ("rateExact", "4.6", 4, "4.6000"),
+    ("rateExact", "4.5632", 4, "4.5632"),
+    ("rateExact", "32", 4, "32.0000"),
+    ("rateExact", "0.03125", 4, "0.0313"),         # half-up on the digit string, not float
+    ("rate", "27.99998642424900642472415771", None, "28.00"),   # the dashboard card: unchanged
 ]
 
 

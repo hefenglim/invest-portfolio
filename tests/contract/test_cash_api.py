@@ -56,7 +56,8 @@ def test_withdraw_over_balance_hard_block(api_client: TestClient) -> None:
     err = r.json()["error"]
     assert err["code"] == "withdraw_insufficient_balance"
     assert err["field"] == "amount"
-    assert "1000" in err["message"]  # the available balance is stated in the message
+    # DEF-008: the resulting dip on its own day, minor unit, U+2212
+    assert "於 2026-02-01 降至 −500.00（出金當日）" in err["message"]
     r2 = api_client.post("/api/cash/movements", json={
         "account_id": "moomoo_my", "date": "2026-02-01", "kind": "withdraw",
         "ccy": "MYR", "amount": "1500", "ack_negative": True})
@@ -93,7 +94,8 @@ def test_fx_over_balance_hard_block(api_client: TestClient) -> None:
     err = r.json()["error"]
     assert err["code"] == "fx_insufficient_balance"
     assert err["field"] == "from_amt"
-    assert "-32000" in err["message"]  # the available balance is stated in the message
+    # DEF-008: the resulting dip on its own day, minor unit, U+2212
+    assert "於 2026-06-01 降至 −42,000（換匯當日）" in err["message"]
     # Fund the pool so the balance covers the sell amount -> the conversion now passes and
     # lands in the SAME fx ledger the CSV path writes.
     api_client.post("/api/cash/movements", json={
@@ -266,6 +268,64 @@ def test_statement_same_day_newest_first_balance_on_top(api_client: TestClient) 
     assert body["rows"][0]["balance"] == "700" and body["rows"][1]["balance"] == "1000"
 
 
+def _post_same_day_same_sign_movements(api_client: TestClient) -> None:
+    """Seed the BUG-06 shape into the (empty) moomoo_my USD pool: one day carrying TWO
+    same-sign credits plus a debit, then a later day. Chronological (`_ordered`) sequence:
+    +1000 → 1000, +250 → 1250, −300 → 950 (end of 05-01), +40 → 990."""
+    for movement in (
+        {"date": "2026-05-01", "kind": "deposit", "amount": "1000"},
+        {"date": "2026-05-01", "kind": "deposit", "amount": "250"},
+        {"date": "2026-05-01", "kind": "withdraw", "amount": "300"},
+        {"date": "2026-05-02", "kind": "deposit", "amount": "40"},
+    ):
+        r = api_client.post("/api/cash/movements", json={
+            "account_id": "moomoo_my", "ccy": "USD", **movement})
+        assert r.status_code == 201, r.text
+
+
+def test_statement_same_day_same_sign_rows_reverse_chronological(
+    api_client: TestClient,
+) -> None:
+    """QA R1 BUG-06: `sort(key=(date, sign), reverse=True)` is STABLE, so equal-key rows
+    (same day, same sign) stayed oldest-first inside the newest-first table and the day's
+    end balance sat at the bottom. The display must be the EXACT reverse of the
+    chronological order: within 2026-05-01 the debit leads (it settles last), the two
+    same-sign credits follow newest-first, and the first row of the day's block carries
+    the end-of-day balance."""
+    _post_same_day_same_sign_movements(api_client)
+    body = api_client.get("/api/cash/statement",
+                          params={"account": "moomoo_my", "ccy": "USD"}).json()
+    assert [r["date"] for r in body["rows"]] == [
+        "2026-05-02", "2026-05-01", "2026-05-01", "2026-05-01"]  # table newest-first
+    assert [r["delta"] for r in body["rows"]] == ["40", "-300", "250", "1000"]
+    assert [r["balance"] for r in body["rows"]] == ["990", "950", "1250", "1000"]
+    # First row of the 05-01 block carries the day's END balance (pre-fix it was "1250").
+    assert body["rows"][1]["balance"] == "950"
+    assert body["current_balance"] == "990" and body["total_count"] == 4
+    # Pagination slices the SAME display order (offset/limit over the sorted flat list).
+    page = api_client.get("/api/cash/statement", params={
+        "account": "moomoo_my", "ccy": "USD", "offset": 1, "limit": 2}).json()
+    assert [r["delta"] for r in page["rows"]] == ["-300", "250"]
+    assert page["total_count"] == 4
+
+
+def test_export_cash_statement_csv_stays_oldest_first(api_client: TestClient) -> None:
+    """FIX-B1 scope pin: the reconciliation CSV reads `account_statement` directly
+    (oldest-first) and must NOT inherit the statement route's display reversal."""
+    _post_same_day_same_sign_movements(api_client)
+    r = api_client.post("/api/export/cash-statement",
+                        json={"account": "moomoo_my", "ccy": "USD"})
+    assert r.status_code == 200
+    reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    data = [row for row in reader[1:] if row and not row[0].startswith("#")]
+    assert [row[0] for row in data] == [
+        "2026-05-01", "2026-05-01", "2026-05-01", "2026-05-02"]
+    assert [Decimal(row[10]) for row in data] == [
+        Decimal("1000"), Decimal("250"), Decimal("-300"), Decimal("40")]
+    assert [Decimal(row[11]) for row in data] == [
+        Decimal("1000"), Decimal("1250"), Decimal("950"), Decimal("990")]
+
+
 def test_export_cash_statement_csv(api_client: TestClient) -> None:
     r = api_client.post("/api/export/cash-statement",
                         json={"account": "tw_broker", "ccy": "TWD"})
@@ -273,9 +333,12 @@ def test_export_cash_statement_csv(api_client: TestClient) -> None:
     assert r.headers["content-type"].startswith("text/csv")
     assert "cash_statement_tw_broker_TWD" in r.headers["content-disposition"]
     reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    # ⑪ (2026-10-05) inserted ``unbooked`` after ``balance`` — the column it explains, marking a
+    # dividend the replay refused — leaving ``counts_from`` last (DEF-056's readers key on it)
+    # and every earlier column at its index.
     assert reader[0] == [
         "date", "ccy", "kind", "symbol", "name", "qty", "price", "fee", "tax",
-        "note_ref", "delta", "balance",
+        "note_ref", "delta", "balance", "unbooked", "counts_from",
     ]
     data = [row for row in reader[1:] if row and not row[0].startswith("#")]
     buy = next(row for row in data if row[2] == "buy" and row[3] == "2330")
@@ -337,7 +400,9 @@ def test_withdraw_put_edit_self_exclusion(api_client: TestClient) -> None:
         "ccy": "USD", "amount": "1000.01", "ack_negative": True})
     assert over.status_code == 422
     err = over.json()["error"]
-    assert err["code"] == "withdraw_insufficient_balance" and "1000" in err["message"]
+    assert err["code"] == "withdraw_insufficient_balance"
+    # DEF-008: the resulting dip on its own day, minor unit, U+2212
+    assert "於 2026-02-01 降至 −0.01（出金當日）" in err["message"]
     assert _balance(api_client, "moomoo_my", "USD") == "200"  # unchanged
     # exactly the row-free balance -> allowed (NOT falsely blocked by its own old amount)
     ok = api_client.put(f"/api/cash/movements/{wid}", json={

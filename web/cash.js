@@ -10,7 +10,7 @@
    For deposit/opening-side CORRECTIONS (edit/delete), the negative-pool 422 (audit C3)
    surfaces as a danger confirm before re-sending with ack_negative. FX conversions
    (FU-D34, 需求五) and WITHDRAWALS (FU-D43a) are DIFFERENT: neither may overdraft, so the
-   換匯中心 shows the pool's 可用餘額 (the sell ceiling), the 出金 form shows 賬戶現金 (the
+   換匯中心 shows the pool's 可用餘額 (the sell ceiling), the 出金 form shows 帳戶現金 (the
    withdraw ceiling), and both amounts are HARD-blocked when they exceed it — live
    disabled-確認 + inline error, backed by the server's fx_insufficient_balance /
    withdraw_insufficient_balance 422 (no ack override).
@@ -36,12 +36,50 @@
     const p = (n) => String(n).padStart(2, '0');
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   })();
+  /* DEF-056 (owner ruling 2026-09-24): a movement / conversion dated after today does not
+     count yet — the balances above already leave it out (M5-06). The SERVER decides
+     (`counts_from`, set only while the row is still ahead, cut on the server's clock — NOT
+     the browser's TODAY above, which only pre-fills the date inputs), and the row says so.
+     Same badge text as web/ledger.js::futureBadge (a separate IIFE). */
+  function dateCell(dateIso, countsFrom) {
+    const td = el('td', 'num', f.date(dateIso));
+    if (countsFrom) {
+      const b = el('span', 'badge badge-stale-mini ledger-future', '未來日期：' + countsFrom + ' 起計入');
+      b.title = '日期晚於今天：到 ' + countsFrom + ' 才計入資金餘額、持股與報酬';
+      const line = el('div', 'ledger-future-line');
+      line.appendChild(b);
+      td.appendChild(line);
+    }
+    return td;
+  }
 
   const KIND_LABEL = {
     deposit: '入金', withdraw: '出金', opening: '期初資金', rebate: '折讓款',
+    interest: '利息', interest_expense: '融資利息', broker_fee: '券商費用',
     fx_in: '換入', fx_out: '換出', buy: '買入', sell: '賣出', dividend: '股利',
   };
+  /* The two cash-kind axes, mirroring portfolio_dash/shared/cash_kinds.py. Presentation
+     only — every money figure still comes from the API — but BOTH used to be written as
+     `kind === 'withdraw'`, which paints a broker fee with the green inbound chip and offers
+     an 取得成本 field on interest that the FX pool then ignores. The lower-case spelling is
+     the wire's (`portfolio/cash.py` lower-cases the stored kind for the line label). */
+  const DEBIT_KINDS = ['withdraw', 'interest_expense', 'broker_fee'];
+  const ACQUIRING_KINDS = ['deposit', 'opening', 'rebate'];
+  /* Kinds the edit dialog may offer. An imported row's kind MUST appear here or a no-op
+     edit silently rewrites it to the first option — a money-of-record mutation from a
+     dialog the user only opened to fix a note. REBATE is not offered to other rows (a
+     hand-entered row is never turned INTO a rebate credit here); a 折讓款 row gets its own
+     kind appended in openEdit, so its no-op edit keeps it (DEF-009). */
+  const EDITABLE_KINDS = [
+    ['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金'],
+    ['interest', '利息'], ['interest_expense', '融資利息'], ['broker_fee', '券商費用'],
+  ];
   const settlementCcy = (a) => (a && (a.settlement_ccy || a.ccy)) || '';
+  /* zh account name from the single naming authority (web/names.js, FU-D37). Every row this
+     page renders carries `account_id`; the payload's English `account` is never printed
+     again (M5, demo audit 2026-09-16: 各帳戶現金 read 「Charles Schwab」/「TW Broker」 beside
+     pages saying 「嘉信 Schwab」/「台灣券商」). */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
 
   /* FU-D34: Decimal-safe compare of two numeric STRINGS — the sell amount vs. the pool
      balance. This is a display-only UX HINT (the backend re-validates as the authority),
@@ -84,6 +122,26 @@
     return pa.neg ? -m : m;
   }
 
+  /* ---- DEF-007 (functional test 2026-09-22, A-02): THE ONE WAY A VALUE THAT ARRIVES AFTER
+     AN AWAIT MAY LAND IN AN EDITABLE FIELD. ----------------------------------------------
+     The 取得成本 prefill checked only its own sequence token, so a reference rate that came
+     back after the owner had typed 31.5 overwrote it with 31.698999 (and flipped the mode
+     back to 匯率), and 確認 then booked 31,699 TWD for a conversion dealt at 31,500. Measured
+     API latency on the live site is 5–30 s, so the window is not theoretical.
+
+     The rule: a late write may only replace what the PAGE knows is in the field — nothing
+     (an empty field destroys nothing when filled), or the value the page itself put there.
+     Anything else was typed during the round trip and is the owner's. `expected` is that
+     known value: the page's own last auto-fill for an estimate/prefill (autoFill below), or
+     the value just submitted for a post-commit clear. Every `.value =` that runs after an
+     `await` in this file goes through here — tests/contract/test_def007_async_field_writes.py
+     scans for any that does not. */
+  /* The guard itself lives in format.js (window.pdField, I-12) — every page with an editable
+     field shares ONE definition; these are this file's names for it. */
+  const writeIfUntouched = window.pdField.writeIfUntouched;
+  const autoFill = window.pdField.autoFill;
+  const resetField = window.pdField.resetField;
+
   let D = { balances: [], movements: [], negative_pools: [] };
   let accounts = [];  // from /api/input/context (id, name, ccy, settlement_ccy, funding_ccy)
   let cmKind = 'deposit';
@@ -92,6 +150,10 @@
      declared further down initForms would sit in its temporal dead zone at that call. */
   let acqPrefillSeq = 0;
   let acqPrefillMsg = '';   // same reason: renderAcqHint() is reachable from that early call
+  /* M5-03: does acqPrefillMsg describe a value we PUT in the field (「參考值：…可直接修改」),
+     or explain why there is none (the `available === false` reason)? The first becomes a lie
+     the moment the user clears the box; the second stays true. */
+  let acqPrefillFilled = false;
   let booted = false;  // FU-D25: gate pd-cash-tab re-renders until the first boot() populated D
   /* FU-D43c estimate state — MODULE scope, not initForms: syncFxCcy() calls
      resetEstimate() early in initForms(), and `let` declarations further down initForms
@@ -100,6 +162,7 @@
   let estPristine = true;  // buy field untouched -> the estimate may write it
   let estSeq = 0;          // stale-response fence (bumped on reset + every request)
   let estTimer = null;     // debounce so typing does not spray requests
+  let estInFlight = false; // M5-04: a request is out — 確認 must say so, not blame the user
 
   /* WPE (2026-07-07): movements ledger pages via the endpoint's limit/offset */
   const PAGE = Math.min((window.pdPrefs && window.pdPrefs.page_size) || 50, 500);
@@ -158,13 +221,18 @@
     tbody.replaceChildren();
     cfxLed.rows.forEach((x) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(x.date)));
-      tr.appendChild(el('td', 'col-text', x.account));
+      tr.appendChild(dateCell(x.date, x.counts_from));
+      tr.appendChild(el('td', 'col-text', acctZh(x.account_id)));
       tr.appendChild(el('td', 'num', f.money(x.from_amt, x.from_ccy) + ' ' + x.from_ccy));
       tr.appendChild(el('td', 'num', f.money(x.to_amt, x.to_ccy) + ' ' + x.to_ccy));
-      /* implied rate is computed by the backend (from/to, home per foreign) — never here */
+      /* implied rate is computed by the backend — never here. Quoted the conventional way
+         (L6, 2026-09-16): rate ≥ 1 with the direction named by implied_unit_ccy /
+         implied_per_ccy, so a USD→MYR row and a MYR→USD row print the same 4.0000.
+         Fixed 4 dp (M3-08): a rate is not money, and `rate()`'s magnitude switch gave this
+         one column two precisions (4.6000 beside 28.00). */
       tr.appendChild(el('td', 'num',
-        '1 ' + x.to_ccy + ' = ' + f.rate(x.implied_rate) + ' ' + x.from_ccy));
+        '1 ' + (x.implied_unit_ccy || x.to_ccy) + ' = ' + f.rateExact(x.implied_rate, 4) +
+        ' ' + (x.implied_per_ccy || x.from_ccy)));
       tbody.appendChild(tr);
     });
     if (!cfxLed.rows.length) {
@@ -182,14 +250,17 @@
     wrap.replaceChildren();
     const byAcct = new Map();
     D.balances.forEach((b) => {
-      if (!byAcct.has(b.account_id)) byAcct.set(b.account_id, { name: b.account, lines: [] });
+      if (!byAcct.has(b.account_id)) byAcct.set(b.account_id, { name: acctZh(b.account_id), lines: [] });
       byAcct.get(b.account_id).lines.push(b);
     });
     accounts.forEach((a) => {
       const card = el('div', 'cash-card');
       /* Account name = clickable header -> the ACCOUNT-LEVEL all-currency statement
          (openStatement with ccy=null); active when that combined view is open. */
-      const acctDiv = el('div', 'acct clickable', a.name);
+      /* zh name (M5 follow-up, 2026-09-16): the card header read the context's English
+         `name` — the one read the `.account` scanner cannot see — and the deployed demo
+         still said 「TW Broker」 here after every other surface had moved. */
+      const acctDiv = el('div', 'acct clickable', acctZh(a.id));
       if (stmt.account === a.id && stmt.ccy == null) acctDiv.classList.add('active');
       acctDiv.title = '點擊查看全部幣別收支明細';
       acctDiv.addEventListener('click', () => openStatement(a.id, null));
@@ -224,7 +295,7 @@
     totalEl.replaceChildren();
     if (D.reporting_total != null) {
       totalEl.appendChild(document.createTextNode(
-        '合併現金（' + D.reporting_currency + '，依最新匯率換算）: ' +
+        '合併現金（' + D.reporting_currency + '，依最新匯率換算）：' +
         f.money(D.reporting_total, D.reporting_currency) + ' ' + D.reporting_currency));
       if (D.reporting_total_unavailable_reason) {
         totalEl.appendChild(el('span', 'excl', '　（' + D.reporting_total_unavailable_reason + '）'));
@@ -241,7 +312,7 @@
     if (!negs.length) { banner.hidden = true; return; }
     banner.hidden = false;
     banner.textContent = '⚠ 資金池透支 — 可能漏登入金或換匯：' + negs.map((p) =>
-      (p.account + ' ' + f.money(p.amount, p.ccy) + ' ' + p.ccy)).join('；');
+      (acctZh(p.account_id) + ' ' + f.money(p.amount, p.ccy) + ' ' + p.ccy)).join('；');
   }
 
   /* ---- C5: statement table ---- */
@@ -283,7 +354,24 @@
     }
     if (r.kind === 'fx_in' || r.kind === 'fx_out') {
       let s = '換匯 ' + (r.ref || '');
-      if (r.fx_rate != null) s += ' @ ' + f.rate(r.fx_rate);
+      if (r.fx_rate != null) {
+        /* M5-01: the backend's rate is from_amount / to_amount — 「how many from_ccy per one
+           to_ccy」 — for BOTH legs of a conversion. Printed bare it silently changed quoting
+           convention with the conversion's direction: two adjacent rows read 「@ 31.77」 and
+           「@ 0.0315」, one TWD-per-USD and one USD-per-TWD, neither carrying a unit. The
+           sentence below is renderFxLedger()'s, verbatim — that column has been labelling
+           the SAME number correctly all along, so this is the existing wording reaching the
+           second surface, not a third convention. Pool ccy + counter ccy recover the pair
+           (fx_out spends from_ccy, fx_in receives to_ccy); with either missing it degrades
+           to the old bare rate rather than mislabelling one. The precision follows that
+           column too (M3-08: fixed 4 dp — this IS the conversion's ledger figure, not a
+           market reference rate), or the statement becomes the third convention. */
+        const from = r.kind === 'fx_out' ? ccy : r.counter_ccy;
+        const to = r.kind === 'fx_out' ? r.counter_ccy : ccy;
+        s += (from && to)
+          ? ' @ 1 ' + to + ' = ' + f.rateExact(r.fx_rate, 4) + ' ' + from
+          : ' @ ' + f.rateExact(r.fx_rate, 4);
+      }
       if (r.counter_amount != null && r.counter_ccy) {
         s += '（對應 ' + f.signed(r.counter_amount, r.counter_ccy) + ' ' + r.counter_ccy + '）';
       }
@@ -300,39 +388,96 @@
       if (combined) {
         const bals = (resp.balances || [])
           .map((b) => b.ccy + ' ' + f.money(b.balance, b.ccy)).join('　·　');
-        sub.textContent = (resp.account || stmt.account) + '・全部幣別' +
+        sub.textContent = acctZh(stmt.account) + '・全部幣別' +
           (bals ? '　目前餘額 ' + bals : '');
       } else {
-        sub.textContent = (resp.account || stmt.account) + '・' + resp.ccy +
+        sub.textContent = acctZh(stmt.account) + '・' + resp.ccy +
           '　目前餘額 ' + f.money(resp.current_balance, resp.ccy) + ' ' + resp.ccy;
+      }
+      /* DEF-056 R5: the printed report's section title says what 目前餘額 leaves out; so does
+         the page. `future_count` is the server's count over the WHOLE scope (a page may hold
+         only some of them). */
+      if (resp.future_count) {
+        sub.textContent += '（截至 ' + resp.as_of + '，不含 ' + resp.future_count + ' 筆未來日期）';
+      }
+      /* ⑪ (owner ruling 2026-10-05): dividends the replay refused are listed below but move no
+         balance — the printed report's section title says the same sentence. The count is the
+         server's, over the whole scope. */
+      if (resp.unbooked_count) {
+        sub.textContent += '（另有 ' + resp.unbooked_count + ' 筆股利未入帳，不計入餘額）';
       }
     }
     const ccyTh = $('#cash-stmt-ccy-th');
     if (ccyTh) ccyTh.hidden = !combined;
     const tbody = $('#cash-stmt-body');
     tbody.replaceChildren();
-    (resp.rows || []).forEach((r) => {
+    /* DEF-056 R5 (verifier bounce): every row is listed (M5-06) while 目前餘額 is as of the
+       server's day, and the newest-first order puts the rows past it at the TOP — directly
+       under a header whose balance they are not. The server flags them (`future`,
+       `counts_from`, cut on its clock); the page draws the printed report's cut line
+       verbatim above them, badges each date like the 出金入金 list (dateCell) and marks each
+       running balance as a projection. */
+    const rows = resp.rows || [];
+    const futureOnPage = rows.filter((r) => r.future).length;
+    let seenFuture = 0;
+    rows.forEach((r) => {
       const rowCcy = r.ccy || resp.ccy;
-      const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(r.date)));
+      if (r.future && seenFuture === 0) {
+        tbody.appendChild(stmtCutRow(futureOnPage, resp.as_of, combined));
+      }
+      if (r.future) seenFuture += 1;
+      const tr = el('tr', r.future
+        ? 'stmt-future' + (seenFuture === futureOnPage ? ' stmt-future-last' : '') : undefined);
+      /* ⑪: a dividend the replay refused (`booked: false`) is listed with the amount it records,
+         struck through, and the server's 「未入帳（待釐清）」 beside its description; its running
+         balance is the one it did not move. Every mark is a class (DEF-077), never a style. */
+      const unbooked = r.booked === false;
+      if (unbooked) tr.classList.add('stmt-unbooked');
+      tr.appendChild(dateCell(r.date, r.counts_from));
       const tdKind = el('td', 'col-text');
       tdKind.appendChild(el('span', 'stmt-chip', KIND_LABEL[r.kind] || r.kind));
       tr.appendChild(tdKind);
       if (combined) tr.appendChild(el('td', 'num col-ccy', rowCcy));
-      tr.appendChild(el('td', 'col-text', describe(r)));
+      const tdText = el('td', 'col-text', describe(r));
+      if (unbooked) {
+        const tag = el('span', 'stmt-unbooked-tag', r.unbooked_note || '');
+        tag.title = r.unbooked_reason || '';
+        tdText.appendChild(tag);
+      }
+      tr.appendChild(tdText);
       const tdDelta = el('td', 'num');
       tdDelta.textContent = f.signed(r.delta, rowCcy);
       if (String(r.delta).indexOf('-') === 0) tdDelta.classList.add('sign-down');
+      if (unbooked) {
+        tdDelta.classList.add('stmt-unbooked-amt');
+        tdDelta.title = r.unbooked_reason || '';
+      }
       tr.appendChild(tdDelta);
       const tdBal = el('td', 'num');
       tdBal.textContent = f.money(r.balance, rowCcy);
       if (String(r.balance).indexOf('-') === 0) { tdBal.style.color = 'var(--amber)'; }
+      if (r.future) {
+        tdBal.classList.add('stmt-projected');
+        tdBal.appendChild(el('span', 'stmt-proj-tag', '投影'));
+        tdBal.title = '未來日期列的餘額是投影，不是目前餘額';
+      }
       tr.appendChild(tdBal);
       tbody.appendChild(tr);
     });
-    if (!(resp.rows || []).length) {
+    if (!rows.length) {
       tbody.appendChild(stmtEmptyRow('empty', combined));
     }
+  }
+
+  /* The cut line above the first future row — export/cash_statement.py::_pool_section's text,
+     verbatim, so the screen and the printed report say the same sentence. */
+  function stmtCutRow(n, asOf, combined) {
+    const tr = el('tr', 'stmt-cut');
+    const td = el('td', 'col-text',
+      '以下 ' + n + ' 筆為未來日期（' + asOf + ' 之後），不計入目前餘額；其餘額欄為投影');
+    td.colSpan = combined ? 6 : 5;
+    tr.appendChild(td);
+    return tr;
   }
 
   /* FU-D25 statement empty state — window.emptyState() glyph + one-line explanation, plus
@@ -406,10 +551,10 @@
     tbody.replaceChildren();
     D.movements.forEach((m) => {
       const tr = el('tr');
-      tr.appendChild(el('td', 'num', f.date(m.date)));
-      tr.appendChild(el('td', 'col-text', m.account));
+      tr.appendChild(dateCell(m.date, m.counts_from));
+      tr.appendChild(el('td', 'col-text', acctZh(m.account_id)));
       const tdKind = el('td', 'col-text');
-      const chipCls = m.kind === 'withdraw' ? 'dir-sell' : 'dir-buy';
+      const chipCls = DEBIT_KINDS.indexOf(m.kind) >= 0 ? 'dir-sell' : 'dir-buy';
       tdKind.appendChild(el('span', 'dir-chip ' + chipCls, KIND_LABEL[m.kind] || m.kind));
       tr.appendChild(tdKind);
       tr.appendChild(el('td', 'num', f.money(m.amount, m.ccy) + ' ' + m.ccy));
@@ -483,13 +628,26 @@
   function enforceFxCcyDistinct(source) {
     const fromSel = $('#cfx-from-ccy');
     const toSel = $('#cfx-to-ccy');
-    if (!fromSel || !toSel || fromSel.value !== toSel.value) return;
+    const note = $('#cfx-ccy-note');
+    if (!fromSel || !toSel) return;
+    if (fromSel.value !== toSel.value) { if (note) note.hidden = true; return; }
+    /* L7 (demo audit 2026-09-16): the sibling flip was SILENT — picking 買入 = MYR on a
+       MYR→USD form rewrote 賣出 to USD and the 可用餘額 line switched pools with it, and
+       nothing on the page said so. Say which field was changed and why, inline under the
+       selects; the note clears on the next change that needs no flip. */
+    let flipped = null;
     if (source === 'from') {
       const alt = otherCcyOption(toSel, fromSel.value);
-      if (alt !== null) toSel.value = alt;
+      if (alt !== null) { toSel.value = alt; flipped = ['買入', alt]; }
     } else {
       const alt = otherCcyOption(fromSel, toSel.value);
-      if (alt !== null) fromSel.value = alt;
+      if (alt !== null) { fromSel.value = alt; flipped = ['賣出', alt]; }
+    }
+    if (note) {
+      note.hidden = !flipped;
+      note.textContent = flipped
+        ? '買賣幣別不可相同 — 已自動將' + flipped[0] + '幣別改為 ' + flipped[1] + '，可用餘額也隨之切換'
+        : '';
     }
   }
 
@@ -514,41 +672,33 @@
   }
 
   function openEdit(m) {
-    /* F2d/F12 — double-credit guard: a 折讓款 (rebate) movement is a system-tagged cash
-       refund whose {kind, note, date} form the suppression key the rebate inbox uses to
-       avoid re-listing (and re-crediting) an already-booked month. Editing any of those
-       would break the tag and re-surface the month. So on a REBATE row we LOCK kind/note/
-       date and allow ONLY the amount to be corrected (the actual refund vs. the estimate);
-       to undo a booking the owner deletes the row instead. The PUT re-sends the ORIGINAL
-       kind/note/date verbatim. A backend guard on the movement PUT is the belt-and-braces
-       stop for direct API calls (see the escalation note). */
+    /* DEF-009 (owner ruling 2026-09-24): a 折讓款 (rebate) row is FULLY editable — 日期／
+       類型／金額／備註 — exactly like a hand-entered row, so a wrongly booked refund can be
+       repaired instead of only deleted. It used to lock kind/note/date because the rebate
+       inbox recognised a credited month from those fields (F2d/F12); the credit now carries
+       an explicit `rebate_period` link the inbox reads first, which no edit here touches, so
+       the month stays booked whatever is corrected. Every edit is recorded in the audit
+       trail server-side (ledger_audit). */
     const isRebate = m.kind === 'rebate';
     const fDate = el('input', 'input'); fDate.type = 'date'; fDate.value = m.date;
-    let fKind;
-    if (isRebate) {
-      fKind = el('input', 'input');
-      fKind.value = KIND_LABEL.rebate;  // 折讓款
-      fKind.disabled = true;
-      fDate.disabled = true;
-    } else {
-      fKind = el('select', 'select');
-      [['deposit', '入金'], ['withdraw', '出金'], ['opening', '期初資金']].forEach(([v, label]) => {
+    const fKind = el('select', 'select');
+    (isRebate ? EDITABLE_KINDS.concat([['rebate', KIND_LABEL.rebate]]) : EDITABLE_KINDS)
+      .forEach(([v, label]) => {
         const o = el('option', null, label); o.value = v;
         if (m.kind === v) o.selected = true;
         fKind.appendChild(o);
       });
-    }
     const fAmt = el('input', 'input'); fAmt.type = 'number'; fAmt.step = '0.01';
     fAmt.value = m.amount;
     const fNote = el('input', 'input'); fNote.value = m.note || '';
-    if (isRebate) fNote.disabled = true;
     /* spec 2026-07-30: the acquisition cost MUST appear in the edit dialog. The PUT is a
        full replace, so a dialog that omitted this field would silently NULL a recorded
        cost basis on any unrelated edit (note/amount) — a data loss, not a display bug.
        Pre-filled with the STORED home AMOUNT (the authority, F1) so a round-trip is
        lossless; clearing the box is the deliberate way to drop the basis. */
     const editHome = fundingCcyOf(m.account_id);
-    const editForeign = !!editHome && m.ccy !== editHome && m.kind !== 'withdraw';
+    const editForeign = !!editHome && m.ccy !== editHome
+      && ACQUIRING_KINDS.indexOf(m.kind) >= 0;
     const fAcq = el('input', 'input'); fAcq.type = 'number'; fAcq.step = '0.01';
     fAcq.value = m.acq_home_amount || '';
     const acqHint = el('div', 'cfx-balance');
@@ -580,7 +730,7 @@
     const backdrop = el('div', 'modal-backdrop');
     const modal = el('div', 'modal');
     const head = el('div', 'modal-head');
-    head.appendChild(el('h3', 'modal-title', '編輯資金紀錄 #' + m.id + '（' + m.account + '・' + m.ccy + '）'));
+    head.appendChild(el('h3', 'modal-title', '編輯資金紀錄 #' + m.id + '（' + acctZh(m.account_id) + '・' + m.ccy + '）'));
     const close = el('button', 'modal-close', '✕'); close.type = 'button';
     head.appendChild(close);
     modal.appendChild(head);
@@ -595,9 +745,11 @@
       body.appendChild(w);
     });
     if (isRebate) {
-      body.appendChild(el('div', 'inbox-rule',
-        '折讓款為系統標記的現金退款 — 類型／備註／日期已鎖定以避免重複入帳,僅可修正金額;' +
-        '若要撤銷此筆退款,請直接刪除。'));
+      body.appendChild(el('div', 'inbox-rule', m.rebate_period
+        ? '此筆為 ' + m.rebate_period + ' 月份的折讓款入帳。日期、類型、金額、備註皆可修改，'
+          + '每次修改都會寫入稽核軌跡；修改後 ' + m.rebate_period
+          + ' 仍視為已入帳，不會重新出現在待確認退款。若要撤銷此筆退款，請直接刪除。'
+        : '此筆為折讓款。日期、類型、金額、備註皆可修改，每次修改都會寫入稽核軌跡。'));
     }
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
@@ -615,15 +767,14 @@
       const send = async (ack) => {
         const payload = {
           account_id: m.account_id,
-          // rebate rows re-send the ORIGINAL kind/note/date (locked) — only the amount changes.
-          date: isRebate ? m.date : fDate.value,
-          kind: isRebate ? 'rebate' : fKind.value,
+          date: fDate.value,
+          kind: fKind.value,
           ccy: m.ccy, amount: fAmt.value,
-          note: isRebate ? m.note : (fNote.value.trim() || null),
+          note: fNote.value.trim() || null,
           ack_negative: ack,
         };
         // Switching the row to 出金 makes it a disposal — the cost basis no longer applies.
-        if (editForeign && payload.kind !== 'withdraw' && fAcq.value.trim()) {
+        if (editForeign && ACQUIRING_KINDS.indexOf(payload.kind) >= 0 && fAcq.value.trim()) {
           payload.acq_home_amount = fAcq.value.trim();
         }
         return api.put('/api/cash/movements/' + m.id, payload);
@@ -648,7 +799,7 @@
     window.confirmDialog({
       title: '刪除資金紀錄',
       body: f.date(m.date) + '・' + (KIND_LABEL[m.kind] || m.kind) + ' ' +
-        f.money(m.amount, m.ccy) + ' ' + m.ccy + '（' + m.account + '）',
+        f.money(m.amount, m.ccy) + ' ' + m.ccy + '（' + acctZh(m.account_id) + '）',
       confirmLabel: '刪除', danger: true,
       onConfirm: async () => {
         const send = (ack) => api.del('/api/cash/movements/' + m.id + (ack ? '?ack_negative=true' : ''));
@@ -745,23 +896,31 @@
     if (single) { const c = $('#cfx-confirm'); if (c) c.disabled = true; }
   }
 
-  /* FU-D43a: the 出金 賬戶現金 line (withdraw ceiling) — shown only for kind=出金;
+  /* FU-D43a: the 出金 帳戶現金 line (withdraw ceiling) — shown only for kind=出金;
      deposit/opening entry has no ceiling (credits need no balance). */
   function updCmBalance() {
     updCeiling({
       line: '#cm-balance', err: '#cm-amt-err', confirm: '#cm-confirm',
       amount: '#cm-amount', active: cmKind === 'withdraw',
       account: $('#cm-account').value, ccy: $('#cm-ccy').value,
-      label: '賬戶現金', overMsg: '出金金額超過賬戶現金', overTail: '出金不可透支',
+      label: '帳戶現金', overMsg: '出金金額超過帳戶現金', overTail: '出金不可透支',
     });
   }
 
   /* ---- B. forms ---- */
   function initForms() {
     const accSelects = [$('#cm-account'), $('#cfx-account')];
+    /* Option label = zh name + the currencies the account actually trades in, from the ONE
+       definition in names.js (L8, re-verification 2026-09-17: this line bracketed the
+       SETTLEMENT currency, so 換匯／出金入金 read 「Moomoo MY（USD）」 while the ledger's
+       three selects already read 「Moomoo MY（USD／MYR）」). The settlement-ccy form remains
+       only as the no-names.js fallback. */
+    const optionLabel = (a) => (window.pdNames && window.pdNames.accountOption)
+      ? window.pdNames.accountOption(a)
+      : acctZh(a.id) + '（' + settlementCcy(a) + '）';
     accSelects.forEach((sel) => {
       accounts.forEach((a) => {
-        const o = el('option', null, a.name + '（' + settlementCcy(a) + '）');
+        const o = el('option', null, optionLabel(a));
         o.value = a.id;
         sel.appendChild(o);
       });
@@ -772,7 +931,10 @@
     /* C2: movement ccy dropdown tracks the selected account */
     const syncMovementCcy = () => {
       fillCcySelect($('#cm-ccy'), $('#cm-account').value);
-      updCmBalance();  // FU-D43a: refresh the 賬戶現金 ceiling for the new account/ccy
+      updCmBalance();  // FU-D43a: refresh the 帳戶現金 ceiling for the new account/ccy
+      // DEF-007: a 取得成本 typed for the old pool is not one for the new pool — the reset is
+      // synchronous with the switch, so the prefill below fills an EMPTY field.
+      resetField($('#cm-acq'));
       // fillCcySelect writes the <select> programmatically, which fires NO change event —
       // without this call the 取得成本 field would stay hidden on load and after an account
       // switch, i.e. exactly when a foreign default is selected for the user.
@@ -791,8 +953,8 @@
     const syncFxCcy = () => {
       const accId = $('#cfx-account').value;
       const a = accounts.find((x) => x.id === accId);
-      $('#cfx-from-amt').value = '';
-      $('#cfx-to-amt').value = '';
+      resetField($('#cfx-from-amt'));
+      resetField($('#cfx-to-amt'));
       fillCcySelect($('#cfx-from-ccy'), accId, a && a.funding_ccy);
       fillCcySelect($('#cfx-to-ccy'), accId, a && settlementCcy(a));
       enforceFxCcyDistinct('from');  // guards a mis-seeded funding==settlement pair too
@@ -805,17 +967,23 @@
     $('#cfx-account').addEventListener('change', syncFxCcy);
     syncFxCcy();
 
-    $('#cm-kind-in').addEventListener('click', () => setKind('deposit'));
-    $('#cm-kind-out').addEventListener('click', () => setKind('withdraw'));
-    const openBtn = $('#cm-kind-open');
-    if (openBtn) openBtn.addEventListener('click', () => setKind('opening'));
+    /* Button id -> stored kind. Table-driven since 2026-08-13: the previous form named each
+       button twice (once to bind, once to toggle `active`), so adding a kind meant editing
+       two places and a half-edit leaves a button that switches the kind without lighting up.
+       Every entry is optional — an older cached page missing a button still boots. */
+    const KIND_BUTTONS = [
+      ['#cm-kind-in', 'deposit'], ['#cm-kind-out', 'withdraw'],
+      ['#cm-kind-open', 'opening'], ['#cm-kind-int', 'interest'],
+      ['#cm-kind-intexp', 'interest_expense'], ['#cm-kind-fee', 'broker_fee'],
+    ].map(([sel, kind]) => [$(sel), kind]).filter(([node]) => !!node);
+    KIND_BUTTONS.forEach(([node, kind]) => {
+      node.addEventListener('click', () => setKind(kind));
+    });
     function setKind(k) {
       cmKind = k;
-      $('#cm-kind-in').classList.toggle('active', k === 'deposit');
-      $('#cm-kind-out').classList.toggle('active', k === 'withdraw');
-      if (openBtn) openBtn.classList.toggle('active', k === 'opening');
+      KIND_BUTTONS.forEach(([node, kind]) => node.classList.toggle('active', k === kind));
       updCmBalance();  // FU-D43a: the ceiling line exists only while kind=出金
-      syncAcqField();  // 出金 is a disposal — it carries no acquisition cost
+      syncAcqField();  // only an ACQUIRING kind carries a home-currency cost
     }
 
     /* ---- spec 2026-07-30: 取得成本 for a FOREIGN credit -------------------------------
@@ -827,7 +995,7 @@
        legal submission. Only the resolved home-currency AMOUNT is persisted (F1). */
     function isForeignMovement() {
       const home = fundingCcyOf($('#cm-account').value);
-      return !!home && $('#cm-ccy').value !== home && cmKind !== 'withdraw';
+      return !!home && $('#cm-ccy').value !== home && ACQUIRING_KINDS.indexOf(cmKind) >= 0;
     }
     function syncAcqField() {
       const field = $('#cm-acq-field');
@@ -835,8 +1003,10 @@
       const show = isForeignMovement();
       field.hidden = !show;
       if (!show) {
-        $('#cm-acq').value = '';
+        resetField($('#cm-acq'));
         acqPrefillMsg = '';
+        acqPrefillFilled = false;
+        $('#cm-acq-hint').className = 'cfx-balance';
         $('#cm-acq-hint').textContent = '';
         return;
       }
@@ -848,23 +1018,36 @@
       const account = $('#cm-account').value, ccy = $('#cm-ccy').value;
       const on = $('#cm-date').value;
       if (!account || !ccy || !on) return;
+      hint.className = 'cfx-balance';
       hint.textContent = '查詢當日匯率…';
       try {
         const r = await api.get('/api/cash/acq-rate', { account_id: account, ccy: ccy, on: on });
         if (seq !== acqPrefillSeq) return;  // a later change already superseded this one
         if (r.available) {
-          $('#cm-acq-mode').value = 'rate';
-          $('#cm-acq').value = r.rate;
-          acqPrefillMsg = '參考值：' + on + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
-            + ' ' + r.home_ccy + '（市場中價，你的實際取得價可能不同，可直接修改）';
+          /* DEF-007: never switch the mode (家幣金額 is the owner's choice, and a RATE written
+             into an AMOUNT field is a different number), and never overwrite a value typed
+             while the lookup was in flight — the reference then stays in the hint only. */
+          acqPrefillFilled = $('#cm-acq-mode').value === 'rate'
+            && autoFill($('#cm-acq'), r.rate);
+          /* The date is the RATE's (as_of), not the one typed: a lookup on a day with no
+             close resolves to the latest earlier one, and the hint must say which. */
+          const asOf = r.as_of || on;
+          acqPrefillMsg = '參考值：' + asOf + ' 收盤 1 ' + ccy + ' = ' + f.rate(r.rate)
+            + ' ' + r.home_ccy
+            + (asOf !== on ? '（' + on + ' 尚無收盤匯率，採最近一個交易日）' : '')
+            + (acqPrefillFilled
+              ? '（市場中價，你的實際取得價可能不同，可直接修改）'
+              : '（市場中價，僅供參考；未覆寫你輸入的值）');
         } else {
-          $('#cm-acq').value = '';
+          autoFill($('#cm-acq'), '');   // retract only a value the page itself put there
+          acqPrefillFilled = false;
           acqPrefillMsg = r.reason + '（留白也可送出：金額照樣計入餘額，'
             + '但不列入匯損益計算並會被標示）';
         }
         renderAcqHint();
       } catch (err) {
         if (seq !== acqPrefillSeq) return;
+        acqPrefillFilled = false;
         acqPrefillMsg = '無法取得參考匯率，請手動輸入（可留白）';
         renderAcqHint();
       }
@@ -875,18 +1058,53 @@
        what-if on the user's OWN entry, exactly like updImplied() in the FX form below; it
        is a display aid and never a stored figure. */
     function renderAcqHint() {
-      var parts = acqPrefillMsg ? [acqPrefillMsg] : [];
+      var hint = $('#cm-acq-hint');
+      /* The field exists only for a foreign credit (syncAcqField). Bound to #cm-amount's
+         input as well, so this also runs for a home-currency movement that has no 取得成本
+         at all — which must stay silent rather than warn about a hidden field. */
+      if (!isForeignMovement()) {
+        hint.className = 'cfx-balance';
+        hint.textContent = '';
+        return;
+      }
       var amt = $('#cm-amount').value.trim(), cost = $('#cm-acq').value.trim();
-      if ($('#cm-acq-mode').value === 'amount' && amt && cost
-          && Number(amt) > 0 && Number(cost) > 0) {
+      /* M5-03 (2026-09-03): the add form and the edit dialog disagreed about a BLANK
+         取得成本. The dialog's updAcqHint() has an `if (!cost)` branch that warns
+         「未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。」; the add form said
+         that only when the RATE LOOKUP had failed, because the sentence lived in
+         acqPrefillMsg and prefillAcq writes it only on the `available === false` branch.
+         Clear the box yourself on a day that HAS a rate and the message left standing was
+         「參考值：… 可直接修改」 — a reference to a value no longer in the field, at the entry
+         point where a stray select-all is likeliest, for the ONE operation that lowers
+         covered_ratio (domain-ledger.md F2). Same sentence as the dialog's on purpose: two
+         surfaces, one consequence, one wording. The lookup-failure reason is NOT replaced —
+         it explains an absence and stays true; only the prefill message, which described a
+         value we ourselves put there, is dropped. */
+      if (!cost) {
+        var blank = acqPrefillFilled || !acqPrefillMsg ? [] : [acqPrefillMsg];
+        blank.push('未登錄取得成本 — 此筆不列入加權平均，帳戶的匯損益會標示缺口。');
+        hint.className = 'cfx-balance warn';
+        hint.textContent = blank.join('　·　');
+        return;
+      }
+      var parts = acqPrefillMsg ? [acqPrefillMsg] : [];
+      if ($('#cm-acq-mode').value === 'amount' && amt && Number(amt) > 0
+          && Number(cost) > 0) {
         parts.push('換算後 1 ' + $('#cm-ccy').value + ' = '
           + (Number(cost) / Number(amt)).toFixed(4) + ' '
           + (fundingCcyOf($('#cm-account').value) || ''));
       }
-      $('#cm-acq-hint').textContent = parts.join('　·　');
+      hint.className = 'cfx-balance';
+      hint.textContent = parts.join('　·　');
     }
     $('#cm-acq').addEventListener('input', renderAcqHint);
-    $('#cm-acq-mode').addEventListener('change', renderAcqHint);
+    $('#cm-acq-mode').addEventListener('change', () => {
+      /* DEF-007: the page's prefill is a RATE. Switched to 家幣金額 it would be booked as an
+         amount (31.698999 TWD for 1,000 USD) — so the page retracts its OWN value; a value
+         the owner typed is left alone. */
+      if (autoFill($('#cm-acq'), '')) acqPrefillFilled = false;
+      renderAcqHint();
+    });
     $('#cm-amount').addEventListener('input', renderAcqHint);
     // The account select is covered by syncMovementCcy above; binding it here too would
     // fire a second, redundant prefill request for every account switch.
@@ -915,12 +1133,16 @@
     /* FU-D43a: NO ack-retry on movement POST — a withdrawal may never overdraft (the
        backend answers a hard 422 withdraw_insufficient_balance; deposits/openings are
        credits and need no balance guard, so POST can no longer answer negative_cash).
-       The live check already disables 確認 while the amount exceeds 賬戶現金; a backend
+       The live check already disables 確認 while the amount exceeds 帳戶現金; a backend
        422 renders inline under the amount as the authority (mirrors the FX form). */
     $('#cm-confirm').addEventListener('click', async () => {
       const amount = $('#cm-amount').value.trim();
       if (!amount) { if (window.toast) window.toast('請輸入金額', 'fail'); return; }
       const restore = window.pdBusy ? window.pdBusy($('#cm-confirm'), '寫入中…') : () => {};
+      /* DEF-007: what was SENT, so the post-commit clear below removes only that — a value
+         typed into the form during the round trip (5–30 s live) is the next entry. */
+      const sent = { amount: $('#cm-amount').value, note: $('#cm-note').value,
+        acq: $('#cm-acq').value };
       try {
         const payload = {
           account_id: $('#cm-account').value, date: $('#cm-date').value, kind: cmKind,
@@ -937,14 +1159,19 @@
         await api.post('/api/cash/movements', payload);
         restore();
         if (window.toast) window.toast('寫入成功', 'ok', (KIND_LABEL[cmKind] || '') + ' ' + amount);
-        $('#cm-amount').value = ''; $('#cm-note').value = ''; $('#cm-acq').value = '';
+        writeIfUntouched($('#cm-amount'), sent.amount, '');
+        writeIfUntouched($('#cm-note'), sent.note, '');
+        writeIfUntouched($('#cm-acq'), sent.acq, '');
+        // M5-03: the hint must describe the field's CURRENT content — clearing the box and
+        // leaving 「參考值：…」 standing is the same stale sentence by another route.
+        renderAcqHint();
         await boot();
       } catch (err) {
         restore();
         if (err && err.status === 422 && err.code === 'withdraw_insufficient_balance') {
           // Backend authority: render ITS message inline (verbatim) and keep 確認 blocked.
           // Editing the amount/帳戶/幣別 fires updCmBalance(), which re-validates against
-          // the pool and clears the block once the amount is within 賬戶現金.
+          // the pool and clears the block once the amount is within 帳戶現金.
           const errEl = $('#cm-amt-err');
           if (errEl) { errEl.hidden = false; errEl.textContent = err.message; }
           $('#cm-confirm').disabled = true;
@@ -959,10 +1186,22 @@
     function updImplied() {
       const fromA = parseFloat($('#cfx-from-amt').value) || 0;
       const toA = parseFloat($('#cfx-to-amt').value) || 0;
-      /* implied-rate what-if on the USER's own entry (input-side calc exception) */
-      $('#cfx-implied').textContent = (fromA > 0 && toA > 0)
-        ? '1 ' + $('#cfx-to-ccy').value + ' = ' + (fromA / toA).toFixed(4) + ' ' + $('#cfx-from-ccy').value
-        : f.NULL_GLYPH;
+      /* implied-rate what-if on the USER's own entry (input-side calc exception).
+         L6 (demo audit 2026-09-16): it always read 「1 買入幣 = x 賣出幣」, so USD 1,000 →
+         MYR 4,000 said 「1 MYR = 0.2500 USD」 while the same pair the other way round said
+         「1 USD = 4.0000 MYR」 — one rate, two spellings, and the ledger below quotes it the
+         conventional way. Quote the pair with the more valuable currency as the unit (the
+         rate ≥ 1 — USD/TWD 31.8, USD/MYR 4.08, MYR/TWD 7.8), whichever side is sold: the
+         same rule the backend's `implied_quote` applies to the ledger rows. */
+      const fromC = $('#cfx-from-ccy').value;
+      const toC = $('#cfx-to-ccy').value;
+      let txt = f.NULL_GLYPH;
+      if (fromA > 0 && toA > 0) {
+        txt = fromA >= toA
+          ? '1 ' + toC + ' = ' + (fromA / toA).toFixed(4) + ' ' + fromC
+          : '1 ' + fromC + ' = ' + (toA / fromA).toFixed(4) + ' ' + toC;
+      }
+      $('#cfx-implied').textContent = txt;
     }
 
     /* ---- FU-D43c: server-computed buy-amount estimate --------------------------------
@@ -973,16 +1212,58 @@
        (it can never fight the user) and the 重新試算 affordance appears; erasing the buy
        field to empty makes it pristine again (filling an EMPTY field destroys nothing).
        All hoisted function declarations — syncFxCcy() above calls them during init;
-       the estPristine/estSeq/estTimer state lives at MODULE scope (TDZ, see top). */
+       the estPristine/estSeq/estTimer state lives at MODULE scope (TDZ, see top).
+
+       M5-08 (P1) / M5-04, 2026-09-03 — THE AUTO-FILLED FIGURE MAY NEVER OUTLIVE THE SELL
+       AMOUNT IT WAS COMPUTED FROM. The estimate is a hint the user may overwrite (a
+       conversion is booked at the price actually dealt — that stays), but a value the PAGE
+       wrote is the page's to retract. It previously survived in two windows:
+
+         * clearing 賣出金額 hid the caption and left the old figure in the buy field, so the
+           form read 「— → 1,573.70」 with nothing to have produced it;
+         * a new 賣出金額 left it there for the whole round trip — measured at 1.91 s live —
+           so 可用餘額 filling 42,000 sat beside 1,573.70 (the 50,000 answer) and the only
+           tell was the 隱含匯率 line reading a rate no provider quoted.
+
+       Both windows end at a 確認 click that writes that pair into the ledger. So the
+       retraction is SYNCHRONOUS with the input event (scheduleEstimate, before the debounce
+       even starts), not deferred to the response: a fix that waited for the reply would
+       leave the window it exists to close. Invariant, asserted by
+       tests/e2e/test_m5_fx_estimate_staleness_flow.py: while the buy field is pristine its
+       content either answers the sell amount currently in the form, or is empty and
+       captioned 「試算中…」. */
 
     function setReestimateVisible(vis) {
       const b = $('#cfx-reestimate');
       if (b) b.hidden = !vis;
     }
 
+    /* The estimate request for the form as it stands, or null when there is nothing to
+       ask. ONE definition, read by both the scheduler and the runner — they disagreed
+       about "askable" and the gap was where the stale value lived. */
+    function estimateQuery() {
+      const from = $('#cfx-from-ccy').value;
+      const to = $('#cfx-to-ccy').value;
+      const amt = $('#cfx-from-amt').value.trim();
+      if (!from || !to || from === to || amt === '' || decCmp(amt, '0') <= 0) return null;
+      return { from_ccy: from, to_ccy: to, amount: amt };
+    }
+
+    /* Retract an AUTO-FILLED buy amount and say why. Never touches a value the user typed:
+       the estPristine guard is the whole difference between retracting our own hint and
+       deleting the owner's entry. */
+    function clearAutoEstimate(caption) {
+      if (!estPristine) return;
+      const to = $('#cfx-to-amt');
+      if (to && to.value !== '' && autoFill(to, '')) updImplied();
+      const cap = $('#cfx-estimate');
+      if (cap) { cap.hidden = !caption; cap.textContent = caption || ''; }
+    }
+
     function resetEstimate() {
       estSeq += 1;  // drop any in-flight response
       if (estTimer) { clearTimeout(estTimer); estTimer = null; }
+      estInFlight = false;
       estPristine = true;
       setReestimateVisible(false);
       const cap = $('#cfx-estimate');
@@ -991,28 +1272,29 @@
 
     async function runEstimate() {
       if (!estPristine) return;
-      const cap = $('#cfx-estimate');
-      const from = $('#cfx-from-ccy').value;
-      const to = $('#cfx-to-ccy').value;
-      const amt = $('#cfx-from-amt').value.trim();
-      if (!from || !to || from === to || amt === '' || decCmp(amt, '0') <= 0) {
-        if (cap) { cap.hidden = true; cap.textContent = ''; }
-        return;
-      }
+      const q = estimateQuery();
+      if (!q) { clearAutoEstimate(''); return; }
+      clearAutoEstimate('試算中…');  // also covers 重新試算, which does not go through the debounce
       const seq = ++estSeq;
+      estInFlight = true;
       let resp;
       try {
-        resp = await api.get('/api/cash/fx-estimate',
-          { from_ccy: from, to_ccy: to, amount: amt });
+        resp = await api.get('/api/cash/fx-estimate', q);
       } catch (err) {
-        return;  // the estimate is a hint — fail silent, never block entry
-      }
-      if (seq !== estSeq || !estPristine) return;  // stale, or the user took over
-      if (!resp || resp.available === false) {
-        if (cap) { cap.hidden = false; cap.textContent = (resp && resp.reason) || '暫無法試算'; }
+        // The estimate is a hint — never block entry. But the field must not be left
+        // holding an answer to a question that failed.
+        if (seq === estSeq) { estInFlight = false; clearAutoEstimate('暫無法試算'); }
         return;
       }
-      $('#cfx-to-amt').value = resp.estimate;  // server Decimal string, placed verbatim
+      if (seq !== estSeq || !estPristine) return;  // stale, or the user took over
+      estInFlight = false;
+      if (!resp || resp.available === false) {
+        clearAutoEstimate((resp && resp.reason) || '暫無法試算');
+        return;
+      }
+      const cap = $('#cfx-estimate');
+      // server Decimal string, placed verbatim — through the DEF-007 guard like every late write
+      if (!autoFill($('#cfx-to-amt'), resp.estimate)) { markBuyEdited(); return; }
       if (cap) {
         cap.hidden = false;
         cap.textContent = '以 ' + f.date(resp.rate_as_of) + ' 匯率 ' + f.rate(resp.rate) +
@@ -1024,7 +1306,17 @@
 
     function scheduleEstimate() {
       if (!estPristine) return;
-      if (estTimer) clearTimeout(estTimer);
+      /* Nulled, not just cleared: estTimer is now READ (by 確認, to tell 「試算中」 from 「請填
+         兩側金額」), so a cleared-but-non-null id would report a pending estimate forever. */
+      if (estTimer) { clearTimeout(estTimer); estTimer = null; }
+      /* Bumped UNCONDITIONALLY: an answer already in flight was computed for the PREVIOUS
+         sell amount, and letting it land during the debounce is the same stale figure by a
+         slower route. */
+      estSeq += 1;
+      estInFlight = false;
+      const q = estimateQuery();
+      clearAutoEstimate(q ? '試算中…' : '');
+      if (!q) return;
       estTimer = setTimeout(() => { estTimer = null; runEstimate(); }, 250);
     }
 
@@ -1032,14 +1324,29 @@
     function markBuyEdited() {
       estPristine = $('#cfx-to-amt').value.trim() === '';
       setReestimateVisible(!estPristine);
+      const cap = $('#cfx-estimate');
       if (estPristine) {
-        const cap = $('#cfx-estimate');
         if (cap) { cap.hidden = true; cap.textContent = ''; }
+        return;
+      }
+      /* M7 (demo audit 2026-09-16): a manual edit while the estimate was still in flight
+         left the caption at 「試算中…」 FOREVER — runEstimate's `!estPristine` early return
+         is right to drop the answer, but it dropped the caption's promise with it, so the
+         page announced a computation that would never complete. The caption is rewritten
+         SYNCHRONOUSLY with the edit (same posture as scheduleEstimate's retraction): the
+         buy amount is now the user's, and 重新試算 is the way back to the spot figure. */
+      if (cap) {
+        cap.hidden = false;
+        cap.textContent = '已手動指定買入金額 — 按「重新試算」可依即期匯率回填';
       }
     }
 
     $('#cfx-reestimate').addEventListener('click', () => {
       estPristine = true;  // explicit user request: the estimate may overwrite again
+      // …and that request hands the field's CURRENT value to the page (DEF-007): the guard
+      // lets a late write replace only what the page owns, and here the owner just gave it.
+      const buy = $('#cfx-to-amt');
+      if (buy && buy.value !== '') buy.dataset.pdAuto = buy.value;
       setReestimateVisible(false);
       runEstimate();
     });
@@ -1066,11 +1373,28 @@
     $('#cfx-confirm').addEventListener('click', async () => {
       const fromA = $('#cfx-from-amt').value.trim();
       const toA = $('#cfx-to-amt').value.trim();
-      if (!fromA || !toA) { if (window.toast) window.toast('請填兩側金額', 'fail'); return; }
+      if (!fromA || !toA) {
+        /* M5-04: the buy field is empty because WE are still filling it (fx-estimate was
+           measured at 1.91 s live), so 「請填兩側金額」 blamed the user for the page's own
+           latency and told them to do something that was about to undo itself. Name the
+           real reason — and still offer the always-valid way out, since the actual dealt
+           amount may be typed at any time. */
+        const pending = !toA && estPristine && (estTimer !== null || estInFlight);
+        if (window.toast) {
+          if (pending) {
+            window.toast('買入金額試算中，請稍候', 'fail',
+              '正在依匯率試算；也可直接填入實際成交金額');
+          } else {
+            window.toast('請填兩側金額', 'fail');
+          }
+        }
+        return;
+      }
       /* FU-D34: NO ack-retry — a conversion may never overdraft the pool. The live check
          already disables 確認 when the amount exceeds 可用餘額; the backend re-validates as
          the authority and a 422 fx_insufficient_balance renders inline under the amount. */
       const restore = window.pdBusy ? window.pdBusy($('#cfx-confirm'), '寫入中…') : () => {};
+      const sentFx = { from: $('#cfx-from-amt').value, to: $('#cfx-to-amt').value };  // DEF-007
       try {
         await api.post('/api/cash/fx', {
           account_id: $('#cfx-account').value, date: $('#cfx-date').value,
@@ -1079,7 +1403,9 @@
         });
         restore();
         if (window.toast) window.toast('換匯已寫入', 'ok', fromA + ' ' + $('#cfx-from-ccy').value + ' → ' + toA + ' ' + $('#cfx-to-ccy').value);
-        $('#cfx-from-amt').value = ''; $('#cfx-to-amt').value = ''; updImplied();
+        writeIfUntouched($('#cfx-from-amt'), sentFx.from, '');
+        writeIfUntouched($('#cfx-to-amt'), sentFx.to, '');
+        updImplied();
         resetEstimate();  // FU-D43c: cleared form -> pristine again, drop in-flight estimates
         await boot();  // refresh balances → the 可用餘額 ceiling updates (+ FU-D40 ledger)
       } catch (err) {
@@ -1126,7 +1452,7 @@
     await loadFxLedger();  // FU-D40: keep the 換匯中心 ledger in step with every refresh
     booted = true;
     updFxBalance();  // FU-D34: refresh the 換匯中心 可用餘額 ceiling from the fresh balances
-    updCmBalance();  // FU-D43a: refresh the 出金 賬戶現金 ceiling too
+    updCmBalance();  // FU-D43a: refresh the 出金 帳戶現金 ceiling too
   }
 
   /* FU-D25: re-render the activated tab's section from cached state on every tab switch.

@@ -16,6 +16,10 @@
     if (text !== undefined) n.textContent = text;
     return n;
   };
+  /* zh account name from the single naming authority (web/names.js, FU-D37); id fallback.
+     M5 (demo audit 2026-09-16): every inbox row carries `account_id`; the payload's English
+     `account_name` (「TW Broker」) is never printed again. */
+  const acctZh = (id) => (id ? (window.pdNames ? window.pdNames.account(id) : id) : '');
   const section = document.getElementById('inbox-section');
   if (!section) return;
   const list = $('#inbox-list');
@@ -45,6 +49,17 @@
         window.toast('已略過', 'ok', label + '・可於「已忽略」取消忽略');
       }
       await boot();
+      /* M6-01 (2026-09-03): repaint the SIDEBAR 收件匣 badge. shell.js exposes
+         window.pdRefreshInboxBadge for exactly this and its own comment names the three
+         callers it exists for — 「a rebate confirm/skip, a dividend commit, an inbox action」
+         — but only rebate-inbox.js ever called it, so this panel's actions moved its own
+         badge 4 → 3 and left the sidebar reading 4 with the title 「4 筆待確認（配息 4・折讓款
+         0）」 indefinitely. The network trace after a confirm carried no /count request at
+         all: an omission, not a race. Written inline at each mutating site, exactly as
+         rebate-inbox.js writes it — a shared local wrapper would hide the call from the
+         very grep that would have caught its absence. Non-critical and silent on failure
+         (shell.js swallows its own errors): a badge is a hint, never a gate. */
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     } catch (err) {
       if (window.toast) window.toast((err && err.message) || '操作失敗', 'fail', err && err.code);
     }
@@ -57,6 +72,10 @@
       confirmedSession.unshift({
         id: id, symbol: it.symbol || '', ex_date: it.ex_date || '',
         ccy: it.ccy || '', net: it.est_net,
+        /* M6-02: a 配股 has no money of its own (gross = net = 0 in the ledger, correctly) —
+           it is measured in SHARES. Carry both so renderStrip can label each row by the
+           figure that identifies it. */
+        kind: it.kind || '', shares: it.est_reinvest_shares,
       });
     });
     renderStrip();
@@ -75,7 +94,16 @@
       const row = el('div', 'icf-row');
       let txt = c.symbol || ('#' + c.id);
       if (c.ex_date) txt += '・' + (f ? f.date(c.ex_date) : c.ex_date);
-      if (c.net != null && c.ccy && f) txt += '・Net ' + f.money(c.net, c.ccy) + ' ' + c.ccy;
+      /* M6-02: 全部確認 on one group books the cash dividend AND the 配股, so two rows here
+         carry the SAME code and the SAME date. Labelling both by 「Net …」 printed the 配股 as
+         「Net 0 TWD」 — the ledger's honest figure, and useless as a name: each row sits beside
+         a 復原 button that DELETES a ledger row, so an ambiguous label is an ambiguous
+         destructive action. Label each row by the figure that identifies it. */
+      if (c.kind === 'stock') {
+        txt += '・配股' + (c.shares != null && f ? ' ' + f.shares(c.shares) + ' 股' : '');
+      } else if (c.net != null && c.ccy && f) {
+        txt += '・Net ' + f.money(c.net, c.ccy) + ' ' + c.ccy;
+      }
       row.appendChild(el('span', 'icf-label', txt));
       const undo = el('button', 'btn btn-sm', '復原');
       undo.type = 'button';
@@ -94,6 +122,8 @@
       renderStrip();
       if (window.toast) window.toast('已復原', 'ok', '帳本紀錄已刪除，項目將重新出現在收件匣');
       boot();
+      // M6-01: the item came BACK, so the badge goes UP — not only down (see act()).
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     });
   }
 
@@ -144,7 +174,7 @@
       const d = s.detail;
       let title = s.symbol || s.fingerprint;
       if (s.ex_date) title += '・除息 ' + (f ? f.date(s.ex_date) : s.ex_date);
-      if (d && d.account_name) title += '（' + d.account_name + '）';
+      if (d && d.account_id) title += '（' + acctZh(d.account_id) + '）';
       main.appendChild(el('span', null, title));
       let sub = '已忽略於 ' + (s.skipped_at ? String(s.skipped_at).slice(0, 10) : '—');
       if (d && d.est_gross != null && d.ccy && f) sub += '・預估 ' + f.money(d.est_gross, d.ccy) + ' ' + d.ccy;
@@ -163,6 +193,8 @@
     window.pdApi.post('/api/dividend-inbox/unskip', { fingerprints: [fp] }).then(() => {
       if (window.toast) window.toast('已取消忽略', 'ok', '項目將重新出現在收件匣');
       boot();
+      // M6-01: an un-skipped item re-enters the pending count (see act()).
+      if (window.pdRefreshInboxBadge) window.pdRefreshInboxBadge();
     }).catch((err) => {
       if (window.toast) window.toast((err && err.message) || '操作失敗', 'fail', err && err.code);
     });
@@ -218,10 +250,12 @@
         };
         main.appendChild(el('span', 'inbox-title',
           (KIND_TITLE[r.kind] || '偵測到配息') + '：' + r.symbol + ' ' + r.name +
-          '（' + r.account_name + '）'));
+          '（' + acctZh(r.account_id) + '）'));
         let sub;
         if (r.kind === 'stock') {
-          sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + r.per_share +
+          /* DEF-039: 元 of par per share, a provider Decimal — exact digits via f.exact
+             (f.money would round a 0.5 元 dividend to TWD's 0 dp). */
+          sub = '除息日 ' + f.date(r.ex_date) + '・股票股利 ' + f.exact(r.per_share) +
             ' 元（面額制）・除權時持有 ' + f.shares(r.shares_held) + ' 股 → 預估配得 ' +
             f.shares(r.est_reinvest_shares) + ' 股（$0 成本）';
         } else if (r.kind === 'drip') {
@@ -288,6 +322,21 @@
     return resp;
   }
 
+  /* DEF-015: the last manual detection's outcome, kept on the panel (the toast leaves after
+     30 s; which symbol failed, and why, is what the owner has to go and check). */
+  function renderRefreshStatus(text, partial) {
+    let line = $('#inbox-refresh-status');
+    if (!line) {
+      line = el('div', 'inbox-note');
+      line.id = 'inbox-refresh-status';
+      const strip = $('#inbox-confirmed-strip');
+      if (strip && strip.parentNode) strip.parentNode.insertBefore(line, strip);
+      else section.appendChild(line);
+    }
+    line.textContent = '上次偵測：' + text;
+    line.classList.toggle('warn', !!partial);
+  }
+
   /* 重新偵測 button in the panel head */
   const head = section.querySelector('.panel-head');
   if (head) {
@@ -302,8 +351,20 @@
         : { done: () => {}, fail: () => {} };
       const resp = await boot(true);
       restore();
-      if (resp) prog.done('偵測完成', (resp.refreshed || '') + '・待確認 ' + resp.total_count + ' 筆');
-      else prog.fail('偵測失敗', '請稍後再試');
+      /* DEF-015: `refreshed` is {updated, failed: [{symbol, reason}], text}, and `text` is the
+         SAME sentence the scheduled scan writes into its run history (the server builds it,
+         with the pending count). A partial refresh is not a success: it gets the warn face
+         and stays on the panel, naming each failed symbol and why. */
+      if (resp) {
+        const r = resp.refreshed || null;
+        const text = (r && r.text) || ('待確認 ' + resp.total_count + ' 筆');
+        const failed = (r && r.failed) || [];
+        renderRefreshStatus(text, failed.length > 0);
+        if (failed.length && prog.warn) prog.warn('偵測完成（部分標的失敗）', text);
+        else prog.done('偵測完成', text);
+      } else {
+        prog.fail('偵測失敗', '請稍後再試');
+      }
     });
     head.appendChild(btn);
   }

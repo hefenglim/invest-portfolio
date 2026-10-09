@@ -52,6 +52,15 @@
     sec.appendChild(lbl);
     return sec;
   }
+  /* M1-03 / D21 — a SPINOFF child's 回本進度 IS its parent's ratio (both totals scaled by the
+     same cost_carry), built on dividends the child never paid. The server says whose and how
+     much (Decimal strings); this composes the sentence — the same one app.js puts on the
+     chip's hover and detail.js prints under the drawer's stat. Text only, never money. */
+  function paybackProvenance(h) {
+    return '承接自 ' + h.payback_from_symbol + '：分拆時承接配息 '
+      + f.money(h.payback_carried_dividends, h.quote_ccy) + '・自身配息 '
+      + f.money(h.payback_own_dividends, h.quote_ccy);
+  }
   function emptyState(msg) {
     const wrap = elc('div', 'dvc-empty');
     wrap.appendChild(elc('span', 'dvc-empty-glyph', '∅'));
@@ -104,8 +113,9 @@
 #dividend-income-card .dvc-cal{display:flex;flex-direction:column;gap:8px;max-height:296px;
   overflow-y:auto;padding-right:2px}
 #dividend-income-card .dvc-pb{display:flex;flex-wrap:wrap;gap:8px 18px}
-#dividend-income-card .dvc-pb-item{display:flex;align-items:center;gap:8px;padding:6px 10px;
+#dividend-income-card .dvc-pb-item{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 10px;
   border:1px solid var(--border-soft);border-radius:var(--radius);background:var(--panel-2)}
+#dividend-income-card .dvc-pb-from{flex-basis:100%;white-space:normal}
 #dividend-income-card .dvc-pb-track{display:inline-block;width:64px;height:5px;border-radius:3px;
   background:var(--border);overflow:hidden}
 #dividend-income-card .dvc-pb-fill{display:block;height:100%;border-radius:3px;background:var(--accent)}
@@ -356,6 +366,10 @@
       if (h.dividend_portion !== null && h.dividend_portion !== undefined) {
         item.appendChild(elc('span', 'dvc-pb-amt',
           '累計 ' + f.money(h.dividend_portion, h.quote_ccy) + ' ' + h.quote_ccy));
+      }
+      /* M1-03 / D21 — full sentence here (owner ruling: the strip has the room). */
+      if (h.payback_from_symbol) {
+        item.appendChild(elc('span', 'dvc-pb-amt dvc-pb-from', paybackProvenance(h)));
       }
       strip.appendChild(item);
     });

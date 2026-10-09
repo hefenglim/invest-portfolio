@@ -46,6 +46,8 @@ import requests
 from pydantic import BaseModel, Field
 
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.account_ref import account_ref, resolve_account_refs
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.clock import app_now
 
 logger = logging.getLogger(__name__)
@@ -56,37 +58,48 @@ _APP_TZ = ZoneInfo("Asia/Taipei")
 # risk -> high(4), warn -> default(3), info -> low(2).
 _NTFY_PRIORITY: dict[str, int] = {"risk": 4, "warn": 3, "info": 2}
 
-# The alert/​signal rule catalog for the NOTIFICATION surface: (rule_id, zh label, severity).
-# This is the single Python source of the push-message labels + subscription defaults; the
-# ids MIRROR strategy.rules_config RULE_META + strategy.signal_states EVENT_* and the zh
-# labels mirror web/settings-alerts.js META + web/detail.js. A drift test
-# (tests/unit/test_notify.py) asserts this catalog covers every backend rule id so a new
-# rule can never silently ship without a push label.
-RULE_CATALOG: list[tuple[str, str, str]] = [
-    ("single_weight", "單一標的集中度", "risk"),
-    ("sector_weight", "產業集中度", "risk"),
-    ("stale_price", "價格過期", "warn"),
-    ("missing_price", "缺價", "warn"),
-    ("fx_drift", "匯率漂移", "info"),
-    ("exdiv_upcoming", "即將除息", "info"),
-    ("quota_low", "AI 額度偏低", "warn"),
-    ("calib_gap", "AI 校準誤差", "warn"),
-    # P3 batch 2 market-risk rules (mirror strategy.rules_config RULE_META). The push
-    # severity here is the rule's representative level (drawdown can escalate to risk).
-    ("drawdown_from_peak", "高點回撤", "risk"),
-    ("vol_spike", "波動突升", "warn"),
-    ("rebalance_drift", "配置漂移", "risk"),
-    ("consensus_change", "分析師共識轉弱", "info"),
-    ("target_cross", "目標價穿越", "warn"),  # FU-D28
-    ("signal_trend", "趨勢反轉", "info"),
-    ("signal_cross", "均線交叉", "info"),
-    ("signal_momentum", "動能轉向", "info"),
+# The rule catalog for the NOTIFICATION surface: ``(rule_id, zh label, severity)``, in the
+# order the 通知 settings page lists its subscription toggles. It is the push-message label
+# source and the subscription default set. The ids MIRROR ``strategy.rules_config.RULE_META``
+# + ``strategy.signal_states`` ``EVENT_*`` (``tests/unit/test_notify.py`` asserts the cover).
+#
+# DEF-062 (2026-09-25): the zh LABELS are no longer written here. Every alert-rule and signal
+# name is read from ``shared.alert_rule_names`` — the ONE table the settings page, the wizard,
+# the card chip, the digest and the run detail also read — so the push can no longer say
+# 「即將除息」 where the settings page says 「即將除息提醒」. Only the two digest labels stay here:
+# they are notification subscriptions, not rules, and nothing else names them.
+_CATALOG_SEVERITY: list[tuple[str, str]] = [
+    ("single_weight", "risk"),
+    ("sector_weight", "risk"),
+    ("stale_price", "warn"),
+    ("missing_price", "warn"),
+    ("fx_drift", "info"),
+    ("exdiv_upcoming", "info"),
+    ("quota_low", "warn"),
+    ("calib_gap", "warn"),
+    # P3 batch 2 market-risk rules. The push severity here is the rule's representative
+    # level (drawdown can escalate to risk).
+    ("drawdown_from_peak", "risk"),
+    ("vol_spike", "warn"),
+    ("rebalance_drift", "risk"),
+    ("consensus_change", "info"),
+    ("target_cross", "warn"),  # FU-D28
+    # R5 (investment-logic review): the two PORTFOLIO-level risks.
+    ("portfolio_drawdown", "risk"),
+    ("currency_weight", "risk"),
+    ("signal_trend", "info"),
+    ("signal_cross", "info"),
+    ("signal_momentum", "info"),
     # P3 batch 3 digests: the daily close summary + weekly action list push under their own
     # subscription toggles (counts/percentages only — B3-D4). These are NOT strategy rules,
     # so the RULE_IDS drift guard (subset check) is unaffected; load_config self-heals both
     # to subscribed=True on an existing install.
-    ("digest_daily", "每日收盤摘要", "info"),
-    ("digest_weekly", "每週行動清單", "info"),
+    ("digest_daily", "info"),
+    ("digest_weekly", "info"),
+]
+_DIGEST_LABELS: dict[str, str] = {"digest_daily": "每日收盤摘要", "digest_weekly": "每週行動清單"}
+RULE_CATALOG: list[tuple[str, str, str]] = [
+    (rid, _DIGEST_LABELS.get(rid) or rule_name(rid), sev) for rid, sev in _CATALOG_SEVERITY
 ]
 _RULE_LABEL: dict[str, tuple[str, str]] = {rid: (label, sev) for rid, label, sev in RULE_CATALOG}
 
@@ -317,13 +330,41 @@ def dispatch(
 # --- message formatting (pure) ------------------------------------------------
 
 
+#: I-16: how a push names a NON-symbol subject (``alert_events.scope``, DEF-037). The column
+#: ``alert_events.symbol`` holds the subject whatever it is — an account id for ``fx_drift``,
+#: a sector for ``sector_weight``, a currency for ``currency_weight`` — and this text used to
+#: print every one of them as a ticker (「schwab 匯率曝險偏移」).
+_SCOPE_LEAD: dict[str, str] = {"sector": "產業", "currency": "幣別", "task": "洞察任務"}
+
+
+def _push_account_label(account_id: str) -> str:
+    """How a push names an account. A push leaves through an external channel — no
+    ``web/api.js`` resolves the token there, and the backend holds no zh name
+    (``web/names.js`` is the one authority) — so the account is named EXPLICITLY as an
+    account, by id: 「帳戶 schwab」. Never ``accounts.name``: that is the English label the
+    owner never chose. The sentence is built with the shared token grammar and resolved
+    here, so a server-side display name, when it exists, changes this one function."""
+    return f"帳戶 {account_id}"
+
+
+def _subject_text(subject: str, scope: str | None) -> str:
+    if scope == "account":
+        return resolve_account_refs(account_ref(subject), _push_account_label)
+    lead = _SCOPE_LEAD.get(scope or "")
+    return f"{lead} {subject}" if lead else subject
+
+
 def format_event(
-    rule_id: str, symbol: str | None, *, linked: bool = False
+    rule_id: str, symbol: str | None, *, scope: str | None = None, linked: bool = False
 ) -> tuple[str, str, str]:
     """A fired alert event → ``(title, body, severity)`` in zh-TW (deterministic, pure).
 
-    Uses only the rule_id + symbol carried by the ``alert_events`` row — NO account
-    balances or amounts. An unknown rule id degrades to ``(rule_id, info)`` (never crashes).
+    Uses only the rule_id + subject (+ its ``scope``) carried by the ``alert_events`` row —
+    NO account balances or amounts. An id outside the catalog (the spec-04c
+    ``calibration_regression`` event) is named by ``shared.alert_rule_names`` at ``info``; an
+    id nobody named reads 「未命名規則」 — never the raw id on the owner's phone (DEF-062) — and
+    never crashes. ``symbol`` is the row's subject column: a ticker when ``scope`` is ``symbol``
+    or unrecorded (a legacy row), otherwise labelled by what it is (I-16).
 
     When ``linked`` is True a clickable deep link WILL be attached by the channel (ntfy
     ``click`` / Telegram + Email append the URL), so the body drops the now-redundant
@@ -331,11 +372,12 @@ def format_event(
     default, taken whenever no public base URL is configured) keeps the byte-identical
     legacy text so the link-free path is unchanged.
     """
-    label, severity = _RULE_LABEL.get(rule_id, (rule_id, "info"))
+    label, severity = _RULE_LABEL.get(rule_id) or (rule_name(rule_id), "info")
     tail = "。" if linked else "，請至儀表板查看詳情。"
-    if symbol:
-        title = f"portfolio-dash · {symbol} {label}"
-        body = f"{symbol}：觸發「{label}」預警{tail}"
+    if symbol and scope != "portfolio":
+        who = _subject_text(symbol, scope)
+        title = f"portfolio-dash · {who} {label}"
+        body = f"{who}：觸發「{label}」預警{tail}"
     else:
         title = f"portfolio-dash · {label}"
         body = f"觸發「{label}」預警{tail}"
@@ -367,10 +409,13 @@ def _frontend_path(href: str | None) -> str:
         return "index.html#sym=" + quote(m.group(1), safe="!*'()")
     if re.search(r"#sym=(.+)$", href):
         return href  # already carries a drawer anchor → pass through
-    if href == "/settings":
-        return "settings.html"
-    if href == "/settings#llm":
-        return "settings.html#llm"
+    # I-15: a settings deep link KEEPS its `#<tab>[/<anchor>]` (quota_low → #llm, calib_gap
+    # → #prompts/evolution). A bare "/settings" is a LEGACY href — stored on an alert_event
+    # before the fix and still pushable — and lands on the 預警 tab, where every global
+    # alert's rule lives, rather than on the default 帳戶與費率 tab.
+    m = re.match(r"^/settings(?:#([\w/-]+))?$", href)
+    if m:
+        return "settings.html#" + (m.group(1) or "alerts")
     if href == "/insights":
         return "insights.html"
     if href == "/pipeline":

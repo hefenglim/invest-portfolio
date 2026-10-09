@@ -4,8 +4,9 @@
 
    資料來源（全部經 window.pdApi）：
    - 分析模板  ← GET /api/strategy-prompts  ([{id,name,body,enabled,...}])
-   - 預警規則  ← GET /api/alert-rules        ({rules:[{id,...}]})
-   - 持倉標的  ← GET /api/dashboard          (holdings[].symbol)
+   - 預警規則  ← GET /api/alert-rules        ({rules:[{id,name,...}]} — name = zh 顯示名，DEF-062)
+   - 標的宇宙  ← GET /api/dashboard + /api/instruments，經 window.ppUniverseSource（pipeline.js，
+                 以代號去重 — DEF-032；與「編輯標的」對話框同一個定義）
    - 額度      ← GET /api/insight-tasks/status (health.quota_remaining, Decimal STRING)
    建立：POST /api/insight-tasks（InsightTypeIn）→（排程則）POST .../{id}/schedule → 預檢。
 
@@ -19,17 +20,20 @@
 
   var STEPS = ['觸發', '範圍', '組裝', '確認'];
 
-  /* Stable alert-rule id -> zh label (the /api/alert-rules payload carries ids only). */
-  var RULE_LABELS = {
-    single_weight: '單一標的集中度', sector_weight: '產業集中度',
-    stale_price: '價格過期/缺價', fx_drift: '匯率漂移',
-    exdiv_upcoming: '即將除息', quota_low: 'AI 額度偏低', calib_gap: 'AI 校準誤差'
-  };
-  function ruleLabel(id) { return RULE_LABELS[id] || id; }
+  /* DEF-062: a rule's zh name is the `name` GET /api/alert-rules carries on every rule — the
+     ONE table (portfolio_dash/shared/alert_rule_names.py) the settings › 預警規則 page reads
+     too. This file used to keep its own 7-entry table and fall back to the id, so 8 of the
+     15 checkboxes read `missing_price`, `vol_spike`, `target_cross` … A rule that somehow
+     arrives without a name reads 「未命名規則」 (and says so in the console) — never its id. */
+  function ruleLabel(r) {
+    if (r && r.name) return r.name;
+    if (window.console) console.warn('[DEF-062] alert rule without a name:', r && r.id);
+    return '未命名規則';
+  }
 
   window.ppWizard = function () {
     /* fetched reference data (filled before the wizard renders). */
-    var REF = { templates: [], rules: [], held: [], registered: [], quota: null };
+    var REF = { templates: [], rules: [], held: [], registered: [], src: null, quota: null };
     var tplOf = function (id) {
       return REF.templates.find(function (x) { return x.id === id; }) || null;
     };
@@ -42,27 +46,58 @@
     };
     var step = 0;
 
-    /* Load the reference data, THEN open the modal (so selectors are populated). */
+    /* Load the reference data, then FILL the already-open modal (so selectors are populated).
+       M7-02 (2026-09-03): this used to await the five fetches BEFORE calling ppModal, so
+       ＋新增洞察任務 produced no button state, no spinner, no toast and no shell for ~11.7s —
+       an unchanged screen, which reads as a dead button. The page's own 乾跑預檢 already had
+       the right shape (modal shell + 「執行預檢中…」 in 0.35s, pipeline-preflight.js), so the
+       feedback mechanism existed and this one button simply was not wired to it. The shell
+       now opens synchronously on the click and the stage is built when the data lands; the
+       five requests are unchanged (their latency is a separate, backlogged concern). */
     var loads = pdApi ? Promise.all([
       pdApi.get('/api/strategy-prompts').catch(function () { return []; }),
       pdApi.get('/api/alert-rules').catch(function () { return { rules: [] }; }),
-      pdApi.get('/api/dashboard').catch(function () { return { holdings: [] }; }),
+      /* M7-07: the shared window.pdDashboard promise, like app.js / charts.js /
+         detail.js / dividends-card.js / alerts.js / rebalance.js — this was the one
+         caller still issuing its own request, so opening the wizard rebuilt the whole
+         dashboard a SECOND time (and /api/insight-tasks/status below rebuilt it a
+         third). Same payload, one request. */
+      (window.pdDashboard || (window.pdDashboard = pdApi.get('/api/dashboard')))
+        .catch(function () { return { holdings: [] }; }),
       pdApi.get('/api/insight-tasks/status').catch(function () { return { health: {} }; }),
       pdApi.get('/api/instruments').catch(function () { return { list: [] }; })
     ]) : Promise.resolve([[], { rules: [] }, { holdings: [] }, { health: {} }, { list: [] }]);
 
+    /* The shell, on the click — mirrors the 乾跑預檢 loading modal. */
+    var slot = null;
+    var backdrop = window.ppModal('新增洞察任務', function (body) {
+      body.classList.add('wz-body');
+      slot = body;
+      body.appendChild(el('div', 'wz-note', '載入設定中…'));
+    }, true);
+    /* 加寬精靈 modal — scoped to THIS backdrop (the shell now opens before other layers
+       may have closed, so a bare document query could widen someone else's box). */
+    var wideBox = backdrop.querySelector('.pv-box.wide');
+    if (wideBox) wideBox.style.width = '880px';
+
     loads.then(function (res) {
       REF.templates = (Array.isArray(res[0]) ? res[0] : []).filter(function (x) { return !x.archived; });
       REF.rules = (res[1] && res[1].rules) || [];
-      REF.held = ((res[2] && res[2].holdings) || []).map(function (h) { return h.symbol; });
-      /* every registered instrument (held + watchlist) — drives the opt-in「含觀察標的」宇宙 */
-      REF.registered = ((res[4] && res[4].list) || []).map(function (i) { return i.symbol; });
+      /* DEF-032: the universe is a set of SYMBOLS. Holdings are (帳戶, 標的) rows, so mapping
+         them straight to symbols listed AAPL twice (嘉信＋Moomoo) and counted 14 檔 for 13.
+         The one definition lives in pipeline.js and is shared with the 編輯標的 dialog. */
+      REF.src = window.ppUniverseSource(res[2], res[4]);
+      REF.held = REF.src.held;
+      /* held + the ACTIVE watchlist (DEF-059: archived out) — drives the opt-in「含觀察標的」宇宙 */
+      REF.registered = REF.src.registered;
       REF.quota = res[3] && res[3].health ? res[3].health.quota_remaining : null;
-      openWizard();
+      /* dismissed (ESC / ✕ / backdrop) while loading → nothing to fill. */
+      if (!slot || !slot.isConnected) return;
+      openWizard(slot);
     });
 
-    function openWizard() {
-    window.ppModal('新增洞察任務', function (body) {
+    function openWizard(body) {
+      body.replaceChildren();
       body.classList.add('wz-body');
       var shell = el('div', 'wz-shell');
       var main = el('div', 'wz-main');
@@ -74,9 +109,7 @@
       /* ---- 右側即時管線預覽 ---- */
       function symCount() {
         if (d.scope !== 'per_symbol') return 1;
-        if (d.universe.mode === 'all') return REF.held.length;
-        if (d.universe.mode === 'all_registered') return REF.registered.length;
-        return (d.universe.symbols || []).length;
+        return window.ppUniverseSymbols(d.universe, REF.src).length;
       }
       function renderRail() {
         rail.replaceChildren();
@@ -95,7 +128,7 @@
           : d.scope === 'on_alert' ? '事件標的'
           : (d.universe.mode === 'all' ? '全部持倉 ' + REF.held.length
             : d.universe.mode === 'all_registered' ? '持倉＋觀察 ' + REF.registered.length
-            : '自選 ' + (d.universe.symbols || []).length) + ' 檔・每檔 1 卡'));
+            : '自選 ' + symCount()) + ' 檔・每檔 1 卡'));
         stack.appendChild(layer('守則', '全域守則（共用）'));
         if (!d.templates.length) stack.appendChild(layer('模板', '－ 尚未選擇 －', 'l-off'));
         d.templates.forEach(function (tid, i) {
@@ -190,7 +223,7 @@
                 renderRail();
               });
               lb.appendChild(cb);
-              lb.appendChild(el('span', null, ruleLabel(r.id)));
+              lb.appendChild(el('span', null, ruleLabel(r)));
               grid2.appendChild(lb);
             });
             stage.appendChild(grid2);
@@ -217,28 +250,17 @@
               grid4.style.gridTemplateColumns = 'repeat(3, 1fr)';
               grid4.appendChild(opt('全部持倉', REF.held.length + ' 檔・自動跟隨持倉變動', d.universe.mode === 'all', function () { d.universe = { mode: 'all' }; renderStage(); }));
               grid4.appendChild(opt('含觀察標的', REF.registered.length + ' 檔・持倉＋觀察清單（每檔皆計費）', d.universe.mode === 'all_registered', function () { d.universe = { mode: 'all_registered' }; renderStage(); }));
-              grid4.appendChild(opt('自選標的', '持倉勾選', d.universe.mode === 'custom', function () { d.universe = { mode: 'custom', symbols: d.universe.symbols || [] }; renderStage(); }));
+              grid4.appendChild(opt('自選標的', '勾選持倉或觀察標的', d.universe.mode === 'custom', function () { d.universe = { mode: 'custom', symbols: d.universe.symbols || [] }; renderStage(); }));
               stage.appendChild(grid4);
               if (d.universe.mode === 'custom') {
-                var grid5 = el('div', 'pv-symgrid');
-                grid5.style.marginTop = '8px';
-                if (!REF.held.length) grid5.appendChild(el('div', 'wz-note', '目前無持倉標的可選。'));
-                REF.held.forEach(function (sym) {
-                  var lb = el('label', 'pv-check');
-                  var cb = el('input');
-                  cb.type = 'checkbox';
-                  cb.value = sym;
-                  cb.checked = (d.universe.symbols || []).indexOf(sym) >= 0;
-                  cb.addEventListener('change', function () {
-                    d.universe.symbols = Array.prototype.slice.call(grid5.querySelectorAll('input:checked')).map(function (x) { return x.value; });
-                    renderRail();
-                  });
-                  lb.appendChild(cb);
-                  lb.appendChild(el('span', null, sym));
-                  lb.appendChild(el('span', 'pv-symtag', '持倉'));
-                  grid5.appendChild(lb);
+                /* one checkbox per SYMBOL with its account chips — the same picker the 編輯標的
+                   dialog uses (pipeline.js::ppUniversePicker). */
+                var picker = window.ppUniversePicker(REF.src, d.universe.symbols || [], function (syms) {
+                  d.universe.symbols = syms;
+                  renderRail();
                 });
-                stage.appendChild(grid5);
+                picker.style.marginTop = '8px';
+                stage.appendChild(picker);
               }
             }
           }
@@ -271,7 +293,7 @@
             stage.appendChild(row);
           });
           var lib = el('a', 'btn btn-sm', '＋ 需要新模板？前往模板庫');
-          lib.href = 'settings.html#prompts';
+          lib.href = 'settings.html#prompts/templates';   /* DEF-038: land ON the 策略提示詞 panel */
           stage.appendChild(lib);
         }
 
@@ -351,8 +373,10 @@
           return it;
         }).then(function (it) {
           document.querySelectorAll('.pv-backdrop').forEach(function (n) { n.remove(); });
+          /* DEF-053: the owner reads 「預警觸發」 on the wizard's own button — never the scope
+             identifier `on_alert` the payload carries. */
           window.toast('已建立洞察任務', 'ok',
-            payload.name + (payload.enabled ? '' : '：on_alert 任務預設停用，確認監聽規則後再啟用'));
+            payload.name + (payload.enabled ? '' : '：預警觸發任務預設停用，確認監聽規則後再啟用'));
           if (window.ppRefresh) window.ppRefresh();
           /* show the preflight for the freshly-created task. */
           if (it && it.id != null && window.ppPreflight) {
@@ -364,11 +388,6 @@
       }
 
       renderStage();
-    }, true);
-
-    /* 加寬精靈 modal */
-    var box = document.querySelector('.pv-box.wide');
-    if (box) box.style.width = '880px';
     }
   };
 

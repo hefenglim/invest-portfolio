@@ -1,7 +1,8 @@
 """帳本報告 — a print-optimized, self-contained HTML ledger report over a date range.
 
-Mirrors the four ledger data sources (the same rows the ``/api/ledgers/*`` reads and the
-ledgers CSV zip dump): 交易紀錄 / 股利紀錄 / 換匯紀錄 / 期初庫存. Each section is a
+Mirrors the ledger data sources the zip exports (the same rows ``/api/ledgers/*`` reads):
+交易紀錄 / 股利紀錄 / 換匯紀錄 / 期初庫存 / 公司行動 / 資金收支 — one section per exportable
+ledger, and ``tests/contract/test_export_ledger_list.py`` holds them to that. Each section is a
 chronological table with a per-section count line and — only where they arise naturally
 from the listed columns — simple per-currency ``Decimal`` sums (transaction net cash,
 dividend net, FX converted amounts, opening cost). This builder computes NO new money: it
@@ -12,23 +13,32 @@ offline and prints cleanly across many pages (page-break-safe rows, thead repeat
 Date range: transactions/dividends/FX filter on their event date; opening inventory filters
 on its build date. An empty section renders 「本區間無紀錄」. The header shows the range
 (「全部期間」 when unbounded).
+
+X1 (owner ruling 2026-10-05): a dividend the replay refused is listed in 股利紀錄 marked
+「未入帳（待釐清）」, its reason (the replay's own sentence) printed under the table, and it is
+LEFT OUT of 淨額合計 — it is in the ledger, but in no balance, return or total. One replay per
+report (``portfolio.returns.replay_dividend_refusals``) over the rows the report already read.
 """
 
 import sqlite3
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.store import (
+    StoredCashMovement,
+    StoredCorporateAction,
     StoredDividend,
     StoredFxConversion,
     StoredOpening,
     StoredTransaction,
-    list_accounts,
+    list_cash_movements,
+    list_corporate_actions,
     list_dividends,
     list_fx_conversions,
     list_instruments,
     list_opening,
     list_transactions,
+    load_ledger_bundle,
 )
 from portfolio_dash.export.artifact import ExportArtifact
 from portfolio_dash.export.report_html import (
@@ -42,12 +52,32 @@ from portfolio_dash.export.report_html import (
     _page_header,
     _version_line,
 )
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.returns import DividendRefusals, replay_dividend_refusals
+from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
+from portfolio_dash.shared.corporate_actions import KIND_ZH
+from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.ledger import dividend_effective_date, pending_from
+from portfolio_dash.shared.money import settled_notional
 
 _ZERO = Decimal("0")
 _DIV_TYPE_ZH = {"CASH": "現金", "STOCK": "配股", "DRIP": "DRIP", "NET": "淨額"}
 
 
 # --- shared helpers -----------------------------------------------------------------------
+
+
+def _acct_label(account_id: str) -> str:
+    """The 帳戶 cell's text: an ``{account:<id>}`` token, never ``accounts.name`` (DEF-045).
+
+    The backend has no zh account name — ``web/names.js`` is the one naming authority — and
+    this report used to print the English API label (「TW Broker」「Charles Schwab」) beside a
+    screen that says 台灣券商 / 嘉信 Schwab. The report is downloaded through
+    ``web/api.js::download``, whose ``_resolveBlobRefs`` swaps every token for the display name
+    (HTML-escaped) before the file is saved, exactly as for every other response.
+    """
+    return _esc(account_ref(account_id))
 
 
 def _in_range(d: date, frm: str | None, to: str | None) -> bool:
@@ -77,11 +107,18 @@ def _sym_cell(symbol: str, name: str) -> str:
     )
 
 
-def _side_chip(side_value: str) -> str:
+def _side_chip(side_value: str, *, daytrade: bool = False, short_sale: bool = False) -> str:
+    """The 買/賣 chip, plus DEF-013's 「當沖」「放空」 (owner ruling 2026-09-24) — the two
+    persisted flags that change what a row books, printed wherever the row is."""
     buy = side_value.upper() == "BUY"
     cls = "buy" if buy else "sell"
     label = "買" if buy else "賣"
-    return f'<span class="chip {cls}">{label}</span>'
+    out = f'<span class="chip {cls}">{label}</span>'
+    if daytrade:
+        out += ' <span class="chip">當沖</span>'
+    if short_sale:
+        out += ' <span class="chip">放空</span>'
+    return out
 
 
 def _totals_line(label: str, totals: dict[str, Decimal]) -> str:
@@ -98,6 +135,34 @@ def _totals_line(label: str, totals: dict[str, Decimal]) -> str:
 
 def _add(totals: dict[str, Decimal], ccy: str, value: Decimal) -> None:
     totals[ccy] = totals.get(ccy, _ZERO) + value
+
+
+_RATE_Q = Decimal("0.0001")
+
+
+def _fmt_rate(value: Decimal) -> str:
+    """An FX rate at 4 dp, ROUND_HALF_UP — matches ``web/format.js`` ``rateExact(v, 4)``.
+
+    A rate is NOT money (data-and-pricing.md): it never takes a currency's minor unit, so it
+    does not go through ``_fmt_amount`` — that printed the 換匯 隱含匯率 as 「28」 for a TWD leg.
+    """
+    return f"{value.quantize(_RATE_Q, rounding=ROUND_HALF_UP):,.4f}"
+
+
+def _date_cell(shown: date, today: date, counts_on: date | None = None) -> str:
+    """A row's date cell, plus DEF-056's 「未來日期：YYYY-MM-DD 起計入」 when the row does not
+    count yet on the report's valuation day (the server's ``now``).
+
+    The predicate is the valuation cut's own — ``shared.models.ledger.pending_from``, the one
+    the ledger lists' ``counts_from`` and every valuation read — so a printed row and the
+    figures it explains can never disagree about whether it counts. *counts_on* differs from
+    *shown* only for a dividend, which counts from its EFFECTIVE date (a 配股's ex-date).
+    """
+    pending = pending_from(counts_on if counts_on is not None else shown, today)
+    mark = ("" if pending is None
+            else '<br><span class="chip future">'
+                 f"未來日期：{_esc(pending.isoformat())} 起計入</span>")
+    return f'<td class="num">{_esc(shown.isoformat())}{mark}</td>'
 
 
 def _empty_section(title: str) -> str:
@@ -119,11 +184,11 @@ def _section(title: str, count: int, head: str, rows: str, totals_lines: list[st
 
 def _transactions_section(
     txs: list[StoredTransaction],
-    accts: dict[str, str],
     names: dict[str, str],
     ccys: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     net_totals: dict[str, Decimal] = {}
@@ -133,15 +198,19 @@ def _transactions_section(
             continue
         count += 1
         ccy = ccys.get(t.symbol, "")
-        gross = t.quantity * t.price
+        # The settled 價金 the cash pool books (owner 2026-09-30); an unregistered symbol
+        # (no currency) cannot have ledger rows, so the raw product is an unreachable fallback.
+        gross = (settled_notional(t.quantity, t.price, Currency(ccy)) if ccy
+                 else t.quantity * t.price)
         net = -(gross + t.fees + t.tax) if t.side.value == "BUY" else (gross - t.fees - t.tax)
         _add(net_totals, ccy, net)
+        side = _side_chip(t.side.value, daytrade=t.daytrade, short_sale=t.short_sale)
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(t.trade_date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(t.account_id, t.account_id))}</td>'
+            f"{_date_cell(t.trade_date, today)}"
+            f'<td class="l">{_acct_label(t.account_id)}</td>'
             f"{_sym_cell(t.symbol, names.get(t.symbol, ''))}"
-            f'<td class="l">{_side_chip(t.side.value)}</td>'
+            f'<td class="l">{side}</td>'
             f'<td class="num">{_fmt_shares(t.quantity)}</td>'
             f'<td class="num">{_fmt_amount(t.price, ccy)}</td>'
             f'<td class="num">{_fmt_amount(t.fees, ccy)}</td>'
@@ -163,31 +232,43 @@ def _transactions_section(
 
 def _dividends_section(
     divs: list[StoredDividend],
-    accts: dict[str, str],
     names: dict[str, str],
     ccys: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
+    *,
+    refusals: DividendRefusals,
 ) -> str:
     rows: list[str] = []
     net_totals: dict[str, Decimal] = {}
     count = 0
+    unbooked: list[str] = []
     for d in divs:
         if not _in_range(d.date, frm, to):
             continue
         count += 1
         ccy = ccys.get(d.symbol, "")
-        _add(net_totals, ccy, d.net)
+        why = refusals.why(d)
+        if why is None:
+            _add(net_totals, ccy, d.net)
+        else:
+            # X1: listed, marked, its reason under the table — and out of 淨額合計.
+            unbooked.append(
+                f'<p class="note">{_esc(d.date.isoformat())}・{_esc(d.symbol)}・'
+                f"{_esc(UNBOOKED_DIVIDEND_NOTE)}：{_esc(why[1])}</p>")
         if d.reinvest_shares is not None:
             reinvest = f"{_fmt_shares(d.reinvest_shares)} 股 @ {_fmt_amount(d.reinvest_price, ccy)}"
         else:
             reinvest = _NULL
+        mark = ("" if why is None
+                else f'<br><span class="chip unbooked">{_esc(UNBOOKED_DIVIDEND_NOTE)}</span>')
         rows.append(
-            "<tr>"
-            f'<td class="num">{_esc(d.date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(d.account_id, d.account_id))}</td>'
+            ("<tr>" if why is None else '<tr class="unbooked">')
+            + f"{_date_cell(d.date, today, dividend_effective_date(d.type, d.date, d.ex_date))}"
+            f'<td class="l">{_acct_label(d.account_id)}</td>'
             f"{_sym_cell(d.symbol, names.get(d.symbol, ''))}"
-            f'<td class="l">{_esc(_DIV_TYPE_ZH.get(d.type.upper(), d.type))}</td>'
+            f'<td class="l">{_esc(_DIV_TYPE_ZH.get(d.type.upper(), d.type))}{mark}</td>'
             f'<td class="num">{_fmt_amount(d.gross, ccy)}</td>'
             f'<td class="num">{_fmt_amount(d.withholding, ccy)}</td>'
             f'<td class="num">{_amount_ccy(d.net, ccy)}</td>'
@@ -201,16 +282,19 @@ def _dividends_section(
         '<th class="l">類型</th><th>總額</th><th>預扣</th><th>淨額</th>'
         "<th>再投資</th></tr>"
     )
-    return _section(
-        "股利紀錄", count, head, "".join(rows), [_totals_line("淨額合計", net_totals)]
-    )
+    notes = [_totals_line("淨額合計", net_totals)]
+    if unbooked:
+        notes.append(f'<p class="note">其中 {len(unbooked)} 筆標示「'
+                     f"{_esc(UNBOOKED_DIVIDEND_NOTE)}」，不計入淨額合計：</p>")
+        notes.extend(unbooked)
+    return _section("股利紀錄", count, head, "".join(rows), notes)
 
 
 def _fx_section(
     convs: list[StoredFxConversion],
-    accts: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     out_totals: dict[str, Decimal] = {}
@@ -222,12 +306,21 @@ def _fx_section(
         count += 1
         _add(out_totals, c.from_ccy.value, c.from_amount)
         _add(in_totals, c.to_ccy.value, c.to_amount)
-        rate = (f"1 {_esc(c.to_ccy.value)} = "
-                f"{_fmt_amount(c.implied_rate, c.from_ccy.value)} {_esc(c.from_ccy.value)}")
+        # QA-10: a conversion that received nothing has no implied rate. The whole cell is
+        # 「—」 rather than 「1 USD = — TWD」, which reads as a missing digit in a real sentence.
+        # M3-08: the rate is formatted as a RATE (4 dp), never through `_fmt_amount` in the
+        # from-currency's minor unit — that printed 27.99998642… as 「28」 because TWD is 0 dp.
+        # L6 (2026-09-16): quoted the conventional way (rate ≥ 1, the more valuable currency
+        # as the unit) via `implied_quote`, the same rule the ledger pages and the entry form
+        # follow — a USD→MYR row no longer reads 「1 MYR = 0.2500 USD」.
+        quote = c.implied_quote
+        rate = _NULL if quote is None else (
+            f"1 {_esc(quote[0].value)} = "
+            f"{_fmt_rate(quote[2])} {_esc(quote[1].value)}")
         rows.append(
             "<tr>"
-            f'<td class="num">{_esc(c.date.isoformat())}</td>'
-            f'<td class="l">{_esc(accts.get(c.account_id, c.account_id))}</td>'
+            f"{_date_cell(c.date, today)}"
+            f'<td class="l">{_acct_label(c.account_id)}</td>'
             f'<td class="num">{_amount_ccy(c.from_amount, c.from_ccy.value)}</td>'
             f'<td class="num">{_amount_ccy(c.to_amount, c.to_ccy.value)}</td>'
             f'<td class="num">{rate}</td>'
@@ -247,11 +340,11 @@ def _fx_section(
 
 def _openings_section(
     openings: list[StoredOpening],
-    accts: dict[str, str],
     names: dict[str, str],
     ccys: dict[str, str],
     frm: str | None,
     to: str | None,
+    today: date,
 ) -> str:
     rows: list[str] = []
     cost_totals: dict[str, Decimal] = {}
@@ -264,12 +357,12 @@ def _openings_section(
         _add(cost_totals, ccy, o.original_cost_total)
         rows.append(
             "<tr>"
-            f'<td class="l">{_esc(accts.get(o.account_id, o.account_id))}</td>'
+            f'<td class="l">{_acct_label(o.account_id)}</td>'
             f"{_sym_cell(o.symbol, names.get(o.symbol, ''))}"
             f'<td class="num">{_fmt_shares(o.shares)}</td>'
             f'<td class="num">{_fmt_amount(o.original_avg, ccy)}</td>'
             f'<td class="num">{_amount_ccy(o.original_cost_total, ccy)}</td>'
-            f'<td class="num">{_esc(o.build_date.isoformat())}</td>'
+            f"{_date_cell(o.build_date, today)}"
             "</tr>"
         )
     if not rows:
@@ -280,6 +373,138 @@ def _openings_section(
     )
     return _section(
         "期初庫存", count, head, "".join(rows), [_totals_line("原始成本合計", cost_totals)]
+    )
+
+
+def _actions_section(
+    actions: list[StoredCorporateAction],
+    names: dict[str, str],
+    frm: str | None,
+    to: str | None,
+    today: date,
+    fees: dict[int, StoredCashMovement] | None = None,
+) -> str:
+    """公司行動 — the one section with NO money column, and that is the point.
+
+    A corporate action moves shares without moving cash (spec §2.1), so there is nothing to
+    total: a 「合計」 line here would have to be zero or invented. What the reader needs
+    instead is the ratio **as two terms**, exactly as stored — printing a quotient would put
+    a rounded number on a page whose whole purpose is reconciliation, and the two-term form
+    is what makes 7-for-1 legible as 7-for-1 rather than as 0.142857.
+
+    Added 2026-08-16. Until then this report showed four ledgers out of six and its button
+    called them 「四帳本＋期初庫存」 — five names for four sections, with the one ledger that
+    explains a changed share count missing. A printed ledger that cannot explain why 100
+    shares became 700 is a ledger that does not reconcile.
+
+    DEF-052 (2026-09-25): the linked reorganisation fee (*fees*, keyed by action id) is
+    printed ON the action's row — it was visible only in the web delete/edit dialogs. The
+    fee is still a cash movement (listed, and totalled, in 資金收支), so this column names the
+    link and is deliberately not totalled here: a second total would count the fee twice.
+    """
+    fees = fees or {}
+    rows: list[str] = []
+    count = 0
+    for a in sorted(actions, key=lambda x: (x.date, x.id)):
+        if not _in_range(a.date, frm, to):
+            continue
+        count += 1
+        moves = (
+            _sym_cell(a.from_symbol, names.get(a.from_symbol, ""))
+            if a.from_symbol == a.to_symbol
+            else (f'<td class="l">{_esc(a.from_symbol)} → {_esc(a.to_symbol)}</td>')
+        )
+        carry = (
+            f"{_fmt_amount(a.cost_carry * Decimal(100), '')}%"
+            if a.cost_carry is not None else _NULL
+        )
+        fee = fees.get(a.id)
+        fee_cell = (_amount_ccy(fee.amount, fee.ccy.value) if fee is not None
+                    else _esc(_NULL))
+        rows.append(
+            "<tr>"
+            f"{_date_cell(a.date, today)}"
+            f'<td class="l">{_acct_label(a.account_id)}</td>'
+            f'<td class="l">{_esc(KIND_ZH.get(a.kind.upper(), a.kind))}</td>'
+            f"{moves}"
+            f'<td class="num">{_fmt_shares(a.ratio_from)} → {_fmt_shares(a.ratio_to)}</td>'
+            f'<td class="num">{_esc(carry)}</td>'
+            f'<td class="num">{fee_cell}</td>'
+            f'<td class="l">{_esc(a.note or "")}</td>'
+            "</tr>"
+        )
+    if not rows:
+        return _empty_section("公司行動")
+    head = (
+        '<tr><th>日期</th><th class="l">帳戶</th><th class="l">類型</th>'
+        '<th class="l">代號 / 名稱</th><th>比例（原 → 新）</th>'
+        "<th>成本分攤</th><th>重組費用</th><th class=\"l\">備註</th></tr>"
+    )
+    return _section(
+        "公司行動", count, head, "".join(rows),
+        ["公司行動本身不移動現金，故本節無金額合計；連帶的重組費用已記在「資金收支」（出金），"
+         "此欄僅標示連結、不另計合計。"],
+    )
+
+
+def _linked_fees(moves: list[StoredCashMovement]) -> dict[int, StoredCashMovement]:
+    """Action id → the cash movement written FOR it (DEF-020's link, DEF-052's column) —
+    the first per action, the same rule the ledger API's ``reorg_fee`` reads."""
+    out: dict[int, StoredCashMovement] = {}
+    for m in moves:
+        if m.corporate_action_id is not None:
+            out.setdefault(m.corporate_action_id, m)
+    return out
+
+
+def _cash_section(
+    moves: list[StoredCashMovement],
+    frm: str | None,
+    to: str | None,
+    today: date,
+) -> str:
+    """資金收支 — the sixth and last ledger, printable since 2026-08-16.
+
+    **The sign comes from the kind, not from the stored amount** (`shared/cash_kinds.py`):
+    amounts are stored unsigned, so a fee and a deposit are the same number until the kind
+    is consulted. This section therefore prints the signed figure and totals it that way —
+    printing seven unsigned rows under one 「金額」 column would show money leaving the
+    account as money arriving, which is the one thing a statement must not do.
+
+    ``acq_home_amount`` gets its own column rather than a derived rate: F1 forbids storing a
+    rate, and deriving one for display here would be a second place that decides how to
+    round it.
+    """
+    rows: list[str] = []
+    totals: dict[str, Decimal] = {}
+    count = 0
+    for m in sorted(moves, key=lambda x: (x.date, x.id)):
+        if not _in_range(m.date, frm, to):
+            continue
+        count += 1
+        ccy = m.ccy.value
+        signed = m.amount * movement_sign(m.kind)
+        _add(totals, ccy, signed)
+        acq = (_fmt_amount(m.acq_home_amount, "") if m.acq_home_amount is not None
+               else _NULL)
+        rows.append(
+            "<tr>"
+            f"{_date_cell(m.date, today)}"
+            f'<td class="l">{_acct_label(m.account_id)}</td>'
+            f'<td class="l">{_esc(CASH_KIND_ZH.get(m.kind.upper(), m.kind))}</td>'
+            f'<td class="num">{_amount_ccy(signed, ccy)}</td>'
+            f'<td class="num">{_esc(acq)}</td>'
+            f'<td class="l">{_esc(m.note or "")}</td>'
+            "</tr>"
+        )
+    if not rows:
+        return _empty_section("資金收支")
+    head = (
+        '<tr><th>日期</th><th class="l">帳戶</th><th class="l">類型</th>'
+        '<th>金額</th><th>取得成本（家幣）</th><th class="l">備註</th></tr>'
+    )
+    return _section(
+        "資金收支", count, head, "".join(rows), [_totals_line("淨額合計", totals)]
     )
 
 
@@ -298,18 +523,28 @@ def build_ledgers_report_html(
     conn: sqlite3.Connection, *, now: datetime, frm: str | None, to: str | None
 ) -> ExportArtifact:
     """Build the print-optimized 帳本報告 for [frm, to] (read-only; no writes)."""
-    accts = {a.account_id: a.name for a in list_accounts(conn)}
     insts = list_instruments(conn)
     names = {i.symbol: i.name for i in insts}
     ccys = {i.symbol: i.quote_ccy.value for i in insts}
+    moves = list_cash_movements(conn)
+    # Each ledger read ONCE: the sections list them, and X1's replay books them.
+    txs, divs, opening = list_transactions(conn), list_dividends(conn), list_opening(conn)
+    actions = list_corporate_actions(conn)
+    refusals = replay_dividend_refusals(load_ledger_bundle(
+        conn, transactions=txs, dividends=divs, opening=opening, actions=actions,
+        instruments={i.symbol: i for i in insts}))
+    # DEF-056: the report's valuation day — the SERVER clock, as the ledger lists' counts_from.
+    today = now.date()
 
     body = "\n".join(
         [
             _header_html(now, frm, to),
-            _transactions_section(list_transactions(conn), accts, names, ccys, frm, to),
-            _dividends_section(list_dividends(conn), accts, names, ccys, frm, to),
-            _fx_section(list_fx_conversions(conn), accts, frm, to),
-            _openings_section(list_opening(conn), accts, names, ccys, frm, to),
+            _transactions_section(txs, names, ccys, frm, to, today),
+            _dividends_section(divs, names, ccys, frm, to, today, refusals=refusals),
+            _fx_section(list_fx_conversions(conn), frm, to, today),
+            _openings_section(opening, names, ccys, frm, to, today),
+            _actions_section(actions, names, frm, to, today, fees=_linked_fees(moves)),
+            _cash_section(moves, frm, to, today),
             _page_footer("帳本為 append-only：更正以新紀錄沖銷，原紀錄永久保留。"),
         ]
     )

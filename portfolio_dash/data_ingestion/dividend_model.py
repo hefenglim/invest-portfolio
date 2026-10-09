@@ -15,8 +15,30 @@ class DividendAmounts(BaseModel):
     reinvest_price: Decimal | None = None
 
 
+#: Batch B (F01): the dividend ``type`` values each STORED (account, market) dividend model
+#: accepts. A merged dual-market account would otherwise mis-book one market's dividends (MY
+#: cash as DRIP with a fabricated 30% withholding, or a US dividend missing withholding) —
+#: corrupt money of record. Dormant for a single-market account whose only model matches.
+#:
+#: US Schwab/Moomoo: DRIP is the account's default mechanism, but a US payout that arrives as
+#: PLAIN CASH is ordinary, not exceptional (P1b, 2026-08-13) — and it needs NO accounting
+#: change: a CASH row falls into ``CASH_DIVIDEND_TYPES`` (``shared/models/enums.py``), so it
+#: reduces ``adjusted_total`` exactly as a TW/MY cash dividend does (owner ruling D35,
+#: 2026-08-10).
+#:
+#: Moved here from ``dividend_import`` (DEF-061, 2026-09-25) so the ONE dividend validator
+#: (``validate.validate_dividend``) and the CSV door read the same table.
+MODEL_ALLOWED_TYPES: dict[str, frozenset[str]] = {
+    "cash_cost_reduction": frozenset({"CASH", "STOCK"}),  # TW: cash cost-reduction (+ 配股)
+    "drip_us": frozenset({"DRIP", "CASH"}),
+    "cash": frozenset({"NET"}),                            # MY single-tier: net received
+}
+
 _US_WITHHOLDING = Decimal("0.30")
 _ZERO = Decimal("0")
+# The M4 bound, restated: ``validate._MAX_MAGNITUDE`` is the owner of the number; this module
+# imports nothing above ``shared/`` and is kept that way (see ``check_amounts``).
+_MAX_MAGNITUDE = Decimal("1e12")
 
 
 def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | None:
@@ -30,20 +52,29 @@ def check_amounts(gross: Decimal, withholding: Decimal, net: Decimal) -> str | N
 
     What it does NOT do is demand ``gross - withholding == net``. That identity belongs to the
     US DRIP model alone, not to dividends in general: a TW cash dividend legitimately nets
-    less than gross through deductions this app DOES NOT MODEL (二代健保補充保費, 匯費), and a
-    US payout can carry an ADR fee. Rejecting those would push the user to falsify the gross.
-    The real invariant is conservation: a payout can never DELIVER more than it declared.
+    less than gross through statutory levies and remittance charges this app DOES NOT MODEL,
+    and a US payout can carry an ADR fee. Rejecting those would push the user to falsify the
+    gross. The real invariant is conservation: a payout can never DELIVER more than it
+    declared. (That wrong identity was genuinely proposed once — see ``LESSONS_LEARNED.md`` —
+    which is why the reason this gate is lenient is written here rather than left to be
+    re-derived by the next reader.)
 
     To be unambiguous, because the wording above has been misread once: **no levy other than
-    the US 30% DRIP withholding is computed anywhere in this codebase.** 二代健保補充保費 is
-    named here only as an EXAMPLE of a legal gross/net gap the gate must tolerate — there is
-    no rate, threshold or field for it in ``FEE_RULES`` or in the dividend model (owner
-    decision 2026-07-26: out of scope; fees/taxes stop at 手續費 + 證交稅). For a TW cash
+    the US 30% DRIP withholding is computed anywhere in this codebase, and none is planned.**
+    There is no rate, threshold or field for any TW dividend levy in ``FEE_RULES`` or in the
+    dividend model, and per the owner's ruling of 2026-08-27 (spec ``AI-D55``) that is a
+    PERMANENT exclusion, not a deferral — fees and taxes stop at 手續費 + 證交稅. For a TW cash
     dividend the user types the net actually received and that number is what reaches the
     ledger; the gap is simply unexplained, not itemised.
     """
     if gross < _ZERO or withholding < _ZERO or net < _ZERO:
         return "股利金額不可為負"
+    # M5-05 (owner ruling 2026-09-06): the same 1e12 bound ``validate._MAX_MAGNITUDE`` puts on
+    # shares/price and the cash / 換匯 amounts. A 31-digit dividend previewed ``ok`` and was
+    # stored verbatim, after which every pool sum holding it lost its last digit to the
+    # 28-digit Decimal context. Here, in the ONE gate, so the CSV door and the edit door agree.
+    if gross > _MAX_MAGNITUDE or withholding > _MAX_MAGNITUDE or net > _MAX_MAGNITUDE:
+        return "股利金額過大，無法處理"
     if withholding + net > gross:
         return (
             f"股利金額不自洽：預扣 {withholding} + 淨額 {net} 大於總額 {gross}"

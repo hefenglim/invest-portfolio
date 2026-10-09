@@ -161,6 +161,126 @@ def test_insights_list_returns_stored_card(
     assert len(grouped["groups"][0]["cards"]) == 1
 
 
+def test_insights_list_carries_figure_flags(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M9 (audit 2026-09-16): every card carries the read-time figure check on the wire.
+
+    The audit measured a card printing 「未實現獲利 429.1 萬美元」 whose sibling from the same
+    batch said 「4,290.80 美元」 (×1000), and one naming 「LRDIM (6883)」 — a code held nowhere.
+    The check compares the card's text against its OWN stored ``input_snapshot`` and flags;
+    it never hides the card, so ``title``/``summary`` come back unchanged either way.
+    """
+    import json
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+    snapshot = json.dumps({"unrealized_pnl": "4290.80", "cost_total": "11951"})
+
+    def _store(card: InsightCard, fp: str) -> None:
+        istore.add_card(
+            golden_db, insight_type_id=it_id, card=card,
+            fingerprint=istore.fingerprint(it_id, fp, "d", "v1"), calibration_version=None,
+            horizon_days=5, input_snapshot=snapshot, model="m", cost_usd=Decimal("0"),
+            now=now,
+        )
+
+    _store(InsightCard(
+        title="持倉檢視", summary="未實現獲利 429.1 萬美元", body_md="留意 LRDIM (6883)。",
+        tags=[],
+    ), "bad")
+    _store(InsightCard(
+        title="持倉檢視", summary="未實現收益 4,290.80 美元，成本 11,951 美元。",
+        body_md="台積電 (2330) 部位不變。", tags=[],
+    ), "good")
+
+    rows = {r["summary"]: r for r in api_client.get("/api/insights").json()["rows"]}
+    bad = rows["未實現獲利 429.1 萬美元"]
+    good = rows["未實現收益 4,290.80 美元，成本 11,951 美元。"]
+    assert bad["figure_flags"] == {
+        "unverified_figures": ["429.1 萬"], "unknown_symbols": ["6883"], "snapshot": "checked",
+    }
+    assert good["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "checked",
+    }
+    assert bad["summary"] == "未實現獲利 429.1 萬美元"  # flagged, never hidden
+    # the grouped shape serializes through the same helper
+    grouped = api_client.get("/api/insights?group=symbol").json()
+    for grp in grouped["groups"]:
+        for card in grp["cards"]:
+            assert set(card["figure_flags"]) == {
+                "unverified_figures", "unknown_symbols", "snapshot",
+            }
+
+
+def test_legacy_card_reads_as_unchecked_on_the_wire_not_clean(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """M9 re-verification (2026-09-17): the audit's #37 card exactly as the demo stores it.
+
+    Every pre-existing row holds ``input_snapshot = "<date>|<target>"`` (the fingerprint
+    fallback — ``RunInputs.input_snapshots`` was never fed) and an empty ``prompt_figures``.
+    The first fix returned ``unverified_figures: []`` for that shape, so the ×1000 card wore
+    no pill. Now the wire says ``snapshot: "none"`` and the page renders 「無快照可核」; a
+    row that DOES carry a recorded population is checked through the same helper.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 7, 5, 18, 22, tzinfo=ZoneInfo("Asia/Taipei"))
+
+    def _store(card: InsightCard, fp: str, prompt_figures: str = "") -> None:
+        istore.add_card(
+            golden_db, insight_type_id=it_id, card=card,
+            fingerprint=istore.fingerprint(it_id, fp, "d", "v1"), calibration_version=None,
+            horizon_days=5, input_snapshot="2026-07-05|US", model="m",
+            cost_usd=Decimal("0"), now=now, prompt_figures=prompt_figures,
+        )
+
+    _store(InsightCard(
+        title="美股部位：科技雙巨頭領漲", summary="未實現獲利 429.1 萬美元",
+        body_md="美股部位淨值 202.4 萬美元。", tags=[],
+    ), "legacy-37")
+    _store(InsightCard(
+        title="美股部位", summary="未實現收益 4,290.80 美元",
+        body_md="部位規模共 11,951 美元成本。", tags=[],
+    ), "fed-40", prompt_figures='["4290.80", "11951"]')
+    _store(InsightCard(
+        title="市場觀察", summary="科技股走勢偏多。", body_md="建議持續觀察。", tags=[],
+    ), "legacy-narrative")
+
+    rows = {r["summary"]: r for r in api_client.get("/api/insights").json()["rows"]}
+    assert rows["未實現獲利 429.1 萬美元"]["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "none",
+    }
+    assert rows["未實現收益 4,290.80 美元"]["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "checked",
+    }
+    # A legacy card with no figure has nothing to check: no pill, not even the muted one.
+    assert rows["科技股走勢偏多。"]["figure_flags"]["snapshot"] == "checked"
+
+    # The page has one pill per state, and the old one-pill-fits-all tooltip is gone.
+    html = (Path(__file__).resolve().parents[2] / "web" / "insights.html").read_text(
+        encoding="utf-8"
+    )
+    for pill in ("數值待核", "未知代碼", "無快照可核"):
+        assert pill in html, pill
+    assert "badge-unchecked" in html
+    assert "ff.snapshot === 'none'" in html
+
+
 def test_deleted_task_history_hidden_but_preserved(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
@@ -207,3 +327,51 @@ def test_deleted_task_history_hidden_but_preserved(
         "SELECT COUNT(*) FROM insight_evaluations WHERE insight_type_id = ?", (it_id,)
     ).fetchone()[0]
     assert n_cards == 1 and n_evals == 1
+
+
+def test_a_cards_own_prediction_echoed_in_its_body_is_not_flagged(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """Second re-verification (2026-09-17): the audit author's #175 printed 「target_pct:
+    0.05」 — the card's OWN stored prediction — and wore 數值待核. A forecast is the one number
+    the model legitimately originates, so the stored ``prediction`` / ``confidence`` join the
+    population on the wire. Tied to the STORED fields: the same body on a card that declares
+    no prediction is still flagged.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from portfolio_dash.llm_insight import insights_store as istore
+    from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+
+    it_id = _make_combo(api_client)
+    now = datetime(2026, 9, 17, 19, 10, tzinfo=ZoneInfo("Asia/Taipei"))
+    body = "- **prediction**：\n  - target_pct: 0.05\n  - horizon_days: 14\n- **confidence**：70"
+
+    def _store(card: InsightCard, fp: str) -> None:
+        istore.add_card(
+            golden_db, insight_type_id=it_id, card=card,
+            fingerprint=istore.fingerprint(it_id, fp, "d", "v1"), calibration_version=None,
+            horizon_days=14, input_snapshot="2026-09-17|NVDA", model="m",
+            cost_usd=Decimal("0"), now=now, prompt_figures='["215.12", "139.99", "0.5366"]',
+        )
+
+    _store(InsightCard(
+        title="NVDA 偏多", summary="股價 215.12 美元，均價 139.99 美元。", body_md=body, tags=[],
+        confidence=70,
+        prediction=Prediction(metric="price_change", direction="up",
+                              target_pct=Decimal("0.05"), horizon_days=14),
+    ), "declared")
+    _store(InsightCard(
+        title="NVDA 偏多", summary="股價 215.12 美元，均價 139.99 美元，未宣告預測。",
+        body_md=body, tags=[],
+    ), "undeclared")
+
+    rows = {r["summary"]: r for r in api_client.get("/api/insights").json()["rows"]}
+    assert rows["股價 215.12 美元，均價 139.99 美元。"]["figure_flags"] == {
+        "unverified_figures": [], "unknown_symbols": [], "snapshot": "checked",
+    }
+    assert rows["股價 215.12 美元，均價 139.99 美元，未宣告預測。"]["figure_flags"] == {
+        "unverified_figures": ["0.05"], "unknown_symbols": [], "snapshot": "checked",
+    }

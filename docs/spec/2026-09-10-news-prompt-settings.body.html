@@ -1,0 +1,203 @@
+<section id="s1">
+  <h2><span class="n">01</span>問題與目標</h2>
+
+  <p class="lede">新聞管線每天 06:00 把每篇抓到的文章交給 AI 整理成
+    <code>{title, news_date, body_summary, related_stocks}</code>。那一次呼叫用的系統提示詞——
+    <b>新聞整理提示詞</b>——在 2026-07-06（batch ④）就做成了「使用者可編輯」：有
+    <code>GET / PUT /api/news-prompt</code> 與 <code>POST /api/news-prompt/reset</code>，有契約測試，有操作記錄標籤
+    （「新聞提示詞變更」「新聞提示詞重設」），FU-D30 的提示詞登錄表也把它列為 <code>user-editable</code>。
+    <strong>但從來沒有任何畫面接上它。</strong>2026-09-09 的全站架構地圖把這三條路由列為
+    「無前端呼叫者」（D-10），目前以 allowlist 釘住並附理由——這份提案就是要把那三條理由刪掉。</p>
+
+  <h3>實測到的現況（拋棄式實例，2026-09-10）</h3>
+  <div class="tw"><table>
+    <thead><tr><th>操作</th><th>引擎回應</th><th>意義</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /api/news-prompt</code></td><td class="n">200 · 434 字 · updated_at 2026-07-06</td>
+        <td>種子＝官方 v2（sha256 <code>fe55de9b</code>），從未被改過</td></tr>
+      <tr class="hl"><td><code>PUT {"body": ""}</code></td><td class="n">200 · 之後 GET 回 0 字</td>
+        <td class="bad"><b>空白被原樣存進去</b>；6 個空白字元也是 200</td></tr>
+      <tr><td><code>PUT {}</code>（缺欄位）</td><td class="n">400 validation_error</td><td>「請求內容不完整，請確認必填欄位都已填寫」——欄位存在但空白，就沒有任何守門</td></tr>
+      <tr><td><code>PUT {"body": "自訂 29 字"}</code> → <code>GET</code></td><td class="n">200 · 29 字</td><td>寫入即時生效於下一次管線</td></tr>
+      <tr><td><code>POST /api/news-prompt/reset</code></td><td class="n">200 · 434 字 · updated_at＝現在</td><td>回到官方 v2</td></tr>
+      <tr><td><code>GET /api/prompt-templates</code></td><td class="n">keys: library_version · strategies · system_prompt · task_presets</td>
+        <td>官方模板庫 wire <b>沒有</b> news_prompt 區塊——畫面無從得知「目前是不是官方版」</td></tr>
+      <tr><td><code>settings.html</code> 版面基線</td><td class="n">390px：offenders 0 · 1257px：0 · console errors 0</td>
+        <td>390px 有一個既存的 <code>.panel-sub</code> 省略號（帳戶與費率頁），非本案</td></tr>
+      <tr><td><code>settings.html</code> 接線基線</td><td class="n">293 控制項 · 31 wired · 7 weak · 0 SUSPECT</td>
+        <td>提示詞分頁的 <code>#sys-reset</code>／<code>#prompts-save</code>／<code>#tpl-from-lib</code>／<code>#tpl-add</code> 皆 wired</td></tr>
+    </tbody></table></div>
+
+  <p class="note"><b>推測待驗：</b>空白提示詞的實際後果。<code>api/news_service.py:86</code> 每次管線執行讀一次本文交給
+    <code>organizer.organize()</code>；沒有系統提示詞時模型只看到文章正文，回傳大概率不是要求的 JSON，
+    每篇文章會走降級路徑（<code>cost_usd 0</code>、摘要空白）。這一條沒有在拋棄式實例上跑 LLM 驗證——
+    實作時的 e2e 不需要它，因為提案直接讓空白進不了門。</p>
+
+  <h3>目標</h3>
+  <ol>
+    <li>在 <b>設定 → AI 提示詞</b> 分頁加上「新聞整理提示詞」面板：看得到、改得了、一鍵回官方版，
+      與既有「系統提示詞」面板<strong>同一套文法</strong>（同樣的標題列、更新時間、重置鈕、儲存列）。</li>
+    <li>畫面隨時說清楚<strong>目前是官方版還是自訂版</strong>，以及官方版號——後端一次算好，前端只顯示。</li>
+    <li><strong>空白內容不得進入儲存</strong>（422），恢復預設只能走「重置回官方版」。</li>
+    <li>刪掉欄位名稱時<strong>提醒但不擋</strong>：整理員回傳的 JSON 需要那四個鍵。</li>
+    <li>三條路由從 D-10 的 allowlist 除名；新面板的每個控制項在接線探測下都是 wired。</li>
+  </ol>
+</section>
+
+<section id="s2">
+  <h2><span class="n">02</span>現況 vs 提案</h2>
+
+  <div class="vs">
+    <div class="vsbox before"><h4>現況</h4>
+      <p>「AI 提示詞」分頁只有兩個面板：<b>系統提示詞</b>（可編輯、可重置）與<b>策略提示詞</b>。
+        新聞整理提示詞沒有面板、沒有連結、沒有徽章；唯一的修改方式是 <code>curl -X PUT</code>，
+        而且會把空白原樣存進去。新聞庫頁的排程提示只連到「設定→排程」。</p></div>
+    <div class="vsbox after"><h4>提案</h4>
+      <p>第三個面板 <b>新聞整理提示詞</b>，位置在系統提示詞之下、策略提示詞之上（它像系統提示詞一樣是「一份全域文字」，
+        不像策略卡是一個清單）。標題列：徽章「與官方版相同／已自訂」＋ 副標「更新 YYYY-MM-DD・官方 v2・每日 06:00 新聞管線與手動抓取共用」＋
+        「重置回官方版」（confirmDialog，danger）。內容：textarea ＋ 欄位提醒條 ＋ hint。儲存列：說明 ＋「儲存」。
+        新聞庫頁的排程提示多一個「整理提示詞」連結，直達本面板。</p></div>
+  </div>
+
+  <div class="lab">
+    <h3>實驗：<span id="lab1-title">「設定 → AI 提示詞」分頁——現況兩個面板，提案三個；提案面板可以真的操作</span></h3>
+    <div class="dsub">下面是真的 iframe：面板用 <code>web/styles.css</code>／<code>web/settings.css</code> 的同一組規則排版，
+      提案面板裡的「儲存」「重置回官方版」由一個離線的「提案版伺服器」回應（規則與驗收表逐條對應，並在頁尾與真實引擎的輸出自我校驗）。
+      拖動滑桿改變視窗寬度；在提案模式裡試試：清空再儲存、刪掉 <code>related_stocks</code> 再看提醒、按重置。</div>
+    <div class="modes" id="lab1-modes">
+      <button data-m="0" data-tone="bad" class="on bad">現況<small>兩個面板；新聞提示詞只能 curl</small></button>
+      <button data-m="1" data-tone="good">提案<small>第三個面板：徽章・守門・提醒・重置</small></button>
+    </div>
+    <div class="sizer">
+      <span class="w">視窗寬 <b id="lab1-w">760</b> px</span>
+      <input type="range" id="lab1-range" min="320" max="900" step="10" value="760">
+    </div>
+    <div class="stage"><iframe id="lab1-frame" title="demo" style="height:560px"></iframe></div>
+    <div class="readout">
+      <div class="ro" id="lab1-ro-a"><div class="k">新聞整理提示詞面板</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-b"><div class="k">徽章（官方版／自訂）</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-c"><div class="k">本文長度</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-d"><div class="k">最後一次寫入結果</div><div class="v">—</div></div>
+      <div class="ro" id="lab1-ro-e"><div class="k">document scrollWidth</div><div class="v">—</div></div>
+    </div>
+    <div class="verdict" id="lab1-verdict">—</div>
+    <div class="note">提案模式的「伺服器」是離線重現，不是真的 API——它的每一條規則（空白 422、徽章判定、重置回官方版）
+      都在頁尾「自我校驗」與 2026-09-10 拋棄式實例的真實回應逐項比對；徽章所需的
+      <code>is_official</code>／<code>official_version</code> 是提案要新增的欄位（決策 D1）。</div>
+  </div>
+
+  <h3>後端契約（提案）</h3>
+  <div class="tw"><table>
+    <thead><tr><th>路由</th><th>現在</th><th>提案</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /api/news-prompt</code></td><td><code>{body, updated_at}</code></td>
+        <td><code>{body, updated_at, <b>official_version</b>: "v2", <b>is_official</b>: true|false}</code>——後端比對，前端不持有官方本文</td></tr>
+      <tr><td><code>PUT /api/news-prompt</code></td><td>任何字串都 200，含空白</td>
+        <td><code>body.strip() == ""</code> → <b>422 <code>news_prompt_empty</code></b>「新聞整理提示詞不可為空白；要恢復預設請按「重置回官方版」」；
+          其餘 200，回傳同 GET 的四個欄位</td></tr>
+      <tr><td><code>POST /api/news-prompt/reset</code></td><td><code>{body, updated_at}</code></td><td>回傳同 GET 的四個欄位（<code>is_official</code> 必為 true）</td></tr>
+      <tr><td><code>GET /api/prompt-templates</code></td><td>無 news_prompt</td><td><b>不動</b>——徽章由 GET /api/news-prompt 自己帶，模板庫 wire 不多一個要同步的地方</td></tr>
+    </tbody></table></div>
+
+  <h3>前端（提案）</h3>
+  <div class="tw"><table>
+    <thead><tr><th>檔案</th><th>改動</th></tr></thead>
+    <tbody>
+      <tr><td><code>web/settings.html</code></td><td>在 <code>#view-prompts</code> 的系統提示詞面板後插入 <code>#news-prompt-panel</code>：
+        <code>#news-prompt-badge</code>・<code>#news-prompt-meta</code>・<code>#news-reset</code>・<code>#news-prompt</code>（textarea）・
+        <code>#news-prompt-schema</code>・<code>#news-save</code></td></tr>
+      <tr><td><code>web/settings-prompts.js</code></td><td>boot 多一個 <code>GET /api/news-prompt</code>（失敗＝一個 fail toast，頁面照樣渲染）；
+        <code>#news-save</code> → PUT（422 → <code>toast(err.message,'fail',err.code)</code>，不清空 textarea）；
+        <code>#news-reset</code> → <code>confirmDialog</code>（danger）→ POST reset；<code>input</code> 事件即時重算徽章（「未儲存的修改」）與欄位提醒。
+        全部走 <code>pdApi</code>，<code>pdBusy</code> 鎖鈕，與系統提示詞面板同一組 helper。</td></tr>
+      <tr><td><code>web/news.html</code></td><td><code>.nw-sched-hint</code> 多一個連結「整理提示詞」→ <code>settings.html#prompts</code>（滾到 <code>#news-prompt-panel</code>）</td></tr>
+      <tr><td><code>shared/whatsnew.py</code></td><td>新增 catalog 條目（href <code>settings.html#prompts</code>、target <code>#news-prompt-panel</code>）</td></tr>
+    </tbody></table></div>
+</section>
+
+<section id="s3">
+  <h2><span class="n">03</span>邊界、例外與不做的事</h2>
+  <ul>
+    <li><b>空白守門只擋「空」，不擋「短」</b>：一個字也是合法的自訂提示詞——判斷提示詞好不好是使用者的事，不是門的事。</li>
+    <li><b>欄位提醒不擋儲存</b>：使用者可能刻意改變輸出格式（例如改用不同鍵名再改程式）；提醒是資訊，不是規則。
+      四個鍵名來自 <code>news/organizer.py</code> 的 <code>_Extract</code> 模型，提醒條的字面清單與它綁在一起（契約測試比對）。</li>
+    <li><b>不做版本升級提示</b>（「官方有新版本」）：系統提示詞今天也沒有；徽章只回答「是不是官方版」。官方 v2 → v3 時，
+      <code>is_official</code> 自然變 false，使用者按重置即可。</li>
+    <li><b>不做預覽／測試送出</b>：新聞整理沒有「代入變數」的概念（輸入是文章正文），與策略卡的預覽不同；要看效果，
+      新聞庫頁的「手動抓取」就是測試。</li>
+    <li><b>不動 <code>GET /api/prompt-templates</code></b>：徽章所需的資訊由 news-prompt 自己帶，避免多一個要同步的 wire。</li>
+    <li><b>系統提示詞的空白守門</b>：同一個缺口（<code>PUT /api/system-prompt {"body": ""}</code> 也是 200）。
+      建議同批一起補（一行守門＋一個測試），但這是決策 D2，不是本案的前提。</li>
+    <li><b>不在新聞庫頁內嵌編輯器</b>：提示詞的家在「AI 提示詞」分頁（FU-D30：每個提示詞一個家）；新聞庫只給一個連結。</li>
+  </ul>
+</section>
+
+<section id="s4">
+  <h2><span class="n">04</span>驗收條件</h2>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>可觀察的驗收條件</th><th>怎麼驗</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>GET /api/news-prompt</code> 回 <code>official_version</code> 與 <code>is_official</code>；種子狀態 <code>is_official=true</code>、
+        自訂後 false、重置後 true</td><td>pytest <code>tests/contract/test_news_api.py</code>（擴充 <code>test_news_prompt_get_put_reset</code>）</td></tr>
+      <tr><td>2</td><td><code>PUT {"body": ""}</code> 與 <code>{"body": "  \n "}</code> → 422 <code>news_prompt_empty</code>，中文訊息；儲存的本文不變</td>
+        <td>pytest 契約測試（新增）；<code>tests/contract/test_error_handler_5xx</code> 類的訊息語言檢查</td></tr>
+      <tr><td>3</td><td>設定頁「AI 提示詞」分頁載入後，<code>#news-prompt</code> 帶著 434 字的官方本文，徽章「與官方版相同」，副標含「官方 v2」</td>
+        <td>e2e <code>tests/e2e/test_news_prompt_settings_flow.py</code>（新增，序列執行）</td></tr>
+      <tr><td>4</td><td>改文字 → 徽章「未儲存的修改」；按儲存 → toast ok、徽章「已自訂」、副標日期更新；重新整理後仍是自訂本文</td><td>同上 e2e</td></tr>
+      <tr><td>5</td><td>清空 → 儲存 → fail toast（422 訊息）、textarea 內容不被清掉、伺服器本文不變</td><td>同上 e2e ＋ 契約測試 2</td></tr>
+      <tr><td>6</td><td>刪掉 <code>related_stocks</code> → 琥珀色提醒出現並點名該欄位；補回 → 提醒消失；提醒不影響儲存</td><td>同上 e2e</td></tr>
+      <tr><td>7</td><td>重置 → confirmDialog（不是 window.confirm）→ 確認 → 官方本文、徽章回「與官方版相同」</td>
+        <td>同上 e2e；<code>tests/contract/test_web_native_dialogs</code> 維持通過</td></tr>
+      <tr><td>8</td><td><code>#news-save</code>／<code>#news-reset</code> 在接線探測下為 <b>wired</b>；分頁其餘控制項基線不變（31 wired / 7 weak / 0 SUSPECT ＋ 2）</td>
+        <td><code>probe_live.py wiring http://127.0.0.1:8477 --pages /settings.html</code></td></tr>
+      <tr><td>9</td><td>settings.html 在 390／768／1257／1440 無新的 overflow offender；面板頭在 390 換行不撐破</td>
+        <td><code>probe_live.py layout</code> 四個寬度；e2e <code>test_no_horizontal_scroll</code></td></tr>
+      <tr><td>10</td><td>三條 news-prompt 路由從 <code>tests/contract/test_api_routes_have_frontend_callers.py</code> 的 allowlist 移除——測試本身會在它們有了呼叫者時要求這件事</td>
+        <td>pytest 該檔（allowlist 留著會紅）</td></tr>
+      <tr><td>11</td><td>新聞庫頁的排程提示多一個「整理提示詞」連結，指向 <code>settings.html#prompts</code></td><td>e2e smoke ＋ 人工點一次</td></tr>
+      <tr><td>12</td><td>What's-new 有本功能的條目（href＋target）；操作記錄兩個標籤沿用；CHANGELOG Unreleased 記錄</td>
+        <td><code>tests/contract</code> 的 catalog 測試；<code>grep -c "^## \[v"</code> = 30</td></tr>
+      <tr><td>13</td><td>gates：ruff・<code>mypy --strict</code>（bare）・pytest 非 e2e 全套・e2e 逐檔序列——全綠</td><td>照 <code>/ship-version</code> 前半</td></tr>
+    </tbody></table></div>
+  <p class="note">實作前需要 owner 在此頁確認。確認後這一節就是驗收清單。</p>
+</section>
+
+<section id="s5">
+  <h2><span class="n">05</span>需要你裁定的四件事</h2>
+  <div class="tw"><table>
+    <thead><tr><th>#</th><th>決策</th><th>選項</th><th>建議</th></tr></thead>
+    <tbody>
+      <tr><td>D1</td><td>徽章「與官方版相同／已自訂」的資料來源</td>
+        <td>(a) <code>GET /api/news-prompt</code> 多帶 <code>official_version</code>＋<code>is_official</code>（後端比對）<br>
+            (b) <code>GET /api/prompt-templates</code> 多一個 <code>news_prompt</code> 區塊，前端自己比對<br>
+            (c) 不做徽章</td>
+        <td><b>(a)</b>——一次比對、一個真相；前端不持有官方本文，模板庫 wire 不多一個同步點</td></tr>
+      <tr><td>D2</td><td>空白守門</td>
+        <td>(a) 只補 news-prompt（422）<br>(b) news-prompt 與 system-prompt 同批補（同一缺口，各一行守門＋一個測試）<br>(c) 不擋，只在 UI 擋</td>
+        <td><b>(b)</b>——UI 擋不住 curl；同一個洞補一次比補兩次便宜</td></tr>
+      <tr><td>D3</td><td>面板位置</td>
+        <td>(a) AI 提示詞分頁，系統提示詞之下、策略提示詞之上<br>(b) 新聞庫頁內嵌<br>(c) 排程分頁（新聞管線旁）</td>
+        <td><b>(a)</b>——它是「一份全域文字」，與系統提示詞同性質；提示詞的家只有一個（FU-D30）</td></tr>
+      <tr><td>D4</td><td>欄位提醒的強度</td>
+        <td>(a) 前端琥珀提醒，不擋<br>(b) 後端回 <code>issues[]</code> 軟性警告（像手動門）<br>(c) 後端 422 硬擋</td>
+        <td><b>(a)</b>——這不是錢，也不是帳；擋了會讓刻意改格式的人無路可走。四個鍵名由契約測試綁定於 <code>organizer._Extract</code>，不會漂移</td></tr>
+    </tbody></table></div>
+</section>
+
+<section id="s6">
+  <h2><span class="n">06</span>實作計畫與爆炸半徑</h2>
+  <p class="lede">依全站架構地圖 §11 的 <b>settings / insight</b> 領域派工清單；三個 subagent 上限、單一工作樹。</p>
+  <div class="tw"><table>
+    <thead><tr><th>批次</th><th>檔案</th><th>要跑的測試</th></tr></thead>
+    <tbody>
+      <tr><td>B1 後端</td><td><code>news/organizer_prompt.py</code>（<code>is_official</code>、版本）・<code>api/routers/prompts.py</code>（422 守門、回傳欄位；D2(b) 時 system-prompt 同款）・<code>tests/contract/test_news_api.py</code>／<code>test_prompts_api.py</code></td>
+        <td><code>pytest tests/contract/test_news_api.py tests/contract/test_prompts_api.py tests/news</code></td></tr>
+      <tr><td>B2 前端</td><td><code>web/settings.html</code>・<code>web/settings-prompts.js</code>・<code>web/news.html</code>・<code>web/settings.css</code>（若徽章需要一個 class）</td>
+        <td><code>pytest tests/contract/test_web_js_parses.py tests/contract/test_web_globals_are_defined.py tests/contract/test_web_native_dialogs.py</code>；<code>probe_live.py wiring/layout</code></td></tr>
+      <tr><td>B3 收尾</td><td><code>shared/whatsnew.py</code>・<code>tests/contract/test_api_routes_have_frontend_callers.py</code>（刪三條）・<code>tests/e2e/test_news_prompt_settings_flow.py</code>・CHANGELOG</td>
+        <td><code>pytest tests/contract tests/e2e/test_news_prompt_settings_flow.py tests/e2e/test_pages_smoke.py</code>（e2e 序列）</td></tr>
+    </tbody></table></div>
+  <p class="note">爆炸半徑（地圖 §11.1「路由新增／改名」與「前端控制項新增」兩列）：<code>web/api.js</code> 單一 fetch 層・
+    <code>api/action_log._LABELS</code>（兩個標籤已存在，不需新增）・whatsnew CATALOG・<code>test_api_routes_have_frontend_callers</code> allowlist・
+    <code>test_web_*</code> 靜態契約・e2e <code>test_no_horizontal_scroll</code>。不碰錢、不碰帳本、不碰 golden payload。</p>
+</section>

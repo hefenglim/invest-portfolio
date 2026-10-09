@@ -122,6 +122,59 @@ class Evidence:
             self.fails.append(rec)
         return ok
 
+    #: Relative tolerance for the ONE structural case exact equality cannot express:
+    #: two independent implementations multiplying the SAME operands in a DIFFERENT
+    #: ASSOCIATION. ``Decimal`` carries 28 significant digits, so ``(a*b)*c`` and ``a*(b*c)``
+    #: can land 1 ULP apart — ~1e-27 relative — while every input compares byte-identical.
+    #:
+    #: 1e-20 sits SEVEN orders above that noise and TWELVE orders below the smallest error
+    #: that could mean anything (a rate is stored to 6 dp, money to 2). It cannot absorb a
+    #: money defect; it can only absorb the last digit of a quotient. Deliberately NOT
+    #: ``XIRR_TOL`` (1e-6 ABSOLUTE): that is loose enough to hide a real cent, and it is
+    #: disclosed for a root-find, which this is not.
+    #:
+    #: ⚠ Do NOT reach for this to make a stubborn check pass. If the OPERANDS differ, the
+    #: disagreement is real and this will not save you — which is the point.
+    ULP_REL_TOL: Decimal = Decimal("1e-20")
+
+    def check_rel(self, check: str, scope: str, expected: Any, actual: Any,
+                  phase: str = "", rel_tol: Decimal | None = None) -> bool:
+        """Assertion for a value whose two derivations differ only in MULTIPLICATION ORDER.
+
+        Found 2026-08-24 by a new scenario op: adding a ``rebate`` (an FX acquisition) turned
+        ``covered_ratio`` from a clean value into a 28-digit repeating one, and the rollup
+        ``(stock + cash) * ratio * (spot - avg) * to_rep`` then differed between oracle and app
+        in the 27th significant digit — while ``fx.avg_rate``, ``fx.covered_ratio`` and
+        ``fx.foreign_cash`` each still compared EXACTLY. The operands agreed; only the
+        association differed.
+
+        The oracle is NOT re-ordered to match the app: computing it differently is the only
+        reason an independent oracle is worth having, and association is not where money bugs
+        live. Both raw values stay in the evidence line.
+        """
+        tol = self.ULP_REL_TOL if rel_tol is None else rel_tol
+        de, da = _as_decimal(expected), _as_decimal(actual)
+        if de is None or da is None:
+            ok = expected is None and actual is None
+            delta = None
+            allowed = None
+        else:
+            delta = abs(de - da)
+            allowed = abs(de) * tol
+            ok = delta <= allowed
+        rec = {"check": check, "scope": scope, "phase": phase,
+               "expected": _sval(expected), "actual": _sval(actual),
+               "rel_tol": _sval(tol), "allowed": _sval(allowed),
+               "delta": _sval(delta), "pass": ok}
+        with self.assertions.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if ok:
+            self.n_pass += 1
+        else:
+            self.n_fail += 1
+            self.fails.append(rec)
+        return ok
+
 
 def _jsonable(v: Any) -> Any:
     try:
@@ -223,10 +276,28 @@ class LocalServer:
             [str(PY), "-m", "uvicorn", "portfolio_dash.api.app:create_app",
              "--factory", "--host", "127.0.0.1", "--port", str(self.port)],
             cwd=str(REPO_ROOT), env=env, stdout=fh, stderr=fh)
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except BaseException:
+            # Never leave a stray uvicorn behind on a failed start: it keeps the log file
+            # open, so the NEXT run dies with a PermissionError while unlinking it and the
+            # real cause (a slow boot) is hidden behind an unrelated traceback.
+            self.stop()
+            raise
         return self.base_url
 
-    def _wait_ready(self, timeout: float = 60.0) -> None:
+    def _wait_ready(self, timeout: float | None = None) -> None:
+        """Poll /api/health until the spawned app answers.
+
+        Default 240s, overridable with ``PD_STRESS_BOOT_TIMEOUT``. The old 60s was tuned
+        on a fast machine and is NOT a safety property — nothing is asserted about boot
+        time, and the app's import graph alone takes ~40-95s on a cold/slow checkout
+        (measured 96.6s here). A too-tight limit reports "server not ready" for a server
+        that is merely still importing, which reads as a broken harness rather than a slow
+        one; raise it rather than debugging the app.
+        """
+        if timeout is None:
+            timeout = float(os.environ.get("PD_STRESS_BOOT_TIMEOUT", "240"))
         deadline = time.monotonic() + timeout
         url = self.base_url + "/api/health"
         while time.monotonic() < deadline:
@@ -239,7 +310,7 @@ class LocalServer:
             except Exception:
                 pass
             time.sleep(0.25)
-        raise TimeoutError(f"server not ready; see {self.log}")
+        raise TimeoutError(f"server not ready after {timeout:.0f}s; see {self.log}")
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -290,6 +361,127 @@ def seed_price(db_path: Path, symbol: str, market: str, close: Decimal,
         conn.close()
 
 
+def seed_prices_daily(
+    db_path: Path,
+    rows_by_date: dict[date, list[tuple[str, str, Decimal]]],
+    source: str = "stress-fixture-daily",
+) -> int:
+    """Seed a DAILY close series, each row stamped ``fetched_at`` = its OWN date.
+
+    That stamp is the whole point, and it is not cosmetic. ``upsert_prices`` multiplies a
+    row by the splits in the window ``(as_of, fetched_at]`` — "which splits had the provider
+    already folded in when this was fetched?". A history row fetched ON its own date predates
+    every later split, so the window is empty, the stored ``split_basis`` is the identity and
+    the close is kept exactly as given. That is both realistic (a quote pulled before a split
+    was never adjusted) and required: with ``fetched_at = now`` every historical row would be
+    multiplied by every subsequent split, and the fixture would be seeding a basis the ledger
+    never traded on.
+
+    It also keeps ``reconcile_prices`` a no-op on these rows for the same reason, so inserting
+    or deleting a SPLIT never silently repaints the history this family asserts against.
+
+    One ``upsert_prices`` call per date (it takes ONE ``fetched_at`` for a batch), all on one
+    connection. Returns the number of rows written.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.pricing.results import PriceRow
+    from portfolio_dash.pricing.store import upsert_prices
+    from portfolio_dash.shared.enums import Market
+    written = 0
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for d in sorted(rows_by_date):
+            rows = rows_by_date[d]
+            if not rows:
+                continue
+            upsert_prices(
+                conn,
+                [PriceRow(instrument=sym, market=Market(mkt), as_of=d, close=close,
+                          source=source)
+                 for sym, mkt, close in rows],
+                fetched_at=datetime.combine(d, datetime.min.time()),
+            )
+            written += len(rows)
+    finally:
+        conn.close()
+    return written
+
+
+def write_corporate_action(db_path: Path, account_id: str, action_date: str, kind: str,
+                           from_symbol: str, to_symbol: str, ratio_to: int, ratio_from: int,
+                           cost_carry: str | None = None, note: str | None = None) -> int:
+    """Write ONE corporate_actions row and return its id (spec §3's table).
+
+    Why the DB and not an API call: the entry surfaces are **W7**, which has not been
+    built — there is no ``POST /api/ledgers/corporate-actions``. This is therefore a
+    SETUP/fixture write through the app's own insert (exactly like ``seed_instrument``
+    uses ``upsert_instrument``), not the calculation under test. The reconciliation still
+    reads the row back from SQLite as a raw fact and computes every consequence in the
+    oracle, so the accounting remains independently verified.
+
+    Switch this to the API the moment W7 lands: an entry surface that is never exercised
+    end-to-end is how the ETF-sell and daytrade tax bugs survived — the engine supported
+    it and no entry path passed it (LESSONS_LEARNED, 2026-07-15).
+
+    The ratio is passed as TWO INTEGERS on purpose (D14). ``int`` in the signature, not
+    ``Decimal``: a helper that accepts ``0.2857`` lets the harness create the very row
+    validation exists to reject, and the oracle would then be asserting a state the app
+    is specified never to hold.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import insert_corporate_action
+    from portfolio_dash.shared.corporate_actions import CorporateActionKind
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return insert_corporate_action(
+            conn, account_id=account_id, action_date=date.fromisoformat(action_date),
+            kind=CorporateActionKind(kind), from_symbol=from_symbol, to_symbol=to_symbol,
+            ratio_to=Decimal(ratio_to), ratio_from=Decimal(ratio_from),
+            cost_carry=None if cost_carry is None else Decimal(cost_carry), note=note)
+    finally:
+        conn.close()
+
+
+def write_legacy_dividend(db_path: Path, account_id: str, symbol: str, pay_date: str,
+                          div_type: str, net: Decimal) -> int:
+    """Write ONE dividend row straight into the ledger — a LEGACY-DATA fixture — and return
+    its id.
+
+    Why not a door: since CR-02 (2026-10-04) every dividend door (manual, CSV, AI, the
+    inbox, the edit dialog) refuses a dividend whose account had opened no position in the
+    symbol by its date (``dividend_without_position``). Such a row can therefore only exist
+    as data written BEFORE that guard — a pre-CR-02 import, a hand-edited database — and the
+    replay still has to refuse it without a 500 (YQ3). This writes exactly that: the app's
+    own store insert, below every validator, like :func:`write_corporate_action`. The
+    scenario proves the door refuses the same row before it writes this one.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import insert_dividend
+    conn = sqlite3.connect(str(db_path))
+    try:
+        did = insert_dividend(conn, account_id=account_id, symbol=symbol,
+                              div_date=date.fromisoformat(pay_date), div_type=div_type,
+                              gross=net, withholding=Decimal("0"), net=net)
+        conn.commit()
+        return int(did)
+    finally:
+        conn.close()
+
+
+def delete_corporate_action_row(db_path: Path, action_id: int) -> bool:
+    """Delete one corporate action (E16: editing/deleting re-computes history)."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import delete_corporate_action
+    conn = sqlite3.connect(str(db_path))
+    # row_factory is required: the store captures the pre-mutation row into ledger_audit
+    # via dict(row), which needs sqlite3.Row rather than a plain tuple.
+    conn.row_factory = sqlite3.Row
+    try:
+        return delete_corporate_action(conn, action_id)
+    finally:
+        conn.close()
+
+
 def seed_fx(db_path: Path, base: str, quote: str, rate: Decimal, as_of: date,
             source: str = "stress-fixture") -> None:
     sys.path.insert(0, str(REPO_ROOT))
@@ -334,7 +526,10 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 gross=dec(r["gross"] or "0"), withholding=dec(r["withholding"] or "0"),
                 net=dec(r["net"] or "0"),
                 reinvest_shares=dec(r["reinvest_shares"]) if r["reinvest_shares"] else None,
-                reinvest_price=dec(r["reinvest_price"]) if r["reinvest_price"] else None))
+                reinvest_price=dec(r["reinvest_price"]) if r["reinvest_price"] else None,
+                # R6: tolerate a pre-migration DB (the column may not exist yet).
+                ex_date=(date.fromisoformat(r["ex_date"])
+                         if "ex_date" in r.keys() and r["ex_date"] else None)))
         for r in conn.execute("SELECT * FROM fx_conversions ORDER BY date, id"):
             f.fxs.append(O.FxFact(
                 id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),
@@ -356,9 +551,29 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                 id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),
                 kind=r["kind"], ccy=r["ccy"], amount=dec(r["amount"]),
                 acq_home_amount=None if _acq is None else dec(_acq)))
+        # Corporate actions: read the TWO RATIO TERMS as stored, never a quotient. The
+        # oracle combines them itself (oracle.ratio_shares); reading a pre-divided ratio
+        # here would import the very rounding the two-term storage exists to prevent.
+        if _table_exists(conn, "corporate_actions"):
+            for r in conn.execute("SELECT * FROM corporate_actions ORDER BY date, id"):
+                _cc = r["cost_carry"]
+                f.actions.append(O.CorpFact(
+                    id=r["id"], account_id=r["account_id"],
+                    d=date.fromisoformat(r["date"]), kind=str(r["kind"]).upper(),
+                    from_symbol=r["from_symbol"], to_symbol=r["to_symbol"],
+                    ratio_to=dec(r["ratio_to"]), ratio_from=dec(r["ratio_from"]),
+                    cost_carry=None if _cc is None else dec(_cc), note=r["note"]))
         return f
     finally:
         conn.close()
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """True when *name* is a table in this DB (the corporate_actions migration is new;
+    a pre-migration DB must load as 'no actions', not as a crash)."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return row is not None
 
 
 def _page(api: Api, path: str, key_rows: str = "rows") -> list[dict]:
@@ -386,6 +601,14 @@ def load_facts_from_api(api: Api) -> O.Facts:
 
     Same independence posture as the DB loader: these endpoints return stored rows
     (facts), and the oracle computes the derived state itself.
+
+    CORPORATE ACTIONS ARE NOT LOADED HERE — there is no public read endpoint for the
+    ``corporate_actions`` ledger yet (spec W7 owns the entry surfaces). Phase 2 therefore
+    replays a remote ledger as if it had no actions, which is correct only while the demo
+    corpus has none. **When W7/D25 land, this loader must read them**, or a phase-2 run
+    against a seeded demo will report holdings failures whose cause is a missing input,
+    not a defect. Recorded here rather than in a plan, because a silent omission in a
+    fact loader is indistinguishable from a bug in the app.
     """
     f = O.Facts()
     insts = api.get("/api/instruments").json().get("list", [])
@@ -414,7 +637,9 @@ def load_facts_from_api(api: Api) -> O.Facts:
             gross=dec(r.get("gross") or "0"), withholding=dec(r.get("withhold") or "0"),
             net=dec(r.get("net") or "0"),
             reinvest_shares=dec(r["reinvest_shares"]) if r.get("reinvest_shares") else None,
-            reinvest_price=dec(r["reinvest_price"]) if r.get("reinvest_price") else None))
+            reinvest_price=dec(r["reinvest_price"]) if r.get("reinvest_price") else None,
+            # R6: absent on an older wire -> None, which replays as the payment date.
+            ex_date=date.fromisoformat(r["ex_date"]) if r.get("ex_date") else None))
     for r in _page(api, "/api/ledgers/fx"):
         f.fxs.append(O.FxFact(
             id=r["id"], account_id=r["account_id"], d=date.fromisoformat(r["date"]),

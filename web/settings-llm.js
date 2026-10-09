@@ -63,24 +63,23 @@
     if (!anyRole) {
       chip.className = 'pill pill-off';
       chip.replaceChildren(el('span', 'dot'), document.createTextNode('AI：已關閉'));
+      chip.title = '';
     } else if (remNum !== null && remNum <= 0) {
       chip.className = 'pill pill-fail';
       chip.replaceChildren(el('span', 'dot'), document.createTextNode('AI：額度歸零'));
       chip.title = '剩餘額度已歸零，請添加額度';
     } else if (remNum !== null && remNum < thrNum) {
-      chip.className = 'pill';
-      chip.style.color = 'var(--amber)';
-      chip.style.borderColor = 'rgba(217,161,63,0.4)';
-      chip.style.background = 'var(--amber-soft)';
+      /* A class, never inline colour (DEF-077 R7 scan): boot() re-renders this chip after
+         every threshold / model / role / top-up save, and the inline amber this branch used
+         to set was cleared only by the 啟用中 branch — so 偏低 → 已關閉 (all role defaults
+         emptied) kept the amber, and 偏低 → 歸零 painted .pill-fail's red over with it. */
+      chip.className = 'pill pill-warn';
       chip.replaceChildren(el('span', 'dot'),
         document.createTextNode('AI：額度偏低 ' + usd(remaining)));
       chip.title = '剩餘額度 ' + usd(remaining) + '，低於警示閾值 '
         + usd(D.quota.alert_threshold_usd);
     } else {
       chip.className = 'pill pill-ok';
-      chip.style.color = '';
-      chip.style.borderColor = '';
-      chip.style.background = '';
       chip.replaceChildren(el('span', 'dot'), document.createTextNode('AI：啟用中'));
       chip.title = '';
     }
@@ -233,7 +232,14 @@
     const x = m || createDefaults(
       (D.models.length && D.models[D.models.length - 1].provider) || 'openrouter');
     set('dr-alias', x.alias); set('dr-provider', x.provider); set('dr-model', x.model_name);
-    set('dr-base', x.api_base || ''); set('dr-key', x.api_key_masked || '（尚未設定）');
+    set('dr-base', x.api_base || '');
+    /* DEF-078 (owner ruling ⑦, 2026-09-26): #dr-key is a password field. It stays EMPTY until
+       重設 unlocks it (a mask typed into a password field would read as dots and say nothing);
+       the stored key's server-side mask — first 3 + ••• + last 3, the API never returns the
+       key — is shown as text beside it instead. */
+    set('dr-key', '');
+    $('#dr-key').placeholder = '按「重設」輸入新的 API Key';
+    $('#dr-key-current').textContent = '目前：' + (x.api_key_masked || '尚未設定');
     set('dr-pin', x.price_in); set('dr-pout', x.price_out);
     set('dr-ctx', x.context_window); set('dr-maxout', x.max_output_tokens);
     set('dr-timeout', x.timeout_seconds); set('dr-retries', x.max_retries);
@@ -384,7 +390,15 @@
     if (!inp) return;
     const save = async () => {
       const raw = inp.value;
-      if (raw === '' || Number(raw) < 0) { inp.classList.add('field-error'); return; }
+      /* F-17: a red border and nothing else. Every other guard on this site says WHY —
+         a blank model alias gets 「✕ 請輸入模型代號（alias）」, an over-limit withdrawal gets a
+         whole sentence. A colour alone is not a message: it does not say what is wrong, and
+         a reader who is not looking at that field when it turns red never learns anything. */
+      if (raw === '' || Number(raw) < 0) {
+        inp.classList.add('field-error');
+        _toast('請輸入警示閾值', 'fail', '需為 0 或以上的金額（USD）');
+        return;
+      }
       inp.classList.remove('field-error');
       try {
         await api.put('/api/llm/quota', { alert_threshold_usd: raw });
@@ -445,10 +459,19 @@
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
       ok.addEventListener('click', async () => {
         const raw = inp.value;
-        if (!raw || Number(raw) <= 0) { inp.classList.add('field-error'); return; }
+        if (!raw || Number(raw) <= 0) {
+          inp.classList.add('field-error');   // see the note on the threshold guard above
+          _toast('請輸入加值金額', 'fail', '需為大於 0 的金額（USD）');
+          return;
+        }
         ok.disabled = true;
         try {
-          await api.post('/api/llm/quota/topup', { amount_usd: raw });
+          /* M9-02: the 備註 field was collected and never sent, so every top-up landed with
+             note = None and the 加值歷史 table's 備註 column was blank forever. The backend's
+             TopupBody has taken `note: str | None` since it was written; an empty box stays
+             null (an empty string is not a note). The AMOUNT path is untouched. */
+          const note = noteIn.value.trim();
+          await api.post('/api/llm/quota/topup', { amount_usd: raw, note: note || null });
           dismiss();
           _toast('加值成功', 'ok', '+' + usd(raw) + ' USD 已加入額度');
           await boot();
@@ -582,7 +605,7 @@
         usage: (resp && resp.usage) || { by_model: [], by_agent: [], daily: { dates: [], series: [] } },
       };
     } catch (err) {
-      _toast('LLM 設定載入失敗', 'fail', (err && err.message) || undefined);
+      _toast('AI 設定載入失敗', 'fail', (err && err.message) || undefined);
       /* fall through with empty D so the page still renders an (empty) shell */
     }
     renderStatus();
@@ -591,7 +614,42 @@
     renderQuota();
     renderUsageTable(); /* table + chips render now */
     maybeRenderLlmChart(); /* chart only if the tab is visible (standalone page = yes) */
+    /* DEF-034: NO listener binding in here. boot() is the page's RELOAD — every threshold /
+       model / role / top-up save ends in `await boot()` — and it used to finish with
+       initAutoAiToggle(), which added one more click listener to the SAME settings.html
+       switch each time: after two threshold saves one click sent three PUT /api/ui-prefs and
+       three toasts. Page elements are bound ONCE at init (below); boot() only reloads data
+       and re-renders nodes it creates itself (tests/contract/test_def034_rebinding_listeners.py). */
   }
+
+  /* L13 (owner ruling 2026-09-16, 3(d)): the automatic AI-resolve switch — persisted in
+     GET/PUT /api/ui-prefs as `auto_ai_resolve` (subset merge, so page_size is untouched).
+     The quick-add modal reads it on every open. Same toggle grammar as the scheduler rows.
+     DEF-034: runs ONCE at page init (an IIFE, like initThreshold / initTopup above), never
+     from boot(). The switch paints from its own PUT response, so no reload re-reads it. */
+  (function initAutoAiToggle() {
+    const t = $('#pref-auto-ai');
+    if (!t) return;
+    const paint = (on) => {
+      t.classList.toggle('on', !!on);
+      t.setAttribute('aria-checked', on ? 'true' : 'false');
+    };
+    api.get('/api/ui-prefs').then((p) => {
+      if (p && typeof p.auto_ai_resolve === 'boolean') paint(p.auto_ai_resolve);
+    }).catch(() => { /* leave the default painted */ });
+    t.addEventListener('click', async () => {
+      const next = !t.classList.contains('on');
+      t.disabled = true;
+      try {
+        const p = await api.put('/api/ui-prefs', { auto_ai_resolve: next });
+        paint(p && typeof p.auto_ai_resolve === 'boolean' ? p.auto_ai_resolve : next);
+        _toast('已儲存', 'ok', next ? '名稱型輸入查無報價時會自動 AI 辨識' : '不再自動 AI 辨識，按「AI 辨識」才會');
+      } catch (err) {
+        _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+      }
+      t.disabled = false;
+    });
+  })();
 
   boot();
 
@@ -668,6 +726,16 @@
     td('num', f.num(r.tokens_out, 0));
     td('num', r.cache_tokens ? f.num(r.cache_tokens, 0) : '—');
     td('num', '$' + f.num(r.cost_usd, 4));
+    /* The provider sent no usage for this call (a reply cut off mid-way): the counts are a
+       local estimate, not a measured 0 — provenance, so the neutral 推導-style tag. */
+    if (r.estimated) {
+      const tag = document.createElement('span');
+      tag.className = 'badge badge-info-mini usage-est';
+      tag.textContent = '估算';
+      tag.title = '供應商未回報用量，輸入與輸出 token 依本機分詞估算';
+      tr.lastChild.appendChild(document.createTextNode(' '));
+      tr.lastChild.appendChild(tag);
+    }
     return tr;
   }
 

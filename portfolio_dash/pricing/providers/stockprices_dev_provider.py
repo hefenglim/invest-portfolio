@@ -8,7 +8,6 @@ under the capitalized ``"Price"`` JSON key (discovered at probe time). Parsed to
 monkeypatching (the repo bans sockets in tests).
 """
 
-from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -18,6 +17,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 _URL = "https://stockprices.dev/api/stocks"
@@ -52,7 +52,7 @@ class StockPricesDevProvider(ProviderBase):
             if not close.is_finite():
                 continue
             out.append(PriceRow(
-                instrument=ref.symbol, market=Market.US, as_of=date.today(),
+                instrument=ref.symbol, market=Market.US, as_of=app_now().date(),
                 close=close, source=self.name,
             ))
         return out

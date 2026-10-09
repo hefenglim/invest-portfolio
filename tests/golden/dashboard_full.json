@@ -8,6 +8,10 @@
     "total_return_rate": "0.1754229393352213444626620957",
     "realized_total": "8000.0",
     "unrealized_total": "462765.0000000000000000000000",
+    "total_return_fx_complete": null,
+    "principal_fx_effect": null,
+    "trading_financing_cost": null,
+    "fx_complete_reason": "最新一日有標的缺價，含匯兌總損益暫不計算（不以較早日期替代，否則與上方資產損益不同日，兩者的差額會失去意義）",
     "xirr": null,
     "xirr_window_days": 157,
     "fx_realized": "2000",
@@ -16,7 +20,7 @@
   "holdings": [
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "2330",
       "name": "TSMC",
       "market": "TW",
@@ -40,6 +44,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.1960784313725490196078431373",
       "spark_30d": [
         "600"
@@ -47,7 +56,7 @@
     },
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "0056",
       "name": "元大高股息",
       "market": "TW",
@@ -71,6 +80,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.05555555555555555555555555556",
       "spark_30d": [
         "38"
@@ -78,7 +92,7 @@
     },
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "2603",
       "name": "長榮",
       "market": "TW",
@@ -102,6 +116,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.21000000000000000000000",
       "spark_30d": [
         "110"
@@ -109,7 +128,7 @@
     },
     {
       "account_id": "tw_broker",
-      "account_name": "TW Broker",
+      "account_name": "{account:tw_broker}",
       "symbol": "00919",
       "name": "群益台灣精選高息",
       "market": "TW",
@@ -133,12 +152,17 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": null,
       "spark_30d": []
     },
     {
       "account_id": "schwab",
-      "account_name": "Charles Schwab",
+      "account_name": "{account:schwab}",
       "symbol": "AAPL",
       "name": "Apple",
       "market": "US",
@@ -162,6 +186,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.2",
       "spark_30d": [
         "300"
@@ -169,7 +198,7 @@
     },
     {
       "account_id": "schwab",
-      "account_name": "Charles Schwab",
+      "account_name": "{account:schwab}",
       "symbol": "MSFT",
       "name": "Microsoft",
       "market": "US",
@@ -193,6 +222,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.125",
       "spark_30d": [
         "450"
@@ -200,7 +234,7 @@
     },
     {
       "account_id": "moomoo_my",
-      "account_name": "Moomoo MY",
+      "account_name": "{account:moomoo_my}",
       "symbol": "1155.KL",
       "name": "Maybank",
       "market": "MY",
@@ -224,6 +258,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.1194444444444444444444444444",
       "spark_30d": [
         "9.875"
@@ -231,7 +270,7 @@
     },
     {
       "account_id": "moomoo_my",
-      "account_name": "Moomoo MY",
+      "account_name": "{account:moomoo_my}",
       "symbol": "NVDA",
       "name": "NVIDIA",
       "market": "US",
@@ -255,6 +294,11 @@
       "oversold": false,
       "short_open": false,
       "unbookable_dividend": false,
+      "unbookable_action": false,
+      "revived_by_dividend": false,
+      "payback_from_symbol": null,
+      "payback_carried_dividends": null,
+      "payback_own_dividends": null,
       "unrealized_pct": "0.4406779661016949152542372881",
       "spark_30d": [
         "170"
@@ -397,6 +441,11 @@
       "USD": "38870.0",
       "MYR": "9875.000"
     },
+    "by_currency_reporting": {
+      "TWD": "1625000",
+      "USD": "1243840.0",
+      "MYR": "69125.000"
+    },
     "reporting_total_value": "2937965.000",
     "reporting_currency": "TWD"
   },
@@ -441,7 +490,9 @@
     },
     "reporting_currency": "TWD",
     "reporting_realized_fx": "2000",
-    "reporting_unrealized_fx": "10545.0"
+    "reporting_unrealized_fx": "10545.0",
+    "excluded_accounts": [],
+    "reporting_unavailable_reason": null
   },
   "dividends": {
     "by_year": [
@@ -1578,6 +1629,21 @@
     "reporting_currency": "TWD",
     "available": true
   },
+  "benchmark": {
+    "available": false,
+    "reason": "所有投入流量都落在基準指數的歷史之外或缺少基準，無法計算基準對照",
+    "terminal_value": null,
+    "net_invested": null,
+    "benchmark_return": null,
+    "excess": null,
+    "uncovered_markets": [
+      "MY",
+      "TW",
+      "US"
+    ],
+    "uncovered_ratio": "1",
+    "by_market": []
+  },
   "freshness": {
     "prices": [
       {
@@ -1626,19 +1692,22 @@
         "base": "MYR",
         "quote": "TWD",
         "as_of": "2026-06-09",
-        "stale": false
+        "stale": false,
+        "source": "test"
       },
       {
         "base": "USD",
         "quote": "MYR",
         "as_of": "2026-06-09",
-        "stale": false
+        "stale": false,
+        "source": "test"
       },
       {
         "base": "USD",
         "quote": "TWD",
         "as_of": "2026-06-09",
-        "stale": false
+        "stale": false,
+        "source": "test"
       }
     ],
     "any_stale": true,
@@ -1648,8 +1717,30 @@
     "missing_fx": [],
     "xirr_unavailable_reason": "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）",
     "trend_unavailable_reason": null,
+    "fx_unavailable_reason": null,
     "unregistered_symbols": [],
-    "last_backup_at": null
+    "last_backup_at": null,
+    "fx_triangulation": [
+      {
+        "via": "USD/MYR × MYR/TWD",
+        "pair": "USD/TWD",
+        "implied": "30.800000",
+        "direct": "32.000000",
+        "gap_pct": "-3.7500",
+        "ok": false,
+        "as_of": "2026-06-09",
+        "stale": false,
+        "compared_on": "2026-06-09",
+        "dates_differ": false,
+        "leg_dates": {
+          "USD/MYR": "2026-06-09",
+          "MYR/TWD": "2026-06-09",
+          "USD/TWD": "2026-06-09"
+        },
+        "reason": null
+      }
+    ],
+    "scheduler_running": false
   },
   "insights": [],
   "dividend_projection": {
@@ -1657,6 +1748,7 @@
     "by_currency": {},
     "basis": "declared_only"
   },
+  "unapplied_actions": [],
   "llm_quota": {
     "remaining_usd": "0",
     "ai_active": false
@@ -1668,7 +1760,9 @@
       "rule": "single_weight",
       "title": "2330 單一持股權重偏高",
       "detail": "單一持股權重 40.8%＞門檻 30.0%",
-      "href": "/symbol/2330"
+      "href": "/symbol/2330",
+      "scope": "symbol",
+      "subject": "2330"
     },
     {
       "id": "single_weight:AAPL",
@@ -1676,7 +1770,9 @@
       "rule": "single_weight",
       "title": "AAPL 單一持股權重偏高",
       "detail": "單一持股權重 32.8%＞門檻 30.0%",
-      "href": "/symbol/AAPL"
+      "href": "/symbol/AAPL",
+      "scope": "symbol",
+      "subject": "AAPL"
     },
     {
       "id": "sector_weight:Information Technology",
@@ -1684,7 +1780,9 @@
       "rule": "sector_weight",
       "title": "Information Technology 產業權重偏高",
       "detail": "產業權重 83.2%＞門檻 60.0%",
-      "href": null
+      "href": "index.html#sector-chart",
+      "scope": "sector",
+      "subject": "Information Technology"
     },
     {
       "id": "stale_price:00919",
@@ -1692,7 +1790,9 @@
       "rule": "stale_price",
       "title": "00919 報價過期",
       "detail": "庫存報價已過期，尚未更新",
-      "href": "/symbol/00919"
+      "href": "/symbol/00919",
+      "scope": "symbol",
+      "subject": "00919"
     },
     {
       "id": "stale_price:MSFT",
@@ -1700,7 +1800,9 @@
       "rule": "stale_price",
       "title": "MSFT 報價過期",
       "detail": "庫存報價已過期，尚未更新",
-      "href": "/symbol/MSFT"
+      "href": "/symbol/MSFT",
+      "scope": "symbol",
+      "subject": "MSFT"
     },
     {
       "id": "missing_price:00919",
@@ -1708,15 +1810,19 @@
       "rule": "missing_price",
       "title": "00919 無報價",
       "detail": "無庫存報價，無法評價",
-      "href": "/symbol/00919"
+      "href": "/symbol/00919",
+      "scope": "symbol",
+      "subject": "00919"
     },
     {
       "id": "fx_drift:schwab",
       "sev": "info",
       "rule": "fx_drift",
-      "title": "Charles Schwab 匯率偏離成本",
+      "title": "{account:schwab} 匯率偏離成本",
       "detail": "即期匯率偏離成本匯率 3.2%＞門檻 3.0%",
-      "href": null
+      "href": "cash.html#fx",
+      "scope": "account",
+      "subject": "schwab"
     }
   ]
 }

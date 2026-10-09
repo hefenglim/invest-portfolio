@@ -16,30 +16,53 @@ independently, spec 4.9 R7).
 Pure ``llm_insight`` persistence: stdlib + ``shared``/``composer_store`` only.
 """
 
+import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from datetime import datetime, timedelta
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.llm_insight import composer_store as cs
+from portfolio_dash.llm_insight.insights_store import InsightTrigger
 
 # A runner: ``fn(conn, insight_type_id, *, now, fired_rule, fired_symbol, ...)``. Kept
 # duck-typed so the scheduler/api seam can register ``insight_service.run_for_id`` without
 # this layer importing api.
 AlertRunner = Callable[..., object]
 
+# DEF-041 (owner ruling 2026-09-24): the symbols currently HELD — a position with shares != 0
+# in any account, read from the COMPUTED book (``api/insight_service.py::
+# held_symbols_for_alerts`` replays it; this layer may not). Zero-arg: the binder closes over
+# the connection and the clock, and the dispatcher calls it at most ONCE per pass, and only
+# when a symbol alert with a subscriber is actually waiting. ``None`` = cannot tell (the
+# reader is not wired, or it failed) — never read as "nothing is held".
+HeldSymbols = Callable[[], Set[str] | None]
+
+logger = logging.getLogger(__name__)
+
 _DEBOUNCE_HOURS = 24
 
 
 class AlertEvent(BaseModel):
-    """One fired alert event (an alert-scan observation)."""
+    """One fired alert event (an alert-scan observation).
+
+    ``symbol`` is the event's SUBJECT KEY — the column predates DEF-037 and keeps its name
+    because the push text, the digests and the per-(rule, subject, day) coalescing all read
+    it. What that key IS lives in ``scope`` (DEF-037, 2026-09-23): ``symbol`` / ``portfolio``
+    (no subject) / ``sector`` / ``account`` / ``currency`` / ``task``. ``None`` = recorded
+    by a caller that did not say (legacy rows, the signal scan) — see :func:`card_target`.
+    ``title`` / ``detail`` are the rule engine's own text, fed to the alert card's prompt.
+    """
 
     id: int
     rule_id: str
     symbol: str | None
     fired_at: str
     consumed: bool
+    scope: str | None = None
+    title: str | None = None
+    detail: str | None = None
 
 
 _DDL = """
@@ -83,6 +106,11 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "notified_at", "TEXT")
     _add_column_if_missing(conn, "notify_attempts", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "href", "TEXT")
+    # DEF-037 (2026-09-23): what the event is ABOUT, and the rule engine's own words for it.
+    # NULLABLE: a legacy row reads "scope not recorded" (card_target decides conservatively).
+    _add_column_if_missing(conn, "scope", "TEXT")
+    _add_column_if_missing(conn, "title", "TEXT")
+    _add_column_if_missing(conn, "detail", "TEXT")
     # The notified_at index MUST come after the column migration: on a legacy DB the
     # table already exists WITHOUT the column, so an index statement inside _DDL runs
     # before the ALTER and crashes boot (caught by the deploy gate 2026-07-12 — a
@@ -107,6 +135,9 @@ def record_event(
     symbol: str | None,
     now: datetime,
     href: str | None = None,
+    scope: str | None = None,
+    title: str | None = None,
+    detail: str | None = None,
 ) -> int:
     """Append a fired alert event; idempotent per (rule, symbol) PER DAY. Returns the id.
 
@@ -114,8 +145,12 @@ def record_event(
     event — the 24h dispatch debounce is the dispatcher's concern, but this avoids a pile
     of identical rows when the scan runs repeatedly intraday. ``href`` (FU-D17, optional)
     is the alert's frontend route, stored so a push can build a clickable deep link.
+    ``scope`` / ``title`` / ``detail`` (DEF-037): what ``symbol`` is, and the alert's text.
     """
-    event_id, _ = record_event_ex(conn, rule_id=rule_id, symbol=symbol, now=now, href=href)
+    event_id, _ = record_event_ex(
+        conn, rule_id=rule_id, symbol=symbol, now=now, href=href,
+        scope=scope, title=title, detail=detail,
+    )
     return event_id
 
 
@@ -126,6 +161,9 @@ def record_event_ex(
     symbol: str | None,
     now: datetime,
     href: str | None = None,
+    scope: str | None = None,
+    title: str | None = None,
+    detail: str | None = None,
 ) -> tuple[int, bool]:
     """Like :func:`record_event`, but also reports whether a NEW row was written.
 
@@ -145,9 +183,9 @@ def record_event_ex(
     if existing is not None:
         return int(existing["id"]), False
     cur = conn.execute(
-        "INSERT INTO alert_events (rule_id, symbol, fired_at, consumed, href) "
-        "VALUES (?, ?, ?, 0, ?)",
-        (rule_id, symbol, now.isoformat(), href),
+        "INSERT INTO alert_events (rule_id, symbol, fired_at, consumed, href, scope, title, "
+        "detail) VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+        (rule_id, symbol, now.isoformat(), href, scope, title, detail),
     )
     conn.commit()
     return int(cur.lastrowid or 0), True
@@ -156,13 +194,14 @@ def record_event_ex(
 def unconsumed_events(conn: sqlite3.Connection) -> list[AlertEvent]:
     """All not-yet-consumed alert events, oldest first."""
     rows = conn.execute(
-        "SELECT id, rule_id, symbol, fired_at, consumed FROM alert_events "
-        "WHERE consumed = 0 ORDER BY id"
+        "SELECT id, rule_id, symbol, fired_at, consumed, scope, title, detail "
+        "FROM alert_events WHERE consumed = 0 ORDER BY id"
     ).fetchall()
     return [
         AlertEvent(
             id=r["id"], rule_id=r["rule_id"], symbol=r["symbol"], fired_at=r["fired_at"],
-            consumed=bool(r["consumed"]),
+            consumed=bool(r["consumed"]), scope=r["scope"], title=r["title"],
+            detail=r["detail"],
         )
         for r in rows
     ]
@@ -261,32 +300,139 @@ def record_dispatch(conn: sqlite3.Connection, key: str, *, now: datetime) -> Non
 
 # --- dispatcher (R7) ----------------------------------------------------------
 
+# DEF-037 (2026-09-23): the scopes that become a card, and as what. An alert card is either
+# ABOUT ONE SYMBOL (the per-symbol context) or about the whole book (the portfolio context,
+# ``fired_symbol=None``). An account, a sector, a currency or an insight task is neither —
+# handed over as ``fired_symbol`` it became a "symbol" the card then described from nothing
+# (measured: an account-level ``fx_drift:moomoo_my`` produced a ``moomoo_my`` card about an
+# invented broker outage). Such events are still recorded, pushed and digested; they are
+# only never dispatched to a card.
+_CARD_SCOPES = ("symbol", "portfolio")
+
+
+def card_target(event: AlertEvent) -> tuple[str | None, str | None]:
+    """``(scope, fired_symbol)`` when *event* can become a card, else ``(None, None)``.
+
+    An event recorded WITHOUT a scope is resolved conservatively, never by guessing from the
+    subject's spelling: a ``signal_*`` transition is per-symbol by construction
+    (``strategy.signal_states`` — recorded by the signal scan with the symbol it scanned);
+    a scope-less event with no subject is portfolio-wide (legacy global rules such as
+    ``quota_low``); any other scope-less event with a subject (``calibration_regression``
+    stores an insight-TASK id there) is not dispatched.
+    """
+    scope = event.scope
+    if scope is None:
+        if event.symbol is None:
+            scope = "portfolio"
+        elif event.rule_id.startswith(_SIGNAL_RULE_PREFIX):
+            scope = "symbol"
+    if scope == "symbol" and event.symbol:
+        return scope, event.symbol
+    if scope == "portfolio":
+        return scope, None
+    return None, None
+
+
+def _trigger_of(event: AlertEvent, scope: str) -> InsightTrigger:
+    """The card's provenance: this event's own record (DEF-037)."""
+    return InsightTrigger(
+        source="alert", rule=event.rule_id, alert_id=event.id, fired_at=event.fired_at,
+        scope=scope, subject=event.symbol if scope == "symbol" else None,
+        title=event.title, detail=event.detail,
+    )
+
+
+class DispatchResult(BaseModel):
+    """What one dispatch pass did: cards run, and events kept OFF the cards (DEF-037/041)."""
+
+    dispatched: int = 0
+    # Owner 2026-09-30 (item 5): (task, rule, symbol) keys NOT run because that key was
+    # already dispatched within 24h — the same unit ``dispatched`` counts in. It was a bare
+    # ``continue``, so a same-day re-scan read 「派發 AI 預警卡 0 張」 with no word why.
+    debounced: int = 0
+    # events a subscriber WOULD have received but whose scope is not a card scope; an event
+    # with no subscriber at all is not listed (nothing was withheld from anyone).
+    skipped: list[AlertEvent] = Field(default_factory=list)
+    # DEF-041: symbol alerts a subscriber would have received for a symbol NOT held (a
+    # watchlist-only symbol). Consumed, listed in the run detail, never a card.
+    not_held: list[AlertEvent] = Field(default_factory=list)
+    # DEF-041: symbol alerts left UNCONSUMED because what is held could not be read — the
+    # next scan decides them. Holding them back is the only answer that neither bills a card
+    # for a watchlist symbol nor drops a held symbol's card for good.
+    held_unknown: list[AlertEvent] = Field(default_factory=list)
+
 
 def dispatch_alert_events(
-    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime
+    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime,
+    held_symbols: HeldSymbols,
 ) -> int:
-    """Process unconsumed alert events → run subscribing on_alert combos (R7). Return count.
+    """:func:`dispatch_alert_events_ex`, returning only the dispatched count (legacy shape)."""
+    return dispatch_alert_events_ex(conn, runner, now=now, held_symbols=held_symbols).dispatched
+
+
+def dispatch_alert_events_ex(
+    conn: sqlite3.Connection, runner: AlertRunner, *, now: datetime,
+    held_symbols: HeldSymbols,
+) -> DispatchResult:
+    """Process unconsumed alert events → run subscribing on_alert combos (R7).
 
     For each new event, each ENABLED subscribing on_alert combo runs the supplied runner
     ONCE per (task, rule, symbol), 24h-debounced on that key. Multiple combos each produce
     their own card (billed/debounced independently). The event is marked consumed after all
     its subscribers have been considered. A runner failure for one combo never aborts the
     rest (degrade, never crash).
+
+    DEF-037: only a ``symbol`` / ``portfolio`` event reaches a card (:func:`card_target`),
+    and the runner is handed the event itself as ``trigger`` — its rule, id, scope and the
+    rule engine's title/detail — so the card is FED the alert it describes and records it.
+
+    DEF-041 (owner ruling 2026-09-24): a ``symbol`` event reaches a card only when that symbol
+    is HELD (*held_symbols* — the computed book, injected, required: a forgotten binding is a
+    ``TypeError``, never a silent return to carding the watchlist). A watchlist-only symbol's
+    alert stays in the alert list and the bell; it is consumed here and reported in
+    ``not_held``, and no card is produced. When the held set cannot be read, symbol events
+    are left unconsumed (``held_unknown``) for the next scan. Portfolio events are unaffected.
     """
-    dispatched = 0
+    result = DispatchResult()
+    held: Set[str] | None = None
+    held_read = False
     for event in unconsumed_events(conn):
-        for it in on_alert_subscribers(conn, event.rule_id):
+        subscribers = on_alert_subscribers(conn, event.rule_id)
+        scope, fired_symbol = card_target(event)
+        if scope is None:
+            if subscribers:
+                result.skipped.append(event)
+            mark_consumed(conn, event.id)
+            continue
+        if scope == "symbol" and subscribers:
+            if not held_read:  # at most ONE book read per pass, and only when needed
+                held_read = True
+                try:
+                    held = held_symbols()
+                except Exception:  # noqa: BLE001 — an unreadable book defers, never crashes
+                    logger.exception("held-symbols reader failed; symbol alerts deferred")
+                    held = None
+            if held is None:
+                result.held_unknown.append(event)
+                continue  # NOT consumed: the next scan decides it
+            if fired_symbol not in held:
+                result.not_held.append(event)
+                mark_consumed(conn, event.id)
+                continue
+        trigger = _trigger_of(event, scope)
+        for it in subscribers:
             key = debounce_key(it.id, event.rule_id, event.symbol)
             if recently_dispatched(conn, key, now=now):
+                result.debounced += 1
                 continue
             try:
                 runner(
                     conn, it.id, now=now, fired_rule=event.rule_id,
-                    fired_symbol=event.symbol,
+                    fired_symbol=fired_symbol, trigger=trigger,
                 )
                 record_dispatch(conn, key, now=now)
-                dispatched += 1
+                result.dispatched += 1
             except Exception:  # noqa: BLE001 — one combo failing must not abort the rest
                 continue
         mark_consumed(conn, event.id)
-    return dispatched
+    return result

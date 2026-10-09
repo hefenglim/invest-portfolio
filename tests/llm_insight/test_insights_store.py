@@ -6,6 +6,7 @@ calendar-day horizon); a pure-narrative card has no prediction → due_at is NUL
 in float — cost_usd / target_pct persist as Decimal strings.
 """
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
@@ -305,3 +306,110 @@ def test_add_card_stores_token_usage() -> None:
     )
     assert rec2.tokens_in == 0 and rec2.tokens_out == 0
     conn.close()
+
+
+# --- M7-08: an unreadable prediction blob degrades the ROW, never the read ---------------
+# `_card_from_row` re-validates the stored blob on every read. A row the schema can no
+# longer parse (a future required field, a narrowed Literal, a corrupt blob, a NULLed
+# confidence) must come back as a flagged narrative record — title kept, prediction None,
+# `unreadable=True` — and must log WHICH row, because the 500 it used to raise named none.
+
+
+_BAD_PREDICTION_ROWS = [
+    ("A_missing_required_fields", '{"direction": "up"}', 70),
+    ("B_confidence_null",
+     '{"metric": "price_change", "direction": "up", "horizon_days": 5}', None),
+    ("C_not_json", "this is not json", 70),
+]
+
+
+def _insert_raw_row(
+    c: sqlite3.Connection, *, title: str, prediction: str | None, confidence: int | None,
+) -> int:
+    cur = c.execute(
+        "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
+        "fingerprint, title, summary, body_md, tags, confidence, prediction, horizon_days, "
+        "due_at, input_snapshot, model, cost_usd, created_at) VALUES "
+        "(1, NULL, 0, NULL, ?, ?, ?, ?, '[]', ?, ?, 5, NULL, '{}', 'm', '0.0021', ?)",
+        (f"fp-{title}", title, f"{title} summary", f"# {title}", confidence, prediction,
+         NOW.isoformat()),
+    )
+    c.commit()
+    return int(cur.lastrowid or 0)
+
+
+@pytest.mark.parametrize(("shape", "prediction", "confidence"), _BAD_PREDICTION_ROWS)
+def test_unreadable_prediction_row_reads_as_a_flagged_narrative_record(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture,
+    shape: str, prediction: str, confidence: int | None,
+) -> None:
+    row_id = _insert_raw_row(conn, title=shape, prediction=prediction, confidence=confidence)
+    with caplog.at_level(logging.WARNING, logger=store.__name__):
+        recs = store.list_cards(conn)
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec.unreadable is True
+    assert rec.card.prediction is None          # dropped, never guessed
+    assert rec.card.title == shape              # the row stays visible
+    assert rec.card.summary == f"{shape} summary"
+    assert rec.card.confidence == confidence    # the stored value passes through as-is
+    # every reader degrades the same way
+    assert store.latest_cards(conn, 3)[0].unreadable is True
+    assert store.find_by_fingerprint(conn, f"fp-{shape}") is not None
+    # the operator's clue: the row id is named in the log line
+    assert any(f"insight {row_id}" in m and "prediction" in m for m in caplog.messages)
+
+
+def test_legal_record_is_unchanged_and_unflagged_beside_an_unreadable_row(
+    conn: sqlite3.Connection,
+) -> None:
+    legal = store.add_card(
+        conn, insight_type_id=1, card=_prediction_card(), fingerprint="fp-legal",
+        calibration_version=3, horizon_days=5, input_snapshot="{}", model="gpt",
+        cost_usd=Decimal("0.0034"), now=NOW,
+    )
+    assert legal.unreadable is False
+    bad_id = _insert_raw_row(conn, title="bad", prediction="this is not json", confidence=70)
+    recs = store.list_cards(conn)
+    assert [r.id for r in recs] == [bad_id, legal.id]
+    assert recs[0].unreadable is True
+    assert recs[1] == legal                      # byte-identical record, prediction included
+    assert recs[1].card.prediction == Prediction(
+        metric="price_change", direction="up", target_pct=Decimal("0.05"), horizon_days=5
+    )
+
+
+def test_prompt_figures_column_round_trips_and_defaults_to_unrecorded() -> None:
+    """M9 re-verification (2026-09-17): the fed-numbers population has its own column.
+
+    ``''`` (the default, and what every pre-existing row reads after the additive ALTER)
+    means "no population recorded" — the figure check reports that as its own state. A
+    stored JSON list comes back byte-identical, through the single-row and the list read.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # An OLD-shape table (no prompt_figures): ensure_tables must add the column in place.
+    conn.executescript(store._DDL)
+    assert "prompt_figures" not in {r[1] for r in conn.execute("PRAGMA table_info(insights)")}
+    store.ensure_tables(conn)
+    assert "prompt_figures" in {r[1] for r in conn.execute("PRAGMA table_info(insights)")}
+
+    when = datetime(2026, 9, 17, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    legacy = store.add_card(
+        conn, insight_type_id=1,
+        card=InsightCard(title="t", summary="s", body_md="b", tags=[]),
+        fingerprint="fp-legacy", calibration_version=None, horizon_days=14,
+        input_snapshot="2026-07-05|US", model="m", cost_usd=Decimal("0"), now=when,
+    )
+    assert legacy.prompt_figures == ""
+    fed = store.add_card(
+        conn, insight_type_id=1,
+        card=InsightCard(title="t2", summary="s", body_md="b", tags=[]),
+        fingerprint="fp-fed", calibration_version=None, horizon_days=14,
+        input_snapshot="2026-09-17|US", model="m", cost_usd=Decimal("0"), now=when,
+        prompt_figures='["4290.80", "11951", "12.49%"]',
+    )
+    assert fed.prompt_figures == '["4290.80", "11951", "12.49%"]'
+    by_id = {r.id: r for r in store.list_cards(conn)}
+    assert by_id[fed.id].prompt_figures == fed.prompt_figures
+    assert by_id[legacy.id].prompt_figures == ""

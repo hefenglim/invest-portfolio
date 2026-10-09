@@ -21,6 +21,42 @@ the structures below are the schema; exact rates are filled/verified at setup.
   500–1000 → 1 · ≥1000 → 5.
 - **Securities transaction tax (sell side):** 現股 0.3% · 當沖 0.15% · ETF 0.1%.
   Buy side: none.
+  ⚠ **The ETF flag is REGISTRY-AUTHORITATIVE and now THREE-STATE — never guessed** (AI-D40,
+  owner ruling 2026-08-24). The stress-audit fix of 2026-07-15 made a registered instrument's
+  `is_etf` win over the input flag at both fee seams (`manual.py`, `csv_import.py`), but left
+  the thing that **seeds** the registry defaulting to `False`: `quick_register`'s auto-register
+  path (`api/routers/input_center.py`) never passed the flag at all, so a TW ETF entered on its
+  first manual trade was taxed at 現股 **0.3%** instead of **0.1%** — 3× — and `tax_rate: 0.003`
+  was written into `fee_rule_snapshot` as the authority. The three states are `True` / `False` /
+  **`None`** **at the INPUT** (`quick_register(is_etf: bool | None)`, `UpdateBody.is_etf`,
+  `ManualBody.new_symbol_is_etf`); **at rest they are TWO `NOT NULL` booleans** —
+  `instruments.is_etf` + `instruments.etf_flag_unknown` (`data_ingestion/schema.py`: SQLite
+  cannot relax `NOT NULL` without a table rebuild, so "unknown" rides alongside as an additive
+  column). `None` at the door is stored as `is_etf=0, etf_flag_unknown=1`; an explicit answer
+  stores `etf_flag_unknown=0`. **Query the unknowns with `etf_flag_unknown=1`, never
+  `is_etf IS NULL`** (that column is never NULL — the query returns 0 rows on every database).
+  Auto-registration lands unknown — both the manual-trade path (`input_center.py`) and the
+  SPINOFF child (`register.py::spinoff_child_draft`, NEW-21 2026-09-06) — and the fee engine
+  meeting `unknown` **on a TW SELL** computes with `False` but raises a soft issue
+  `etf_flag_unknown`「無法判定是否為 ETF，賣出稅率待確認」(`fees.py::resolve_etf_flag` returns the
+  `(is_etf, unknown)` pair) — on EVERY door that computes a fee, the ledger 更正 door included
+  (CR-08, 2026-10-04: it passed `inst.is_etf` straight through, so an edited sell was taxed at
+  現股 0.3% with no finding and no `etf_flag=unknown` in its snapshot; the sentence now has one
+  spelling, `fees.ETF_FLAG_UNKNOWN_MESSAGE`). A BUY carries no TW tax, so it stays silent. This is the same red
+  line as "a stale price is labelled, never guessed": **an unknown rate is disclosed, never
+  defaulted in silence.** Existing rows were migrated in as `etf_flag_unknown=0` (KNOWN) and are
+  never rewritten — only future auto-registrations land unknown.
+  ⚠ **當沖 OUTRANKS ETF — settled, not incidental (QA-19, owner ruling 2026-09-01).** A TW sell
+  that is both a same-day round trip AND an ETF resolves to the **當沖 0.15%**, never the ETF
+  0.1%. `fees.py::_tw` already reads `tax_daytrade if daytrade else tax_etf if is_etf else
+  tax_normal`, so this rule records the precedence rather than changing it — and it is recorded
+  precisely because **no repository artefact stated the real-world answer**, which made the
+  engine's ordering an accident that any future edit could reverse in good faith. A rate that
+  only exists as the order of a ternary is not a decision, it is a coincidence.
+  Consequence for every preview surface: `strategy/whatif.py` has no 當沖 input to read, so the
+  drawer **discloses the assumption** (`daytrade_note`) instead of presenting the non-daytrade
+  rate as the only answer — the same posture as `etf_flag_unknown`, and required by
+  `domain-ledger.md`'s rule that a surface which cannot know which branch applies must say so.
 - **Brokerage fee:** 0.1425% (configurable) + discount rate + **min NT$20**. Fee and
   tax are collected to integer NT$ by **無條件捨去 (unconditional floor, ROUND_DOWN)** —
   財政部 rule 角以下免收 (**owner sign-off 2026-07-15, FE-D3**; supersedes the earlier
@@ -31,6 +67,10 @@ the structures below are the schema; exact rates are filled/verified at setup.
   **FORECAST-ONLY** — it NEVER enters cost basis, P&L, or `compute_fees`; it is surfaced
   as a preview hint + a pending-confirmation inbox item, booked as a cash credit only when
   the owner confirms the actual refund (`rebate_rate` lives in config for the forecaster).
+  The booked credit's `rebate_period` + ACCOUNT are its inbox link: DEF-009 made the row's date,
+  kind, amount and note editable, but not its account (CR-10, 2026-10-04 — moving it reopened
+  the original account's month and a second confirm credited the refund twice). To book it
+  elsewhere, delete the row and confirm the other account's month.
 - ⚠ **`discount` and `rebate_rate` express the SAME broker benefit two different ways** —
   charge less now, or charge full and refund later. Setting `discount < 1` **and**
   `rebate_rate > 0` applies it twice, and since fees are part of `original_total` that
@@ -68,7 +108,7 @@ the structures below are the schema; exact rates are filled/verified at setup.
   from the USD notional × trade-date USD/MYR rate (`ceil(amount_usd × fx / 1,000) × RM1`,
   cap RM1,000 stock / RM200 ETF) then **booked back in USD** on the single-currency row; the
   snapshot records the FX rate + the MYR figure. No stored USD/MYR rate → stamp 0 + a soft
-  issue 「無 USD/MYR 匯率,印花稅未計」.
+  issue 「無 USD/MYR 匯率，印花稅未計」.
 - **Dividend:** cash; Malaysian single-tier system. Record net received (Q10); confirm
   any high-income dividend surtax in the probe.
 

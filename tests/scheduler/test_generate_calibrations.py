@@ -74,25 +74,34 @@ def _self_correct_combo(conn: sqlite3.Connection) -> int:
 
 
 def _seed_misses(conn: sqlite3.Connection, type_id: int, n: int, *, miss: bool) -> None:
+    # R6 DEF-079: a task with no calibration version stores its cards — and Loop 2 its
+    # evaluations — with calibration_version NULL. This fixture used to stamp 1, a row real
+    # data never contains, and that is how the first version being written from ZERO miss
+    # samples (the real rows are NULL, Loop 3 asked for version 1) stayed invisible.
     for i in range(n):
         es.add_evaluation(
-            conn, insight_id=1000 + i, insight_type_id=type_id, calibration_version=1,
+            conn, insight_id=1000 + i, insight_type_id=type_id, calibration_version=None,
             is_shadow=False, status="scored", quant_hit=not miss,
             narrative_score=20 if miss else 80, miss=miss, actual_value=None,
             confidence=70, now=NOW, notes="高估" if miss else None,
         )
 
 
-def _good_master(monkeypatch: pytest.MonkeyPatch) -> None:
+def _good_master(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Install the fake master; returns the generation prompts it received (in order)."""
+    seen: list[str] = []
+
     def completion(**kw: object) -> _Resp:
         msgs = kw["messages"]
         assert isinstance(msgs, list)
         joined = "".join(str(m.get("content")) for m in msgs)
         if "審查" in joined:  # validator review pass
             return _Resp('{"ok": true, "reasons": []}')
+        seen.append(joined)
         return _Resp('{"body": "新版校正規則：修訂幅度高估條款", "cause": "連續高估失誤"}')
 
     monkeypatch.setattr(llm_mod.litellm, "completion", completion)
+    return seen
 
 
 # --- trigger + min_samples gate ----------------------------------------------
@@ -102,13 +111,15 @@ def test_generate_creates_new_version_on_consecutive_misses(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _master(conn)
-    _good_master(monkeypatch)
+    prompts = _good_master(monkeypatch)
     tid = _self_correct_combo(conn)
     # min_samples default 8: seed 8 misses (≥3 consecutive + miss-rate high).
     _seed_misses(conn, tid, 8, miss=True)
     insight_service.generate_calibrations_for_all(conn, now=NOW)
     versions = cs.list_calibrations(conn, tid)
     assert len(versions) == 1
+    # DEF-079: the master WAS handed the eight failures (it used to get 「（無失誤樣本）」).
+    assert prompts[0].count("評語：高估") == 8
     assert versions[0].version == 1  # first appended version
     assert "校正" in versions[0].body
     assert versions[0].cause == "連續高估失誤"
@@ -190,12 +201,15 @@ def test_second_run_appends_version(
     tid = _self_correct_combo(conn)
     _seed_misses(conn, tid, 8, miss=True)
     insight_service.generate_calibrations_for_all(conn, now=NOW)
-    # add another miss batch under version 1 + run again → appends version 2.
+    # another miss batch — v1 is not adopted, so these are still no-layer cards (NULL),
+    # scored AFTER v1 was written (DEF-080: only evidence v1 was not built from counts)
+    # + run again → appends version 2.
     for i in range(8):
         es.add_evaluation(
-            conn, insight_id=2000 + i, insight_type_id=tid, calibration_version=1,
+            conn, insight_id=2000 + i, insight_type_id=tid, calibration_version=None,
             is_shadow=False, status="scored", quant_hit=False, narrative_score=10,
-            miss=True, actual_value=None, confidence=70, now=NOW, notes="再次高估",
+            miss=True, actual_value=None, confidence=70, now=NOW + timedelta(days=1),
+            notes="再次高估",
         )
     insight_service.generate_calibrations_for_all(conn, now=NOW + timedelta(days=7))
     versions = cs.list_calibrations(conn, tid)

@@ -8,6 +8,7 @@ insert on ``golden_db`` + the 202; the thread's completion is covered by the
 
 import sqlite3
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -154,9 +155,10 @@ def test_runs_row_shape_and_filter(
     row = rows[0]
     assert set(row) == {
         "id", "job_id", "started_at", "finished_at", "status", "detail",
-        "duration_s", "cost_usd",
+        "duration_s", "cost_usd", "label",   # label: DEF-030 (the insight task's name)
     }
     assert row["status"] == "error" and row["cost_usd"] is None
+    assert row["label"] is None  # a system job is named by the page's JOB_ZH table
     assert row["duration_s"] == 30.0
 
 
@@ -313,20 +315,20 @@ def _usage_row(
     )
 
 
-def test_status_cost_block_news_window_sum_honest(
+def test_status_cost_block_is_the_run_rows_own_spend(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """news_daily cost = sum of news_organize llm_usage rows INSIDE the run window only;
-    other agents and out-of-window rows are excluded. Decimal-string math, no floats."""
+    """A static LLM job serves the spend its run row recorded (calls, tokens, cost).
+
+    2026-09-30 (owner, the verifier's R10 observation ③): this block used to be re-derived
+    by summing news_organize rows inside the run's time window, while the run history read
+    the same run's empty ``cost_usd``. The run now records its own spend when it finishes.
+    """
     golden_db.execute(
-        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
-        "VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
-        "'2026-06-11T06:10:00+08:00','ok','news: organized 2')"
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, cost_usd, "
+        "llm_calls, tokens_in, tokens_out) VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
+        "'2026-06-11T06:10:00+08:00','ok','news: organized 2','0.012',2,110,55)"
     )
-    _usage_row(golden_db, "2026-06-11T06:02:00+08:00", "news_organize", "0.010", 100, 50)
-    _usage_row(golden_db, "2026-06-11T06:08:30+08:00", "news_organize", "0.002", 10, 5)
-    _usage_row(golden_db, "2026-06-11T07:00:00+08:00", "news_organize", "9", 999, 999)
-    _usage_row(golden_db, "2026-06-11T06:05:00+08:00", "insight_generate", "5", 500, 500)
     golden_db.commit()
     lr = api_client.get("/api/scheduler/status").json()["jobs"]["news_daily"]["last_run"]
     assert lr["cost"] == {
@@ -334,14 +336,30 @@ def test_status_cost_block_news_window_sum_honest(
         "tokens_in": 110,
         "tokens_out": 55,
         "calls": 2,
-        "source": "usage_window",
+        "source": "run_row",
     }
+
+
+def test_status_cost_block_never_guesses_from_usage_in_the_window(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    """A row written before runs recorded their spend serves no block — usage rows that
+    happen to fall inside its window are not attributed to it (the history shows — too)."""
+    golden_db.execute(
+        "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
+        "VALUES ('news_daily','2026-06-11T06:00:00+08:00',"
+        "'2026-06-11T06:10:00+08:00','ok','news: organized 2')"
+    )
+    _usage_row(golden_db, "2026-06-11T06:02:00+08:00", "news_organize", "0.010", 100, 50)
+    golden_db.commit()
+    lr = api_client.get("/api/scheduler/status").json()["jobs"]["news_daily"]["last_run"]
+    assert lr["cost"] is None
 
 
 def test_status_cost_none_when_llm_job_made_no_calls(
     api_client: TestClient, golden_db: sqlite3.Connection
 ) -> None:
-    """An LLM-capable job whose window saw zero usage rows honestly serves no block."""
+    """An LLM-capable job whose run made no call honestly serves no block."""
     golden_db.execute(
         "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail) "
         "VALUES ('digest_daily','2026-06-11T15:10:00+08:00',"
@@ -393,3 +411,35 @@ def test_status_insight_zero_cost_run_serves_no_block(
     golden_db.commit()
     lr = api_client.get("/api/scheduler/status").json()["jobs"]["insight:8"]["last_run"]
     assert lr["cost"] is None
+
+
+# --- M3: the scheduler-liveness block -------------------------------------------------
+
+
+def test_jobs_payload_carries_the_scheduler_liveness_block(api_client: TestClient) -> None:
+    """M3 — measured on the demo: all 25 jobs read 「啟用」 with 「下次執行」 = 「—」, because
+    the instance runs with ``PD_DISABLE_SCHEDULER=1``. ``enabled`` is a STORED INTENT and
+    ``next: null`` is ambiguous (no scheduler vs. next fire unknown), so nothing in this
+    payload distinguished "off" from "unknown". The top-level block does.
+
+    The hermetic ``api_client`` builds the app WITHOUT lifespan and the ``_safe_db`` fixture
+    sets ``PD_DISABLE_SCHEDULER=1``, so this test app is exactly the shape that produced the
+    defect: ``running`` is False and the env var is the reported cause.
+    """
+    body = api_client.get("/api/scheduler/jobs").json()
+    assert body["scheduler"] == {"running": False, "reason": "PD_DISABLE_SCHEDULER=1"}
+    # The jobs array is UNCHANGED by the addition (the wire contract the page already binds
+    # to), and the ambiguity the block resolves is still visible beside it.
+    assert all(j["next"] is None for j in body["jobs"])
+    assert any(j["enabled"] is True for j in body["jobs"])
+
+
+def test_scheduler_reason_distinguishes_not_started_from_the_env_var(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two real deployments produce a null scheduler and they are NOT the same fact: the env
+    var is a deliberate choice (demo/test/CI), a missing lifespan is an accident. Reporting
+    one reason for both would send the reader to an env var that is not set."""
+    monkeypatch.delenv("PD_DISABLE_SCHEDULER", raising=False)
+    body = api_client.get("/api/scheduler/jobs").json()
+    assert body["scheduler"] == {"running": False, "reason": "scheduler not started"}

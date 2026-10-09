@@ -22,19 +22,79 @@
    form's error).
    In all cases the PdApiError is still thrown so in-flight callers stop. 402 / 409 /
    503 are re-thrown WITHOUT redirect so the AI/insight block can catch them and
-   render a degraded state. */
+   render a degraded state.
+
+   ACCOUNT REFERENCE TOKENS (DEF-023, 2026-09-23): the backend has no zh account name
+   (web/names.js is the ONE naming authority), so a backend sentence that names an
+   account carries the token `{account:<id>}` instead of a name or a bare id
+   (portfolio_dash/shared/account_ref.py). This layer resolves the token on EVERY
+   response — the parsed 2xx body and the error envelope's `message` / `issues` alike —
+   by walking the value and replacing tokens inside strings with
+   `pdNames.account(id)` (`pdNames.resolveRefs`). Without names.js on the page the id
+   itself is shown, exactly what pdNames does for an unknown id. The walk touches ONLY
+   strings that contain the literal `{account:`; every other value — every Decimal
+   money string in particular — is returned as-is, so the money-passthrough guarantee
+   above is unchanged. */
 (function () {
   'use strict';
 
+  /* The token grammar, duplicated from names.js ONLY for the degrade path (a page that
+     loads api.js without names.js). Pinned equal by tests/contract/test_account_ref_seam.py. */
+  const ACCOUNT_REF = /\{account:([^{}\s]+)\}/g;
+
+  /* DEF-044 (2026-09-24): every page loads web/names.js BEFORE this file, so the resolver
+     exists before the first response can land (a names.js tag AFTER api.js leaves a window in
+     which an early response is resolved without it). Five pages — settings / insights /
+     instruments / news / data-center — shipped with no names.js at all, and the id fallback
+     below hid it: 排程中心 printed 「fx_drift 帳戶 moomoo_my」 and nothing anywhere went red.
+     The fallback stays — a readable id beats a raw `{account:…}` token or a crash on the
+     owner's screen — but a page that breaks the load order now says so LOUDLY, at load, before
+     any token has to happen by: a console error, which the page-smoke e2e (zero console errors
+     on every page) turns into a red build. tests/contract/test_names_js_before_api_js.py pins
+     the order on every page statically and runs this check. */
+  if (!window.pdNames || typeof window.pdNames.resolveRefs !== 'function') {
+    console.error('[pdApi] web/names.js must be loaded before api.js: account names on this '
+      + 'page will degrade to raw account ids.');
+  }
+
+  function _resolveText(s) {
+    if (s.indexOf('{account:') === -1) return s;        // fast path: byte-identical
+    const names = window.pdNames;
+    if (names && typeof names.resolveRefs === 'function') return names.resolveRefs(s);
+    return s.replace(ACCOUNT_REF, (m, id) => id);      // names.js absent: the id itself
+  }
+
+  /** Resolve account tokens in every string of a parsed JSON value, in place. Arrays and
+      plain objects are walked; strings are replaced only when they carry a token; every
+      other value (numbers, booleans, null) is untouched. Returns the same value. */
+  function _resolveRefs(v) {
+    if (typeof v === 'string') return _resolveText(v);
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) v[i] = _resolveRefs(v[i]);
+      return v;
+    }
+    if (v !== null && typeof v === 'object') {
+      Object.keys(v).forEach(function (k) { v[k] = _resolveRefs(v[k]); });
+      return v;
+    }
+    return v;
+  }
+
   /** Structured error thrown for any non-2xx response. Mirrors the
-      api/errors.py envelope: { error: { code, message, field?, issues? } }. */
+      api/errors.py envelope: { error: { code, message, field?, issues? } }.
+
+      `message` is left EMPTY when the envelope supplied none (2026-08-29): `super()`
+      leaves Error's inherited '' in that case, and '' is falsy, so a caller's
+      `(err && err.message) || '中文預設'` reaches its Chinese fallback. Assigning the
+      argument unconditionally would write `undefined` here — which renders as the string
+      "undefined" at any site that concatenates without a fallback. See _toError. */
   class PdApiError extends Error {
     constructor(status, code, message, field, issues) {
       super(message);
       this.name = 'PdApiError';
       this.status = status;
       this.code = code;
-      this.message = message;
+      if (message !== undefined && message !== null) this.message = message;
       this.field = field;            // optional; undefined when absent
       this.issues = issues;          // optional; undefined when absent
     }
@@ -95,10 +155,22 @@
     return init;
   }
 
-  /** Parse a non-2xx envelope defensively into a PdApiError. */
+  /** Parse a non-2xx envelope defensively into a PdApiError.
+
+      NO MESSAGE IS INVENTED HERE. This used to open with
+      `let message = resp.statusText || 'request failed'` — always truthy — so every
+      caller's `(err && err.message) || '中文預設'` was dead code and a proxy 502 with an
+      HTML body toasted 「Bad Gateway」 at the owner (82 Chinese fallbacks across 27 files
+      were unreachable, 2026-08-29). The server's envelope is the ONLY source of a
+      user-facing message; when it did not supply one, `message` stays unset and the
+      caller's own Chinese default is what the owner reads.
+
+      The English `statusText` is not lost — it rides along on `err.statusText` for
+      diagnostics (web/detail.js's comment already names it as such). It is simply not a
+      sentence anyone should be shown. */
   async function _toError(resp) {
     let code = 'error';
-    let message = resp.statusText || 'request failed';
+    let message;                       // stays undefined unless the envelope supplies one
     let field;
     let issues;
     try {
@@ -111,9 +183,14 @@
         issues = err.issues;           // stays undefined if absent
       }
     } catch (e) {
-      /* no / non-JSON body — keep statusText-derived defaults */
+      /* no / non-JSON body — no message of record; the caller's zh fallback renders */
     }
-    return new PdApiError(resp.status, code, message, field, issues);
+    // The error path resolves account tokens too: a 4xx `message` is toasted verbatim and
+    // its `issues[].text` are rendered as the form's findings.
+    const out = new PdApiError(
+      resp.status, code, _resolveRefs(message), field, _resolveRefs(issues));
+    out.statusText = resp.statusText || '';   // diagnostics only — never toasted
+    return out;
   }
 
   /** Shared response handler: 2xx → parsed-untouched JSON (or null); else throw. */
@@ -122,7 +199,8 @@
       if (resp.status === 204) return null;
       const text = await resp.text();
       if (!text) return null;
-      return JSON.parse(text);         // strings stay strings — NO coercion
+      // strings stay strings — NO coercion; only account tokens inside them are resolved
+      return _resolveRefs(JSON.parse(text));
     }
     const err = await _toError(resp);
     if (resp.status === 401 && !window.location.pathname.endsWith('login.html')) {
@@ -172,6 +250,27 @@
     return _track(_download(path, body, opts));
   }
 
+  /* I-10: a downloaded file is the one response no page renders — a print report is SAVED
+     and opened offline, where no fetch layer and no names.js can reach it. So the tokens are
+     resolved HERE, before the Blob is saved, by the same resolver as every other response:
+     text/* only (a zip or any binary is never touched), byte-identical when there is no
+     token, the display name HTML-escaped inside text/html, and the UTF-8 BOM preserved
+     (Excel needs it on a CSV; `ignoreBOM` keeps it in the decoded string). */
+  const _HTML_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  async function _resolveBlobRefs(blob, resp) {
+    const type = String((resp.headers && resp.headers.get('content-type')) || blob.type || '')
+      .toLowerCase();
+    if (type.indexOf('text/') !== 0) return blob;
+    const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(await blob.arrayBuffer());
+    if (text.indexOf('{account:') === -1) return blob;
+    const html = type.indexOf('text/html') === 0;
+    const out = text.replace(ACCOUNT_REF, function (m) {
+      const name = _resolveText(m);
+      return html ? name.replace(/[&<>"']/g, function (c) { return _HTML_ESC[c]; }) : name;
+    });
+    return new Blob([out], { type: blob.type || type });
+  }
+
   async function _download(path, body, opts) {
     const method = body !== undefined && body !== null ? 'POST' : 'GET';
     const resp = await fetch(_normPath(path), _jsonInit(method, body, opts));
@@ -182,7 +281,7 @@
       }
       throw err;
     }
-    const blob = await resp.blob();
+    const blob = await _resolveBlobRefs(await resp.blob(), resp);
     const filename = _filenameFromDisposition(resp, 'download');
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

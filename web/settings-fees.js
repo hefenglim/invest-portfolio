@@ -46,6 +46,13 @@
   };
   const CAP_KEYS = new Set(['taf_cap', 'clearing_cap', 'stamp_cap_stock', 'stamp_cap_etf']);
 
+  /* Read-only fields: the stored spelling -> what it means, and why it cannot be changed.
+     The server marks them with `editable: false`; these two maps are display only. */
+  const ROUNDING_ZH = { floor: '無條件捨去（floor）', half_up: '四捨五入（half_up）' };
+  const READONLY_ZH = {
+    rounding: '由市場規定，不可修改（台股費稅無條件捨去至整數元，財政部「角以下免收」；美／馬每項費用四捨五入至最小幣值單位）'
+  };
+
   function isMeaningful(f) {
     if (f.key === 'rounding') return true;
     if (f.overridden) return true;
@@ -79,20 +86,29 @@
     row.appendChild(label);
 
     const ctrl = el('div', 'fee-ctrl');
-    let input;
-    if (f.key === 'rounding') {
-      input = el('select', 'input fee-input');
-      [['floor', '無條件捨去 (floor)'], ['half_up', '四捨五入 (half_up)']].forEach((opt) => {
-        const o = el('option', null, opt[1]); o.value = opt[0]; input.appendChild(o);
-      });
-      input.value = f.effective || f.default || 'half_up';
-    } else {
-      input = el('input', 'input fee-input');
-      input.type = 'number'; input.step = 'any'; input.min = '0';
-      if (!CAP_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
-      input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
-      if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
+
+    /* READ-ONLY fields are shown, never offered. `rounding` is the market's own rule, not a
+       preference: TW quantizes fee AND tax by 無條件捨去 to integer NT$ (FE-D3, 財政部
+       角以下免收) and US/MY quantize each component to the 2-dp minor unit — the engine
+       branches on the market, and never read this field at all. It was editable anyway, so
+       an override was accepted, reported as effective, changed no money, and was written
+       into every subsequent row's permanent fee_rule_snapshot as the regime that produced
+       its numbers (QA-07). Deliberately NOT given the `.fee-input` class: `collect()` reads
+       that class, so a read-only field cannot be posted back even by accident. */
+    if (f.editable === false) {
+      const shownValue = ROUNDING_ZH[f.effective] || f.effective || '—';
+      ctrl.appendChild(el('div', 'fee-readonly num', shownValue));
+      const why = el('span', 'panel-sub', READONLY_ZH[f.key] || '由市場規定，不可修改');
+      ctrl.appendChild(why);
+      row.appendChild(ctrl);
+      return row;
     }
+
+    const input = el('input', 'input fee-input');
+    input.type = 'number'; input.step = 'any'; input.min = '0';
+    if (!CAP_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
+    input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
+    if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
     input.dataset.key = f.key;
     ctrl.appendChild(input);
 
@@ -240,26 +256,53 @@
     }
   }
 
-  async function resetSet(name) {
-    if (!window.pdApi) return;
-    if (!window.confirm('重設「' + (RS_NAMES[name] || name) + '」所有費率為系統預設？')) return;
-    try {
-      replaceCard(await window.pdApi.post('/api/fee-rules/' + name + '/reset'));
-      if (window.toast) window.toast('已重設為系統預設', 'ok');
-    } catch (err) {
-      if (window.toast) window.toast(err.message, 'fail', err.code);
-    }
+  /* F-15: these two were the app's only native `window.confirm` — everywhere else (30+
+     confirmations met by the 2026-08-27 sweep) uses `confirmDialog`, which carries a title,
+     an explanation, a danger style and a named action button. The difference is not cosmetic:
+     a native confirm fits one line, and these two change what EVERY future trade costs. The
+     one fact the owner needs before deciding — that history is safe, because each row keeps
+     its own fee snapshot — was only being told to them AFTERWARDS, in the success toast. */
+  const HISTORY_NOTE = '僅影響未來交易；既有交易列各自保留當時的費率快照，不會被重算。';
+
+  function askThen(opts, run) {
+    if (!window.confirmDialog) { run(); return; }   // degrade: never silently do nothing
+    window.confirmDialog({
+      title: opts.title, body: opts.body, confirmLabel: opts.confirmLabel,
+      danger: true, onConfirm: run,
+    });
   }
 
-  async function resetAll() {
+  function resetSet(name) {
     if (!window.pdApi) return;
-    if (!window.confirm('重設全部費率規則為系統預設？此動作會清除所有費率調整。')) return;
-    try {
-      renderAll(await window.pdApi.post('/api/fee-rules/reset-all'));
-      if (window.toast) window.toast('全部費率已重設為系統預設', 'ok');
-    } catch (err) {
-      if (window.toast) window.toast(err.message, 'fail', err.code);
-    }
+    askThen({
+      title: '重設費率規則',
+      body: '將「' + (RS_NAMES[name] || name) + '」的所有費率恢復為系統預設值。' + HISTORY_NOTE,
+      confirmLabel: '重設此規則',
+    }, async () => {
+      try {
+        replaceCard(await window.pdApi.post('/api/fee-rules/' + name + '/reset'));
+        if (window.toast) window.toast('已重設為系統預設', 'ok');
+      } catch (err) {
+        if (window.toast) window.toast(err.message, 'fail', err.code);
+      }
+    });
+  }
+
+  function resetAll() {
+    if (!window.pdApi) return;
+    askThen({
+      title: '重設全部費率規則',
+      body: '將所有券商的費率規則恢復為系統預設值，清除你做過的每一項費率調整。'
+        + HISTORY_NOTE,
+      confirmLabel: '全部重設',
+    }, async () => {
+      try {
+        renderAll(await window.pdApi.post('/api/fee-rules/reset-all'));
+        if (window.toast) window.toast('全部費率已重設為系統預設', 'ok');
+      } catch (err) {
+        if (window.toast) window.toast(err.message, 'fail', err.code);
+      }
+    });
   }
 
   /* Replace a single card in place (keeps other cards' open/scroll state). */

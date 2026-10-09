@@ -110,8 +110,17 @@ def test_sell_within_holdings() -> None:
     conn.close()
 
 
-def test_sell_oversell_returns_full_numbers() -> None:
-    """SELL > held: oversell True (soft warning) yet full numbers still returned."""
+def test_sell_oversell_states_the_fork_instead_of_inventing_a_realized(
+) -> None:
+    """SELL > held: proceeds and the negative remainder stay; the realized figure does not.
+
+    Changed 2026-08-24 (investment-logic review). The drawer has no 放空 declaration to read,
+    and the two readings book DIFFERENT amounts: a declared short realizes only the 1,000 held
+    and opens a short for the other 4,000, while an undeclared oversell discards the basis and
+    books NOTHING. The old assertion below pinned ``500 × 5,000`` — the held average applied to
+    shares that were never held, which is neither answer. One app must not print two answers
+    for one trade (the manual form showed +500 where this drawer showed +3,000).
+    """
     conn = _db()
     r = _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("5000"),
                 price=Decimal("600"), account_id="tw_broker")
@@ -120,11 +129,27 @@ def test_sell_oversell_returns_full_numbers() -> None:
     fee = Decimal(str(r["fee"]))
     tax = Decimal(str(r["tax"]))
     proceeds_net = Decimal(str(r["proceeds_net"]))
-    # realized still computed on the requested shares vs the held adjusted_avg (500).
+    # The objectively-known figures are still returned in full.
     assert proceeds_net == amount - fee - tax
-    assert Decimal(str(r["adjusted_cost_removed"])) == Decimal("500") * Decimal("5000")
-    assert Decimal(str(r["realized"])) == proceeds_net - Decimal("500") * Decimal("5000")
     assert Decimal(str(r["remaining_shares"])) == Decimal("1000") - Decimal("5000")
+    # The ones that depend on the unasked question are withheld, with the fork spelled out.
+    assert r["realized"] is None
+    assert r["adjusted_cost_removed"] is None
+    assert "放空" in str(r["realized_note"]) and "賣超" in str(r["realized_note"])
+    conn.close()
+
+
+def test_sell_within_holdings_keeps_the_exact_prior_arithmetic() -> None:
+    """The ordinary branch must not move — and it now uses build_book's operand order."""
+    conn = _db()
+    r = _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("400"),
+                price=Decimal("600"), account_id="tw_broker")
+    assert r["oversell"] is False and r["realized_note"] is None
+    proceeds_net = Decimal(str(r["proceeds_net"]))
+    # held: 1,000 shares, adjusted total 500,000 -> totals x frac, not avg x shares.
+    removed = Decimal("500000") * (Decimal("400") / Decimal("1000"))
+    assert Decimal(str(r["adjusted_cost_removed"])) == removed
+    assert Decimal(str(r["realized"])) == proceeds_net - removed
     conn.close()
 
 
@@ -196,3 +221,23 @@ def test_old_fields_null_for_fresh_buy() -> None:
     assert r["old_adjusted_avg"] is None
     assert r["old_weight"] is None
     conn.close()
+
+
+def test_tw_fractional_shares_are_refused_before_pricing() -> None:
+    """L12 (demo audit 2026-09-16): the drawer priced a 0.5-股 TW sell (min fee 20, tax
+    floored — every number "right") for a trade the write door refuses. Same rule, same
+    place in the flow (before fees), field = shares so the form can point at the input."""
+    import pytest
+
+    from portfolio_dash.strategy.whatif import WhatIfError
+
+    conn = _db()
+    with pytest.raises(WhatIfError) as exc:
+        _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("0.5"),
+                price=Decimal("600"), account_id="tw_broker")
+    assert exc.value.field == "shares"
+    assert "整數" in str(exc.value)
+    # A whole-share sell on the same fixture still simulates.
+    out = _whatif(conn, symbol="2330", side=Side.SELL, shares=Decimal("1"),
+                  price=Decimal("600"), account_id="tw_broker")
+    assert "amount" in out and out["account_id"] == "tw_broker"

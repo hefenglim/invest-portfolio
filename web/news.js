@@ -35,7 +35,7 @@
     const x = el('button', 'nw-x', '✕');
     x.addEventListener('click', closeModal);
     m.appendChild(x);
-    m.appendChild(el('h3', null, item.title || '(未命名)'));
+    m.appendChild(el('h3', null, item.title || '（未命名）'));
     const meta = el('div', 'm-meta');
     meta.appendChild(el('span', null, item.date || ''));
     if (item.source) meta.appendChild(el('span', null, '· ' + item.source));
@@ -43,7 +43,7 @@
     (item.related_stocks || []).forEach((s) => meta.appendChild(el('span', 'nw-tag', s)));
     m.appendChild(meta);
     m.appendChild(el('div', 'm-summary',
-      item.summary || (item.headline_only ? '(此則僅取得標題，未整理內文摘要)' : '')));
+      item.summary || (item.headline_only ? '（此則僅取得標題，未整理內文摘要）' : '')));
     const foot = el('div', 'm-foot');
     if (item.link) {
       const a = el('a', null, '前往原文 ↗'); a.href = item.link; a.target = '_blank';
@@ -51,6 +51,15 @@
     }
     var attrib = f.aiAttrib(item.model, item.tokens_in, item.tokens_out, item.cost_usd);
     if (attrib) foot.appendChild(el('span', 'ai-attrib', attrib));
+    /* DEF-057: the news-organizer prompt version this summary was produced with (null =
+       headline-only, or organized before versions were recorded → nothing to name). */
+    if (item.prompt_version != null) {
+      const pv = el('a', 'ai-attrib nw-pver', '整理提示詞 v' + item.prompt_version);
+      pv.href = 'settings.html#prompts/news-prompt';
+      pv.title = '此則摘要以新聞整理提示詞 v' + item.prompt_version +
+        ' 產生；點擊前往 AI 提示詞，於「版本記錄」檢視該版內文';
+      foot.appendChild(pv);
+    }
     m.appendChild(foot);
     $('#nw-back').classList.add('open');
   }
@@ -62,7 +71,7 @@
     const row = el('div', 'nw-row');
     const top = el('div', 'nw-row-top');
     top.appendChild(el('span', 'nw-date', item.date || ''));
-    top.appendChild(el('span', 'nw-title', item.title || '(未命名)'));
+    top.appendChild(el('span', 'nw-title', item.title || '（未命名）'));
     top.appendChild(el('span', 'nw-cost', '$' + f.num(item.cost_usd, 4)));
     row.appendChild(top);
     const meta = el('div', 'nw-row-meta');
@@ -153,6 +162,18 @@
     }).catch(() => {});
   }
 
+  /* G-02 (measured 2026-09-02 on a real manual run): `job_runs.detail` is composed
+     SERVER-side and is not owner-facing prose. The ok path reads
+     「manual: organized 0, headline 1, skipped 0 over 24 symbol(s) (budget stop)」 and the
+     error path is a bare `str(exc)` — both went verbatim into the toast body below.
+
+     Same rule the API error envelope already applies (api/errors.py::_prefer_zh): KEEP a
+     detail that was written for the owner, DROP one that was not. Deliberately not
+     translated here — parsing the backend's sentence would make this file a second, drifting
+     owner of its wording, which is the very class G-02 exists to close. */
+  const CJK = /[㐀-䶿一-鿿豈-﫿]/;
+  const zhDetail = (d) => (d && CJK.test(d) ? d : null);
+
   /* 抓取新聞 (3C): POST /api/news/run {scope} -> 202 + background pipeline. Poll the run
      history for completion, then reload the list. NEVER runs the LLM on page load — only on
      this explicit click. Guest/demo → 403, surfaced as a friendly fail toast. */
@@ -162,8 +183,8 @@
       const run = resp && resp.rows && resp.rows[0];
       if (run && run.finished_at) {
         if (prog) {
-          if (run.status === 'error') prog.fail('抓取失敗', run.detail || '請稍後再試');
-          else prog.done('抓取完成', run.detail || '已更新新聞庫');
+          if (run.status === 'error') prog.fail('抓取失敗', zhDetail(run.detail) || '請稍後再試');
+          else prog.done('抓取完成', zhDetail(run.detail) || '已更新新聞庫');
         }
         state.offset = 0; load();
         return;
@@ -177,14 +198,14 @@
     const scope = ($('#nw-scope') && $('#nw-scope').value) || 'all';
     const restore = window.pdBusy ? window.pdBusy(runBtn, '抓取中…') : () => {};
     const prog = window.toastProgress
-      ? window.toastProgress('新聞抓取中…', '正在向資料源抓取並以 AI 整理(數十秒~數分鐘)')
+      ? window.toastProgress('新聞抓取中…', '正在向資料源抓取並以 AI 整理（數十秒～數分鐘）')
       : null;
     api.post('/api/news/run', { scope: scope }).then(() => {
       restore();
       pollNewsRun(prog, 0);
     }).catch((err) => {
       restore();
-      const msg = (err && err.status === 409) ? '已有抓取正在進行,請稍候'
+      const msg = (err && err.status === 409) ? '已有抓取正在進行，請稍候'
         : (err && err.message) || '抓取失敗';
       if (prog) prog.fail('無法開始抓取', msg);
       else if (window.toast) window.toast(msg, 'fail', err && err.code);

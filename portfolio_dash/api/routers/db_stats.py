@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.news import store as news_store
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.ledger_registry import LEDGER_TABLES
 
 router = APIRouter()
 
@@ -30,15 +31,17 @@ class _TableSpec(NamedTuple):
     date_col: str | None  # MIN(date_col) = oldest record (None -> no date shown)
 
 
-# Hand-maintained registry: name -> zh label, category, oldest-record date column.
+# The 帳本 ledgers come from shared/ledger_registry.py (declaration order preserved), so a
+# new ledger appears here without being remembered here. Everything below them is
+# hand-maintained: name -> zh label, category, oldest-record date column.
 # Category order below (_PORTFOLIO_CATEGORIES) drives the display grouping.
+_LEDGER_SPECS: tuple[_TableSpec, ...] = tuple(
+    _TableSpec(t.table, t.label, "帳本", t.date_col) for t in LEDGER_TABLES
+)
+
 _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     # 帳本 — the permanent sources of truth
-    _TableSpec("transactions", "交易帳本", "帳本", "trade_date"),
-    _TableSpec("dividends", "股利帳本", "帳本", "date"),
-    _TableSpec("fx_conversions", "換匯帳本", "帳本", "date"),
-    _TableSpec("opening_inventory", "期初庫存", "帳本", "build_date"),
-    _TableSpec("cash_movements", "資金收支", "帳本", "date"),
+    *_LEDGER_SPECS,
     _TableSpec("accounts", "帳戶", "帳本", None),
     _TableSpec("instruments", "標的清單", "帳本", None),
     # 市場資料 — fetched quotes / rates / external datasets
@@ -49,6 +52,7 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("portfolio_snapshots", "月度 KPI 快照", "市場資料", "month"),
     # AI 記錄 — per-call / per-card AI history
     _TableSpec("llm_usage", "AI 請求明細", "AI 記錄", "ts"),
+    _TableSpec("llm_fail_log", "AI 抽取失敗記錄", "AI 記錄", "created_at"),
     _TableSpec("insights", "洞察卡", "AI 記錄", "created_at"),
     _TableSpec("insight_evaluations", "洞察評分", "AI 記錄", "evaluated_at"),
     _TableSpec("calibration_prompts", "校正提示詞版本", "AI 記錄", "created_at"),
@@ -56,13 +60,20 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("insight_types", "洞察任務", "AI 記錄", None),
     _TableSpec("insight_type_strategies", "任務-策略關聯", "AI 記錄", None),
     _TableSpec("strategy_prompts", "策略提示詞", "AI 記錄", None),
+    # DEF-033: every saved body of every strategy (append-only; a restore is a new row).
+    _TableSpec("strategy_prompt_versions", "策略提示詞版本", "AI 記錄", "saved_at"),
+    _TableSpec("prompt_versions", "系統／新聞整理提示詞版本", "AI 記錄", "saved_at"),
     # 系統記錄 — operational history
     _TableSpec("job_runs", "排程執行紀錄", "系統記錄", "started_at"),
     _TableSpec("action_log", "系統操作記錄", "系統記錄", "ts"),
     _TableSpec("ledger_audit", "帳本操作稽核", "系統記錄", "at"),
+    # 系統記錄 rather than 帳本: it holds no money of record, only the note of which file
+    # each imported row came from — and it is what the import undo is keyed on.
+    _TableSpec("import_batches", "匯入批次", "系統記錄", "imported_at"),
     _TableSpec("alert_events", "預警事件", "系統記錄", "fired_at"),
     _TableSpec("alert_dispatch_log", "預警派發紀錄", "系統記錄", "dispatched_at"),
     _TableSpec("signal_states", "技術訊號狀態", "系統記錄", "updated_at"),
+    _TableSpec("signal_history", "訊號歷史", "系統記錄", "as_of"),
     _TableSpec("pending_dividend_skips", "配息略過記錄", "系統記錄", "skipped_at"),
     _TableSpec("rebate_skips", "折讓款略過記錄", "系統記錄", "skipped_at"),
     _TableSpec("digests", "摘要卡", "系統記錄", "digest_date"),
@@ -70,9 +81,9 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("auth_users", "授權用戶", "系統記錄", None),
     _TableSpec("auth_sessions", "登入工作階段", "系統記錄", None),
     # 設定 — small config stores (registered so they don't read as "unknown")
-    _TableSpec("llm_models", "LLM 模型註冊表", "設定", None),
-    _TableSpec("llm_defaults", "LLM 角色預設", "設定", None),
-    _TableSpec("llm_quota_config", "LLM 額度設定", "設定", None),
+    _TableSpec("llm_models", "AI 模型註冊表", "設定", None),
+    _TableSpec("llm_defaults", "AI 角色預設", "設定", None),
+    _TableSpec("llm_quota_config", "AI 額度設定", "設定", None),
     _TableSpec("schedule_config", "排程設定", "設定", None),
     _TableSpec("data_sources", "資料來源", "設定", None),
     _TableSpec("data_source_fallbacks", "資料源帳戶順位", "設定", None),

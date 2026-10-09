@@ -11,25 +11,28 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
     list_cash_movements,
     list_dividends,
     list_fx_conversions,
-    list_instruments,
-    list_opening,
     list_transactions,
+    load_ledger_bundle,
 )
 from portfolio_dash.forex.fx_pnl import compute_fx_summary
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
+from portfolio_dash.portfolio.benchmark_counterfactual import counterfactual
 from portfolio_dash.portfolio.cash import cash_balances
-from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
 from portfolio_dash.portfolio.dashboard_models import (
+    BenchmarkComparison,
+    BenchmarkMarketLeg,
     DashboardData,
     DividendProjection,
     DividendSummary,
@@ -37,6 +40,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     ExDividendItem,
     FreshnessReport,
     FxFreshness,
+    FxTriangle,
     HoldingRow,
     HoldingSubtotal,
     KpiSummary,
@@ -46,9 +50,32 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.pnl import value_holdings
-from portfolio_dash.portfolio.results import CombinedView, ReturnSummary, SectorAllocation
-from portfolio_dash.portfolio.returns import total_return, xirr_reporting
-from portfolio_dash.portfolio.timeseries import FxHistory, PriceHistory, daily_value_series
+from portfolio_dash.portfolio.price_basis import price_in, series_in
+from portfolio_dash.portfolio.results import (
+    CombinedView,
+    OversoldPosition,
+    ReturnSummary,
+    SectorAllocation,
+    UnappliedAction,
+    UnbookableDividend,
+)
+from portfolio_dash.portfolio.returns import (
+    CashMovementFlow,
+    DividendIdentity,
+    booked_dividends,
+    dividend_key,
+    total_return,
+    xirr_reporting,
+)
+from portfolio_dash.portfolio.timeseries import (
+    FxHistory,
+    PriceHistory,
+    build_reporting_flows,
+    daily_value_series,
+    trading_financing_cost,
+)
+from portfolio_dash.portfolio.twr import convert_closes
+from portfolio_dash.pricing.benchmarks import benchmark_for_market
 from portfolio_dash.pricing.results import FxRead, PriceRead
 from portfolio_dash.pricing.store import (
     get_dividend_events,
@@ -58,14 +85,16 @@ from portfolio_dash.pricing.store import (
     get_latest_price,
     get_price_history,
 )
+from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import (
     Dividend,
     FXConversion,
-    OpeningInventory,
-    Transaction,
+    LedgerBundle,
+    valued_rows_as_of,
 )
 from portfolio_dash.shared.sectors import canonical_sector
 
@@ -96,6 +125,9 @@ class RateResolver:
         self._conn = conn
         self._now = now
         self.reads: dict[tuple[Currency, Currency], FxRead | None] = {}
+        # Pairs `_read` answered from the INVERSE stored pair — so `history` reads the series
+        # in the same direction the rate was resolved (one owner of the direction rule).
+        self._inverted: set[tuple[Currency, Currency]] = set()
 
     def _read(self, base: Currency, quote: Currency) -> FxRead | None:
         direct = get_fx(self._conn, base, quote, now=self._now)
@@ -103,9 +135,28 @@ class RateResolver:
             return direct
         inverse = get_fx(self._conn, quote, base, now=self._now)
         if inverse is not None:
+            self._inverted.add((base, quote))
             return FxRead(rate=_ONE / inverse.rate, as_of=inverse.as_of,
                           source=inverse.source, stale=inverse.stale)
         return None
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        """The stored series of *base*/*quote* in ``[start, end]``, ascending, read in the
+        SAME direction :meth:`rate` resolved the pair (direct, else the inverted inverse).
+
+        DEF-077: the triangulation compares its three legs on a common DATE, so it needs
+        each leg's rows, not only the latest one — and a leg answered from the inverse pair
+        must be inverted exactly as `_read` inverts it (``1 / rate``, full precision). A
+        zero stored rate is skipped (a rate of 0 is not a rate).
+        """
+        if (base, quote) not in self._inverted:
+            return get_fx_history(self._conn, base, quote, start, end)
+        return [
+            FxRead(rate=_ONE / r.rate, as_of=r.as_of, source=r.source, stale=False)
+            for r in get_fx_history(self._conn, quote, base, start, end)
+            if r.rate != _ZERO
+        ]
 
     def rate(self, base: Currency, quote: Currency) -> Decimal:
         if base == quote:
@@ -119,6 +170,143 @@ class RateResolver:
             # badge renders (web/app.js) — so it is a user-facing string, not log text.
             raise KeyError(f"尚無 {base.value}/{quote.value} 匯率資料")
         return read.rate
+
+
+# M1 — triangular-consistency disclosure over the stored FX rates.
+#
+# Display scales. The RATES are never touched: these quantize the two DERIVED figures so
+# the wire carries a readable number instead of a 28-significant-digit division tail.
+# 6 dp matches the FX rate cap in data-and-pricing.md (a rate is not money; the 2-dp rule
+# never applies), and 4 dp on a PERCENT is 6 dp on the underlying ratio — the same
+# resolution as the legs it is derived from, so the gap can never be "more precise" than
+# its own inputs.
+_TRI_RATE_DP = Decimal("0.000001")
+_TRI_GAP_DP = Decimal("0.0001")
+# Tolerance in PERCENT. 0.05% is roughly a retail FX spread: below it the disagreement is
+# indistinguishable from two providers quoting a moment apart, above it the reporting total
+# visibly depends on which conversion path was used (the measured demo gap is 0.0690%).
+_TRI_TOLERANCE_PCT = Decimal("0.05")
+# DEF-077: how far before the oldest leg's latest date the common-date search looks. FX legs
+# are written on every weekday a provider answers and MYR/TWD is derived on every day both USD
+# legs exist (`pricing/cross.py`), so a gap of more than a few days means a leg stopped
+# updating — a month is far past any holiday run, and past it there is nothing honest to
+# compare (the triangle reads 「無法比較」 and the freshness list already flags the stale leg).
+_TRI_LOOKBACK_DAYS = 30
+_FxHistory = Callable[[Currency, Currency, date, date], list[FxRead]]
+
+
+def _fx_triangulation(
+    reads: dict[tuple[Currency, Currency], FxRead | None],
+    *,
+    history: _FxHistory,
+    valued_on: date,
+) -> list[FxTriangle]:
+    """Every triangle closable from the pairs actually READ this request.
+
+    Generic over ``reads`` on purpose — in practice the only triple stored today is
+    USD/TWD · USD/MYR · MYR/TWD, but a fourth currency must not need a code change to be
+    checked. For each directly-read pair ``(a, c)`` and each other currency ``b`` whose two
+    legs ``(a, b)`` and ``(b, c)`` were ALSO read, the two-leg product is compared with the
+    direct rate.
+
+    Presence is the only gate: a stale leg still produces a triangle (flagged ``stale``)
+    because a stale rate is exactly when a path disagreement is most likely, and hiding the
+    check there would blind the reader at the worst moment. A MISSING leg produces nothing —
+    the resolver's inverse fallback already means a read exists for either direction, so an
+    absent key means the pair was genuinely never asked for, not that it is unknown.
+
+    **Judged on ONE day (DEF-077, owner ruling ⑥ A, 2026-09-26).** The verdict compares the
+    three legs on their latest COMMON date not after *valued_on* — when every leg's latest
+    read is that day, the reads themselves; otherwise the rows *history* returns (the
+    resolver's :meth:`RateResolver.history`, same direction as the read) within
+    ``_TRI_LOOKBACK_DAYS`` before the oldest leg's latest date. It used to compare latest row
+    against latest row, so a refresh that had moved one leg to a new day measured the day's
+    market move and reported it as ``ok: false`` (verifier J-01, 3be67db: −0.0938%).
+    Legs whose latest dates differ carry ``dates_differ`` + ``leg_dates``; no common date in
+    the window → ``ok: None`` with a reason, never ``False``. The tolerance is unchanged:
+    MYR/TWD is derived from the two USD legs (`pricing/cross.py`), so on a common date the
+    gap is ~0 within the 6-dp cap and anything past 0.05% is still a row that reached
+    ``fx_rates`` by another path — the guard semantics of ``data-and-pricing.md``.
+
+    Reads the resolver's recorded rates (and, when the legs' dates differ, their stored
+    history) and mutates nothing.
+    """
+    have = {k: v for k, v in reads.items() if v is not None}
+    # Every currency that appears on either side of a read — the candidate pivots.
+    pivots = sorted({c for pair in have for c in pair}, key=lambda x: x.value)
+    out: list[FxTriangle] = []
+    for (a, c), direct_read in sorted(have.items(), key=lambda kv: (kv[0][0].value,
+                                                                   kv[0][1].value)):
+        if a == c:
+            continue
+        for b in pivots:
+            if b in (a, c):
+                continue
+            leg1, leg2 = have.get((a, b)), have.get((b, c))
+            if leg1 is None or leg2 is None:
+                continue
+            if direct_read.rate == _ZERO:  # never divide by a zero rate — 0 is not a rate
+                continue
+            legs = (((a, b), leg1), ((b, c), leg2), ((a, c), direct_read))
+            latest = {r.as_of for _, r in legs}
+            base = FxTriangle(
+                via=f"{a.value}/{b.value} × {b.value}/{c.value}",
+                pair=f"{a.value}/{c.value}",
+                implied=None, direct=None, gap_pct=None, ok=None,
+                as_of=min(latest),
+                stale=leg1.stale or leg2.stale or direct_read.stale,
+                dates_differ=len(latest) > 1,
+                leg_dates={f"{x.value}/{y.value}": r.as_of for (x, y), r in legs},
+            )
+            common = _common_rates(legs, history=history, valued_on=valued_on)
+            if common is None:
+                out.append(base.model_copy(update={"reason": (
+                    f"最近 {_TRI_LOOKBACK_DAYS} 天內三組匯率沒有共同日期，無法比較")}))
+                continue
+            on, (r1, r2, r3) = common
+            if r3 == _ZERO:
+                continue
+            implied = r1 * r2
+            gap_pct = ((implied / r3) - _ONE) * Decimal("100")
+            gap_q = gap_pct.quantize(_TRI_GAP_DP, rounding=ROUND_HALF_UP)
+            out.append(base.model_copy(update={
+                "implied": implied.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
+                "direct": r3.quantize(_TRI_RATE_DP, rounding=ROUND_HALF_UP),
+                "gap_pct": gap_q,
+                # Judged on the QUANTIZED gap: the badge and the number printed beside it
+                # must never disagree, which they can if ok reads full precision.
+                "ok": abs(gap_q) <= _TRI_TOLERANCE_PCT,
+                "compared_on": on,
+            }))
+    return out
+
+
+def _common_rates(
+    legs: tuple[tuple[tuple[Currency, Currency], FxRead], ...],
+    *,
+    history: _FxHistory,
+    valued_on: date,
+) -> tuple[date, tuple[Decimal, Decimal, Decimal]] | None:
+    """The latest date not after *valued_on* on which all three legs have a stored rate,
+    with that day's three rates (leg1, leg2, direct) — or None (DEF-077).
+
+    When every leg's latest read already falls on one such day, the reads are the answer
+    (the common case: no extra query). Otherwise each leg's series is read back over
+    ``_TRI_LOOKBACK_DAYS`` before the oldest latest date — a common date cannot be later
+    than that — in the direction the rate was resolved.
+    """
+    latest = {r.as_of for _, r in legs}
+    first = next(iter(latest))
+    if len(latest) == 1 and first <= valued_on:
+        return first, (legs[0][1].rate, legs[1][1].rate, legs[2][1].rate)
+    end = min(min(latest), valued_on)
+    start = end - timedelta(days=_TRI_LOOKBACK_DAYS)
+    series = [{row.as_of: row.rate for row in history(x, y, start, end)} for (x, y), _ in legs]
+    days = set(series[0]) & set(series[1]) & set(series[2])
+    if not days:
+        return None
+    day = max(days)
+    return day, (series[0][day], series[1][day], series[2][day])
 
 
 # Fixed market order for the per-market subtotal rows (deterministic wire order).
@@ -198,44 +386,265 @@ def _holdings_subtotals(
     return out
 
 
+# How many rows an XIRR reason names individually before it summarizes.
+_UNAPPLIED_ACTIONS_NAMED = 3
+
+
+def _named_capped[T](items: Sequence[T], name: Callable[[T], str]) -> str:
+    """「A（…）、B（…）、C（…），另有 N 筆」 — the ONE capped list every XIRR reason names its rows
+    with (R11, 2026-10-04: three reasons carried three copies of it).
+
+    Capped rather than unbounded: the string renders inside a KPI badge, and a 20-row ledger
+    problem would push the dashboard sideways (the same overflow class as the 136-digit XIRR,
+    2026-08-05). The remainder is counted, never dropped silently.
+    """
+    named = "、".join(name(i) for i in items[:_UNAPPLIED_ACTIONS_NAMED])
+    rest = len(items) - _UNAPPLIED_ACTIONS_NAMED
+    return named + (f"，另有 {rest} 筆" if rest > 0 else "")
+
+
+def _unapplied_action_reason(unapplied: list[UnappliedAction]) -> str:
+    """The XIRR badge's zh explanation when the book carries unapplied corporate actions.
+
+    Names the ACCOUNT, SYMBOL and DATE of each one (owner requirement 2026-08-10). XIRR is
+    the single figure a skipped action blanks portfolio-wide, so the message has to point at
+    the one ledger row responsible instead of leaving the owner to hunt for it across a
+    multi-account book. The 賣超 reason said only that *a* position was 待釐清 until CR-01
+    (2026-10-04) gave it this same shape (:func:`_oversold_reason`). Capped by
+    :func:`_named_capped`.
+    """
+    # The account is a TOKEN the fetch layer resolves to the zh display name (DEF-023):
+    # this string used to carry the bare id, so the badge read 「2884（tw_broker・…）」.
+    named = _named_capped(
+        unapplied,
+        lambda a: f"{a.from_symbol}（{account_ref(a.account_id)}・{a.date.isoformat()}）")
+    return (
+        f"帳本中有 {len(unapplied)} 筆公司行動無法套用（待釐清）：{named}"
+        " — 這些部位的股數仍是行動前的基準，與行動後的現價不同步，無法計算 XIRR"
+    )
+
+
+def _oversold_reason(positions: list[OversoldPosition]) -> str:
+    """The XIRR badge's zh explanation when the book carries 賣超 positions (CR-01, 2026-10-04).
+
+    It said only 「帳本中有賣超部位待釐清」, which was enough while every 賣超 had a holdings row
+    wearing the badge. One netted back to exactly zero shares has none — it is listed only on
+    the BOOK — so the sentence now names each position the way the unapplied-action reason
+    does: account (as a token the fetch layer resolves), symbol, the day the sell exceeded the
+    holding, and 「部位已歸零」 when no holdings row will show it. Capped by
+    :func:`_named_capped`.
+    """
+    def one(p: OversoldPosition) -> str:
+        when = f"・{p.oversold_on.isoformat()}" if p.oversold_on is not None else ""
+        flat = "，部位已歸零" if p.shares == _ZERO else ""
+        return f"{p.symbol}（{account_ref(p.account_id)}{when}{flat}）"
+
+    return (f"帳本中有賣超部位待釐清：{_named_capped(positions, one)}"
+            " — 成本基礎已捨棄、該筆賣出沒有已實現損益，無法計算 XIRR")
+
+
+def _orphan_dividend_reason(dividends: list[Dividend]) -> str:
+    """The XIRR badge's zh explanation when the book refused dividends with no position (CR-02):
+    account, symbol and the effective date of each row, capped by :func:`_named_capped`."""
+    named = _named_capped(
+        dividends,
+        lambda d: f"{d.symbol}（{account_ref(d.account_id)}・{d.effective_date.isoformat()}）")
+    return (f"帳本中有 {len(dividends)} 筆股利沒有對應持倉（待釐清）：{named}"
+            " — 該帳戶在股利日之前沒有買進或期初庫存，股利未入帳，無法計算 XIRR")
+
+
+#: The cause word each ``UnbookableDividend.cause`` reads as inside a reason sentence.
+_UNBOOKABLE_CAUSE_ZH = {"short": "放空中", "vacated": "已換股"}
+
+
+def _unbookable_dividend_why(dividends: Sequence[UnbookableDividend]) -> str:
+    """The FX-complete reason's rung for dividends refused on a position that existed (K3).
+
+    Named per row — account, symbol, effective date and the cause — because nothing else on
+    the dashboard names them: XIRR is not withheld for these (it excludes the payout and
+    computes, review R2 ⑤), so when the carrier is flat this sentence is the dashboard's ONLY
+    pointer to the row. Capped by :func:`_named_capped`.
+    """
+    named = _named_capped(
+        dividends,
+        lambda u: (f"{u.dividend.symbol}（{account_ref(u.dividend.account_id)}・"
+                   f"{u.dividend.effective_date.isoformat()}・"
+                   f"{_UNBOOKABLE_CAUSE_ZH[u.cause]}）"))
+    return f"帳本中有 {len(dividends)} 筆股利無法入帳（待釐清）：{named}"
+
+
+@dataclass(frozen=True)
+class FxCompleteOutcome:
+    """B of the A · B · B−A decomposition, plus WHY it is absent when it is.
+
+    Same shape and same reason as ``XirrOutcome``: a figure that legitimately degrades needs
+    to carry its own explanation, or the UI can only blank the row. Owner ruling 2026-08-25 —
+    a line that silently vanishes teaches the reader nothing; 「—」 with a reason does.
+    """
+
+    value: Decimal | None
+    reason: str | None
+
+
+def fx_complete_return(
+    trend: TrendSeries, *, has_oversold: bool, has_unapplied_action: bool,
+    has_orphan_dividend: bool = False,
+    unbookable_dividends: Sequence[UnbookableDividend] = (),
+) -> FxCompleteOutcome:
+    """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
+
+    ``total_return`` (A) translates each currency's NET P&L at today's spot, so the rate never
+    reaches the PRINCIPAL. The trend converts every flow at its own trade-date rate, so
+    ``total_value − net_invested`` on its last point is the figure that does — and it was
+    being displayed under the label 浮動損益.
+
+    Degrades with a stated reason whenever the trend cannot support it: unavailable/empty, or
+    a last day the trend itself marks ``incomplete``. That last case does NOT fall back to an
+    earlier complete day: a B measured on a different date than A makes B − A a
+    plausible-looking wrong number, which is the whole failure mode this decomposition exists
+    to prevent.
+    """
+    if not trend.available or not trend.points:
+        return FxCompleteOutcome(None, "尚無趨勢資料，無法計算含匯兌損益")
+    last = trend.points[-1]
+    if last.incomplete:
+        # WHICH kind of incomplete (F-13, 2026-08-27). `TrendPoint.incomplete` is set by five
+        # different causes — a missing price, a 賣超 position, an unbookable dividend, an
+        # unapplied corporate action, a whole-book action failure — and this reason named only
+        # the first. Measured: an oversold TSLA that HAD a same-day close produced 「最新一日
+        # 有標的缺價」, sending the reader off to check the price feed, while the XIRR row two
+        # lines above, reading the same book, said 「帳本中有賣超部位待釐清」. Same ladder order
+        # as the XIRR gate, so one book never yields two diagnoses.
+        # CR-02 (2026-10-04) added the third rung, in the XIRR gate's own order. Defaulted to
+        # False only because the cost of a missed argument is a wrong DIAGNOSIS on an already-
+        # blank figure (B is withheld either way) — the one production caller passes it.
+        # K3 (2026-10-05) added the fourth: a payout refused on an open short or a vacated
+        # ticker. The trend marked those days (held carrier) yet this ladder had no rung for it
+        # and fell through to 「缺價」 over a priced position — F-13's misdiagnosis, again. It
+        # sits after the three XIRR rungs because XIRR itself is not withheld for it.
+        why = ("帳本中有賣超部位待釐清" if has_oversold
+               else "帳本中有公司行動無法套用（待釐清）" if has_unapplied_action
+               else "帳本中有股利沒有對應持倉（待釐清）" if has_orphan_dividend
+               else _unbookable_dividend_why(unbookable_dividends) if unbookable_dividends
+               else "最新一日有標的缺價")
+        return FxCompleteOutcome(
+            None, f"{why}，含匯兌總損益暫不計算（不以較早日期替代，否則與"
+                  "上方資產損益不同日，兩者的差額會失去意義）")
+    return FxCompleteOutcome(last.total_value - last.net_invested, None)
+
+
+_BENCH_EPOCH = date(1990, 1, 1)  # benchmark closes may predate the first ledger event
+
+
+def _benchmark_comparison(
+    conn: sqlite3.Connection,
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    as_of: date,
+    actions: ActionIndex,
+    fx_complete: Decimal | None,
+    cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
+) -> BenchmarkComparison:
+    """R4 / AI-D43 — spend the portfolio's own flows on each market's index instead.
+
+    Assembled HERE for the same reason ``fx_complete_return`` is: this is the only layer
+    holding both the ledger flows and the reporting-currency figure they must be compared
+    against. Reuses the request's ONE ``ActionIndex`` (trap #21) and the ALREADY-loaded
+    ``fx_history`` — a benchmark's quote currency is the quote currency of the market whose
+    flows it is standing in for, so the pair is loaded exactly when it is needed, and a
+    genuinely missing pair drops those closes and degrades that market to uncovered rather
+    than raising.
+
+    ⚠ ``series_in`` is applied to the benchmark series for the same reason and with the same
+    known limitation the performance router documents: nobody holds an index, so nobody
+    records its splits, making the call a structural no-op today — wired anyway because it
+    is correct the moment such an action IS recorded, and because one raw series read is how
+    the next reader concludes the re-expression rule is optional.
+    """
+    # K2: the stream B is built from — a payout the replay refused is no flow on either leg.
+    flows = build_reporting_flows(bundle, fx_history, reporting,
+                                  cash_movements=cash_movements,
+                                  refused_dividends=refused_dividends)
+    if flows is None:
+        return BenchmarkComparison(
+            available=False,
+            reason="部分投入流量缺少當日匯率，無法換算成報告幣，基準對照暫不可用",
+        )
+    closes_by_market: dict[Market, list[tuple[date, Decimal]]] = {}
+    labels: dict[Market, str] = {}
+    # AI-D49: a cash-movement flow has no market and buys no index, so it contributes no
+    # benchmark series to load. `counterfactual` excludes it from both legs; this loop must
+    # not ask for 「the index of None」.
+    for market in {f.market for f in flows if f.market is not None}:
+        bench = benchmark_for_market(market)
+        if bench is None:
+            # No market is unmapped today (MY gained KLCI 2026-08-27), but a market
+            # added later would land here — uncovered and NAMED, never dropped.
+            continue
+        raw = [
+            (p.as_of, p.value)
+            for p in series_in(
+                actions, bench.storage_key,
+                get_price_history(conn, bench.storage_key, _BENCH_EPOCH, as_of),
+                valued_on=as_of,
+            )
+        ]
+        converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
+        if converted:
+            closes_by_market[market] = converted
+            labels[market] = bench.label
+
+    result = counterfactual(flows, closes_by_market)
+    excess = (
+        None if not result.available or fx_complete is None or result.benchmark_return is None
+        else fx_complete - result.benchmark_return
+    )
+    return BenchmarkComparison(
+        available=result.available,
+        reason=result.reason,
+        terminal_value=result.terminal_value,
+        net_invested=result.net_invested,
+        benchmark_return=result.benchmark_return,
+        excess=excess,
+        uncovered_markets=list(result.uncovered_markets),
+        uncovered_ratio=result.uncovered_ratio,
+        by_market=[
+            BenchmarkMarketLeg(
+                market=leg.market, label=labels[leg.market],
+                terminal_value=leg.terminal_value, net_invested=leg.net_invested,
+            )
+            for leg in result.by_market
+        ],
+    )
+
+
 def build_dashboard(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency
 ) -> DashboardData:
     """Assemble the complete dashboard data model from SQLite (read-only)."""
     as_of = now.date()
 
-    # 1. Ledgers and reference data (Stored* rows -> ledger models).
-    txs = [
-        Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                    quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in list_transactions(conn)
-    ]
-    divs = [
-        Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                 type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                 net=s.net, reinvest_shares=s.reinvest_shares,
-                 reinvest_price=s.reinvest_price)
-        for s in list_dividends(conn)
-    ]
+    # 1. Ledgers and reference data. One bundle, one loader (Stored* -> ledger models).
+    bundle = load_ledger_bundle(conn)
+    instruments = bundle.instruments
+    # DEF-056 (owner ruling 2026-09-24): FX conversions and cash movements count from their
+    # own date like every other ledger — the SAME predicate as step 1c's bundle cut. The FX
+    # pool and the cash series already bounded themselves by `as_of`; XIRR's three cost
+    # kinds (AI-D42) and 交易與融資成本 (the B − A split) did not, so a future-dated fee or
+    # rebate was a flow dated after XIRR's own terminal value. Cut ONCE, here, at the load.
     convs = [
         FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
                      from_amount=s.from_amount, to_ccy=s.to_ccy, to_amount=s.to_amount)
-        for s in list_fx_conversions(conn)
+        for s in valued_rows_as_of(list_fx_conversions(conn), as_of)
     ]
-    opening = [
-        OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_cost_total=s.original_cost_total,
-                         build_date=s.build_date)
-        for s in list_opening(conn)
-    ]
-    instruments = {i.symbol: i for i in list_instruments(conn)}
     accounts = {a.account_id: a for a in list_accounts(conn)}
     # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
     # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
     # Loaded once here so the two views can never read different rows.
-    cash_movements = list_cash_movements(conn)
+    cash_movements = valued_rows_as_of(list_cash_movements(conn), as_of)
 
     # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
     # Instrument row has no quote currency — it cannot be booked, valued, or priced.
@@ -244,24 +653,86 @@ def build_dashboard(
     # freshness.unregistered_symbols so the UI can tell the user exactly how to fix it
     # (register the symbol, then the next build includes the rows). Same degradation
     # philosophy as the oversold (賣超) path.
-    ledger_syms = ({t.symbol for t in txs} | {d.symbol for d in divs}
-                   | {o.symbol for o in opening})
-    unregistered = sorted(ledger_syms - instruments.keys())
+    unregistered = bundle.unregistered_symbols
     if unregistered:
-        skip = set(unregistered)
-        txs = [t for t in txs if t.symbol not in skip]
-        divs = [d for d in divs if d.symbol not in skip]
-        opening = [o for o in opening if o.symbol not in skip]
+        bundle = bundle.without_unregistered()
+    # 1c. Every row counts from its OWN date (DEF-016 for dividends, widened to trades,
+    # openings, FX conversions and corporate actions by DEF-056 — owner rulings 2026-09-24).
+    # A confirmed payout is stored on its payment date and a trade may be entered ahead of
+    # its date; replaying either now moved the holdings, 總報酬 and the adjusted cost, and
+    # handed XIRR a flow dated after its own terminal value, while the cash pool and the
+    # trend already ignored it. ONE cut, here, so the book, XIRR, the received-dividend
+    # summary, the FX pool and the trend all read the same ledger — and every surface built
+    # on this function (drawer, exports, alerts, insights, snapshots, rebalance) inherits it.
+    bundle = bundle.valued_as_of(as_of)
+    # Read-only local views of the (now filtered) bundle, for the steps below.
+    txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
 
     # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
     # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
-    book = build_book(txs, divs, opening, instruments, allow_oversell=True)
-    has_oversold = any(h.oversold for h in book.holdings)
+    try:
+        book = build_book(bundle, allow_oversell=True)
+    except ArithmeticError as exc:
+        # ⚠ NOT THE OWNER any more (2026-08-29). ``cost_basis.build_book`` re-types every
+        # ``ArithmeticError`` out of the replay into an ``UnbookableLedgerError`` naming the
+        # offending row, so this arm no longer fires for a ledger fault — go THERE to change
+        # the behaviour or the wording. The re-typing moved because this was the ONLY call
+        # site that had it: the same row that degraded here answered 500 on 重算, the tax
+        # package and 試算, and fixing it at four sites is four chances to miss one.
+        #
+        # Kept, deliberately, as a floor rather than deleted: the guarantee this file owes its
+        # caller is "``build_dashboard`` does not raise a raw decimal fault", and that must
+        # hold even if the replay is swapped, patched or extended. It is pinned as a CHANNEL
+        # by ``tests/portfolio/test_r8_decimal_fault_degrades.py``, which injects the fault
+        # rather than provoking it, precisely so the guarantee survives its current cause.
+        #
+        # The arm catches the CLASS, not one cause: ``decimal.DivisionByZero`` and
+        # ``decimal.Overflow`` are SIBLINGS of ``InvalidOperation``, not subclasses (this arm
+        # said ``InvalidOperation`` until wave 3 and both walked straight past it), and
+        # ``ZeroDivisionError`` is in the class too.
+        raise UnbookableLedgerError(
+            "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
+            "請於交易帳本修正該列後重試"
+        ) from exc
+    # Read off the BOOK, not off the holdings (CR-01 / CR-11, 2026-10-04): a 賣超 that a later
+    # buy of the same size netted back to exactly zero shares has no holding to inspect —
+    # `any(h.oversold ...)` was False there, and XIRR came out as a confident −67.8% over a
+    # discarded basis (measured on the review's probe). `Book.oversold_positions` lists every
+    # 賣超 position, so this is a strict superset of the old test.
+    oversold_positions = book.oversold_positions
+    has_oversold = bool(oversold_positions)
+    # CR-02: dividends the replay refused because the account never held the symbol by their
+    # date. No position carries a flag for them, so the book's list is the only record.
+    orphan_dividends = book.orphan_dividends
+    # Read off the BOOK, not off the holdings: two of the three ways an action goes
+    # unapplied leave no holding to inspect — an EXCHANGE that already emptied the source
+    # (the flag is dropped with its zero-share carrier), and a source that never existed
+    # (nothing is flagged at all). `any(h.unbookable_action ...)` is False in both, and the
+    # XIRR terminal value is wrong in all three. See Book.unapplied_actions (audit F-47/F-49).
+    unapplied_actions = book.unapplied_actions
     held_symbols = sorted({h.symbol for h in book.holdings})
     price_reads: dict[str, PriceRead | None] = {
         sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
     }
-    price_map = {sym: pr.value for sym, pr in price_reads.items() if pr is not None}
+    # §5.1(d), applied HERE and not inside `value_holdings` (trap #3). A stored close is
+    # as traded on its own date, but the book's share count is already in today's terms, so
+    # a price carried forward across a split must be re-expressed — divided by the splits
+    # in `(pr.as_of, as_of]` — before it meets those shares. `price_map` is the ONE dict fed
+    # to BOTH `value_holdings` (below) and `xirr_reporting` (step 4), which multiplies
+    # `price × h.shares` itself rather than reading `market_value`: correcting it inside
+    # `value_holdings` would leave the XIRR terminal value on the raw price and make market
+    # value and XIRR disagree by the whole ratio — two numbers on one screen, the worst
+    # kind of discrepancy. One seam here gives valuation, XIRR, weights, KPIs and net worth
+    # the same corrected price.
+    #
+    # ONE index for the request (trap #21). `price_in` short-circuits structurally on "no
+    # SPLIT for this symbol", so an action-free ledger takes the untouched pre-existing
+    # expression and this dict is byte-for-byte the old one (D38 invariant 1).
+    actions = ActionIndex.build(bundle.actions)
+    price_map = {
+        sym: price_in(actions, sym, pr.value, priced_on=pr.as_of, valued_on=as_of)
+        for sym, pr in price_reads.items() if pr is not None
+    }
     valued = value_holdings(book.holdings, price_map)
 
     resolver = RateResolver(conn, now=now)
@@ -310,7 +781,7 @@ def build_dashboard(
         # Same: rendered in the XIRR badge. Keeps the pair + the date, because those two
         # facts are what tell the owner which rate to backfill.
         raise KeyError(
-            f"查無 {d.isoformat()}(含)之前的 {base.value}/{quote.value} 匯率"
+            f"查無 {d.isoformat()}（含）之前的 {base.value}/{quote.value} 匯率"
         )
 
     xirr_value: Decimal | None = None
@@ -318,11 +789,47 @@ def build_dashboard(
     xirr_reason: str | None = None
     if has_oversold:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
-        xirr_reason = "帳本中有賣超部位待釐清 — 無法計算 XIRR"
+        # Named per position since CR-01 (2026-10-04): a 賣超 netted back to zero shares has no
+        # holdings row to find, so the reason is the one place that says which row broke.
+        xirr_reason = _oversold_reason(oversold_positions)
+    elif unapplied_actions:
+        # A skipped corporate action is a DIFFERENT problem from 賣超 and says so: the shares
+        # are positive and look ordinary, but they are in PRE-action terms while every price
+        # is post-action, so `xirr_reporting` — which multiplies `price × h.shares` itself
+        # rather than reading `market_value` — would build its terminal value out of the
+        # wrong quantity and return a confident number (measured before this gate: 0.5301
+        # with no reason given, off a terminal value 94% composed of one such row).
+        #
+        # BLAST RADIUS — deliberate, and the ONE place in this change that is not contained
+        # to the affected symbol (owner requirement 2026-08-10). Everywhere else, one
+        # unapplied action damages exactly one stock: `pnl.py` nulls that position's
+        # market_value and every aggregate simply excludes it while still computing for the
+        # rest. XIRR cannot work that way. It is a SINGLE number over a terminal value that
+        # sums every holding, so one wrong share count makes the sum wrong — and dropping
+        # the position instead would silently report the XIRR of a DIFFERENT portfolio,
+        # which is the same wrong-number-that-looks-right failure by another route. Blanking
+        # the whole figure is therefore correct (and matches the `has_oversold` precedent
+        # directly above), but it is an accepted portfolio-wide cost, not a free one. The
+        # reason string below carries the account, symbol and date precisely so the owner
+        # can go straight to the one row that blanked it.
+        xirr_reason = _unapplied_action_reason(unapplied_actions)
+    elif orphan_dividends:
+        # CR-02 (2026-10-04). A dividend with no position means the ledger is missing the buy
+        # or opening that earned it. XIRR without both is the return of a DIFFERENT ledger — the
+        # unapplied-action reasoning directly above — so the figure is withheld and the rows
+        # are named, rather than computed with the payout silently left out.
+        xirr_reason = _orphan_dividend_reason(orphan_dividends)
     else:
         try:
-            outcome = xirr_reporting(txs, divs, opening, valued, instruments, fx_at,
-                                     price_map, resolver.rate, as_of, reporting)
+            outcome = xirr_reporting(
+                txs, divs, opening, valued, instruments, fx_at,
+                price_map, resolver.rate, as_of, reporting,
+                # The replay REFUSED these (a dividend on an open short); counting them
+                # here is what gave one payment three answers on three screens.
+                refused_dividends=book.refused_dividends,
+                # AI-D42: the three trading/financing costs. `cash_movements` is already
+                # loaded above for the pool/FX work — no extra read.
+                cash_movements=cash_movements)
             xirr_value = outcome.rate
             xirr_window_days = outcome.window_days
             if (xirr_value is not None and xirr_window_days is not None
@@ -331,7 +838,7 @@ def build_dashboard(
                 # unaffected and still on the wire. `window_days` is reported either way.
                 xirr_value = None
                 xirr_reason = (f"觀察期 {xirr_window_days} 天・不足以年化"
-                               f"(需 ≥{_XIRR_MIN_WINDOW_DAYS} 天)")
+                               f"（需 ≥{_XIRR_MIN_WINDOW_DAYS} 天）")
         except KeyError as exc:
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
@@ -360,12 +867,44 @@ def build_dashboard(
                 stock_value += h.market_value
         exposure[acct.account_id] = (acct.settlement_ccy, stock_value)
     fx_summary: FXSummary | None
+    fx_reason: str | None = None
     try:
-        fx_summary = compute_fx_summary(accounts, instruments, txs, divs, convs,
+        # `as_of` is the SAME day `GET /api/cash` bounds its balances to (M5-06), so the FX
+        # pool and the funds view are asked for the same day — the manual's
+        # `fx.pool_equals_funds` (§8.3) is an identity only under that condition (X8b).
+        # ⑪: the FX pool's foreign cash counts the payouts the BOOK booked — the same rows
+        # `GET /api/cash` counts, or `fx.pool_equals_funds` (§8.3) breaks by a refused one.
+        fx_summary = compute_fx_summary(accounts, instruments, txs,
+                                        booked_dividends(divs, book.refused_dividends), convs,
                                         exposure, resolver.rate, reporting,
-                                        cash_movements)
-    except KeyError:
+                                        cash_movements, as_of=as_of)
+    except KeyError as exc:
+        # LAST RESORT, and no longer a SILENT one. `compute_fx_summary` now degrades per
+        # account (QA-01: an EMPTY account with no home->reporting rate used to raise here
+        # and take the whole `fx` section — and both FX KPIs — down with it), so a missing
+        # rate does not reach this branch any more. What made that defect invisible was
+        # that `fx = None` explained nothing anywhere on the payload; the resolver's
+        # message is therefore surfaced VERBATIM as `freshness.fx_unavailable_reason`,
+        # exactly as `xirr_unavailable_reason` already does with the same message.
         fx_summary = None
+        fx_reason = str(exc).strip("'\"")
+    if fx_summary is not None and not any(
+            r.realized_fx is not None or r.unrealized_fx_total is not None
+            for r in fx_summary.by_account.values()):
+        # NOTHING TO REPORT is not a report of zero. Every FX-exposed account came back
+        # None (no account has an FX cost basis at all), so the two rollup totals are the
+        # ZERO an empty accumulator starts at — a number no ledger row supports, and
+        # exactly the "initialised value rendered as a fact" defect. The section is absent
+        # instead, and now says why.
+        #
+        # ⚠ This is NOT the QA-01 bail-out coming back. That one dropped the section
+        # because ONE unrelated (and empty) account lacked a rate, discarding another
+        # account's correct 33,000 TWD; this fires only when EVERY account is None, so a
+        # single real figure anywhere keeps the section. It is also decided from the
+        # LEDGER rather than from whether some unrelated pair happened to be stored, which
+        # is what made the old behaviour differ for the same portfolio on two days.
+        fx_summary = None
+        fx_reason = "尚無換匯或外幣入金的取得成本，無匯兌損益可計算"
 
     # 6. Dividend summary — cash actually received (incl. DRIP net), native ccy.
     # ttm_cutoff bounds the trailing-12-month window (display-only attribution).
@@ -373,9 +912,18 @@ def build_dashboard(
     year_ccy: dict[int, dict[Currency, Decimal]] = {}
     total_ccy: dict[Currency, Decimal] = {}
     ttm_ccy: dict[Currency, Decimal] = {}
+    # R6 (2026-10-04): only what the BOOK booked. The replay refuses a dividend with no
+    # position (CR-02), one landing on an open declared short (the short PAYS it), and one on
+    # a ticker an EXCHANGE vacated — and this walk of the raw ledger summed all three, so one
+    # payout got three answers: counted here, excluded from 總報酬 and XIRR, 無法入帳 in the
+    # drawer. Skipped through the SAME value key XIRR skips them by. Each stays named where it
+    # is explained: the XIRR reason / the drawer (no position), the 待釐清 flag (the other two).
+    refused = {dividend_key(dv) for dv in book.refused_dividends}
     for dv in divs:
         if dv.type is DividendType.STOCK:
             continue  # 配股 adds shares, not cash
+        if dividend_key(dv) in refused:
+            continue
         ccy = instruments[dv.symbol].quote_ccy
         per_year = year_ccy.setdefault(dv.date.year, {})
         per_year[ccy] = per_year.get(ccy, _ZERO) + dv.net
@@ -436,7 +984,10 @@ def build_dashboard(
             unrealized_pct = h.unrealized_pnl / abs(h.original_cost_total)
         data = h.model_dump()
         data.update(
-            account_name=acct.name, name=inst.name, market=inst.market,
+            # I-10: the account as a TOKEN, like every backend sentence — ``accounts.name`` is
+            # the English label (「TW Broker」) the owner never chose. pdApi resolves it for
+            # every page, pdApi.download for the print reports that render this field.
+            account_name=account_ref(acct.account_id), name=inst.name, market=inst.market,
             sector=inst.sector, board=inst.board,
             price_as_of=pr.as_of if pr is not None else None,
             price_stale=pr.stale if pr is not None else True,
@@ -447,14 +998,34 @@ def build_dashboard(
 
     # 9. Trend — bulk-load histories, then the pure daily replay.
     trend_reason: str | None = None
+    # Declared OUT here (empty by default) because step 10's benchmark counterfactual reads
+    # it as well, and on a ledger with no events the trend branch below never runs. Empty is
+    # the honest value there: no flows to convert, so the counterfactual refuses.
+    trend_fx_history: FxHistory = {}
     if txs or divs or opening:
+        # BOTH ends of every corporate action (audit F-50): a SPINOFF child appears in no
+        # other ledger, so omitting it loaded no price history for a position the replay
+        # booked CORRECTLY — `daily_value_series` then found no price and marked every day
+        # after the spinoff `incomplete`, flattening the trend. `without_unregistered()`
+        # above guarantees both symbols have an Instrument row, so the `instruments[sym]`
+        # lookup below stays total.
         ledger_symbols = sorted({t.symbol for t in txs} | {d.symbol for d in divs}
-                                | {o.symbol for o in opening})
+                                | {o.symbol for o in opening}
+                                | {a.from_symbol for a in bundle.actions}
+                                | {a.to_symbol for a in bundle.actions})
+        # RAW on purpose (W6c): this is the ONE series read that must NOT be re-expressed
+        # here. Its consumer is `daily_value_series`, which values a DIFFERENT day on every
+        # iteration and therefore applies §5.1(d) itself, per point, at its `_entry_at_or_
+        # before` lookup — with `valued_on=day`, which is exactly the factor a precomputed
+        # re-expression could not know. Correcting it twice would divide by the ratio twice.
         price_history: PriceHistory = {
             sym: [(p.as_of, p.value) for p in get_price_history(conn, sym, _EPOCH, as_of)]
             for sym in ledger_symbols
         }
-        fx_history: FxHistory = {}
+        # (``trend_fx_history`` is declared before this branch so step 10's benchmark
+        # counterfactual can read it on an EMPTY ledger too — where it is simply empty and
+        # the counterfactual refuses honestly instead of raising UnboundLocalError.)
+        fx_history = trend_fx_history
         for ccy in {instruments[sym].quote_ccy for sym in ledger_symbols}:
             if ccy == reporting:
                 continue
@@ -462,8 +1033,8 @@ def build_dashboard(
                 rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
                 if rows:
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
-        trend = daily_value_series(txs, divs, opening, instruments, price_history,
-                                   fx_history, reporting, end=as_of)
+        trend = daily_value_series(bundle, price_history, fx_history, reporting,
+                                   end=as_of, cash_movements=cash_movements)
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
@@ -473,7 +1044,11 @@ def build_dashboard(
             # exactly as there), converted at carry-forward FX per day. Display-only
             # attribution — no money-of-record path is touched.
             cash_txs = list_transactions(conn)
-            cash_divs = list_dividends(conn)
+            # ⑪ (owner ruling 2026-10-05): only the payouts the replay booked, exactly as
+            # `GET /api/cash` — a refused dividend raised the net-worth line by a payout
+            # 總報酬, XIRR and 股利總覽 all left out. `book` is this request's replay; it cuts at
+            # `as_of`, which is where this series ends.
+            cash_divs = booked_dividends(list_dividends(conn), book.refused_dividends)
             cash_convs = list_fx_conversions(conn)
             cash_ccys = {
                 ccy for _acct, ccy in cash_balances(
@@ -514,10 +1089,41 @@ def build_dashboard(
         unrealized_total = unrealized_rep
         if gross_rep != _ZERO:
             total_return_rate = total_return_blended / gross_rep
+    # AI-D41: B and B − A ride beside A. Computed HERE because this is the only layer
+    # holding both the ReturnSummary and the TrendSeries; neither module can see the
+    # other's figure, which is precisely why the discrepancy went unnoticed.
+    fx_outcome = fx_complete_return(
+        trend, has_oversold=has_oversold,
+        has_unapplied_action=bool(unapplied_actions),
+        has_orphan_dividend=bool(orphan_dividends),
+        unbookable_dividends=book.unbookable_dividends)
+    fx_complete = fx_outcome.value
+    # AI-D48 made B − A a TWO-term difference, so the third term is subtracted out rather
+    # than left inside 「本金匯率效果」 — a residual that quietly absorbs whatever joins B next
+    # is the same mislabelling AI-D48 removed, one field over. B = A + 本金匯率 + 交易與融資成本.
+    trading_cost = trading_financing_cost(cash_movements, trend_fx_history, reporting)
+    principal_fx = (
+        None if fx_complete is None or total_return_blended is None or trading_cost is None
+        else fx_complete - total_return_blended - trading_cost
+    )
+    # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
+    benchmark = _benchmark_comparison(
+        conn, bundle, trend_fx_history, reporting,
+        as_of=as_of, actions=actions, fx_complete=fx_complete,
+        # AI-D48/D49: the SAME stream B is built from. The counterfactual then declines to
+        # place the cash flows (they carry no market), so the costs land on the portfolio leg
+        # only — one stream, one place that decides what can be spent on an index.
+        cash_movements=cash_movements,
+        refused_dividends=book.refused_dividends,
+    )
     kpis = KpiSummary(
         reporting_currency=reporting,
         total_market_value=total_value,
         total_return=total_return_blended,
+        total_return_fx_complete=fx_complete,
+        principal_fx_effect=principal_fx,
+        trading_financing_cost=None if fx_complete is None else trading_cost,
+        fx_complete_reason=fx_outcome.reason,
         total_return_rate=total_return_rate,
         realized_total=realized_total,
         unrealized_total=unrealized_total,
@@ -557,7 +1163,8 @@ def build_dashboard(
     fx_fresh = [
         FxFreshness(base=base, quote=quote,
                     as_of=read.as_of if read is not None else None,
-                    stale=read.stale if read is not None else True)
+                    stale=read.stale if read is not None else True,
+                    source=read.source if read is not None else None)
         for (base, quote), read in fx_reads_sorted
     ]
     freshness = FreshnessReport(
@@ -569,7 +1176,12 @@ def build_dashboard(
                     for (base, quote), read in fx_reads_sorted if read is None],
         xirr_unavailable_reason=xirr_reason,
         trend_unavailable_reason=trend_reason,
+        fx_unavailable_reason=fx_reason,
         unregistered_symbols=unregistered,
+        # M1: a CHECK over the same reads the list above reports on — no extra query, no
+        # rate mutated. Empty unless three read pairs close a triangle.
+        fx_triangulation=_fx_triangulation(resolver.reads, history=resolver.history,
+                                           valued_on=as_of),
     )
 
     return DashboardData(
@@ -586,7 +1198,16 @@ def build_dashboard(
         dividends=dividend_summary,
         ex_dividend_calendar=calendar,
         trend=trend,
+        benchmark=benchmark,
         freshness=freshness,
         insights=[],
         dividend_projection=dividend_projection,
+        # Read off the BOOK (see the `unapplied_actions` assignment above), not off the
+        # holdings: this is the ONLY channel that survives an action whose source position
+        # was emptied or never existed, and §6.3's red footer needs a cause to name.
+        unapplied_actions=unapplied_actions,
+        oversold_positions=oversold_positions,
+        orphan_dividends=orphan_dividends,
+        opened_positions=book.opened_positions,
+        unbookable_dividends=book.unbookable_dividends,
     )

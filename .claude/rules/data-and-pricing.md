@@ -20,9 +20,98 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   **6 dp**, ROUND_HALF_UP — cap only, never pad (clean values store byte-identical).
   This refines, not contradicts, "store at full source precision": the cap removes
   representation noise, not information.
+- **FX cross rates are DERIVED through one base currency, never fetched (owner ruling
+  2026-09-16, demo audit M1 option (b)).** `USD/TWD` and `USD/MYR` are the two pairs with a
+  liquid direct market and are fetched; `MYR/TWD` is `USD/TWD ÷ USD/MYR`, written by
+  `pricing/cross.py` right after every FX write (latest refresh and history backfill alike,
+  derived over the whole stored history) with `source = "derived:USD"`. A day's row is WRITTEN
+  only when it differs from the derivation of its legs — compared on the TEXT the write seam
+  would store (`pricing/store.stored_rate_text`) and on the source: a day whose leg the run
+  wrote or changed, a gap, or a row another writer left (a pre-M1 provider row, a seed's fixed
+  series, a hand edit). An unchanged day keeps its row and its `fetched_at`, and a repeat run
+  writes nothing (CR-14, 2026-10-04: every FX write had re-upserted and restamped ~1,800 rows,
+  three quote jobs a day). Do not narrow the derivation to "the dates this run touched": the
+  foreign rows sit on dates no run touches. Measured before the rule: the
+  three independently fetched rates, all dated 2026-09-15 and none stale, disagreed by
+  +0.0690% (USD/MYR × MYR/TWD = 31.856972 vs USD/TWD 31.834999), and a 4,000 MYR spot
+  conversion moved the report-currency total by 40.88 TWD with no ledger change — the
+  conversion path and the valuation path used different rates. The provider's `MYRTWD=X` is
+  itself a USD cross sampled at another moment, so nothing real is lost. Consequences:
+  **(1)** `freshness.fx_triangulation` is now a *guard*, not a warning — a non-zero gap means a
+  row reached `fx_rates` by some path other than this module. It is judged on the three legs'
+  latest COMMON date not after the valuation day (DEF-077, owner ruling ⑥ A, 2026-09-26) —
+  never latest row against latest row, which reads a day's market move as a data error
+  (J-01 measured −0.0938% with no bad row, USD/TWD a day ahead of USD/MYR). Legs on different
+  latest dates carry `dates_differ` + `leg_dates` and the page says 「日期不同」; no common date
+  within 30 days → `ok: null` + `reason` (「無法比較」), never `false`. The resolver reads each
+  leg's history in the direction it resolved the rate; **(2)** a derived pair must
+  never be handed to a provider (`pricing/cross.py::fetched_pairs` filters the worklist, so
+  two writers can never own one row); **(3)** the freshness panel labels a derived row
+  「推導」 so nobody reads it as a market quote; **(4)** the 6-dp cap applies to the derived
+  value exactly as to a fetched one. Adding a fourth currency is a row in `CROSS_RATES`, not
+  code. Rejected: base = TWD (derives away the one pair with a real market — and the pair the
+  Moomoo FX pool's acquisition cost is booked in); read-time derivation in `shared/fx` (the
+  stored row and the used rate would differ — two truths).
 - **Average cost** — never stored as an authoritative rounded value. Store
   `total_cost` + `shares`; compute `average = total_cost / shares` on read
-  (see `domain-ledger.md`).
+  (see `domain-ledger.md`). A correction never derives a total from an average: the 期初 edit
+  door takes `total` or keeps the stored one, and refuses `avg` (CR-04, 2026-10-04 — the dialog
+  sent the server's own 28-digit quotient back and a date-only edit stored
+  99999.99999999999999999999999 for 100000).
+
+### The stored price basis — as-traded, in two columns (2026-08-10, owner D30)
+
+Same class of rule as the float-noise cap above: a statement about what a stored price
+**means**. A provider re-states its history after a split, so the number it delivers for a
+given date depends on **when it was fetched** — while the ledger's share count for that
+date does not. The stored close therefore fixes one canonical meaning:
+
+> **A stored `close` is the price AS TRADED on its own `as_of_date`** (unadjusted for any
+> later split), so it is always in the same share terms as the ledger's share count on that
+> date.
+
+`prices` carries three related columns to keep that true under an editable action ledger:
+
+| Column | Meaning |
+| --- | --- |
+| `close_raw` | the provider's value **exactly as delivered**, **un-capped** — the only price column exempt from the 4-dp cap, because the close is *derived* from it and the derivation must not compound the cap's error |
+| `split_basis` | the factor applied (canonical TEXT; the identity is the literal `"1"`, which is also the DDL default) |
+| `close` | `cap_4dp(close_raw × split_basis)` — **the cap goes LAST, on the product** |
+
+- **Two operations, one expression.** The write seam (`pricing/store.upsert_prices`, every
+  fetch) and the reconcile (`pricing/reconcile.reconcile_prices`, every SPLIT
+  insert/edit/delete) both compute `close := close_raw × target`, **recomputed from the raw
+  column** — never rescaled in place, never by dividing the old basis back out. One shared
+  helper (`pricing/store.express_close`) so the two cannot drift. Idempotency, reversibility
+  and order-independence then hold by construction: deleting a SPLIT restores every affected
+  row **byte-identically**, which matters because `prices` is the only place this feature
+  writes outside the ledgers and 重算 does not cover it.
+- **Cap last, measured:** `cap(raw) × 20` stores `2.8340` where `cap(raw × 20)` stores
+  `2.8333`; at `×3` it is `0.4251` vs `0.4250` — the sub-RM1 MY tick above.
+- **All four OHLC columns are re-expressed** (W8, owner ruling 2026-08-27 — **supersedes
+  D39b**). `close`, `open`, `high` and `low` each carry their own `*_raw` and are stored as
+  `cap_4dp(raw × split_basis)`, so every one of them is restatable and reversible. D39b's
+  objection was precisely that a factor applied to a column with no raw "could never be
+  restated or reversed", and its own escape clause was "or add its own raw columns" — W8 took
+  that clause. Until then a row could carry a post-split close beside pre-split highs and
+  lows; harmless only because nothing read those columns, and a trap for the first
+  candlestick chart drawn from this table.
+- **`volume` is still never multiplied**, and for a STRONGER reason than the old OHLC one: it
+  is a count, not a price. A 20-for-1 split multiplies the share count and divides the price,
+  so giving `volume` the price factor would be actively **wrong**, not merely unrestatable.
+  It gets no raw column and no factor.
+- **The write multiplies; the read divides.** The write window is `(as_of, fetched_at]` —
+  "which splits had the provider already folded in?" — and multiplies them back **out** to
+  recover the as-traded value. The read (`portfolio/price_basis.price_in`) window is
+  `(pd, d]` — "which splits happened between this price's date and the valuation day?" — and
+  **divides**, so a price carried forward across a split meets a share count in the same
+  units. Different windows, not a double application; the as-traded invariant sits between
+  them. The read is never written back, so 重算 stays authoritative.
+- **`Decimal(1)` is not `Decimal("1.0")`.** Multiplication sums exponents, so a
+  non-integral identity factor rewrites `1.5` as `1.50` and `600` as `600.0` —
+  value-preserving, TEXT-changing, invisible to `==`, and it would repaint every price row
+  in the database on symbols with no corporate action at all. Both seams **short-circuit**
+  past the identity rather than computing it.
 
 **Amount precision (per-currency minor unit, applied at settlement):**
 - USD = 2 dp (cent) · TWD = 0 dp (whole NT$; **fee/tax 無條件捨去 — floor, ROUND_DOWN — to
@@ -31,10 +120,27 @@ Lossy 2-dp truncation at storage is forbidden because it breaks two real cases b
   - Note: `quantize_amount` (general amounts, e.g. proceeds) still uses ROUND_HALF_UP; the
     floor is specific to the TW **fee/tax** engine (`fees.py`, `rounding="floor"`). US/MY fee
     components quantize per-component ROUND_HALF_UP to the 2-dp minor unit.
+  - **A trade moves its SETTLED 價金, never the raw quantity × price** (owner 2026-09-30, method
+    left to the developer: 「依券商實務」). `shared/money.py::settled_notional(qty, price, ccy)`:
+    TWD drops everything below the dollar (TWSE computes an odd-lot 交割價金 per order and price
+    with 元以下捨去, 2024-04-01; a board lot is always whole dollars), USD / MYR round the cent /
+    sen half up. Every figure OF RECORD a trade moves reads it — the cash pool, the cost basis,
+    realized proceeds, the XIRR and net-invested flows, the FX pool's foreign cash, the fee base,
+    and every preview that mirrors them (manual door, drawer 試算) — so 0.5 AAPL at 191.23 is
+    95.62 everywhere, never 95.615 in one place. A product already in the minor unit is returned
+    AS IS (the identity short-circuit, as in the split-basis seams below), so whole-lot ledgers
+    are byte-identical. A VALUATION (price × shares held), a projection or a tolerance check is
+    not a settlement. `tests/portfolio/test_settled_notional.py` scans every quantity × price in
+    the package; the stress-audit oracle transcribes the rule on its own (`oracle.settled`).
 
 **Mechanics:**
 - Persist Decimals as **TEXT** (canonical string) or **scaled integers**; one
-  convention per column, documented. Do not mix.
+  convention per column, documented. Do not mix. The canonical string is `money.to_db`
+  (fixed-point), never `str(Decimal)`, which prints `5E-7` / `0E-24` for some values — and no
+  export cell may print one either (`decimal_str` for a Decimal, `stored_decimal_str` for a
+  stored TEXT). Owner 2026-09-30, after the llm-usage CSV passed a stored `5E-7` through;
+  `tests/contract/test_exports_never_print_scientific_notation.py` builds every export and lists
+  every bare `str()` in `export/`.
 - All FX conversion goes through the single helper in `shared/`. No ad-hoc
   multiply-by-rate scattered across modules.
 - Rounding is explicit (`Decimal.quantize` + stated rounding mode). Display formatting
@@ -47,13 +153,32 @@ Canonical tables (names indicative; finalize in the spec phase):
 
 - `accounts` — first-class entity: broker, settlement currency, funding currency,
   fee-rule-set ref, dividend model (see `domain-ledger.md`).
-- `instruments` — symbol, market (`US` / `TW` / `MY`), quote currency, sector, name.
+- `instruments` — symbol, market (`US` / `TW` / `MY`), quote currency, sector, name, and
+  `aliases` (a JSON list of the other names a card may use — 大立光 for 3008 LARGAN; one
+  writer, `store.set_instrument_aliases`; one name belongs to one instrument — item 8,
+  2026-09-30).
 - `transactions` — source of truth: account, instrument, side, quantity, price, fees,
   tax, trade date. **Append-only in spirit**; corrections are new rows or explicit
   edits, never silent mutation. Store a fee/tax/FX-rate **snapshot** per row so 重算
   reproduces history even after rules change.
+  ⚠ **`fee_rule_snapshot` is PROVENANCE, not the replay's input** (recorded 2026-08-24, after a
+  review claimed 重算 depends on it — it does not: `portfolio/cost_basis.py` reads `ev.fees` /
+  `ev.tax` off the row). What it records is *which regime produced those two numbers*. It was
+  therefore **empty on every broker-imported row**: `csv_import.py` only computes (and snapshots)
+  a fee or tax it was **not** given, and a broker statement supplies both — the fee verbatim and
+  a literal `"0"` tax. That silence is indistinguishable from "no rule applied". A supplied
+  fee/tax now records `{"source": "supplied", …}` instead of `{}`, so a row's numbers are always
+  attributable to either the engine or the statement. `data_ingestion/broker/convert.py`'s
+  refusal to recompute is **deliberate and unchanged** — recomputing would yield a defensible
+  number that does not match the money that actually left the account, which is the wrong kind
+  of correct.
 - `dividends` — account, instrument, date, type (cash / stock / DRIP), gross,
-  withholding, net, reinvest shares + price (see dividend models in `domain-ledger.md`).
+  withholding, net, reinvest shares + price (see dividend models in `domain-ledger.md`), and
+  `ex_date` (an ex-date after `date` is ASKED about on every door — a warning the owner
+  confirms, owner ruling ② 2026-10-05; CR-09 shipped it as a refusal). Every door that writes a dividend runs
+  `validate_dividend` — the inbox confirm included — and the correction door edits `ex_date`
+  (absent = keep, null = clear; a kept ex-date across a symbol change or a 配股's type / pay-date
+  change asks first) (CR-09, 2026-10-04).
 - `fx_conversions` — account, date, from_ccy, from_amount, to_ccy, to_amount (Q12).
 - `opening_inventory` — account, instrument, shares, original avg cost, original cost
   total, **build date** (not a trade flow, but feeds XIRR).
@@ -88,6 +213,51 @@ Rules:
 - A failed/stale fetch degrades gracefully: serve last-known price with a clear
   staleness indicator; never crash the dashboard, never silently fabricate.
 - Source is recorded per row, so data provenance is always auditable.
+- **Exactly one price row is typed by a human: the SPINOFF child's seed** (D48b; DEF-040,
+  owner ruling 2026-09-24, R4 2026-09-25). A spinoff creates a holding no provider has quoted
+  yet, so the corporate-action form takes the child's opening price off the statement.
+  `pricing/seed.py` is its only writer and remover (`pricing/` still owns every write to
+  `prices`; the `api` layer only binds it). Three rules: **(1) a seed is written ONLY into an
+  EMPTY `(instrument, as_of_date)` slot** — never over a provider quote or another seed; a
+  refused write is reported (`child_price_skipped`), never silent. R3 wrote through
+  `upsert_prices`' `ON CONFLICT` and so replaced a provider quote with no copy kept, and the
+  delete then removed the replacement: the quote was gone while the API answered `restored`.
+  **(2)** `source = "manual"` is RESERVED for seeds (no provider may use it) and the stamp is
+  `fetched_at` = the action day 00:00; **(3)** each save records what it wrote
+  (`corporate_actions.child_seed_json`), and deleting / re-dating the action takes back exactly
+  that row and only while it is intact — a row a real quote has since replaced is the market's
+  number and stays, with the reason in the confirm dialog and the toast. The provenance rule
+  above is what makes (3) decidable from the row.
+
+### Snapshot provenance — fundamentals are a UNION, not a fallback chain (AI-D4 / AI-D14)
+
+**Owner ruling J, 2026-08-16, recorded in `docs/spec/2026-08-16-ai-assistant.md` §0; mechanism
+revised by AI-D14 (W3-2, same day).** The default for a quote / FX / price fetch is the
+**first-success-wins fallback chain** in `pricing/defaults.py` — one value is wanted, so the
+chain picks the first provider that can give it and stops (and the `prices` table's
+`(instrument, as_of_date)` key means a chart always reads exactly one close per day — the
+union never touches charts). **Fundamentals are the deliberate, controlled exception.** Every
+*enabled* fundamentals provider (yfinance / Finnhub / Alpha Vantage) writes its own
+`external_snapshots` row — the table's primary key is already `(source, dataset, symbol,
+as_of)`, so provenance is already in the data model and the rows coexist without a new table.
+
+- **No merge layer — one block per source (AI-D14).** `fundamentals_json` is
+  `{source: block}` — the block key IS the provenance (AI-D4's "every field carries its
+  source" survives as "every block carries its as_of/currency", and the two-values-kept spirit
+  is unchanged: two providers disagreeing simply produce two blocks). Field NAMES are
+  normalized to one canonical set inside each block (renaming, not merging — the LLM must not
+  be left to align `trailingPE` vs `peTTM`). **The never-average red line is enforced by the
+  prompt**: the template requires different values across sources to be reported side by side
+  with their sources, never averaged, never reconciled into a number no provider reported.
+  That is the same red line as "the LLM never emits numbers of record" and "a stale price is
+  labelled, never guessed".
+- **Key-gated.** A provider whose key is absent reports `supports() == False`: it writes no
+  snapshot and raises no error, so registering the key later plugs it in without a code change.
+- ⚠ **This is scoped to fundamentals.** It is a deviation from the fallback convention, not a
+  replacement for it — other snapshot chains (consensus, chips, sentiment, indices) keep
+  first-success-wins unless the owner rules otherwise. An edge that exists in the code but not
+  in this file is the next audit finding, which is why the exception is written here rather
+  than left in the spec.
 
 ## Scheduling (pricing refresh)
 

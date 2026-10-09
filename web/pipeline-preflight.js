@@ -70,7 +70,7 @@
   window.ppPreflight = function (t) {
     var back = window.ppModal('乾跑預檢 — ' + t.name, function (body) {
       body.appendChild(el('div', 'pv-note',
-        '不呼叫 LLM、零成本：逐道執行與正式執行相同的守門檢查（R1–R8），並組裝實際送出的提示詞供確認。'));
+        '不呼叫 AI、零成本：逐道執行與正式執行相同的守門檢查（R1–R8），並組裝實際送出的提示詞供確認。'));
       var slot = el('div');
       slot.appendChild(el('div', 'wz-note', '執行預檢中…'));
       body.appendChild(slot);

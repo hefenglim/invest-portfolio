@@ -112,6 +112,45 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
   **attribution breakdown** of that figure, **not** an extra gain added on top.
   Present it as decomposition (asset P&L vs. FX P&L), never additively.
 
+### Which figure actually embeds FX — A · B · B−A (AI-D41, owner ruling 2026-08-24)
+
+The bullet above is true of **XIRR**. It is **NOT** true of `total_return`, and the manual's
+invariant **I5 is corrected accordingly**: `portfolio/returns.py` computes
+`Σ_ccy (realized + unrealized)_native × spot_today` — the rate is applied to the **gain**, never
+to the **principal**. Meanwhile `portfolio/timeseries.py` builds `total_value − net_invested`
+with every flow converted at **its own trade-date** rate; that IS the FX-complete lifetime
+result, and it was labelled 「浮動損益」. Three figures, one decomposition:
+
+| | figure | what it is |
+| --- | --- | --- |
+| **A** | `total_return` — 資產損益（不含本金匯率） | each currency's native P&L at today's spot |
+| **B** | 含匯兌總損益 = `total_value − net_invested` | flows at trade-date FX, value at spot → FX-complete |
+| **B − A** | 本金匯率效果 | `cost × (spot_now − acq_rate)` — the 換匯損益 card's content |
+
+⚠ **Adding the 換匯損益 card to A double-counts the cross term** `(MV − C)(spot − acq)`. A, B and
+B−A are presented **side by side as a decomposition, never summed** — the same red line as the
+bullet above, applied to the figure the bullet does not cover. `total_return`'s definition is
+**unchanged**; only its label and the presence of B alongside it are new.
+
+### Which cash movements are return, and which are capital (AI-D42, 2026-08-24)
+
+`shared/cash_kinds.py` already draws this line — reuse its table, never re-derive the predicate:
+
+- **Costs of trading and financing → they ARE return.** `REBATE` (+) · `INTEREST_EXPENSE` ·
+  `BROKER_FEE` (−). These are P&L with no offsetting security flow, so `xirr_reporting` takes
+  them as flows (the set is `portfolio/returns.py::XIRR_CASH_KINDS`; the sign comes from the
+  kind's `credit` axis via `shared/cash_kinds.py::movement_sign`, each converted at its own
+  date's FX). FE-D1's 77% rebate is one of them, and it is **0.229% of capital per round
+  trip** — the 群益 charge-first model is the owner's normal billing, not an edge case.
+- **Capital movements → they are NOT return.** `DEPOSIT` · `WITHDRAW` · `OPENING`. Admitting
+  them would silently redefine XIRR from "the return on money put into securities" to "the
+  return on the account" — a different metric, and not this one.
+- **`INTEREST` (earned on idle cash) is NOT return either** — the principal that earns it never
+  entered this metric's denominator, so crediting its yield to the numerator is asymmetric.
+  (This bullet listed `INTEREST` among the flows until 2026-09-06 — a transcription error; the
+  ruling text in `docs/spec/2026-08-16-ai-assistant.md` AI-D42, the manual §7.2 and the code
+  all exclude it, and adding an `INTEREST` row leaves XIRR byte-identical, measured.)
+
 ## Data integrity (carried over from the human's spec)
 
 - Permanent sources of truth: **opening inventory, transaction ledger, dividend ledger,
@@ -125,10 +164,167 @@ quote currency. Moomoo MY is one brokerage account holding USD-settled US stocks
   net across all dates. A net-only check let a back-dated sell through whenever a LATER buy
   covered it — and the replay then discarded that symbol's cost basis permanently. Mirrors
   the cash ledger's `running_min` guard (audit C3).
+- **A cash guard compares the pool DAY BY DAY, never lowest point against lowest point**
+  (DEF-090, 2026-10-01; `shared/cash_dip.py`). A withdrawal / 換匯 is refused when it makes
+  any day negative or more negative (`new_dip`); every ack-able `negative_cash` door — the
+  import-batch undo, and since DEF-092 (owner ruling A, 2026-10-02) the single-row edit /
+  delete and FX delete doors, and since DEF-093 (2026-10-03) the FX EDIT door for every pool
+  it takes money from (its from-pool stays hard) — asks only when a day turns negative or
+  drops below the pool's old low (`caused_dip`), so 「此筆會使…」 never quotes a dip the row
+  did not cause. Comparing only the two lowest points let a back-dated withdrawal open a new
+  negative stretch whenever an older, unrelated dip was deeper — the aggregate hid the event,
+  the same class as the net-only sell check above. Every refusal names the FIRST short day
+  and the lowest point (owner ruling 2B, DEF-091): 「自 D1 起為負，最低於 D2 降至 −N」. A door
+  that changes a two-legged row checks EVERY pool it touches, not only the leg it spends.
+- **Same-day trades replay in WRITE order — the ledger id — never buys-before-sells**
+  (DEF-012, recorded 2026-09-23). A transaction has no time-of-day column, so the only
+  evidence of intraday order is the row id: the order the owner entered the rows, or the
+  order the statement listed them. `shared/ledger_events.py` therefore has ONE `TRADE`
+  priority (`BUY`/`SELL` are aliases of it) and `build_book` sorts `(date, priority, id
+  order)`; OPENING and CORPORATE_ACTION still precede the day's trades and DIVIDEND still
+  follows them. Measured before the rule (functional test B-18): 2884 held 100 @ 9,320, then
+  buy 200@44 → sell 100@45 → buy 100@46 on one day previewed the sell at realized −1,580 and
+  booked −1,223 once the third row landed, cost 17,070 where the entry order gives 16,713.33.
+  Consequences: **(1)** the manual preview appends its draft LAST and so agrees with the
+  replay; **(2)** a CSV file's rows take ids in file order, so its preview counts a same-day
+  sibling as cover only when it is listed ABOVE the sell (`validate.siblings_booked_before`)
+  — a file with the sell above its buy is a 賣超 in both the preview and the replay, not a
+  clean preview followed by a discarded basis; **(3)** a broker statement listed newest-first
+  must be re-ordered chronologically WITHIN the day by its converter, or its ids encode the
+  reverse of what happened; **(4)** the stress-audit oracle keeps its own transcription;
+  **(5)** every correction door re-sorts its would-be ledger with `store.*_order_key` (each
+  the Python twin of its `list_*` ORDER BY) before replaying it (CR-03, 2026-10-04): an edit
+  replaced its row IN PLACE, so moving a back-dated buy onto its sell's day replayed
+  buy-then-sell in the guard and sell-then-buy after the write — no question, sticky 賣超. Demo
+  data is unaffected: the one same-day buy+sell pair on the demo ledger (tw_broker 2603
+  2026-07-02) already had the buy's id below the sell's.
+- **Every row counts from its OWN date** (DEF-016 for dividends; widened to trades, openings,
+  FX conversions — and with them cash movements and corporate actions — by DEF-056; owner
+  rulings 2026-09-24, option A). A confirmed dividend is stored on its payment date (the inbox
+  confirms a payout the day it is announced) and a trade / opening / conversion may be entered
+  ahead of its date (allowed with a warning since DEF-014), so a row can lie after the
+  valuation date. Every VALUATION as at day D — the book / adjusted cost, holdings, 總報酬,
+  XIRR, 已收股利, allocation, the B−A attribution, the FX pool's realized / unrealized FX, the
+  drawer, 試算, the tax package, the sell hints, rebalance, the stress-audit oracle — reads
+  `LedgerBundle.valued_as_of(D)` (FX conversions and cash movements, which the bundle does not
+  carry: `valued_rows_as_of`), one predicate `counts_by(counts_on, D)` = `counts_on <= D`:
+  a trade from its `trade_date`, an opening from its `build_date`, a dividend from its
+  `effective_date` (payment date; the ex-date for a 配股 with one), a corporate action from its
+  `date`. Actions are cut with the rest because only a date PREFIX is a state that exists: a
+  future split applied to today's shares meets prices that are still pre-split (the stored
+  price basis folds in only splits a fetch has seen), and a future action on a future buy
+  would find no source. The cash pool (`as_of`, M5-06) and the trend (`through`, per day — it
+  delegates to the same cut) already cut this way. VALIDATION replays (重算, correction-door
+  replay guards, corporate-action reachability, the date-aware sell guard, the draft preview
+  which replays as of the trade date since DEF-048) keep the WHOLE ledger — they check what
+  will be stored, not what has happened. The validation SHARE path
+  (`data_ingestion/holdings.py`: the walker, the naive sum, `_later_event_dates`) dates a 配股
+  by the same `effective_date` (CR-05, 2026-10-04 — it used the payment date, so a sale between
+  ex-date and pay date was refused as 賣超 while the replay booked it): one dating rule for every
+  share counter. A ledger row dated after the SERVER's today carries
+  `counts_from` and reads 「未來日期：YYYY-MM-DD 起計入」 on EVERY surface that lists it — the
+  ledger tabs, the cash page's lists, the 現金收支明細 statement (which also draws the printed
+  report's cut line and marks each future running balance 投影, because newest-first puts
+  those rows directly under a 目前餘額 they are not part of), the drawer's 配息史, and the two
+  reconciliation CSVs that mirror those tables (a trailing `counts_from` column). R4 badged a
+  hand-picked list of tables and missed the statement (DEF-056 R5), so the guard is now a
+  sweep: `tests/e2e/test_def056_r5_future_row_sweep_flow.py` fails on ANY visible row that
+  prints a future date without the badge. The drawer's 交易明細 lists no future row at all
+  (owner ruling ③, 2026-09-25). Measured before the rule (golden, day
+  2026-06-11): an 18,200 TWD dividend paying in 15 days moved XIRR 0.5677 → 0.6703 and 總報酬
+  111,600 → 129,800; a 1,000-share 2330 buy dated 2026-07-01 put 2,000 shares in today's holding
+  (market value 639,600 → 1,239,600, XIRR 0.5677 → 0.6577); a 2-for-1 AAPL split dated 2026-07-01
+  doubled the position at the unsplit price (XIRR → 0.8024, 總報酬 → 151,200) — each while the
+  cash pool did not move.
+- **「持有」 has two readings, each with ONE owner** (DEF-075, owner ruling ② B, 2026-09-26:
+  "a future-dated sale has not happened yet, so the position is still held"). The REGISTRY
+  question — does the watchlist badge read 持有, may the symbol be archived / removed / purged,
+  is it held for the target-weights badge, the signal `held` flag, the quote jobs' 部分
+  threshold and the Alpha Vantage held universe — is `data_ingestion/holdings.py::
+  holds_position` / `held_among`: a position in any account today or on any later ledger date
+  (a declared short is a position; so is a symbol whose only rows are still ahead). The
+  VALUATION question — which symbols today's book holds (insight / alert producers, the
+  digest, the sell form's sellable shares) — is the book cut at the valuation day
+  (`api/insight_service.py::held_in_book`, `valued_as_of`). The two differ only on a symbol
+  whose every row is still ahead. `current_shares > 0` (all dates netted, long only) answers
+  neither, and four readers used it until R6: the badge said 觀察 while 移除 answered 422
+  「持倉中的標的不可移除」. `tests/contract/test_def075_registry_held_readers_agree.py` drives
+  every registry reader through its public door against `holds_position`.
 - **賣超 (undeclared oversell) is STICKY.** An acked oversell discards the position's cost
   basis and emits no realized row (待釐清). A later buy nets the position positive again but
   does **not** restore the discarded basis, so the flag must not be cleared by one either —
-  it is raised on "was ever negative", not on the final sign.
+  it is raised on "was ever negative", not on the final sign. It is recorded on the BOOK
+  (`Book.oversold_positions`, CR-11 2026-10-04), because `build_book` drops a 0-share position
+  from `holdings`: a 賣超 netted back to exactly zero was invisible to every correction door,
+  the XIRR gate and the drawer, and deleting its first buy erased the holding and its realized
+  row with no question. Every reader of "is this position 賣超" reads the book's record. The
+  book also records every position it OPENED, flat included, with both 待釐清 flags
+  (`Book.opened_positions`: `oversold`, and the sticky `unbookable_action` a refused corporate
+  action sets); the manual preview withholds its position math whenever that record flags the
+  position — on today's book, the trade-date book and the book with the draft, for every branch
+  (R4 / S1) — and the drawer tells 「部位已結清」 from 「從未持有」 by it (S9).
+- **A dividend needs a position that exists by its effective date** (CR-02, 2026-10-04). Every
+  door refuses one without it (`dividend_without_position`: no opening, non-zero trade or
+  EXCHANGE / SPINOFF into the symbol in that account by then); a stored one is refused on the
+  book (`Book.orphan_dividends`, also in `refused_dividends`), named, and withholds XIRR — it is
+  never income and never a ghost holding, and it never answers 500 (it did: `build_dashboard`
+  caught only `ArithmeticError`). A payout after a full close still books as realized income
+  (H2). One rule, two forms: `holdings.position_exists_by` (SQL, the doors) and
+  `LedgerBundle.position_opened_by` (the replay guard's fallback); both count an action only as
+  the replay reads it (convertible, both symbols registered), and their one stated difference
+  from the replay is a readable action the replay refuses (S8). Correction doors compare
+  stranded dividends per ROW, never per (account, symbol) — a legacy orphan on the key masked a
+  new one (R5) — and 股利總覽 skips every dividend the book refuses (R6), so one payout never
+  gets three answers.
+- **An EXCHANGE's `vacated_to` describes the position's CURRENT life** (CR-06, 2026-10-04). A
+  trade, an opening, or an EXCHANGE / SPINOFF landing shares on a vacated ticker clears it, so
+  a reused ticker's dividends book; while it stays vacated, a dividend on it is still refused
+  (E24) and flagged on the live successor.
+- **A refused dividend moves no money and counts nowhere** (owner rulings ⑪ / K2 / K3 / X1 / Y1 /
+  Y3, 2026-10-05; manual §6.6). The replay refuses three kinds — no position by the effective
+  date (`Book.orphan_dividends`), an open declared short and a vacated ticker
+  (`Book.unbookable_dividends`, with cause, carrier and the strict sentence) — all in
+  `Book.refused_dividends`. Such a row is excluded from EVERY money figure: cash pools and the
+  statement balance, the guards' pool, the FX pool's foreign cash, net worth, `net_invested` /
+  XIRR / B / TWR / the benchmark flows, realized income, shares and every listing total — through
+  ONE decision, `returns.DividendRefusals` over the replay's own refusals, never a re-derivation.
+  A surface that LISTS dividend rows lists it marked 「未入帳（待釐清）」 with that sentence; the
+  raw re-importable ledger CSV stays raw (DEF-026). The 待釐清 is on the BOOK, so it does not die
+  with a flat carrier: every trend day from it is incomplete and B is withheld with the reason,
+  while a HELD carrier keeps its value (its shares and price are real — only a 賣超 or an
+  unapplied action drops a value). The remedy wording has one owner
+  (`cost_basis.ORPHAN_DIVIDEND_REMEDY` / `CASH_MOVEMENT_REMEDY`, unified to 「…並刪除該筆股利」),
+  and the drawer offers the remedy of each cause from server facts. An unreplayable ledger counts
+  every payout, as before (X2).
+- **A PREVIEW MUST MIRROR THE REPLAY'S BRANCHES, LITERALLY** (audit 2026-08-24, review §1.3).
+  Every "what would this trade do" surface — the manual sell preview
+  (`api/routers/input_center.py`), the drawer 試算 (`strategy/whatif.py`) — reproduces
+  `portfolio/cost_basis.py`'s **branch structure**, not just its happy-path formula. The three
+  sell branches are **declared short** (realized on `min(qty, max(shares,0))` only; the
+  remainder opens/extends a short and emits **no** realized row), **undeclared oversell**
+  (basis discarded → **no** realized row, 待釐清), and **ordinary**. Applying the ordinary
+  formula to all three fabricated a `+500` realized on a short extension the ledger books
+  nothing for — while the holdings column two rows above honestly printed 「—」, and the drawer
+  gave a third answer for the same trade. **One app must not show three answers**, and a
+  preview that disagrees with what will be written is worse than no preview.
+  ⚠ **EVERY projected column, not just the realized one** (widened 2026-08-27, sweep F-01).
+  The 2026-08-24 pin was written as 「`preview.realized` ≡ the booked realized row for all three
+  shapes」 — and that is exactly what shipped, so the AVERAGE pair rendered beside it went on
+  projecting a single happy path for another three days. A declared short leaves a SHORT lot
+  based on the proceeds received; an undeclared oversell DISCARDS the basis; a full exit leaves
+  no position at all (`build_book` drops `shares == 0`). The preview printed the PRE-trade
+  average for all of them, so a card read 「240.00 → 240.00」 directly above its own warning that
+  the basis was about to be permanently discarded. **A pin that names one field certifies one
+  field.** The contract test is parametrised over every sell shape × every projected column and
+  compares against `build_book`, so a new column or a fourth branch fails on its own
+  (`tests/api/test_review_r1_preview_mirrors_replay.py`).
+  ⚠ **Project the TOTALS, then divide on read** — never project an average directly. The replay
+  moves `original_total` / `adjusted_total` and computes `avg = total / shares` on read
+  (`data-and-pricing.md`); an average projected in one step re-divides and can differ in the
+  last digit from the row that gets written.
+  ⚠ **A surface that cannot know which branch applies must say so, not pick one.** The drawer
+  has no 放空 declaration to read, so it states the fork and gives NO figure — for the averages
+  exactly as it already did for the realized amount.
 
 ### Declared short sale (owner ruling 2026-07-31, spec option C)
 

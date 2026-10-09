@@ -6,6 +6,8 @@ against the actual measurement fed in by the api/pricing seam. Hand-checked case
 
 from decimal import Decimal
 
+import pytest
+
 from portfolio_dash.llm_insight import scoring
 from portfolio_dash.llm_insight.cards import Prediction
 from portfolio_dash.llm_insight.scoring import ActualMeasurement
@@ -106,6 +108,26 @@ def test_volatility_none_returns_none() -> None:
     ) is None
 
 
+def test_volatility_flat_hit_within_vol_band() -> None:
+    # AI-D25: the vol flat band is ±5% — a 30-day vol estimator jitters by several percent
+    # on a constant series, so the shared ±0.5% band would make every flat call an
+    # automatic miss. +4% relative vol change is "stable".
+    actual = ActualMeasurement(vol_change_pct=Decimal("0.04"))
+    assert scoring.score_quant(_pred("volatility", "flat"), actual) is True
+
+
+def test_volatility_flat_miss_outside_vol_band() -> None:
+    # +6% relative vol change is a real regime move, not estimator noise.
+    actual = ActualMeasurement(vol_change_pct=Decimal("0.06"))
+    assert scoring.score_quant(_pred("volatility", "flat"), actual) is False
+
+
+def test_volatility_flat_band_does_not_leak_into_price_change() -> None:
+    # The wider band is scoped to volatility: a +2% price move is still NOT flat.
+    actual = ActualMeasurement(price_change_pct=Decimal("0.02"))
+    assert scoring.score_quant(_pred("price_change", "flat"), actual) is False
+
+
 # --- relative: symbol vs benchmark -------------------------------------------
 
 
@@ -134,6 +156,19 @@ def test_relative_down_hit_when_underperforms() -> None:
 def test_relative_missing_benchmark_returns_none() -> None:
     actual = ActualMeasurement(symbol_return_pct=Decimal("0.05"), benchmark_return_pct=None)
     assert scoring.score_quant(_pred("relative", "up"), actual) is None
+
+
+def test_relative_flat_band_stays_half_percent() -> None:
+    # AI-D25 widened only the VOLATILITY band; excess return keeps the shared ±0.5%:
+    # +0.4% excess is "in line with the benchmark" (flat hit), +0.6% is a real beat.
+    tight = ActualMeasurement(
+        symbol_return_pct=Decimal("0.054"), benchmark_return_pct=Decimal("0.05")
+    )
+    assert scoring.score_quant(_pred("relative", "flat"), tight) is True
+    wide = ActualMeasurement(
+        symbol_return_pct=Decimal("0.056"), benchmark_return_pct=Decimal("0.05")
+    )
+    assert scoring.score_quant(_pred("relative", "flat"), wide) is False
 
 
 # --- decide_miss --------------------------------------------------------------
@@ -213,3 +248,145 @@ def test_calibration_error_perfect() -> None:
     # claimed 100, all hit → 0pp.
     rows = [(100, True), (100, True)]
     assert scoring.calibration_error(rows) == Decimal("0")
+
+
+# --- trust_tier (W7, AI-D36) ----------------------------------------------------
+
+
+def test_trust_tier_insufficient_below_min_sample_regardless_of_quality() -> None:
+    # A perfect record over 7 rows is still 樣本不足 — the same honesty gate as the
+    # event study's MIN_SAMPLE and the rolling gap's <8.
+    assert scoring.trust_tier(
+        n=7, quant_n=7, quant_hit_rate=Decimal("1"), narrative_success_rate=None,
+        calib_error_pp=Decimal("0"),
+    ) == "樣本不足"
+
+
+def test_trust_tier_boundaries_are_inclusive() -> None:
+    # success exactly 0.6 AND error exactly 10pp → 可參考 (both bounds inclusive).
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.6"), narrative_success_rate=None,
+        calib_error_pp=Decimal("10"),
+    ) == "可參考"
+
+
+def test_trust_tier_success_below_bar_is_early() -> None:
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.59"), narrative_success_rate=None,
+        calib_error_pp=Decimal("3"),
+    ) == "早期"
+
+
+def test_trust_tier_calibration_above_bar_is_early() -> None:
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.9"), narrative_success_rate=None,
+        calib_error_pp=Decimal("10.01"),
+    ) == "早期"
+
+
+def test_trust_tier_unknown_calibration_is_early_not_sufficient() -> None:
+    # No calibration evidence (None) is NOT evidence of calibration.
+    assert scoring.trust_tier(
+        n=8, quant_n=8, quant_hit_rate=Decimal("0.9"), narrative_success_rate=None,
+        calib_error_pp=None,
+    ) == "早期"
+
+
+def test_trust_tier_narrative_only_combo_uses_the_miss_rate_leg() -> None:
+    # quant_n == 0 → the "0" quant_hit_rate must NOT be consumed (combo_score reports
+    # "0" for 0/0 — reading it as a real 0% would demote every narrative-only task).
+    assert scoring.trust_tier(
+        n=8, quant_n=0, quant_hit_rate=Decimal("0"),
+        narrative_success_rate=Decimal("0.75"), calib_error_pp=Decimal("5"),
+    ) == "可參考"
+
+
+def test_trust_tier_no_success_evidence_at_all_is_early() -> None:
+    assert scoring.trust_tier(
+        n=8, quant_n=0, quant_hit_rate=None, narrative_success_rate=None,
+        calib_error_pp=Decimal("5"),
+    ) == "早期"
+
+
+# --- confidence_ceiling (W7.1, LAW REVISED by AI-D39 on 2026-08-25) -------------------
+# The anchoring law's arithmetic moved into code after the first live run had 0 of 13 cards
+# obey it; the RULE still lives in the prompt (AI-D33: no code-side clamp). What changed on
+# 2026-08-25 is the law itself — the rolling gap was being deducted ON TOP of a bucket cap
+# that is already the calibration correction, and an unscored bucket outranked a measured one.
+# The two tests that pinned those behaviours are REPLACED below rather than deleted quietly,
+# with their old expectations recorded so the change is legible.
+
+
+def _bin(bucket: str, n: int, actual: str) -> dict[str, object]:
+    return {"bucket": bucket, "n": n, "actual_pct": actual}
+
+
+_LIVE_BINS = [_bin("40-60", 35, "17.14"), _bin("60-80", 10, "0.00")]
+_LIVE_OVERALL = Decimal("13.33")   # the same demo run's global hit rate
+
+
+def test_confidence_ceiling_is_the_largest_self_consistent_value() -> None:
+    """The law is circular — a value's cap depends on its own bucket.
+
+    With the demo's real bins and a 13.33% overall record: every value in 40-60 exceeds
+    17.14+5, every value in 60-80 exceeds 0+5, and 20-40 (never scored) now caps at
+    13.33+5 = 18.33 rather than at the old constant 70. So the answer is 18, where the
+    pre-AI-D39 law said 39 — the drop is the removal of a cap that ignorance had earned.
+    """
+    assert scoring.confidence_ceiling(_LIVE_BINS, overall_hit_pct=_LIVE_OVERALL) == 18
+
+
+def test_the_rolling_gap_is_no_longer_deducted() -> None:
+    """REPLACES test_confidence_ceiling_subtracts_a_negative_gap_in_points (expected 34) and
+    test_confidence_ceiling_floors_at_zero_and_does_not_invent_one (expected 0).
+
+    Both pinned the double-charge: a bucket's cap is ``actual_pct + 5``, which IS the
+    calibration correction, and the demo's −0.466 gap then subtracted 47 more points to reach
+    0. The gap no longer participates at all — the parameter is gone, so a caller that still
+    passes it fails loudly instead of being silently ignored.
+    """
+    import inspect
+
+    sig = inspect.signature(scoring.confidence_ceiling)
+    assert "gap" not in sig.parameters
+    with pytest.raises(TypeError):
+        scoring.confidence_ceiling(_LIVE_BINS, gap=Decimal("-0.466"))  # type: ignore[call-arg]
+
+
+def test_confidence_ceiling_with_no_history_at_all_is_the_no_data_cap() -> None:
+    """``overall_hit_pct is None`` = nothing has EVER been scored. The only state a constant
+    can honestly answer, and the only one that still reaches it."""
+    assert scoring.confidence_ceiling([], overall_hit_pct=None) == scoring.CEILING_NO_DATA
+
+
+def test_a_bucket_below_the_sample_gate_falls_back_to_the_OVERALL_record() -> None:
+    """REPLACES test_confidence_ceiling_below_the_sample_gate_does_not_anchor (expected 70).
+
+    A handful of rows is still not evidence — that gate is unchanged. What changed is what it
+    falls back TO: the record as a whole, not a constant that outranks it.
+    """
+    assert scoring.confidence_ceiling(
+        [_bin("60-80", 3, "0.00")], overall_hit_pct=Decimal("30.00")) == 35
+
+
+def test_confidence_ceiling_rewards_a_well_calibrated_record() -> None:
+    """A good record raises the ceiling, INCLUDING through the ranges it has not been scored in.
+
+    72% actual in 60-80 admits 77 there — but a 75% overall record caps the unscored 80-100
+    range at 80, and 80 is admitted by that same range, so 80 is the largest self-consistent
+    answer. Under the pre-AI-D39 law the unscored cap was a flat 70 and this returned 77.
+
+    That is the deliberate symmetry of AI-D39 (b), not a leak: an unscored range falls back to
+    THE RECORD, so it can sit above a measured bucket when the record is strong for the same
+    reason it sits below one when the record is weak. What the old constant did was let
+    ignorance beat evidence in ONE direction only.
+    """
+    assert scoring.confidence_ceiling(
+        [_bin("60-80", 40, "72.00")], overall_hit_pct=Decimal("75.00")) == 80
+
+
+def test_confidence_ceiling_tolerates_a_malformed_bucket_label() -> None:
+    """A bin is data, not a contract — an unparseable label is skipped, never raised on."""
+    assert scoring.confidence_ceiling(
+        [{"bucket": "n/a", "n": 99, "actual_pct": "5.00"}], overall_hit_pct=Decimal("30.00")
+    ) == 35

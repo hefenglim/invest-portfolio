@@ -140,6 +140,20 @@
   }
   function pdLoadScript(src) {
     return new Promise((resolve, reject) => {
+      /* LOCAL assets only (owner ruling 2026-08-12). Every front-end dependency is vendored
+         into web/ so a CDN outage cannot take a feature down; this refuses a remote copy at
+         RUNTIME rather than relying on tests/contract/test_vendored_assets.py having caught
+         it in source. The static guard is the cheap tripwire; this is the actual rule.
+
+         Rejects a scheme (`https:`, and also `data:`/`javascript:` — not remote, but nothing
+         here should ever load one) and an authority in either slash direction. The backslash
+         half is not paranoia: the URL spec treats `\` as `/` for special schemes, so a bare
+         `\\host/x.js` assigned to .src resolves OFF-ORIGIN, and an `indexOf('://')` test
+         reads it as a harmless relative path. */
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(src) || /^[/\\]{2}/.test(src)) {
+        reject(new Error('refused remote script: ' + src));
+        return;
+      }
       if (pdScriptLoaded(src)) return resolve();
       const s = document.createElement('script');
       s.src = src;
@@ -179,11 +193,20 @@
     if (window.openSymbolDrawer) return Promise.resolve();
     if (pdDrawerPromise) return pdDrawerPromise;
     pdLoadCss('detail.css');
-    const echartsCdn = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
     /* detail.js fetches its own data via window.pdApi, so ensure the fetch layer + format
-       + echarts are present; it no longer needs mock-data.js / history-mock.js. */
+       + echarts are present; it no longer needs mock-data.js / history-mock.js.
+
+       ECharts is the FOURTH load site and the only one no HTML grep finds: index/insights/
+       settings carry a <head> tag, and this line lazily loads the same library on every OTHER
+       page the first time a symbol drawer opens. It was a jsdelivr URL until 2026-08-12; it is
+       now the vendored web/echarts.min.js, version-stamped through the same ?v= idiom as
+       whatsnew.js above (the ?v= stamper only rewrites HTML, so a JS-injected asset has to
+       stamp itself). The other 15 pages deliberately get NO <head> tag: eager-loading ~1 MB
+       for a drawer most sessions never open would be a permanent regression traded for a
+       rare outage. */
+    const q = _appVersion ? ('?v=' + _appVersion) : '';
     pdDrawerPromise = pdEnsureApi()
-      .then(() => (window.echarts ? null : pdLoadScript(echartsCdn)))
+      .then(() => (window.echarts ? null : pdLoadScript('echarts.min.js' + q)))
       .then(() => (window.fmt ? null : pdLoadScript('format.js')))
       .then(() => pdLoadScript('detail.js'));
     return pdDrawerPromise;
@@ -335,6 +358,15 @@
       const ccy = el('span', 'badge badge-ccy'); ccy.id = 'report-ccy';
       tb.appendChild(ccy);
       const fresh = el('a', 'badge'); fresh.id = 'fresh-chip'; fresh.href = '#freshness';
+      /* F-09: the chip's own title promises 「點擊查看資料新鮮度明細」, and its target is a
+         <details> that is CLOSED by default — so following the anchor scrolled the reader to
+         a collapsed one-line header and nothing else. The href stays (the browser still does
+         the scrolling); this only opens the panel it scrolls to. Bound ONCE at creation, so
+         a re-rendered header cannot stack handlers. */
+      fresh.addEventListener('click', () => {
+        const d = document.getElementById('freshness');
+        if (d) d.open = true;
+      });
       tb.appendChild(fresh);
     }
     tb.appendChild(el('span', 'header-spacer'));
@@ -390,7 +422,7 @@
       btn.appendChild(el('span', 'tb-lbl', '重新整理'));
       btn.appendChild(el('span', 'tb-caret', '▾'));
       btn.type = 'button';
-      btn.title = '更新報價或重建統計（後端接線後生效）';
+      btn.title = '更新報價或重建統計';
       const menu = el('div', 'refresh-menu');
       menu.hidden = true;
       const mkOpt = (label, sub, fn) => {
@@ -403,7 +435,16 @@
       };
       /* 更新報價：POST /api/actions/refresh-quotes（同步執行 quotes_tw/us/my，
          real provider fetch — 約 10 秒）。進度以常駐 toastProgress 顯示（Progress 系統），
-         成功後自動重載以顯示新價。 */
+         成功後自動重載以顯示新價。
+         M10-02: the door answers `results[job] = {status, detail, held_failed, …}` — the
+         SAME status the job_runs row carries — and the toast reads it instead of declaring
+         完成 unread. A partial run (a HELD symbol's quote was lost) stays on screen with the
+         full list and does NOT auto-reload: the reload would wipe the one place the user
+         is told; the updated prices show on the next refresh.
+         DEF-068: the partial branch always ended 「其餘已更新」 and read `held_failed` alone —
+         with every provider down it printed that under 「9 檔持倉未更新」 while 0 had been
+         updated, and never named the lost FX pairs. Every number now comes from the door's
+         `summary` (scheduler.jobs.combine_quote_results); this code only formats it. */
       let refreshBusy = false;
       menu.appendChild(mkOpt('更新報價', '報告模式：抓取最新報價與匯率（約 10 秒）', () => {
         if (refreshBusy) return;
@@ -417,37 +458,103 @@
           .then((resp) => {
             refreshBusy = false;
             const jobs = (resp && resp.jobs) ? resp.jobs.join(' / ') : 'quotes';
-            prog.done('報價更新完成', jobs + ' 已執行，正在重新整理…');
-            setTimeout(() => { window.location.reload(); }, 900);
+            const results = (resp && resp.results) || {};
+            const byStatus = (s) => Object.keys(results).filter((j) => results[j].status === s);
+            /* An `error` WITH counts is a market that lost every instrument (DEF-067 ①, owner
+               ruling 2026-09-26) — a loss, read through `summary` like any other. Only an
+               `error` WITHOUT counts is a job that crashed (the wrapper's failure sentence). */
+            const crashed = byStatus('error').filter((j) => results[j].instruments == null);
+            if (crashed.length) {
+              prog.fail('報價更新失敗', crashed.map((j) => j + '：' + (results[j].detail || '')).join('；'));
+              return;
+            }
+            const sum = (resp && resp.summary) || null;
+            const fxLost = (sum && sum.fx_failed) || [];
+            const fxTxt = fxLost.length ? '；匯率未更新：' + fxLost.join('、') : '';
+            const lostTxt = (sum && sum.instruments_failed && sum.instruments_failed.length)
+              ? '：' + sum.instruments_failed.join('、') : '';
+            if (sum && sum.all_failed) {
+              prog.fail('報價更新失敗',
+                sum.instruments_not_updated + ' 檔報價都沒有更新' + lostTxt + fxTxt
+                + '。仍顯示上次取得的價格，請稍後再試或檢查資料來源。');
+              return;
+            }
+            const partial = byStatus('partial').concat(byStatus('error'));
+            if (partial.length) {
+              prog.warn('報價更新部分完成', sum
+                ? sum.instruments_updated + ' 檔已更新、' + sum.instruments_not_updated + ' 檔未更新'
+                  + lostTxt + fxTxt + '。重新整理頁面即可看到已更新的價格。'
+                : '部分持倉的報價沒有更新，詳見設定 › 排程中心的執行紀錄。');
+              return;
+            }
+            /* ok by the owner's threshold (no HELD symbol lost), but a watchlist symbol or an
+               FX pair may still be missing: say so, and do not reload over the message. */
+            if (sum && (sum.instruments_not_updated || fxLost.length)) {
+              prog.warn('報價更新完成，部分項目未更新',
+                sum.instruments_updated + ' 檔已更新'
+                + (sum.instruments_not_updated
+                  ? '、' + sum.instruments_not_updated + ' 檔未持有的標的未更新' + lostTxt : '')
+                + fxTxt + '。重新整理頁面即可看到已更新的價格。');
+              return;
+            }
+            /* L24 (demo audit 2026-09-16): 0056 came back from the provider dated 09-11 while
+               its market peers moved to 09-14 — not a FAILURE (the fetch succeeded), so no
+               toast named it and the user only found it by reading the freshness table.
+               The job now reports `lagging` (held symbols whose newest stored close is older
+               than the run's newest for the same market); it is said here, before the reload
+               that would otherwise wipe the only place it is said. */
+            const lagging = [];
+            Object.keys(results).forEach((j) => {
+              (results[j].lagging || []).forEach((s) => { if (lagging.indexOf(s) < 0) lagging.push(s); });
+            });
+            const lagTxt = lagging.length
+              ? '；' + lagging.length + ' 檔資料來源未提供更新（仍為舊日期）：' + lagging.join('、')
+              : '';
+            prog.done('報價更新完成', jobs + ' 已執行' + lagTxt + '，正在重新整理…');
+            if (lagging.length && window.toast) {
+              window.toast('部分報價仍為舊日期', 'warn',
+                lagging.join('、') + ' 的資料來源尚未提供新收盤價；可稍後再按一次更新報價');
+            }
+            setTimeout(() => {
+              if (window.pdBeforeReload) window.pdBeforeReload();
+              window.location.reload();
+            }, 900);
           })
           .catch((e) => {
             refreshBusy = false;
             prog.fail('報價更新失敗', (e && e.message) || '請稍後再試');
           });
       }));
-      menu.appendChild(mkOpt('重算（重建統計）', '由四帳本完整重建所有統計 — 較耗時', () => {
-        if (window.confirmDialog) {
-          window.confirmDialog({
-            title: '重算（重建統計）',
-            body: '將由期初庫存、交易、股利、換匯四帳本完整重建所有持倉與報酬統計。帳本本身不會被修改。',
-            confirmLabel: '開始重算',
-            onConfirm: () => {
-              const prog = window.toastProgress('重算中…', '正在由四帳本重建所有統計');
-              pdEnsureApi()
-                .then((ok) => {
-                  if (!ok) throw new Error('API 層載入失敗');
-                  return window.pdApi.post('/api/actions/recompute');
-                })
-                .then(() => {
-                  prog.done('重算完成', '四帳本重放驗證通過，正在重新整理…');
-                  setTimeout(() => { window.location.reload(); }, 900);
-                })
-                .catch((e) => {
-                  prog.fail('重算失敗', (e && e.message) || '請稍後再試');
-                });
-            }
+      /* The ledgers named below are the ones `build_book` actually replays — opening,
+         transactions, dividends and corporate actions (`LedgerBundle`). This copy named
+         換匯 instead, and 換匯 is not in the bundle at all: the dialog promised a check
+         it never performed, on the one ledger the user would most want checked after
+         entering a rate by hand. It also omitted 公司行動, which IS replayed.
+         Deliberately not "fixed" by widening the endpoint: `forex/pools.py` and
+         `portfolio/cash.py` cannot raise, so replaying them would be a verification that
+         can never fail — and a verification that cannot fail is a progress bar.
+         M10-04 (owner ruling 2026-09-06): no confirm dialog and no 「較耗時」. The replay is
+         read-only and takes 17–30 ms end to end (measured: 24,000 rows 0.77 s, 50,000 rows
+         1.86 s — under a second at any scale this app assumes); the wait the user feels is
+         the page reload that follows (/api/dashboard, 1.5–2.6 s), so the copy names that.
+         The name stays 重算. */
+      menu.appendChild(mkOpt('重算（重建統計）', '重放期初庫存、交易、股利與公司行動帳本驗證統計（瞬間完成；隨後重新整理頁面）', () => {
+        const prog = window.toastProgress('重算…', '重放帳本只需一瞬間；驗證通過後重新整理頁面約需 2 秒');
+        pdEnsureApi()
+          .then((ok) => {
+            if (!ok) throw new Error('API 層載入失敗');
+            return window.pdApi.post('/api/actions/recompute');
+          })
+          .then(() => {
+            prog.done('重算完成', '帳本重放驗證通過（帳本本身未修改；換匯與資金收支不經此路徑驗證），正在重新整理…');
+            setTimeout(() => {
+              if (window.pdBeforeReload) window.pdBeforeReload();   // L25: keep the view state
+              window.location.reload();
+            }, 900);
+          })
+          .catch((e) => {
+            prog.fail('重算失敗', (e && e.message) || '請稍後再試');
           });
-        }
       }));
       btn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
       document.addEventListener('click', (e) => { if (!menu.hidden && !wrap.contains(e.target)) menu.hidden = true; });
@@ -616,9 +723,43 @@
   /* ---- toasts ---- */
   const host = el('div', 'toast-host');
   document.body.appendChild(host);
+  /* kind: 'ok' (green ✓, 4.2 s) | 'fail' (red ✕, 30 s) | 'warn' (amber !, 30 s).
+     'warn' is the third face (M10-02): three callers already passed it and were painted as
+     a green ✓ — a partial result is not a success, and it is not read in 4 seconds either.
+     Colour comes from styles.css's .toast-warn (the same --amber token .pill-warn uses).
+     L3 (demo audit 2026-09-16): fail / warn used to stay until closed, and they outlived the
+     condition they reported — 「帳本資料載入失敗 日期區間無效」 was still on screen minutes
+     after the dates had been fixed and the table had loaded. Two changes, neither of which
+     makes a failure easy to miss: (1) fail/warn dismiss after 30 s — long enough to read a
+     list of lost symbols, and hovering pauses the clock; (2) a toast whose text (msg + sub)
+     is already showing REPLACES the earlier copy, so a retried request never stacks the
+     same sentence three deep. */
+  const OK_MS = 4200;
+  const ATTENTION_MS = 30000;
+  /* DEF-008 (functional test 2026-09-22, A-05/A-06): the third argument is a SUB-LINE for
+     the owner, and most failure paths pass `err.code` there by convention (api.js's own
+     header documents `window.toast(err.message, 'fail', err.code)`) — so every red toast
+     printed 「withdraw_insufficient_balance」「validation_error」 under a zh sentence. Fixing
+     that at ~50 call sites is how the 51st comes back, so it is fixed HERE, once: a sub that
+     is a machine code (lower_snake ASCII, the api/errors.py vocabulary) is diagnostics — it
+     goes to the toast's tooltip and the console, never into the visible text. A zh sub-line
+     never matches the pattern and renders exactly as before. */
+  const DIAG_CODE = /^[a-z][a-z0-9_]*$/;
   window.toast = function (msg, kind, sub) {
-    const t = el('div', 'toast ' + (kind === 'fail' ? 'toast-fail' : 'toast-ok'));
-    t.appendChild(el('span', null, kind === 'fail' ? '✕' : '✓'));
+    const diag = (typeof sub === 'string' && DIAG_CODE.test(sub)) ? sub : null;
+    if (diag) {
+      sub = '';
+      if (window.console && console.debug) console.debug('[toast] code:', diag, msg);
+    }
+    const cls = kind === 'fail' ? 'toast-fail' : (kind === 'warn' ? 'toast-warn' : 'toast-ok');
+    const key = cls + ' ' + (msg || '') + ' ' + (sub || '');
+    Array.from(host.querySelectorAll('.toast')).forEach((old) => {
+      if (old.dataset.toastKey === key) old.remove();
+    });
+    const t = el('div', 'toast ' + cls);
+    t.dataset.toastKey = key;
+    if (diag) t.title = '錯誤碼：' + diag;   // DEF-008: diagnostics on hover, not in the text
+    t.appendChild(el('span', null, kind === 'fail' ? '✕' : (kind === 'warn' ? '!' : '✓')));
     const txt = el('div');
     txt.appendChild(el('div', 'msg', msg));
     if (sub) txt.appendChild(el('div', 'sub', sub));
@@ -628,7 +769,12 @@
     x.addEventListener('click', () => t.remove());
     t.appendChild(x);
     host.appendChild(t);
-    if (kind !== 'fail') setTimeout(() => t.remove(), 4200); /* 失敗訊息常駐直到關閉 */
+    const ttl = (kind === 'fail' || kind === 'warn') ? ATTENTION_MS : OK_MS;
+    let timer = setTimeout(() => t.remove(), ttl);
+    t.addEventListener('mouseenter', () => { clearTimeout(timer); timer = null; });
+    t.addEventListener('mouseleave', () => {
+      if (timer === null && t.parentNode) timer = setTimeout(() => t.remove(), ttl);
+    });
   };
 
   /* toastProgress(msg, sub): a persistent spinner toast for LONG network operations
@@ -660,6 +806,7 @@
         if (sub2) { sEl.textContent = sub2; if (!sEl.parentNode) txt.appendChild(sEl); }
       },
       done: (msg2, sub2) => settle('ok', msg2, sub2),
+      warn: (msg2, sub2) => settle('warn', msg2, sub2),
       fail: (msg2, sub2) => settle('fail', msg2, sub2)
     };
   };

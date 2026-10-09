@@ -23,8 +23,28 @@ from pydantic import BaseModel
 
 from portfolio_dash.llm_insight.cards import Prediction
 
-# The flat band: |move| within ±0.5% counts as "flat" for a direction=flat prediction.
+# The flat band FLOOR: |move| within ±0.5% counts as "flat" when nothing better is known.
+#
+# ⚠ For ``price_change`` this is now a FLOOR, not the band (review ⑩, 2026-08-25). Fixed at
+# ±0.5% it made 「持平」 nearly unhittable: over 14 days at 30% annualised vol the one-sigma
+# move is ~7%, so flat scored ~6% while up/down sat near 51% each — and ``price_change`` is
+# the only metric the official cards emit, so the scoreboard was training the assistant out of
+# saying "I do not expect this to move". AI-D25 diagnosed the identical bias for volatility
+# and widened ITS band; the same reasoning was never applied here.
+#
+# The measurement seam now feeds ``ActualMeasurement.flat_band`` scaled to the symbol's own
+# volatility over the actual horizon; this constant remains the floor, so a very calm symbol
+# never ends up with a TIGHTER band than before — that would deepen the bias precisely where
+# 「持平」 is the honest call. ``relative`` deliberately keeps the fixed band: an excess return
+# has a different variance from the raw move, and scaling it by the symbol's own vol would
+# overstate it. That is a separate measurement, not an oversight.
 _FLAT_BAND = Decimal("0.005")
+# Volatility gets its own, wider band (AI-D25, owner ruling 2026-08-19): ``vol_change_pct``
+# is the fractional change of a 30-day realized-vol ESTIMATOR, which jitters by several
+# percent on a constant series — at ±0.5% a ``direction=flat`` volatility call would be an
+# automatic miss, silently punishing one direction class. Price moves and excess returns
+# keep the shared band above.
+_VOL_FLAT_BAND = Decimal("0.05")
 
 
 class ActualMeasurement(BaseModel):
@@ -39,12 +59,25 @@ class ActualMeasurement(BaseModel):
     - ``symbol_return_pct`` / ``benchmark_return_pct`` — fractional returns; for ``relative``.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    # extra="forbid" (2026-08-25): while adding ``flat_band`` a typo in the field name was
+    # silently DROPPED by Pydantic's default and three tests went green against a measurement
+    # that did not contain what they thought it did. A measurement is the input to a scored,
+    # stored verdict — an unknown field here must fail loudly, not be discarded.
+    model_config = {"arbitrary_types_allowed": True, "extra": "forbid"}
 
     price_change_pct: Decimal | None = None
     vol_change_pct: Decimal | None = None
     symbol_return_pct: Decimal | None = None
     benchmark_return_pct: Decimal | None = None
+    # The 「持平」 band ACTUALLY used for this measurement, scaled to the symbol's own
+    # volatility over the real horizon (review ⑩, 2026-08-25). ``None`` → the fixed
+    # ``_FLAT_BAND``, which is what legacy rows and any seam that cannot compute a band keep.
+    #
+    # It is fed in rather than derived here for two reasons: ``scoring`` stays pure (it has no
+    # price series), and a band that varies per card MUST be recorded with the verdict or a
+    # scored row cannot be audited — a stored hit whose threshold is unknowable is not
+    # evidence. See ``insight_evaluations.flat_band``.
+    flat_band: Decimal | None = None
 
 
 def _direction_hit(direction: str, move: Decimal, *, band: Decimal = _FLAT_BAND) -> bool:
@@ -66,7 +99,7 @@ def _score_price_change(pred: Prediction, m: ActualMeasurement) -> bool | None:
         if pred.direction == "up":
             return move >= target
         return move <= -target
-    return _direction_hit(pred.direction, move)
+    return _direction_hit(pred.direction, move, band=m.flat_band or _FLAT_BAND)
 
 
 def _score_volatility(pred: Prediction, m: ActualMeasurement) -> bool | None:
@@ -74,7 +107,8 @@ def _score_volatility(pred: Prediction, m: ActualMeasurement) -> bool | None:
     if change is None:
         return None
     # A volatility prediction is a regime call: up = vol rose, down = vol fell, flat = stable.
-    return _direction_hit(pred.direction, change)
+    # The flat arm uses the wider vol-specific band (AI-D25) — see ``_VOL_FLAT_BAND``.
+    return _direction_hit(pred.direction, change, band=_VOL_FLAT_BAND)
 
 
 def _score_relative(pred: Prediction, m: ActualMeasurement) -> bool | None:
@@ -158,3 +192,147 @@ def calibration_error(rows: list[tuple[int, bool]]) -> Decimal:
     hits = sum(1 for _, hit in rows if hit)
     actual = (Decimal(hits) / n) * Decimal("100")
     return abs(claimed - actual)
+
+
+# --- Trust tier (W7, AI-D36) ------------------------------------------------------
+# The scoreboard's per-task stamp — 命中率 × 校準誤差 × 樣本數 in ONE vocabulary, computed
+# HERE (the web layer renders the string; it never computes it). Anchors: the sample gate
+# is the event study's MIN_SAMPLE (= the evolution config's min_samples default); the
+# calibration bar is the calib_gap alert's gap_alert_pp default.
+TIER_MIN_SAMPLE = 8
+TIER_SUCCESS_MIN = Decimal("0.6")
+TIER_CALIB_MAX_PP = Decimal("10")
+
+TIER_SUFFICIENT = "可參考"
+TIER_EARLY = "早期"
+TIER_INSUFFICIENT = "樣本不足"
+
+
+def trust_tier(
+    *,
+    n: int,
+    quant_n: int,
+    quant_hit_rate: Decimal | None,
+    narrative_success_rate: Decimal | None,
+    calib_error_pp: Decimal | None,
+) -> str:
+    """One task's trust tier from its hit rate × calibration error × sample count.
+
+    * ``n < TIER_MIN_SAMPLE`` → 樣本不足 (regardless of the rates — a handful of hits is
+      noise theatre, the same honesty gate as the event study and the rolling gap).
+    * The success leg is ``quant_hit_rate`` when quant rows exist — ``combo_score`` reports
+      ``"0"`` for a quant-less combo, and reading that as a real 0% would demote every
+      narrative-only task on a number it never earned — else ``narrative_success_rate``.
+    * 可參考 ⟺ success ≥ 0.6 AND the calibration error is KNOWN and ≤ 10pp; a combo with
+      no calibration evidence (None) is 早期, not 可參考 — "no evidence of miscalibration"
+      is not evidence of calibration.
+    """
+    if n < TIER_MIN_SAMPLE:
+        return TIER_INSUFFICIENT
+    success = quant_hit_rate if quant_n > 0 else narrative_success_rate
+    if success is None:
+        return TIER_EARLY
+    if (
+        success >= TIER_SUCCESS_MIN
+        and calib_error_pp is not None
+        and calib_error_pp <= TIER_CALIB_MAX_PP
+    ):
+        return TIER_SUFFICIENT
+    return TIER_EARLY
+
+
+# --- Confidence ceiling (W7.1, 2026-08-23, owner ruling 「生產端＋提示詞雙邊修」) ----------
+# AI-D33 put the anchoring law in the PROMPT and deliberately refused a code-side clamp: a
+# validator that silently rewrites the model's own stated confidence is the same defect class
+# as averaging two providers' fundamentals. The first live run (demo, 2026-08-23) exposed the
+# other failure mode — 0 of 13 advice cards obeyed a law that asked the model to execute a
+# three-step conditional over a bins table mid-generation.
+#
+# So the ARITHMETIC moves here and the RULE stays exactly where it was. The prompt still
+# states the ceiling, the model still writes the number, and nothing clamps anything after
+# the fact; the model is simply handed ONE integer instead of a table plus a procedure.
+#
+# ⚠ REVISED 2026-08-25 (AI-D39), and the revision is to the LAW, not to this implementation:
+# W7.1 executed AI-D33's three steps faithfully and two of them were wrong.
+#
+#   (a) The gap was subtracted ON TOP of the bucket cap. A bucket's cap is `actual_pct + 5`,
+#       which IS the calibration correction — deducting the global rolling gap as well charges
+#       the same over-confidence twice. Measured on the demo: bins said 39, the gap took 47,
+#       the answer was 0. That 0 was arithmetic, not evidence. The step is gone, and with it
+#       the `gap` parameter: a parameter kept "for compatibility" after it stops being read is
+#       how the next reader concludes the gap still matters.
+#   (b) A bucket nobody had scored capped at a CONSTANT 70, while a bucket measured at 40%
+#       capped at 45 — so ignorance outranked evidence, and a model could lift its own ceiling
+#       by moving into an unscored range. Over a 20-sample rolling window that is a limit
+#       cycle, not a calibration loop. An unscored bucket now caps at the OVERALL record.
+#
+# AI-D33's red line is untouched: nothing here clamps what the model writes. Only the integer
+# handed to the prompt changes. (The third step, recording violations instead of clamping, is
+# a separate surface — see `insights.ceiling_at_create`.)
+CEILING_NO_DATA = 70  # LAST RESORT ONLY: nothing has ever been scored, so there is no record
+CEILING_HEADROOM = 5  # the law's "actual_pct + 5"
+
+
+def _bucket_bounds(label: str) -> tuple[int, int] | None:
+    """``"40-60"`` -> ``(40, 60)``; anything unparseable -> ``None`` (never raise on a bin)."""
+    lo, _, hi = label.partition("-")
+    try:
+        return int(lo), int(hi)
+    except ValueError:
+        return None
+
+
+def confidence_ceiling(
+    bins: list[dict[str, object]],
+    *,
+    overall_hit_pct: Decimal | None,
+    min_samples: int = TIER_MIN_SAMPLE,
+) -> int:
+    """The largest SELF-CONSISTENT confidence (0-100) the anchoring law admits.
+
+    The law is circular by construction — a confidence's cap depends on the bucket that same
+    confidence falls into — so the answer is the largest ``c`` with ``c <= cap(bucket(c))``:
+
+    * a bucket at or above the sample gate caps at ``actual_pct + CEILING_HEADROOM``;
+    * a bucket below the gate, or absent from ``bins`` entirely, caps at
+      ``overall_hit_pct + CEILING_HEADROOM`` — the record as a whole, since this particular
+      range has none of its own (AI-D39 (b));
+    * only when NOTHING has ever been scored (``overall_hit_pct is None``) does
+      ``CEILING_NO_DATA`` apply. That is a genuinely different state from "this bucket has no
+      history", and it is the only one a constant can honestly answer.
+
+    ⚠ ``overall_hit_pct`` is a PERCENTAGE (0-100), the same unit as a bin's ``actual_pct`` —
+    NOT the fraction that ``backtest_json.overall_hit_rate`` carries on the wire. The caller
+    converts, visibly. Mixing the two silently is precisely the class of defect W7.1 shipped
+    (one score printed four different ways), so the unit is in the name.
+
+    ⚠ There is deliberately NO floor: on a badly calibrated history this returns a small
+    number, and the prompt says so in words rather than having this layer invent a floor the
+    owner never ruled.
+    """
+    caps: list[tuple[int, int, Decimal]] = []
+    # The fallback for a range with no record of its own: the record as a whole.
+    unscored_cap = (Decimal(CEILING_NO_DATA) if overall_hit_pct is None
+                    else overall_hit_pct + CEILING_HEADROOM)
+    for b in bins:
+        bounds = _bucket_bounds(str(b.get("bucket", "")))
+        if bounds is None:
+            continue
+        n = int(str(b.get("n", 0)))
+        cap = (
+            Decimal(str(b.get("actual_pct", "0"))) + CEILING_HEADROOM
+            if n >= min_samples
+            else unscored_cap
+        )
+        caps.append((bounds[0], bounds[1], cap))
+
+    def cap_for(c: int) -> Decimal:
+        for lo, hi, cap in caps:
+            if lo <= c < hi or (hi == 100 and c == 100):
+                return cap
+        return unscored_cap  # a bucket nobody has ever scored
+
+    for c in range(100, -1, -1):
+        if Decimal(c) <= cap_for(c):
+            return c
+    return 0

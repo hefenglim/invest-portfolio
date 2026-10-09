@@ -3,16 +3,34 @@
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from portfolio_dash.shared.clock import app_now
+from portfolio_dash.shared.corporate_actions import CorporateActionKind, convert_stored
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument, MarketRule
-from portfolio_dash.shared.models.enums import Side
-from portfolio_dash.shared.money import from_db, to_db
+from portfolio_dash.shared.models.enums import DividendType, Side
+from portfolio_dash.shared.models.ledger import (
+    Dividend,
+    LedgerBundle,
+    OpeningInventory,
+    Transaction,
+)
+from portfolio_dash.shared.money import cap_dp, from_db, to_db
 from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
+
+#: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
+#: inside its own class body, so every annotation after it — ``ex_date``, the
+#: ``effective_date`` return — resolves to the FIELD and mypy rejects it. Aliasing is the
+#: least surprising fix: renaming the field would change the ledger's wire contract.
+Date = date
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +42,7 @@ _PRICE_DP = 4
 
 def _cap_price(v: Decimal) -> Decimal:
     """Round *v* to at most 4 decimals; values already within the cap are returned as-is."""
-    exp = v.as_tuple().exponent
-    if isinstance(exp, int) and exp < -_PRICE_DP:
-        return v.quantize(Decimal(1).scaleb(-_PRICE_DP), rounding=ROUND_HALF_UP)
-    return v
+    return cap_dp(v, _PRICE_DP)
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +50,30 @@ def _cap_price(v: Decimal) -> Decimal:
 # ---------------------------------------------------------------------------
 # Every row correction (edit / delete) on the four ledgers captures the BEFORE state
 # here, so an explicit correction is auditable even though the ledger is not literally
-# append-only. No UI viewer this wave — db-stats visibility is enough.
+# append-only. Read back by the 資料中心 「帳本操作稽核」 list and its export-centre CSV
+# (``export/ledger_audit.py``, post-closure item 10, owner 2026-09-30) — for its first
+# months nothing read it, and a trail nobody can open is not an audit trail.
+
+
+#: DEF-049 (2026-09-25): WHICH door removed the row, when it was not the row's own ledger
+#: tab. ``None`` (the default) is every single-row correction, byte-identical to before; a
+#: bulk door sets it for the duration of its transaction with :func:`audit_source`, and every
+#: audit row written inside — including the linked fee a corporate action takes with it — is
+#: tagged. A context variable rather than a parameter threaded through each ``delete_*``,
+#: because the batch undo reaches ``delete_corporate_action`` through the ledger tab's own
+#: ``_delete_actions`` (I-3), and a label that has to be remembered at every hop is the one a
+#: future hop forgets.
+_AUDIT_SOURCE: ContextVar[str | None] = ContextVar("ledger_audit_source", default=None)
+
+
+@contextmanager
+def audit_source(label: str) -> Iterator[None]:
+    """Tag every ``ledger_audit`` row written inside the block with *label* (DEF-049)."""
+    token = _AUDIT_SOURCE.set(label)
+    try:
+        yield
+    finally:
+        _AUDIT_SOURCE.reset(token)
 
 
 def _write_audit(
@@ -45,18 +83,37 @@ def _write_audit(
     action: str,
     before: dict[str, object] | None,
 ) -> None:
-    """Record the pre-mutation snapshot of one ledger row (idempotent-agnostic append)."""
+    """Record the pre-mutation snapshot of one ledger row (idempotent-agnostic append).
+
+    ``source`` (DEF-049) is written only when a bulk door set one via :func:`audit_source`;
+    a single-row correction writes the same five columns it always has.
+    """
     if before is None:
         return
+    source = _AUDIT_SOURCE.get()
+    if source is None:
+        conn.execute(
+            "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                table_name,
+                row_id,
+                action,
+                json.dumps(before, ensure_ascii=False, default=str),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        return
     conn.execute(
-        "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at) "
-        "VALUES (?,?,?,?,?)",
+        "INSERT INTO ledger_audit (table_name, row_id, action, before_json, at, source) "
+        "VALUES (?,?,?,?,?,?)",
         (
             table_name,
             row_id,
             action,
             json.dumps(before, ensure_ascii=False, default=str),
             datetime.now(UTC).isoformat(),
+            source,
         ),
     )
 
@@ -69,41 +126,455 @@ def _capture(
 
 
 def list_ledger_audit(
-    conn: sqlite3.Connection, *, table_name: str | None = None
+    conn: sqlite3.Connection,
+    *,
+    table_name: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict[str, object]]:
-    """Return ledger_audit rows (newest first); optionally filter by table_name."""
+    """Return ledger_audit rows (newest first); optionally filter by table_name.
+
+    ``limit`` / ``offset`` page the list for the 資料中心 reader (post-closure item 10,
+    owner 2026-09-30); ``None`` keeps the whole trail. ``source`` rides along (DEF-049's
+    「批次復原 #id」, NULL for a single-row correction) so the reader can say which door
+    removed a row.
+    """
     where = " WHERE table_name=?" if table_name is not None else ""
     params: tuple[object, ...] = (table_name,) if table_name is not None else ()
+    page = ""
+    if limit is not None:
+        page = " LIMIT ? OFFSET ?"
+        params = (*params, limit, offset)
     rows = conn.execute(
-        f"SELECT id, table_name, row_id, action, before_json, at "
-        f"FROM ledger_audit{where} ORDER BY id DESC",
+        f"SELECT id, table_name, row_id, action, before_json, at, source "
+        f"FROM ledger_audit{where} ORDER BY id DESC{page}",
         params,
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def upsert_instrument(conn: sqlite3.Connection, inst: Instrument) -> None:
+def count_ledger_audit(conn: sqlite3.Connection) -> int:
+    """How many audit rows exist — the reader's pager total."""
+    row = conn.execute("SELECT COUNT(*) AS n FROM ledger_audit").fetchone()
+    return int(row["n"])
+
+
+def upsert_instrument(
+    conn: sqlite3.Connection, inst: Instrument, *, today: date | None = None,
+    commit: bool = True,
+) -> None:
     """Insert or update an instrument row (idempotent). board_status is owned by
-    register_instrument and intentionally not written here (preserved on conflict)."""
+    register_instrument and intentionally not written here (preserved on conflict).
+
+    **``target_set_at`` is owned HERE, and derived rather than passed** (D44). It dates the
+    target band, and the rule is one sentence: *the stamp moves only when the band's value
+    moves*. Deciding that in the SQL — ``IS NOT`` against the stored row, SQLite's null-safe
+    inequality — is what makes it true for every caller at once. The four write paths
+    (``PUT /api/instruments/{symbol}``, ``_apply_extras``, ``quick_register``,
+    ``restore_archived``) all arrive through this one statement, so none of them has to
+    remember the rule, and a fifth added later inherits it. A helper each caller had to
+    invoke would be the registration-point class ``import_templates`` names seven of.
+
+    Consequences worth stating, because they are the reason this is not just a timestamp:
+
+    * **An unrelated edit does not touch it.** Renaming a symbol or filling its industry
+      leaves both band columns identical, the ``CASE`` takes the ``ELSE``, and the stamp
+      keeps its old value. That is the whole point — a stamp that moved on any write would
+      date the row, not the band, and the D44 finding would go permanently silent.
+    * **Clearing the band clears the stamp** (``new_stamp`` is None when neither level is
+      set), so "no band" never carries a date for a band that is not there.
+    * ``inst.target_set_at`` is IGNORED. The model field is read-only (see ``Instrument``);
+      one owner, and this is it.
+    * **The stamp is a BUSINESS date, so it is the Taipei day** (DEF-022, 2026-09-23 —
+      ``shared/clock.py``, decision Q6: Asia/Taipei is the only day anchor for business
+      logic). It was ``datetime.now(UTC).date()``, which between 00:00 and 07:59 Taipei is
+      YESTERDAY — and ``validate.py`` compares this stamp against a split's trade date to
+      decide whether the D44 finding fires, so a band set on the morning of a split was
+      dated the day before it. ``tests/architecture/test_business_dates_use_app_clock.py``
+      is the guard for the class.
+    """
+    stamp = (today or app_now().date()).isoformat()
+    low = to_db(inst.target_low) if inst.target_low is not None else None
+    high = to_db(inst.target_high) if inst.target_high is not None else None
+    new_stamp = stamp if (low is not None or high is not None) else None
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
-               target_low, target_high, is_etf, industry)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+               target_low, target_high, is_etf, etf_flag_unknown, industry,
+               target_set_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
                target_low=excluded.target_low, target_high=excluded.target_high,
-               is_etf=excluded.is_etf, industry=excluded.industry""",
+               is_etf=excluded.is_etf, etf_flag_unknown=excluded.etf_flag_unknown,
+               industry=excluded.industry,
+               target_set_at=CASE
+                   WHEN instruments.target_low IS NOT excluded.target_low
+                     OR instruments.target_high IS NOT excluded.target_high
+                   THEN excluded.target_set_at
+                   ELSE instruments.target_set_at
+               END""",
         (
             inst.symbol, inst.market.value, inst.quote_ccy.value,
             inst.sector, inst.name, inst.board,
-            to_db(inst.target_low) if inst.target_low is not None else None,
-            to_db(inst.target_high) if inst.target_high is not None else None,
+            low,
+            high,
             1 if inst.is_etf else 0,
+            1 if inst.etf_flag_unknown else 0,
             inst.industry,
+            new_stamp,
         ),
     )
-    conn.commit()
+    # ``commit=False`` lets a caller inside an all-or-nothing batch defer to the batch's
+    # single commit — a mid-batch commit here would leave this row standing after a
+    # rollback took every ledger row it was written for (``preview.commit_preview``).
+    if commit:
+        conn.commit()
+
+
+class MovedBand(BaseModel):
+    """What :func:`move_target_band` moved, for the response that reports it — and, since
+    DEF-021, what the EXCHANGE row itself records (``corporate_actions.band_move_json``) so
+    that :func:`restore_target_band` can move it back on delete."""
+
+    from_symbol: str
+    to_symbol: str
+    target_low: Decimal | None = None
+    target_high: Decimal | None = None
+    set_at: date | None = None
+
+
+def band_move_to_json(moved: MovedBand) -> str:
+    """Canonical TEXT for ``corporate_actions.band_move_json``. Levels go through
+    :func:`to_db` so the stored digits are the instrument row's own digits — the restore
+    compares the two as TEXT, byte for byte, and a ``Decimal('40') != '40.0'`` mismatch
+    would make a band that nobody touched read as "changed"."""
+    return json.dumps({
+        "from_symbol": moved.from_symbol,
+        "to_symbol": moved.to_symbol,
+        "target_low": to_db(moved.target_low) if moved.target_low is not None else None,
+        "target_high": to_db(moved.target_high) if moved.target_high is not None else None,
+        "set_at": moved.set_at.isoformat() if moved.set_at is not None else None,
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def band_move_from_json(text: str | None) -> MovedBand | None:
+    """The inverse of :func:`band_move_to_json`; ``None`` for NULL, blank or unreadable
+    text — a hand-edited column must degrade to "nothing recorded", never raise into a
+    ledger read."""
+    if not text:
+        return None
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return MovedBand(
+            from_symbol=str(raw["from_symbol"]),
+            to_symbol=str(raw["to_symbol"]),
+            target_low=from_db(raw["target_low"]) if raw.get("target_low") else None,
+            target_high=from_db(raw["target_high"]) if raw.get("target_high") else None,
+            set_at=date.fromisoformat(raw["set_at"]) if raw.get("set_at") else None,
+        )
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+class MovedWeight(BaseModel):
+    """What ``strategy.target_weights.move_target_weight`` moved for one EXCHANGE — the
+    record ``corporate_actions.weight_move_json`` keeps so the delete can move the target
+    weight back (F-3, 2026-09-23: DEF-021's reversal, for the owner's OTHER per-symbol
+    setting). Declared HERE, beside :class:`MovedBand`, because it is the shape of a ledger
+    row's column; the weights themselves stay owned by ``strategy/target_weights.py``, which
+    reads and writes the config (``data_ingestion`` may not import ``strategy``)."""
+
+    from_symbol: str
+    to_symbol: str
+    weight: Decimal
+
+
+def weight_move_to_json(moved: MovedWeight) -> str:
+    """Canonical TEXT for ``corporate_actions.weight_move_json``. The weight is written with
+    ``str()`` — the very serialiser ``save_target_weights`` uses for the config — so the
+    restore can compare the recorded digits to the stored ones as TEXT, byte for byte."""
+    return json.dumps({
+        "from_symbol": moved.from_symbol,
+        "to_symbol": moved.to_symbol,
+        "weight": str(moved.weight),
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def weight_move_from_json(text: str | None) -> MovedWeight | None:
+    """The inverse of :func:`weight_move_to_json`; ``None`` for NULL, blank or unreadable
+    text — a hand-edited column degrades to "nothing recorded", never raises into a read."""
+    if not text:
+        return None
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return MovedWeight(from_symbol=str(raw["from_symbol"]),
+                           to_symbol=str(raw["to_symbol"]),
+                           weight=Decimal(str(raw["weight"])))
+    except (KeyError, ValueError, TypeError, ArithmeticError):
+        return None
+
+
+class ChildSeedRecord(BaseModel):
+    """What a SPINOFF's save wrote into ``prices`` for its child (DEF-040 R4) — recorded on
+    the row (``corporate_actions.child_seed_json``) so the delete takes back exactly that.
+
+    ``close`` is ``None`` when the save wrote NO seed: no price was typed, or the
+    ``(child, day)`` slot already held a row (a provider's quote, or a seed nobody owns) and
+    the seed writer refused to overwrite it. Otherwise ``symbol`` / ``as_of`` / ``close`` are
+    the slot and the typed value. A NULL column (every row saved before this record existed,
+    and every non-SPINOFF row) means "unknown": the delete then falls back to the seed
+    signature alone (R3's rule).
+
+    Why a record and not the signature alone: the signature (``source`` + action-day stamp)
+    says "a seed", not "THIS action's seed". An orphan seed — left by a pre-R3 delete, or by
+    a pre-R4 date edit — carries the same signature, so a later SPINOFF on that day would
+    have "taken back" a row that existed before it was saved.
+    """
+
+    close: Decimal | None = None
+    symbol: str | None = None
+    as_of: date | None = None
+
+
+def child_seed_to_json(record: ChildSeedRecord) -> str:
+    """Canonical TEXT for ``corporate_actions.child_seed_json`` (close via :func:`to_db`)."""
+    return json.dumps({
+        "close": to_db(record.close) if record.close is not None else None,
+        "symbol": record.symbol,
+        "as_of": record.as_of.isoformat() if record.as_of is not None else None,
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def child_seed_from_json(text: str | None) -> ChildSeedRecord | None:
+    """The inverse of :func:`child_seed_to_json`; ``None`` (= unknown, R3's rule) for NULL,
+    blank or unreadable text — a hand-edited column never raises into a ledger read."""
+    if not text:
+        return None
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        close = raw.get("close")
+        as_of = raw.get("as_of")
+        symbol = raw.get("symbol")
+        return ChildSeedRecord(
+            close=Decimal(str(close)) if close is not None else None,
+            symbol=str(symbol) if symbol is not None else None,
+            as_of=date.fromisoformat(str(as_of)) if as_of is not None else None)
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+
+
+def set_child_seed(
+    conn: sqlite3.Connection, action_ids: list[int], record: ChildSeedRecord,
+    *, commit: bool = True,
+) -> None:
+    """Re-record what the SPINOFF rows *action_ids* own in ``prices`` (DEF-060: an edit that
+    moves, removes or re-types the seed). Not audited on its own: it is a record of a price
+    side effect, and the edit that causes it already audited the row's before-image."""
+    conn.executemany(
+        "UPDATE corporate_actions SET child_seed_json=? WHERE id=?",
+        [(child_seed_to_json(record), i) for i in action_ids])
+    if commit:
+        conn.commit()
+
+
+class BandRestoreVerdict(BaseModel):
+    """Whether deleting an EXCHANGE row moves its band back (DEF-021), and why not.
+
+    ``restorable`` is the PREDICATE (read-only, :func:`pending_band_restore`);
+    ``restored`` is set by :func:`restore_target_band` once the write has happened.
+    ``reason`` is the zh sentence the delete confirm and the delete response show when the
+    band stays where it is."""
+
+    band: MovedBand
+    restorable: bool
+    restored: bool = False
+    reason: str | None = None
+
+
+def _band_text(low: Decimal | None, high: Decimal | None) -> str:
+    """「下限 40／上限 55」 for a message; 「無」 when both are unset."""
+    parts: list[str] = []
+    if low is not None:
+        parts.append(f"下限 {to_db(low)}")
+    if high is not None:
+        parts.append(f"上限 {to_db(high)}")
+    return "／".join(parts) if parts else "無"
+
+
+def pending_band_restore(
+    conn: sqlite3.Connection, moved: MovedBand | None
+) -> BandRestoreVerdict | None:
+    """What deleting the EXCHANGE that recorded *moved* WOULD do to the band, without
+    doing it — the ledger page's read for the delete confirm.
+
+    Same shape as :func:`pending_band_move` / :func:`move_target_band`: the predicate the
+    confirm quotes and the predicate the delete runs are one function, so the sentence on
+    screen cannot promise what the write then declines. ``None`` when the row recorded no
+    move (every non-EXCHANGE row, and every row written before DEF-021).
+
+    The move is reversed ONLY when both halves are still exactly as the move left them:
+
+    * the destination carries **byte-for-byte** the recorded band (both levels AND
+      ``target_set_at``) — the owner has not touched it since, so nothing of theirs is
+      overwritten; a level they changed, cleared or re-dated is their judgement about the
+      destination security and outranks the inherited one;
+    * the source carries **no** band — a band set on the retired symbol after the move is,
+      again, the owner's own, and there is no merge rule that could be right.
+    """
+    if moved is None:
+        return None
+    src = get_instrument(conn, moved.from_symbol)
+    dst = get_instrument(conn, moved.to_symbol)
+    if dst is None:
+        return BandRestoreVerdict(band=moved, restorable=False, reason=(
+            f"{moved.to_symbol} 已不在標的清單，目標價未自動移回 {moved.from_symbol}"))
+    if src is None:
+        return BandRestoreVerdict(band=moved, restorable=False, reason=(
+            f"{moved.from_symbol} 已不在標的清單，目標價未自動移回"))
+    same_low = (to_db(dst.target_low) if dst.target_low is not None else None) == (
+        to_db(moved.target_low) if moved.target_low is not None else None)
+    same_high = (to_db(dst.target_high) if dst.target_high is not None else None) == (
+        to_db(moved.target_high) if moved.target_high is not None else None)
+    if not (same_low and same_high and dst.target_set_at == moved.set_at):
+        return BandRestoreVerdict(band=moved, restorable=False, reason=(
+            f"{moved.to_symbol} 的目標價在換股後已改動（登錄時 "
+            f"{_band_text(moved.target_low, moved.target_high)}，目前 "
+            f"{_band_text(dst.target_low, dst.target_high)}），未自動移回 "
+            f"{moved.from_symbol}，請到「觀察清單」自行調整"))
+    if src.target_low is not None or src.target_high is not None:
+        return BandRestoreVerdict(band=moved, restorable=False, reason=(
+            f"{moved.from_symbol} 目前已另有目標價（"
+            f"{_band_text(src.target_low, src.target_high)}），未自動移回，"
+            f"{moved.to_symbol} 的目標價保持不變"))
+    return BandRestoreVerdict(band=moved, restorable=True)
+
+
+def restore_target_band(
+    conn: sqlite3.Connection, moved: MovedBand | None, *, commit: bool = True
+) -> BandRestoreVerdict | None:
+    """DEF-021: move the band an EXCHANGE carried across BACK to the retired symbol, when
+    :func:`pending_band_restore` says it is safe — the conditional inverse of
+    :func:`move_target_band`, run by the delete inside the delete's own transaction.
+
+    Writes the columns directly, like the move it undoes: ``upsert_instrument`` would
+    re-derive ``target_set_at`` and stamp the band today, while the recorded ``set_at`` is
+    the date the owner actually set it — the same D44 reasoning as the forward move.
+    """
+    verdict = pending_band_restore(conn, moved)
+    if verdict is None or not verdict.restorable:
+        return verdict
+    band = verdict.band
+    conn.execute(
+        "UPDATE instruments SET target_low=?, target_high=?, target_set_at=? WHERE symbol=?",
+        (to_db(band.target_low) if band.target_low is not None else None,
+         to_db(band.target_high) if band.target_high is not None else None,
+         band.set_at.isoformat() if band.set_at is not None else None,
+         band.from_symbol),
+    )
+    conn.execute(
+        "UPDATE instruments SET target_low=NULL, target_high=NULL, target_set_at=NULL "
+        "WHERE symbol=?",
+        (band.to_symbol,),
+    )
+    if commit:
+        conn.commit()
+    return verdict.model_copy(update={"restored": True})
+
+
+def pending_band_move(
+    conn: sqlite3.Connection, *, from_symbol: str, to_symbol: str
+) -> MovedBand | None:
+    """What :func:`move_target_band` WOULD move, without moving it — the form preview's read.
+
+    The conditions live here and not in the router, so "will it move?" and "move it" can
+    never disagree: the preview that promises the move and the commit that performs it are
+    the same predicate, called twice. A second copy in the router would be a sentence on
+    screen the writer no longer honours — §5.1's two-numbers-on-one-screen failure applied
+    to a promise instead of a figure.
+    """
+    src = get_instrument(conn, from_symbol)
+    dst = get_instrument(conn, to_symbol)
+    if src is None or dst is None or from_symbol == to_symbol:
+        return None
+    if src.target_low is None and src.target_high is None:
+        return None
+    if dst.target_low is not None or dst.target_high is not None:
+        return None
+    return MovedBand(from_symbol=from_symbol, to_symbol=to_symbol,
+                     target_low=src.target_low, target_high=src.target_high,
+                     set_at=src.target_set_at)
+
+
+def move_target_band(
+    conn: sqlite3.Connection, *, from_symbol: str, to_symbol: str,
+    commit: bool = True,
+) -> MovedBand | None:
+    """D47: carry the owner's price-alert band from a retired symbol to its successor.
+
+    Owner ruling 2026-08-15 — 「ticker更換簡單一些可以直接換名字就好，其他都不動」. So the
+    band MOVES and its **values do not change**: an EXCHANGE re-keys a position, it does not
+    re-denominate one (§5.1's price re-expression is SPLIT-scoped), so 200 still means 200.
+
+    **A move, not a copy**, and that is the load-bearing half. ``target_cross`` fires for
+    every REGISTERED symbol carrying a band — held or merely watched — so a band left behind
+    on a symbol the owner no longer owns keeps sending alerts about a ticker that has
+    stopped trading. Clearing the source is what makes this a fix rather than a duplicate.
+
+    **Never overwrites.** A destination that already carries a band carries the owner's own
+    judgement about the destination security, which outranks an inherited one; there is no
+    merge rule that could be right, so the answer is to leave both alone and do nothing.
+
+    ⚠ **The one deliberate second writer of these columns.** Everything else goes through
+    :func:`upsert_instrument`, which DERIVES ``target_set_at`` by comparing values — and
+    that is exactly wrong here: the band's value has not changed, only the row it lives on,
+    so re-deriving would stamp it today and D44's "does this band predate that split?" would
+    answer no for the next split. The date rides across with the value it dates.
+
+    ⚠ **Conditionally reversible (DEF-021, 2026-09-23 — supersedes the earlier "not
+    reversible" limitation, which the entry surface never actually stated).** The caller
+    records what moved on the EXCHANGE row (``insert_corporate_action(band_move=…)`` →
+    ``corporate_actions.band_move_json``), and deleting that row runs
+    :func:`restore_target_band`: the band goes back to the source ONLY while the
+    destination still carries exactly the recorded band and the source has none; otherwise
+    the delete says so (``band_restored: false`` + a reason) and touches neither symbol. The
+    band is still a setting rather than money of record — 重算 does not cover it — which is
+    why the reversal is a recorded, conditional mechanism and not a replay. Returns ``None``
+    when nothing moved, so a caller can stay silent instead of announcing a no-op.
+    """
+    moving = pending_band_move(conn, from_symbol=from_symbol, to_symbol=to_symbol)
+    if moving is None:
+        return None
+    conn.execute(
+        "UPDATE instruments SET target_low=?, target_high=?, target_set_at=? WHERE symbol=?",
+        (to_db(moving.target_low) if moving.target_low is not None else None,
+         to_db(moving.target_high) if moving.target_high is not None else None,
+         moving.set_at.isoformat() if moving.set_at is not None else None,
+         to_symbol),
+    )
+    conn.execute(
+        "UPDATE instruments SET target_low=NULL, target_high=NULL, target_set_at=NULL "
+        "WHERE symbol=?",
+        (from_symbol,),
+    )
+    if commit:            # see upsert_instrument — the batch owns the transaction
+        conn.commit()
+    return moving
 
 
 def _row_to_instrument(row: sqlite3.Row) -> Instrument:
@@ -114,16 +585,47 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         target_low=from_db(row["target_low"]) if row["target_low"] else None,
         target_high=from_db(row["target_high"]) if row["target_high"] else None,
         is_etf=bool(row["is_etf"]),
+        etf_flag_unknown=bool(row["etf_flag_unknown"]),
         archived=bool(row["archived"]),
         industry=row["industry"],
+        target_set_at=(
+            date.fromisoformat(row["target_set_at"]) if row["target_set_at"] else None
+        ),
+        aliases=_aliases_of(row),
     )
+
+
+def _aliases_of(row: sqlite3.Row) -> list[str]:
+    """The stored alias list; a missing column or unreadable text reads as none."""
+    if "aliases" not in row.keys() or not row["aliases"]:
+        return []
+    try:
+        value = json.loads(row["aliases"])
+    except ValueError:
+        return []
+    return [str(a) for a in value if isinstance(a, str) and a.strip()] if isinstance(
+        value, list) else []
+
+
+def set_instrument_aliases(conn: sqlite3.Connection, symbol: str, aliases: list[str]) -> None:
+    """Replace *symbol*'s alias list — the column's ONE writer (owner 2026-09-30, item 8).
+
+    Callers normalize and check first (``shared.instrument_names.normalize_aliases`` /
+    ``alias_conflicts``); this stores what it is given, in order, as a JSON list.
+    """
+    conn.execute(
+        "UPDATE instruments SET aliases = ? WHERE symbol = ?",
+        (json.dumps(list(aliases), ensure_ascii=False), symbol),
+    )
+    conn.commit()
 
 
 def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived, industry FROM instruments WHERE symbol=?",
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases "
+        "FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
     return _row_to_instrument(row) if row is not None else None
@@ -136,7 +638,8 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     so no money figure is affected by archiving)."""
     rows = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, archived, industry FROM instruments"
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases "
+        "FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
 
@@ -193,8 +696,13 @@ def migrate_instrument_sectors(conn: sqlite3.Connection) -> int:
 # routed (see its docstring). Only two API tiers remain:
 #   * currently held -> DELETE refused (422 ``held``); a held symbol is never archived,
 #   * everything else -> SOFT delete (archived=1), fully reversible.
-# Invariant "held => not archived" is enforced at the single booking seam below
-# (``insert_transaction`` / ``upsert_opening`` un-archive on any new booking).
+# Invariant "held => not archived" is enforced on BOTH sides (DEF-064, 2026-09-25): the
+# archive guard refuses a symbol that ``holdings.holds_position`` says is held (today or on a
+# later ledger date — shorts and future-dated rows included), and every write seam that can
+# give a symbol shares re-activates it — ``insert_transaction`` / ``upsert_opening``
+# unconditionally (any new booking), every correction / delete of a trade, share-adding
+# dividend, opening or corporate action through ``_reactivate_if_held`` (same predicate).
+# The fetch universes (``shared/instrument_scope.py``) rely on it to filter on the flag alone.
 
 
 def has_ledger_history(conn: sqlite3.Connection, symbol: str) -> bool:
@@ -248,7 +756,8 @@ def delete_instrument(
     available for internal / test use (rebuild tooling, fixtures).
 
     Cleaned in addition to the instruments row: ``prices``, ``dividend_events`` (both keyed
-    ``instrument``), ``signal_states`` / ``alert_events`` (keyed ``symbol``), any
+    ``instrument``), ``signal_states`` / ``signal_history`` / ``alert_events`` (keyed
+    ``symbol``), any
     ``pending_dividend_skips`` fingerprint for the symbol, and the symbol's entry in the
     single-row ``target_weights_config`` JSON map. Raw SQL by table name keeps the cleanup
     atomic without importing upward (data_ingestion imports no higher layer).
@@ -268,7 +777,8 @@ def delete_instrument(
     # artifacts are keyed ``symbol`` and always cleaned. preserve_market_data keeps only the
     # former (so a benchmark's daily-close series stored under the same key is not orphaned).
     market_data = (("prices", "instrument"), ("dividend_events", "instrument"))
-    personal = (("signal_states", "symbol"), ("alert_events", "symbol"))
+    personal = (("signal_states", "symbol"), ("signal_history", "symbol"),
+                ("alert_events", "symbol"))
     tables = personal if preserve_market_data else (*market_data, *personal)
     for table, col in tables:
         if _table_exists(conn, table):
@@ -304,6 +814,39 @@ def _unarchive_on_booking(conn: sqlite3.Connection, symbol: str) -> None:
     conn.execute(
         "UPDATE instruments SET archived=0 WHERE symbol=? AND archived=1", (symbol,)
     )
+
+
+def _reactivate_if_held(conn: sqlite3.Connection, *symbols: str) -> None:
+    """Un-archive each ARCHIVED symbol among *symbols* that holds a position after this write.
+
+    DEF-064 (2026-09-25): 「持有 ⇒ 未封存」 was upheld only by the two INSERT seams above, so
+    every other write that moves shares could leave a held symbol archived — measured on
+    1ee7771: sell all → 封存 → delete the sell put 1,000 shares back on a symbol that stayed
+    archived and out of every fetch universe (no quote, no snapshot, no signal). Every ledger
+    write seam that can move shares — the corrections and deletes of trades, share-adding
+    dividends, openings and corporate actions — calls this with every symbol it touched,
+    before and after the change.
+
+    The test is ``holdings.holds_position``, the SAME predicate the archive guard refuses on
+    (``api/routers/instruments.py``), so the two sides of the invariant cannot disagree. A
+    symbol that is not archived costs one indexed read; only an archived one is replayed.
+    Imported here, not at module top, because ``holdings`` imports this module. No commit:
+    it joins the caller's transaction. A multi-row undo (``provenance.delete_batch``) checks
+    after each row, so an intermediate state can re-activate a symbol the finished undo
+    leaves flat — the safe direction (a stray 還原 costs a fetch; a stale archive costs a
+    held position its price).
+    """
+    from portfolio_dash.data_ingestion.holdings import holds_position
+
+    today = app_now().date()
+    for symbol in dict.fromkeys(symbols):
+        row = conn.execute(
+            "SELECT archived FROM instruments WHERE symbol=?", (symbol,)
+        ).fetchone()
+        if row is None or not row[0]:
+            continue
+        if holds_position(conn, symbol, today=today):
+            _unarchive_on_booking(conn, symbol)
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[Account]:
@@ -526,7 +1069,8 @@ class StoredDividend(BaseModel):
     id: int
     account_id: str
     symbol: str
-    date: date
+    date: date  # the PAYMENT date (R6 pinned the meaning)
+    ex_date: Date | None = None  # R6: NULL on every pre-R6 row and whenever unknown
     type: str
     gross: Decimal
     withholding: Decimal
@@ -547,6 +1091,7 @@ def insert_dividend(
     net: Decimal,
     reinvest_shares: Decimal | None = None,
     reinvest_price: Decimal | None = None,
+    ex_date: date | None = None,
     commit: bool = True,
 ) -> int:
     """Insert a dividends row and return its new primary-key id.
@@ -557,8 +1102,8 @@ def insert_dividend(
     cur = conn.execute(
         """INSERT INTO dividends
                (account_id, symbol, date, type, gross, withholding, net,
-                reinvest_shares, reinvest_price)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+                reinvest_shares, reinvest_price, ex_date)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (
             account_id,
             symbol,
@@ -569,8 +1114,10 @@ def insert_dividend(
             to_db(net),
             to_db(reinvest_shares) if reinvest_shares is not None else None,
             to_db(reinvest_price) if reinvest_price is not None else None,
+            ex_date.isoformat() if ex_date is not None else None,
         ),
     )
+    _reactivate_if_held(conn, symbol)  # a 配股 / DRIP adds shares (DEF-064)
     if commit:
         conn.commit()
     return int(cur.lastrowid or 0)
@@ -596,29 +1143,39 @@ def list_dividends(
         params.append(symbol)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        f"SELECT id, account_id, symbol, date, type, gross, withholding, net, "
-        f"reinvest_shares, reinvest_price FROM dividends{where} ORDER BY date ASC, id ASC",
+        f"{_DIV_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredDividend(
-            id=r["id"],
-            account_id=r["account_id"],
-            symbol=r["symbol"],
-            date=date.fromisoformat(r["date"]),
-            type=r["type"],
-            gross=from_db(r["gross"]),
-            withholding=from_db(r["withholding"]),
-            net=from_db(r["net"]),
-            reinvest_shares=(
-                from_db(r["reinvest_shares"]) if r["reinvest_shares"] is not None else None
-            ),
-            reinvest_price=(
-                from_db(r["reinvest_price"]) if r["reinvest_price"] is not None else None
-            ),
-        )
-        for r in rows
-    ]
+    return [_div_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``dividends`` (S6, 2026-10-04): the list and the by-id
+# lookup read through both, so they cannot return two shapes of one row (as ``_FX_SELECT``).
+_DIV_SELECT = ("SELECT id, account_id, symbol, date, type, gross, withholding, net, "
+               "reinvest_shares, reinvest_price, ex_date FROM dividends")
+
+
+def _div_row(r: sqlite3.Row) -> StoredDividend:
+    return StoredDividend(
+        id=r["id"],
+        account_id=r["account_id"],
+        symbol=r["symbol"],
+        date=date.fromisoformat(r["date"]),
+        ex_date=(
+            date.fromisoformat(r["ex_date"])
+            if "ex_date" in r.keys() and r["ex_date"] else None
+        ),
+        type=r["type"],
+        gross=from_db(r["gross"]),
+        withholding=from_db(r["withholding"]),
+        net=from_db(r["net"]),
+        reinvest_shares=(
+            from_db(r["reinvest_shares"]) if r["reinvest_shares"] is not None else None
+        ),
+        reinvest_price=(
+            from_db(r["reinvest_price"]) if r["reinvest_price"] is not None else None
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -638,9 +1195,42 @@ class StoredFxConversion(BaseModel):
     to_amount: Decimal
 
     @property
-    def implied_rate(self) -> Decimal:
-        """Home-currency units per one foreign-currency unit (from_amount / to_amount)."""
+    def implied_rate(self) -> Decimal | None:
+        """Home-currency units per one foreign-currency unit (from_amount / to_amount).
+
+        ``None`` when nothing was received: a conversion with ``to_amount == 0`` has no
+        implied rate, and dividing by it raised ``decimal.DivisionByZero`` all the way out to
+        the generic 500 handler — one hand-edited row took the entire 換匯 ledger page down
+        (QA-10). Every write door already refuses a zero leg, so this is only reachable by
+        editing the database directly, which is exactly the posture
+        :attr:`StoredOpening.original_avg` in this module already takes for the same shape.
+
+        ``None`` rather than ``Decimal(0)``: a rate of zero is a NUMBER, and a number nobody
+        can derive is the kind of fabricated figure ``data-and-pricing.md`` rules out. The two
+        consumers already render an absent value as 「—」 (``web/format.js``'s ``f.rate`` and
+        ``export/report_html._NULL``), so the honest answer costs nothing downstream.
+        """
+        if self.to_amount == 0:
+            return None
         return self.from_amount / self.to_amount
+
+    @property
+    def implied_quote(self) -> tuple[Currency, Currency, Decimal] | None:
+        """The implied rate quoted the CONVENTIONAL way: ``(unit_ccy, per_ccy, rate)`` meaning
+        「1 unit_ccy = rate per_ccy」 with the more valuable currency as the unit, so
+        ``rate >= 1`` — USD/TWD 31.8, USD/MYR 4.08, MYR/TWD 7.8 — whichever side was sold.
+
+        :attr:`implied_rate` is direction-bound (from / to), so the same USD↔MYR conversion
+        read 「1 USD = 4.0000 MYR」 when MYR was sold and 「1 MYR = 0.2500 USD」 when USD was
+        (demo audit 2026-09-16, L6): one rate, two spellings, and the entry form's what-if
+        line quoted it a third way. This is presentation-level (the FX pool never reads it);
+        ``None`` exactly when :attr:`implied_rate` is None, for the same QA-10 reason.
+        """
+        if self.to_amount == 0 or self.from_amount == 0:
+            return None
+        if self.from_amount >= self.to_amount:
+            return (self.to_ccy, self.from_ccy, self.from_amount / self.to_amount)
+        return (self.from_ccy, self.to_ccy, self.to_amount / self.from_amount)
 
 
 def insert_fx_conversion(
@@ -691,22 +1281,28 @@ def list_fx_conversions(
         where = " WHERE account_id=?"
         params = [account_id]
     rows = conn.execute(
-        f"SELECT id, account_id, date, from_ccy, from_amount, to_ccy, to_amount "
-        f"FROM fx_conversions{where} ORDER BY date ASC, id ASC",
+        f"{_FX_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredFxConversion(
-            id=r["id"],
-            account_id=r["account_id"],
-            date=date.fromisoformat(r["date"]),
-            from_ccy=Currency(r["from_ccy"]),
-            from_amount=from_db(r["from_amount"]),
-            to_ccy=Currency(r["to_ccy"]),
-            to_amount=from_db(r["to_amount"]),
-        )
-        for r in rows
-    ]
+    return [_fx_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``fx_conversions`` (R10-a, 2026-10-04): the list and
+# the by-id lookup read through both, so they cannot return two shapes of one row.
+_FX_SELECT = ("SELECT id, account_id, date, from_ccy, from_amount, to_ccy, to_amount "
+              "FROM fx_conversions")
+
+
+def _fx_row(r: sqlite3.Row) -> StoredFxConversion:
+    return StoredFxConversion(
+        id=r["id"],
+        account_id=r["account_id"],
+        date=date.fromisoformat(r["date"]),
+        from_ccy=Currency(r["from_ccy"]),
+        from_amount=from_db(r["from_amount"]),
+        to_ccy=Currency(r["to_ccy"]),
+        to_amount=from_db(r["to_amount"]),
+    )
 
 
 def list_transactions(
@@ -729,29 +1325,425 @@ def list_transactions(
         params.append(symbol)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        f"SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
-        f"fee_rule_snapshot, note, daytrade, short_sale FROM transactions{where} "
-        f"ORDER BY trade_date ASC, id ASC",
+        f"{_TXN_SELECT}{where} ORDER BY trade_date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredTransaction(
-            id=r["id"],
-            account_id=r["account_id"],
-            symbol=r["symbol"],
-            side=Side(r["side"]),
-            quantity=from_db(r["quantity"]),
-            price=from_db(r["price"]),
-            fees=from_db(r["fees"]),
-            tax=from_db(r["tax"]),
-            trade_date=date.fromisoformat(r["trade_date"]),
-            fee_rule_snapshot=json.loads(r["fee_rule_snapshot"] or "{}"),
-            note=r["note"],
-            daytrade=bool(r["daytrade"]),
-            short_sale=bool(r["short_sale"]),
-        )
-        for r in rows
-    ]
+    return [_txn_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``transactions`` (S6) — see ``_DIV_SELECT``.
+_TXN_SELECT = ("SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
+               "fee_rule_snapshot, note, daytrade, short_sale FROM transactions")
+
+
+def _txn_row(r: sqlite3.Row) -> StoredTransaction:
+    return StoredTransaction(
+        id=r["id"],
+        account_id=r["account_id"],
+        symbol=r["symbol"],
+        side=Side(r["side"]),
+        quantity=from_db(r["quantity"]),
+        price=from_db(r["price"]),
+        fees=from_db(r["fees"]),
+        tax=from_db(r["tax"]),
+        trade_date=date.fromisoformat(r["trade_date"]),
+        fee_rule_snapshot=json.loads(r["fee_rule_snapshot"] or "{}"),
+        note=r["note"],
+        daytrade=bool(r["daytrade"]),
+        short_sale=bool(r["short_sale"]),
+    )
+
+
+#: ``(child symbol, day, expected close)`` — the seed price slot a SPINOFF row owns
+#: (:meth:`StoredCorporateAction.owned_seed_slot`). The close is ``None`` for a legacy row
+#: with no record: the seed signature alone then decides (R3's rule).
+SeedSlot = tuple[str, date, Decimal | None]
+
+
+class StoredCorporateAction(BaseModel):
+    """Pydantic model for a persisted corporate_actions row.
+
+    The ratio terms and ``cost_carry`` are Decimals here but are NOT validated as ratio
+    terms — that is :class:`CorporateAction`'s job, applied when the row is turned into a
+    domain model. Keeping the stored shape permissive means a hand-edited or legacy row
+    surfaces through the ledger page and the audit trail instead of making every read raise.
+    """
+
+    id: int
+    account_id: str
+    date: date
+    kind: str
+    from_symbol: str
+    to_symbol: str
+    ratio_to: Decimal
+    ratio_from: Decimal
+    cost_carry: Decimal | None = None
+    note: str | None = None
+    # DEF-021: the band this EXCHANGE carried across, when it did (``band_move_json``).
+    # ``None`` on every non-EXCHANGE row, on a move that found nothing to move, and on
+    # every row written before the column existed.
+    band_move: MovedBand | None = None
+    # F-3: the target WEIGHT this EXCHANGE carried across (``weight_move_json``); ``None``
+    # under the same three conditions as ``band_move``.
+    weight_move: MovedWeight | None = None
+    # DEF-040 R4: what this SPINOFF's save wrote into ``prices`` for its child
+    # (``child_seed_json``). ``None`` = unknown (a row saved before the record existed, or a
+    # non-SPINOFF row) — the delete then falls back to the seed signature (R3's rule).
+    child_seed: ChildSeedRecord | None = None
+
+    def owned_seed_slot(self) -> "SeedSlot | None":
+        """The ``(child, day, expected close)`` seed price slot this row OWNS, or ``None`` —
+        the ONE answer to "who owns a seed" (DEF-040 R4; moved here from
+        ``api/routers/ledgers.py::_owned_slot`` for DEF-063).
+
+        Three readers, one rule: a SPINOFF's delete and batch undo (which seed they may take
+        back), an edit's move (which slot it vacates), and
+        ``scripts/clean_orphan_seed_prices.py`` (a seed-signature row NO row owns is an
+        orphan). They agree by construction because they all call this.
+
+        * not a SPINOFF → owns nothing;
+        * a record that says the save wrote NOTHING (no price typed, the slot was already
+          occupied, or an import door that takes no price) → owns nothing, so neither its
+          delete nor its undo can take a row it never wrote;
+        * a record that says what it wrote → that ``(symbol, day, close)``;
+        * NO record at all (a row saved before the record existed) → R3's rule: its own
+          ``(to_symbol, date)``, and the seed signature alone decides (close ``None``).
+        """
+        if self.kind.strip().upper() != CorporateActionKind.SPINOFF.value:
+            return None
+        rec = self.child_seed
+        if rec is None:
+            return self.to_symbol, self.date, None
+        if rec.close is None:
+            return None
+        return rec.symbol or self.to_symbol, rec.as_of or self.date, rec.close
+
+
+def insert_corporate_action(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    action_date: date,
+    kind: CorporateActionKind,
+    from_symbol: str,
+    to_symbol: str,
+    ratio_to: Decimal,
+    ratio_from: Decimal,
+    cost_carry: Decimal | None = None,
+    note: str | None = None,
+    band_move: MovedBand | None = None,
+    weight_move: MovedWeight | None = None,
+    child_seed: ChildSeedRecord | None = None,
+    commit: bool = True,
+) -> int:
+    """Insert a corporate_actions row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (batch atomicity), matching
+    every other ledger insert. ``band_move`` is what :func:`move_target_band` moved (or
+    :func:`pending_band_move` promised) for this EXCHANGE — recorded on the row so the
+    delete can offer the conditional reversal (DEF-021). ``weight_move`` is the same record
+    for the target weight (F-3), read back by ``strategy.target_weights.restore_target_weight``.
+
+    ``child_seed`` (DEF-040 R4) is what the save wrote into ``prices`` for a SPINOFF's
+    child. A SPINOFF inserted WITHOUT one — the CSV / broker import doors, which take no
+    child price — records "wrote nothing" explicitly, so its delete (or batch undo) can never
+    take a seed some other save wrote. Every other kind stays NULL.
+    """
+    if child_seed is None and kind is CorporateActionKind.SPINOFF:
+        child_seed = ChildSeedRecord()
+    cur = conn.execute(
+        """INSERT INTO corporate_actions (account_id, date, kind, from_symbol, to_symbol,
+               ratio_to, ratio_from, cost_carry, note, band_move_json, weight_move_json,
+               child_seed_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            account_id,
+            action_date.isoformat(),
+            kind.value,
+            from_symbol,
+            to_symbol,
+            to_db(ratio_to),
+            to_db(ratio_from),
+            None if cost_carry is None else to_db(cost_carry),
+            note,
+            band_move_to_json(band_move) if band_move is not None else None,
+            weight_move_to_json(weight_move) if weight_move is not None else None,
+            child_seed_to_json(child_seed) if child_seed is not None else None,
+        ),
+    )
+    _reactivate_if_held(conn, from_symbol, to_symbol)  # an EXCHANGE / SPINOFF gives shares
+    if commit:
+        conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_corporate_actions(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str | None = None,
+    symbol: str | None = None,
+) -> list[StoredCorporateAction]:
+    """Return corporate_actions rows ordered by date ASC, id ASC.
+
+    Optionally filter by *account_id* and/or *symbol* (matching EITHER end of the action —
+    a symbol's history includes the actions that created it as well as those that consumed
+    it). **Every** consumer loads through here (or through :func:`get_corporate_action`, which
+    shares its column list and row shape); no module writes its own SELECT.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    if account_id is not None:
+        clauses.append("account_id=?")
+        params.append(account_id)
+    if symbol is not None:
+        clauses.append("(from_symbol=? OR to_symbol=?)")
+        params.extend([symbol, symbol])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"{_ACTION_SELECT}{where} ORDER BY date ASC, id ASC",
+        params,
+    ).fetchall()
+    return [_action_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``corporate_actions`` (S6) — see ``_DIV_SELECT``.
+_ACTION_SELECT = ("SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, "
+                  "ratio_from, cost_carry, note, band_move_json, weight_move_json, "
+                  "child_seed_json FROM corporate_actions")
+
+
+def _action_row(r: sqlite3.Row) -> StoredCorporateAction:
+    return StoredCorporateAction(
+        id=r["id"],
+        account_id=r["account_id"],
+        date=date.fromisoformat(r["date"]),
+        kind=r["kind"],
+        from_symbol=r["from_symbol"],
+        to_symbol=r["to_symbol"],
+        ratio_to=from_db(r["ratio_to"]),
+        ratio_from=from_db(r["ratio_from"]),
+        cost_carry=None if r["cost_carry"] is None else from_db(r["cost_carry"]),
+        note=r["note"],
+        band_move=band_move_from_json(r["band_move_json"]),
+        weight_move=weight_move_from_json(r["weight_move_json"]),
+        child_seed=child_seed_from_json(r["child_seed_json"]),
+    )
+
+
+def get_corporate_action(
+    conn: sqlite3.Connection, action_id: int
+) -> StoredCorporateAction | None:
+    """Return one corporate action by id, or None — one ``WHERE id=?`` row (S6; it listed the
+    whole table, once more on every corporate-action edit / delete)."""
+    r = conn.execute(f"{_ACTION_SELECT} WHERE id=?", (action_id,)).fetchone()
+    return None if r is None else _action_row(r)
+
+
+_CA_CAPTURE = (
+    "SELECT id, account_id, date, kind, from_symbol, to_symbol, ratio_to, ratio_from, "
+    "cost_carry, note, band_move_json, weight_move_json, child_seed_json "
+    "FROM corporate_actions WHERE id=?"
+)
+
+
+def update_corporate_action(
+    conn: sqlite3.Connection,
+    action_id: int,
+    *,
+    account_id: str,
+    action_date: date,
+    kind: CorporateActionKind,
+    from_symbol: str,
+    to_symbol: str,
+    ratio_to: Decimal,
+    ratio_from: Decimal,
+    cost_carry: Decimal | None = None,
+    note: str | None = None,
+    commit: bool = True,
+) -> bool:
+    """Update one corporate action in place; audit the pre-mutation row. False if absent.
+
+    Editing an action RE-COMPUTES history (E16 / domain-ledger N2) — nothing is snapshotted,
+    so a previously displayed share count and every figure derived from it will change. That
+    is intended and is why the before-image goes to ``ledger_audit`` like every other ledger
+    correction. ``band_move_json`` is deliberately NOT touched: it records what the original
+    save moved, and the delete's reversal reads it as written.
+
+    Pass ``commit=False`` when the caller also syncs the linked reorganisation fee
+    (DEF-020) and wants both writes under one commit.
+    """
+    before = _capture(conn, _CA_CAPTURE, (action_id,))
+    if before is None:
+        return False
+    _write_audit(conn, "corporate_actions", str(action_id), "update", before)
+    conn.execute(
+        """UPDATE corporate_actions SET account_id=?, date=?, kind=?, from_symbol=?,
+               to_symbol=?, ratio_to=?, ratio_from=?, cost_carry=?, note=? WHERE id=?""",
+        (
+            account_id,
+            action_date.isoformat(),
+            kind.value,
+            from_symbol,
+            to_symbol,
+            to_db(ratio_to),
+            to_db(ratio_from),
+            None if cost_carry is None else to_db(cost_carry),
+            note,
+            action_id,
+        ),
+    )
+    _reactivate_if_held(
+        conn, str(before["from_symbol"]), str(before["to_symbol"]), from_symbol, to_symbol
+    )
+    if commit:
+        conn.commit()
+    return True
+
+
+def linked_cash_movements(
+    conn: sqlite3.Connection, action_id: int
+) -> "list[StoredCashMovement]":
+    """The cash movements written FOR this corporate action (DEF-020 — today, at most the
+    reorganisation-fee WITHDRAW). Read before a delete so the response can say what went
+    with the row, and by the ledger list so the delete confirm can say it beforehand.
+
+    ``WHERE corporate_action_id=?`` in the list's own order (S6): it listed every movement and
+    filtered in Python — called per action, so an N-row set delete read the table N times."""
+    rows = conn.execute(
+        f"{_MOVEMENT_SELECT} WHERE corporate_action_id=? ORDER BY date ASC, id ASC",
+        (action_id,),
+    ).fetchall()
+    return [_movement_row(r) for r in rows]
+
+
+def delete_corporate_action(
+    conn: sqlite3.Connection, action_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one corporate action AND the cash movements linked to it; audit every
+    pre-deletion row. False if absent.
+
+    DEF-020: the reorganisation fee is a consequence of the action, not a movement in its
+    own right — the form books it only because the action happened — so it leaves with the
+    action, in the SAME transaction. Deleting the action and leaving the fee produced a
+    pool that was 50 TWD short of its pre-action figure with nothing on the cash page to
+    explain it. ``commit=False`` lets the router delete an N-account set, restore the
+    target band (DEF-021) and commit once.
+    """
+    before = _capture(conn, _CA_CAPTURE, (action_id,))
+    if before is None:
+        return False
+    _write_audit(conn, "corporate_actions", str(action_id), "delete", before)
+    for m in linked_cash_movements(conn, action_id):
+        _write_audit(conn, "cash_movements", str(m.id), "delete",
+                     _capture(conn, "SELECT * FROM cash_movements WHERE id=?", (m.id,)))
+        conn.execute("DELETE FROM cash_movements WHERE id=?", (m.id,))
+    conn.execute("DELETE FROM corporate_actions WHERE id=?", (action_id,))
+    # Deleting an EXCHANGE hands the shares back to its source (DEF-064).
+    _reactivate_if_held(conn, str(before["from_symbol"]), str(before["to_symbol"]))
+    if commit:
+        conn.commit()
+    return True
+
+
+def load_ledger_bundle(
+    conn: sqlite3.Connection,
+    *,
+    transactions: list[StoredTransaction] | None = None,
+    dividends: list[StoredDividend] | None = None,
+    opening: list[StoredOpening] | None = None,
+    actions: list[StoredCorporateAction] | None = None,
+    instruments: dict[str, Instrument] | None = None,
+) -> LedgerBundle:
+    """Load every ledger a replay reads as ONE bundle (``Stored*`` rows -> ledger models).
+
+    This conversion was open-coded at five call sites — the dashboard, what-if, the tax
+    package, 重算, and the ledger-edit revalidation — so a new ledger column reached four
+    of them and a new LEDGER reached none. One loader, one bundle, one signature.
+
+    Pass a pre-built ``Stored*`` list to replay a MUTATED ledger (the ledger-edit preview
+    swaps in the would-be rows); anything not passed is read from the store. ``instruments``
+    likewise (R10, 2026-10-04): a caller building two bundles from rows it already read — the
+    replay guard's "before" and "after" — passes the registry it read too, rather than having
+    each bundle read it again.
+
+    Rows whose symbol has no ``instruments`` entry are KEPT. The bundle exposes them via
+    :attr:`~portfolio_dash.shared.models.ledger.LedgerBundle.unregistered_symbols` and
+    each caller decides — the dashboard drops them and reports, 重算 refuses outright.
+    Filtering here would silently pick one of those answers for everybody.
+    """
+    s_txs = transactions if transactions is not None else list_transactions(conn)
+    s_divs = dividends if dividends is not None else list_dividends(conn)
+    s_open = opening if opening is not None else list_opening(conn)
+    s_acts = actions if actions is not None else list_corporate_actions(conn)
+    good_actions, bad_actions = convert_stored(s_acts)
+    return LedgerBundle(
+        transactions=[
+            Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
+                        quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
+                        trade_date=s.trade_date, short_sale=s.short_sale)
+            for s in s_txs
+        ],
+        dividends=[
+            Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
+                     ex_date=s.ex_date,
+                     type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
+                     net=s.net, reinvest_shares=s.reinvest_shares,
+                     reinvest_price=s.reinvest_price)
+            for s in s_divs
+        ],
+        opening=[
+            OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
+                             original_cost_total=s.original_cost_total,
+                             build_date=s.build_date)
+            for s in s_open
+        ],
+        # `convert_stored` is the ONE owner of this conversion (§6.0). It was open-coded
+        # here and it RAISED — and this function is called by `portfolio/dashboard.py`,
+        # which has no try/except by design, so one malformed row 500'd every page instead
+        # of degrading to 待釐清. Measured 2026-08-11.
+        actions=good_actions,
+        unreadable_actions=bad_actions,
+        # A COPY of a caller's registry: a bundle's ``instruments`` is mutable (the spinoff
+        # preview adds its draft child to its post bundle), and two bundles built from one
+        # read must not see each other's additions.
+        instruments=(dict(instruments) if instruments is not None
+                     else {i.symbol: i for i in list_instruments(conn)}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The store's ledger ORDER, as Python keys (CR-03, 2026-10-04)
+# ---------------------------------------------------------------------------
+# One key per ``list_*`` above, each the exact twin of that function's SQL ``ORDER BY``.
+# They exist because order is DATA to the replay: ``build_book`` books one day's trades in
+# list order, which is ledger-id order (DEF-012). A correction door that builds a WOULD-BE
+# ledger by replacing a row in place keeps that row at its OLD list position — so an edit that
+# moved a row's date replayed a different same-day order than the store would list after the
+# write (pre-merge review CR-03: a back-dated buy moved onto its sell's day booked FIRST in the
+# guard and SECOND in the ledger; the guard asked nothing and the sell went sticky 賣超).
+# ``api/replay_guard._to_models`` sorts every would-be list with these, and
+# ``tests/contract/test_cr03_edit_replays_the_stored_order.py`` pins each key to its SQL.
+# Rows must carry their REAL id — a not-yet-written draft has none to sort by.
+
+
+def transaction_order_key(t: StoredTransaction) -> tuple[date, int]:
+    """``list_transactions``: ``ORDER BY trade_date ASC, id ASC``."""
+    return (t.trade_date, t.id)
+
+
+def dividend_order_key(d: StoredDividend) -> tuple[date, int]:
+    """``list_dividends``: ``ORDER BY date ASC, id ASC``."""
+    return (d.date, d.id)
+
+
+def opening_order_key(o: StoredOpening) -> tuple[str, str]:
+    """``list_opening``: ``ORDER BY account_id, symbol``."""
+    return (o.account_id, o.symbol)
+
+
+def corporate_action_order_key(a: StoredCorporateAction) -> tuple[date, int]:
+    """``list_corporate_actions``: ``ORDER BY date ASC, id ASC``."""
+    return (a.date, a.id)
 
 
 # ---------------------------------------------------------------------------
@@ -764,11 +1756,10 @@ def list_transactions(
 
 
 def get_transaction(conn: sqlite3.Connection, txn_id: int) -> StoredTransaction | None:
-    """Return one transaction by id, or None."""
-    for t in list_transactions(conn):
-        if t.id == txn_id:
-            return t
-    return None
+    """Return one transaction by id, or None — one ``WHERE id=?`` row (S6; it listed the
+    whole table and filtered in Python, a second full read on every trade edit / delete)."""
+    r = conn.execute(f"{_TXN_SELECT} WHERE id=?", (txn_id,)).fetchone()
+    return None if r is None else _txn_row(r)
 
 
 def update_transaction(
@@ -786,8 +1777,12 @@ def update_transaction(
     daytrade: bool,
     note: str | None = None,
     fee_rule_snapshot: dict[str, str] | None = None,
+    short_sale: bool | None = None,
 ) -> bool:
     """Full-row transaction correction; returns False when the id does not exist.
+
+    ``short_sale`` (DEF-013, 2026-09-24): the 放空 declaration is correctable on the edit
+    door like 當沖 is; ``None`` leaves the stored flag untouched (the pre-DEF-013 contract).
 
     ``daytrade`` is persisted (audit MED-1) so a recompute reproduces the sell-side TW tax
     rate; the caller supplies the effective value explicitly (no default — the single
@@ -798,8 +1793,8 @@ def update_transaction(
     stored snapshot untouched (records the rule set in force when first written). The
     pre-mutation row is captured to ``ledger_audit`` first (M9).
     """
-    _write_audit(conn, "transactions", str(txn_id), "update",
-                 _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
+    prior = _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,))
+    _write_audit(conn, "transactions", str(txn_id), "update", prior)
     dt = 1 if daytrade else 0
     if fee_rule_snapshot is None:
         cur = conn.execute(
@@ -821,24 +1816,35 @@ def update_transaction(
                 json.dumps(fee_rule_snapshot), txn_id,
             ),
         )
+    if short_sale is not None:
+        conn.execute("UPDATE transactions SET short_sale=? WHERE id=?",
+                     (1 if short_sale else 0, txn_id))
+    # A correction can give shares back to the old symbol and to the new one (DEF-064).
+    _reactivate_if_held(conn, *([str(prior["symbol"])] if prior else []), symbol)
     conn.commit()
     return cur.rowcount > 0
 
 
-def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> bool:
-    _write_audit(conn, "transactions", str(txn_id), "delete",
-                 _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,)))
+def delete_transaction(
+    conn: sqlite3.Connection, txn_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one trade, auditing its before-image. ``commit=False`` (DEF-049) hands the
+    transaction to a caller that deletes many rows as ONE undo (``provenance.delete_batch``)."""
+    prior = _capture(conn, "SELECT * FROM transactions WHERE id=?", (txn_id,))
+    _write_audit(conn, "transactions", str(txn_id), "delete", prior)
     cur = conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
-    conn.commit()
+    if prior is not None:  # deleting a SELL gives the shares back (DEF-064)
+        _reactivate_if_held(conn, str(prior["symbol"]))
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
 def get_dividend(conn: sqlite3.Connection, div_id: int) -> StoredDividend | None:
-    """Return one dividend by id, or None."""
-    for d in list_dividends(conn):
-        if d.id == div_id:
-            return d
-    return None
+    """Return one dividend by id, or None — one ``WHERE id=?`` row (S6; it listed the whole
+    table and filtered in Python, a second full read on every dividend edit / delete)."""
+    r = conn.execute(f"{_DIV_SELECT} WHERE id=?", (div_id,)).fetchone()
+    return None if r is None else _div_row(r)
 
 
 def update_dividend(
@@ -854,39 +1860,62 @@ def update_dividend(
     net: Decimal,
     reinvest_shares: Decimal | None = None,
     reinvest_price: Decimal | None = None,
+    ex_date: date | None | Literal["keep"] = "keep",
 ) -> bool:
-    """Full-row dividend correction; returns False when the id does not exist."""
-    _write_audit(conn, "dividends", str(div_id), "update",
-                 _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
+    """Full-row dividend correction; returns False when the id does not exist.
+
+    ``ex_date`` (CR-09): a date sets it, ``None`` clears it, and the default ``"keep"`` leaves
+    the stored value alone — an explicit sentinel rather than a ``None`` default, because a
+    default that CLEARS is how a caller that never heard of the column would silently erase
+    every 配股's effective date.
+    """
+    prior = _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,))
+    _write_audit(conn, "dividends", str(div_id), "update", prior)
+    ex_sql = ""
+    ex_params: tuple[str | None, ...] = ()
+    if ex_date != "keep":
+        ex_sql = ", ex_date=?"
+        ex_params = (ex_date.isoformat() if ex_date is not None else None,)
     cur = conn.execute(
-        """UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
-               withholding=?, net=?, reinvest_shares=?, reinvest_price=? WHERE id=?""",
+        f"""UPDATE dividends SET account_id=?, symbol=?, date=?, type=?, gross=?,
+               withholding=?, net=?, reinvest_shares=?, reinvest_price=?{ex_sql}
+            WHERE id=?""",
         (
             account_id, symbol, div_date.isoformat(), div_type, to_db(gross),
             to_db(withholding), to_db(net),
             to_db(reinvest_shares) if reinvest_shares is not None else None,
             to_db(reinvest_price) if reinvest_price is not None else None,
+            *ex_params,
             div_id,
         ),
     )
+    _reactivate_if_held(conn, *([str(prior["symbol"])] if prior else []), symbol)  # DEF-064
     conn.commit()
     return cur.rowcount > 0
 
 
-def delete_dividend(conn: sqlite3.Connection, div_id: int) -> bool:
-    _write_audit(conn, "dividends", str(div_id), "delete",
-                 _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,)))
+def delete_dividend(
+    conn: sqlite3.Connection, div_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one dividend, auditing its before-image (``commit`` as ``delete_transaction``)."""
+    prior = _capture(conn, "SELECT * FROM dividends WHERE id=?", (div_id,))
+    _write_audit(conn, "dividends", str(div_id), "delete", prior)
     cur = conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
-    conn.commit()
+    if prior is not None:
+        _reactivate_if_held(conn, str(prior["symbol"]))  # DEF-064
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
 def get_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> StoredFxConversion | None:
-    """Return one fx_conversions row by id, or None."""
-    for c in list_fx_conversions(conn):
-        if c.id == fx_id:
-            return c
-    return None
+    """Return one fx_conversions row by id, or None.
+
+    One ``WHERE id=?`` row (R10-a, 2026-10-04) — it listed the whole table and filtered in
+    Python, a second full read on every FX edit / delete door beside the guards' snapshot.
+    """
+    r = conn.execute(f"{_FX_SELECT} WHERE id=?", (fx_id,)).fetchone()
+    return None if r is None else _fx_row(r)
 
 
 def update_fx_conversion(
@@ -915,11 +1944,15 @@ def update_fx_conversion(
     return cur.rowcount > 0
 
 
-def delete_fx_conversion(conn: sqlite3.Connection, fx_id: int) -> bool:
+def delete_fx_conversion(
+    conn: sqlite3.Connection, fx_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one conversion, auditing its before-image (``commit`` as ``delete_transaction``)."""
     _write_audit(conn, "fx_conversions", str(fx_id), "delete",
                  _capture(conn, "SELECT * FROM fx_conversions WHERE id=?", (fx_id,)))
     cur = conn.execute("DELETE FROM fx_conversions WHERE id=?", (fx_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
@@ -946,6 +1979,7 @@ def delete_opening(conn: sqlite3.Connection, account_id: str, symbol: str) -> bo
         "DELETE FROM opening_inventory WHERE account_id=? AND symbol=?",
         (account_id, symbol),
     )
+    _reactivate_if_held(conn, symbol)  # DEF-064
     conn.commit()
     return cur.rowcount > 0
 
@@ -964,7 +1998,11 @@ class StoredCashMovement(BaseModel):
     id: int
     account_id: str
     date: date
-    kind: str  # DEPOSIT | WITHDRAW | OPENING | REBATE
+    # The canonical vocabulary + each kind's direction and FX-acquisition semantics live in
+    # ``shared/cash_kinds.py`` (CashKind). Not spelled out here as a literal list: this
+    # comment went stale the moment a kind was added, and a stale comment next to a `str`
+    # field is what makes the next reader believe the set is closed at four.
+    kind: str
     ccy: Currency
     amount: Decimal
     note: str | None = None
@@ -973,6 +2011,13 @@ class StoredCashMovement(BaseModel):
     # known", which keeps the amount OUT of the FX pool's weighted average (never guessed).
     # An AMOUNT, not a rate — see the migration note in schema.py.
     acq_home_amount: Decimal | None = None
+    # DEF-020: the corporate action this movement was booked FOR (a reorganisation-fee
+    # WITHDRAW); None for every movement entered on its own. See schema.py.
+    corporate_action_id: int | None = None
+    # DEF-009: the TRADE MONTH ('YYYY-MM') a confirmed 折讓款 credit books; None for every
+    # other movement. Set by the rebate inbox's confirm, never re-pointed by an edit, and
+    # read FIRST by the inbox's dedup — so kind / date / note are free to be corrected.
+    rebate_period: str | None = None
 
 
 def insert_cash_movement(
@@ -985,15 +2030,27 @@ def insert_cash_movement(
     amount: Decimal,
     note: str | None = None,
     acq_home_amount: Decimal | None = None,
+    corporate_action_id: int | None = None,
+    rebate_period: str | None = None,
+    commit: bool = True,
 ) -> int:
+    """Insert a cash_movements row and return its new primary-key id.
+
+    Pass ``commit=False`` to defer the commit to the caller (batch-import atomicity, #1).
+    Single-row and manual callers keep the default ``commit=True`` and are unchanged.
+    ``corporate_action_id`` links a reorganisation fee to its action (DEF-020);
+    ``rebate_period`` links a confirmed 折讓款 credit to its trade month (DEF-009).
+    """
     cur = conn.execute(
         "INSERT INTO cash_movements "
-        "(account_id, date, kind, ccy, amount, note, acq_home_amount) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "(account_id, date, kind, ccy, amount, note, acq_home_amount, corporate_action_id, "
+        "rebate_period) VALUES (?,?,?,?,?,?,?,?,?)",
         (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
-         None if acq_home_amount is None else to_db(acq_home_amount)),
+         None if acq_home_amount is None else to_db(acq_home_amount),
+         corporate_action_id, rebate_period),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid or 0)
 
 
@@ -1006,29 +2063,37 @@ def list_cash_movements(
         where = " WHERE account_id=?"
         params = [account_id]
     rows = conn.execute(
-        f"SELECT id, account_id, date, kind, ccy, amount, note, acq_home_amount "
-        f"FROM cash_movements{where} ORDER BY date ASC, id ASC",
+        f"{_MOVEMENT_SELECT}{where} ORDER BY date ASC, id ASC",
         params,
     ).fetchall()
-    return [
-        StoredCashMovement(
-            id=r["id"], account_id=r["account_id"],
-            date=date.fromisoformat(r["date"]), kind=r["kind"],
-            ccy=Currency(r["ccy"]), amount=from_db(r["amount"]), note=r["note"],
-            acq_home_amount=(None if r["acq_home_amount"] is None
-                             else from_db(r["acq_home_amount"])),
-        )
-        for r in rows
-    ]
+    return [_movement_row(r) for r in rows]
+
+
+# The ONE column list and row shape for ``cash_movements`` (R10-a) — see ``_FX_SELECT``.
+_MOVEMENT_SELECT = ("SELECT id, account_id, date, kind, ccy, amount, note, acq_home_amount, "
+                    "corporate_action_id, rebate_period FROM cash_movements")
+
+
+def _movement_row(r: sqlite3.Row) -> StoredCashMovement:
+    return StoredCashMovement(
+        id=r["id"], account_id=r["account_id"],
+        date=date.fromisoformat(r["date"]), kind=r["kind"],
+        ccy=Currency(r["ccy"]), amount=from_db(r["amount"]), note=r["note"],
+        acq_home_amount=(None if r["acq_home_amount"] is None
+                         else from_db(r["acq_home_amount"])),
+        corporate_action_id=(None if r["corporate_action_id"] is None
+                             else int(r["corporate_action_id"])),
+        rebate_period=r["rebate_period"],
+    )
 
 
 def get_cash_movement(
     conn: sqlite3.Connection, move_id: int
 ) -> StoredCashMovement | None:
-    for m in list_cash_movements(conn):
-        if m.id == move_id:
-            return m
-    return None
+    """Return one cash_movements row by id, or None — one ``WHERE id=?`` row (R10-a), as
+    :func:`get_fx_conversion`."""
+    r = conn.execute(f"{_MOVEMENT_SELECT} WHERE id=?", (move_id,)).fetchone()
+    return None if r is None else _movement_row(r)
 
 
 def update_cash_movement(
@@ -1042,18 +2107,39 @@ def update_cash_movement(
     amount: Decimal,
     note: str | None = None,
     acq_home_amount: Decimal | None = None,
+    commit: bool = True,
 ) -> bool:
+    """Update one movement in place. ``corporate_action_id`` is deliberately not a
+    parameter: the link is set by the writer that books the fee and is never re-pointed —
+    and neither is ``rebate_period`` (DEF-009), for the same reason.
+    ``commit=False`` lets the corporate-action edit sync its fee under one commit.
+
+    Every correction captures the pre-edit row to ``ledger_audit`` first (DEF-009: the owner
+    ruled an auto-booked 折讓款 row fully editable ON CONDITION that each edit is audited; the
+    cash ledger was the one ledger whose edits left no before-image at all — measured on demo
+    2026-09-24: 12 ``transactions`` update rows, 0 ``cash_movements``).
+    """
+    _write_audit(conn, "cash_movements", str(move_id), "update",
+                 _capture(conn, "SELECT * FROM cash_movements WHERE id=?", (move_id,)))
     cur = conn.execute(
         "UPDATE cash_movements SET account_id=?, date=?, kind=?, ccy=?, amount=?, "
         "note=?, acq_home_amount=? WHERE id=?",
         (account_id, move_date.isoformat(), kind, ccy.value, to_db(amount), note,
          None if acq_home_amount is None else to_db(acq_home_amount), move_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
-def delete_cash_movement(conn: sqlite3.Connection, move_id: int) -> bool:
+def delete_cash_movement(
+    conn: sqlite3.Connection, move_id: int, *, commit: bool = True
+) -> bool:
+    """Delete one movement, capturing its before-image to ``ledger_audit`` (DEF-009's class:
+    a cash correction leaves a trail, exactly like the other ledgers' deletes)."""
+    _write_audit(conn, "cash_movements", str(move_id), "delete",
+                 _capture(conn, "SELECT * FROM cash_movements WHERE id=?", (move_id,)))
     cur = conn.execute("DELETE FROM cash_movements WHERE id=?", (move_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0

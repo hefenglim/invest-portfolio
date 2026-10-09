@@ -28,7 +28,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from portfolio_dash.data_ingestion.holdings import shares_on
+from portfolio_dash.data_ingestion.holdings import load_action_index, shares_on
 from portfolio_dash.data_ingestion.rules_binding import dividend_model_for
 from portfolio_dash.data_ingestion.store import (
     insert_dividend,
@@ -36,13 +36,23 @@ from portfolio_dash.data_ingestion.store import (
     list_dividends,
     list_instruments,
 )
+from portfolio_dash.data_ingestion.validate import DividendInput, validate_dividend
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.defaults import default_registry
-from portfolio_dash.pricing.refresh import refresh_dividends
+from portfolio_dash.pricing.refresh import describe_refresh, refresh_dividends, refresh_failures
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.results import DividendEvent
 from portfolio_dash.pricing.store import get_dividend_events, get_price_history
-from portfolio_dash.scheduler.jobs import DEFAULT_BOARD, earliest_acquisitions
+from portfolio_dash.scheduler.jobs import (
+    DEFAULT_BOARD,
+    JobOutcome,
+    earliest_acquisitions,
+    sweep_outcome,
+)
+from portfolio_dash.shared.account_ref import account_ref
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.instrument_scope import tracked_instruments
 from portfolio_dash.shared.models.assets import Instrument
 
 _ZERO = Decimal("0")
@@ -73,6 +83,8 @@ class PendingDividend(BaseModel):
     kind: str  # cash | drip | net | stock — the booking model on confirm
     source: str
     account_id: str
+    #: DEF-008: an ACCOUNT TOKEN (``{account:<id>}``, ``shared/account_ref.py``), not the
+    #: English ``accounts.name`` — the fetch layer resolves it to the ``pdNames`` spelling.
     account_name: str
     symbol: str
     name: str
@@ -187,32 +199,128 @@ def list_skipped(conn: sqlite3.Connection, *, now: datetime) -> list[SkippedDivi
     return out
 
 
-def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """Targeted event fetch for every symbol (any market) with an acquisition history.
+class RefreshOutcome(BaseModel):
+    """What one dividend-event refresh did — as data AND as the one sentence (DEF-015).
+
+    ``failed`` is ``[{symbol, reason}]`` so a page can list them; ``text`` is
+    ``pricing.refresh.describe_refresh`` — the formatter ``dividends_daily`` uses too.
+    """
+
+    updated: int
+    failed: list[dict[str, str]]
+    text: str
+    #: DEF-047: symbols whose source answered with no dividend records — normal, not failed.
+    empty: list[str] = []
+
+
+def refresh_events_for_acquired(conn: sqlite3.Connection, *, now: datetime) -> RefreshOutcome:
+    """Targeted event fetch for every TRACKED symbol (any market) with an acquisition history.
 
     TW routes to FinMind (fetches since 2015); US/MY route to yfinance (full
-    dividend series). Returns a short human summary for the panel toast.
+    dividend series). It used to return 「14 檔事件已更新，1 檔失敗」 and nothing else —
+    which symbol, and why, was dropped here (DEF-015); both now travel.
+
+    DEF-074 (owner ruling ① B, 2026-09-26): the universe is the shared "not archived"
+    predicate (``shared/instrument_scope.py``), the one the same job's fallback path
+    (``scheduler/jobs.py::dividend_inbox_scan`` → ``build_worklist``) already reads. It was
+    ``list_instruments`` filtered only by "has an acquisition", so an archived symbol with a
+    buy history kept spending a dividend fetch every weekday while the fallback skipped it —
+    one job, two universes. A held symbol is never archived (the DEF-064 guard), so no
+    held position's dividend is missed. Events already stored for an archived symbol are
+    still read by :func:`detect` — archiving stops fetching, it does not hide the ledger.
     """
     acq = earliest_acquisitions(conn)
     refs = [
-        InstrumentRef(symbol=i.symbol, market=i.market,
-                      board=i.board or DEFAULT_BOARD[i.market])
-        for i in list_instruments(conn)
-        if i.symbol in acq
+        InstrumentRef(symbol=t.symbol, market=t.market,
+                      board=t.board or DEFAULT_BOARD[t.market])
+        for t in tracked_instruments(conn)
+        if t.symbol in acq
     ]
     if not refs:
-        return "無持倉可偵測"
+        return RefreshOutcome(updated=0, failed=[], text="無持倉可偵測")
     summary = refresh_dividends(conn, default_registry(conn), refs, now=now)
-    return f"{len(summary.ok)} 檔事件已更新, {len(summary.failed)} 檔失敗"
+    return RefreshOutcome(updated=len(summary.ok), failed=refresh_failures(summary),
+                          text=describe_refresh(summary), empty=sorted(summary.empty))
+
+
+def scan_sentence(outcome: RefreshOutcome, pending: int) -> str:
+    """「<refresh sentence>・待確認 N 筆」 — the ONE line the 重新偵測 toast and the scheduled
+    ``dividend_inbox_scan`` run both show, so the two can never tell the owner different
+    things about the same scan (DEF-015)."""
+    return f"{outcome.text}・待確認 {pending} 筆"
 
 
 def _price_on_or_before(
-    conn: sqlite3.Connection, symbol: str, target: date
+    conn: sqlite3.Connection, symbol: str, target: date, *, actions: ActionIndex
 ) -> Decimal | None:
-    """Last stored close on-or-before *target* (bounded lookback), or None."""
-    hist = get_price_history(
-        conn, symbol, target - timedelta(days=_PRICE_LOOKBACK_DAYS), target)
+    """Last stored close on-or-before *target* (bounded lookback), or None.
+
+    Expressed in **``target``'s** share terms, not its own date's (§5.1(d) / W6c). This is
+    the DRIP reinvest price, and the caller divides the net dividend by it to get a SHARE
+    COUNT that is booked into the ledger against a position the replay has already
+    re-denominated. A close carried forward from before a split is in pre-split terms, so a
+    7-for-1 would book one seventh of the shares actually reinvested — a money-of-record
+    error, not a display one. Re-expressing is a no-op the moment a genuine post-split close
+    exists (the window ``(pd, target]`` is then empty).
+    """
+    hist = series_in(
+        actions, symbol,
+        get_price_history(
+            conn, symbol, target - timedelta(days=_PRICE_LOOKBACK_DAYS), target),
+        valued_on=target,
+    )
     return hist[-1].value if hist else None
+
+
+#: The ledger type :func:`confirm` books for each inbox kind — ONE table, read by the confirm
+#: and by the validator gate, so the row that is checked is the row that is written.
+_KIND_TYPE = {"drip": "DRIP", "net": "NET", "stock": "STOCK", "cash": "CASH"}
+
+
+def _row_input(p: PendingDividend) -> DividendInput:
+    """The exact row :func:`confirm` would write for *p*, as the dividend validator's input."""
+    kind_type = _KIND_TYPE.get(p.kind, "CASH")
+    withholding = p.est_withhold if kind_type == "DRIP" else _ZERO
+    return DividendInput(
+        account_id=p.account_id, symbol=p.symbol, div_date=p.pay_date or p.ex_date,
+        type=kind_type, gross=p.est_gross, withholding=withholding, net=p.est_net,
+        reinvest_shares=p.est_reinvest_shares if kind_type in ("DRIP", "STOCK") else None,
+        reinvest_price=p.est_reinvest_price if kind_type == "DRIP" else None,
+        ex_date=p.ex_date)
+
+
+def _validated(conn: sqlite3.Connection, p: PendingDividend) -> PendingDividend:
+    """Round 2 (a), CR-09's class: the confirm door runs the ONE dividend validator.
+
+    DEF-061 made ``validate_dividend`` the check every door that writes a dividend runs; this
+    door wrote straight through ``insert_dividend``, so it skipped every check the other doors
+    run. The validator is asked about the row :func:`confirm` would write; a HARD finding makes
+    the item non-confirmable with that sentence, and since :func:`confirm` recomputes
+    :func:`detect` it cannot be forced. A SOFT finding — e.g. ``ex_date_after_pay_date``, a
+    provider event that pays before it goes ex (soft since owner ruling ②, 2026-10-05) — goes
+    into the note and leaves the item confirmable (ruling ⑩: confirming is the owner's
+    acknowledgement of what the item shows).
+
+    S11 (round 3): this is also where CR-02's no-position refusal comes from — the
+    validator's ``dividend_without_position``, the one rule and the one sentence. The
+    detection loop kept its own copy (a second ``position_exists_by`` per item, worded
+    differently) and let it REPLACE every other reason, so an item paid before its ex-date and
+    missing a reinvest price named only one of its three problems.
+
+    So the note names EVERY reason, hard ones first: the hard findings, then the item's own
+    note (缺再投資價, 馬股單層淨額入帳), then the soft findings — confirming the item is the
+    owner's acknowledgement of what the item shows, so what it shows must include them. One
+    finding is dropped as a restatement: an item already blocked by its missing reinvest price
+    has no share count, and ``reinvest_shares_required`` would say the same thing as a
+    rebuild failure.
+    """
+    findings = validate_dividend(conn, _row_input(p))
+    hard = [i.message for i in findings if not i.needs_confirm
+            and not (not p.confirmable and i.kind == "reinvest_shares_required")]
+    soft = [i.message for i in findings if i.needs_confirm and not i.info]
+    notes = [*hard, *([p.note] if p.note else []), *soft]
+    return p.model_copy(update={"confirmable": p.confirmable and not hard,
+                                "note": "；".join(notes) if notes else None})
 
 
 def detect(
@@ -228,6 +336,9 @@ def detect(
     acq = earliest_acquisitions(conn)
     skips: set[str] = set() if include_skipped else _skipped(conn)
     today = now.date()
+    # ONE index for the whole detection (trap #21): the loop below is symbol x event x
+    # account, so a per-lookup index would re-read the action ledger on every DRIP row.
+    actions = load_action_index(conn)
 
     # Ledger dividend dates per (account, symbol, family) — the recorded guard.
     ledger_dates: dict[tuple[str, str, str], list[date]] = {}
@@ -249,7 +360,7 @@ def detect(
         for ev in get_dividend_events(conn, symbol):
             if ev.ex_date < first_date or ev.ex_date > today:
                 continue
-            for account_id, account in accounts.items():
+            for account_id in accounts:
                 held = shares_on(conn, account_id, symbol, before=ev.ex_date)
                 if held <= _ZERO:
                     continue
@@ -265,11 +376,11 @@ def detect(
                     *, est_reinvest_price: Decimal | None = None,
                     est_reinvest_shares: Decimal | None = None,
                     confirmable: bool = True, note: str | None = None,
-                    _acct: str = account_id, _acct_name: str = account.name,
+                    _acct: str = account_id, _acct_name: str = account_ref(account_id),
                     _sym: str = symbol, _held: Decimal = held,
                     _ev: DividendEvent = ev, _inst: Instrument = inst,
                 ) -> PendingDividend:
-                    return PendingDividend(
+                    return _validated(conn, PendingDividend(
                         fingerprint=fingerprint, kind=kind, source=_ev.source,
                         account_id=_acct, account_name=_acct_name, symbol=_sym,
                         name=_inst.name or _sym, ex_date=_ev.ex_date,
@@ -279,7 +390,7 @@ def detect(
                         est_reinvest_price=est_reinvest_price,
                         est_reinvest_shares=est_reinvest_shares,
                         ccy=_inst.quote_ccy.value, confirmable=confirmable, note=note,
-                    )
+                    ))
 
                 # --- cash-family item (CASH / DRIP / NET by account model) ---
                 if ev.cash_amount is not None and ev.cash_amount > _ZERO:
@@ -288,11 +399,17 @@ def detect(
                         account_id, symbol, "cash", ev.ex_date
                     ):
                         gross = ev.cash_amount * held
+                        # CR-02's question — does the account hold a position on the day the
+                        # row is booked? — is asked by `_validated`, through the validator every
+                        # dividend door runs (`dividend_without_position`). S11: this loop kept
+                        # its own copy (a second `position_exists_by` per item, in its own
+                        # words), so one rule had two answers to drift apart.
                         if model == "drip_us":
                             wh = gross * _US_WITHHOLDING
                             net = gross - wh
                             px = _price_on_or_before(
-                                conn, symbol, ev.pay_date or ev.ex_date)
+                                conn, symbol, ev.pay_date or ev.ex_date,
+                                actions=actions)
                             out.append(_mk(
                                 fp, "drip", ev.cash_amount, gross, wh, net,
                                 est_reinvest_price=px,
@@ -343,41 +460,43 @@ def confirm(
         p = by_fp.get(fp)
         if p is None or not p.confirmable:
             continue
-        div_date = p.pay_date or p.ex_date
-        if p.kind == "drip":
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                div_type="DRIP", gross=p.est_gross, withholding=p.est_withhold,
-                net=p.est_net, reinvest_shares=p.est_reinvest_shares,
-                reinvest_price=p.est_reinvest_price,
-            )
-        elif p.kind == "net":
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                div_type="NET", gross=p.est_gross, withholding=_ZERO, net=p.est_net,
-            )
-        elif p.kind == "stock":
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                div_type="STOCK", gross=_ZERO, withholding=_ZERO, net=_ZERO,
-                reinvest_shares=p.est_reinvest_shares,
-            )
-        else:  # cash (TW 沖減)
-            row_id = insert_dividend(
-                conn, account_id=p.account_id, symbol=p.symbol, div_date=div_date,
-                div_type="CASH", gross=p.est_gross, withholding=_ZERO, net=p.est_net,
-            )
+        # The row is built by `_row_input` — the SAME function the validator gate in `detect`
+        # checked (round 2 (a)), so what was validated is exactly what is written: DRIP keeps
+        # its withholding and reinvest figures, NET / CASH book withholding 0, STOCK books
+        # shares only (its estimated amounts are all 0 by construction).
+        #
+        # R6 (review ⑧): the detection carries BOTH dates and this door kept only the payment
+        # one. Handing the ex-date through costs nothing and is what lets a 配股's shares be
+        # booked when the price adjusts instead of a month later. Passed for every kind —
+        # `Dividend.effective_date` decides which kinds actually use it, so the rule stays in
+        # ONE place rather than being re-decided at each writer.
+        row = _row_input(p)
+        row_id = insert_dividend(
+            conn, account_id=row.account_id, symbol=row.symbol, div_date=row.div_date,
+            ex_date=row.ex_date, div_type=row.type, gross=row.gross,
+            withholding=row.withholding if row.withholding is not None else _ZERO,
+            net=row.net if row.net is not None else _ZERO,
+            reinvest_shares=row.reinvest_shares, reinvest_price=row.reinvest_price,
+        )
         written.append(row_id)
     return written
 
 
-def scan_job(conn: sqlite3.Connection, *, now: datetime) -> str:
+def scan_job(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     """Scheduler-dispatched daily scan: refresh events + report the pending count.
 
     Registered into ``scheduler.jobs`` at app startup (runner seam — scheduler
     never imports api), so the inbox grows by itself and the run history shows
     how many items await the user.
+
+    DEF-067 (2026-09-26): returns the job's VERDICT with the sentence — it returned the
+    sentence alone, so the run read 成功 over 「0 檔事件已更新，10 檔失敗」. Same rule as
+    ``dividends_daily`` (``scheduler.jobs.sweep_outcome``); a symbol whose source answered
+    with no dividend records is not a failure (DEF-047). The sentence is unchanged.
     """
-    refreshed = refresh_events_for_acquired(conn, now=now)
-    pending = len(detect(conn, now=now))
-    return f"{refreshed} · 待確認 {pending} 筆"
+    outcome = refresh_events_for_acquired(conn, now=now)
+    return sweep_outcome(
+        scan_sentence(outcome, len(detect(conn, now=now))),
+        total=outcome.updated + len(outcome.failed) + len(outcome.empty),
+        failed=len(outcome.failed),
+    )

@@ -67,9 +67,11 @@ def test_document_structure_and_both_accounts_in_execution_list() -> None:
 
     # 執行清單 groups by account: BOTH accounts carrying a leg appear (schwab AAPL buy +
     # tw_broker 2330 sell). The AAPL constituents line lists the moomoo_my holding too.
-    assert "TW Broker" in doc
-    assert "Charles Schwab" in doc
-    assert "Moomoo MY" in doc  # AAPL's second constituent (chip under the summary row)
+    # I-10: named by TOKEN (resolved to the display name by pdApi.download on the way to
+    # disk), never by the English accounts.name.
+    assert "{account:tw_broker}" in doc
+    assert "{account:schwab}" in doc
+    assert "{account:moomoo_my}" in doc  # AAPL's second constituent (chip under the summary row)
 
     # A per-account subtotal is rendered.
     assert "小計" in doc

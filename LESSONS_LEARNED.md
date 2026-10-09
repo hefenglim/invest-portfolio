@@ -23,6 +23,184 @@ prevents recurrence.
 
 ## Implementation lessons
 
+- **A `min-height` aligns baselines only if the content is guaranteed to be ONE line
+  (2026-09-02, KPI band v3):** the rebuilt band's whole point was that the three big
+  numbers share a baseline, and `.kpi-label { min-height: 19px }` was the rule meant to
+  deliver it — a badged label and an un-badged one would then be equally tall. It is a
+  FLOOR, not a cap. At 900px the XIRR card's 「觀察期 240 天・短窗參考」 badge wrapped inside
+  the label (which carries `flex-wrap: wrap` as audit M1's protection against a nowrap pair
+  setting a width floor), the label went two lines, and that card's number sat **17px**
+  below its neighbours' — the exact "these do not line up" defect, inside the fix for it.
+  The rule: an element whose height must be constant may not host content of variable
+  length. Status chips moved out of `.kpi-label` into a `.kpi-flag` row **under** the value,
+  where a second line costs height inside the card and moves no number. Found by
+  `tests/e2e/test_kpi_band_tiers.py` on its first run, not by eye — which is the second
+  half of the lesson: **layout intent is only testable as geometry.** Every assertion this
+  repo had about the band read TEXT, so five cards speaking three different grammars, an
+  inverted width allocation and a value orphaned onto its own line were all green for
+  months. Assert `getBoundingClientRect`, not `inner_text`, for anything whose defect is
+  that it looks wrong.
+- **Read the tier back from `matchMedia`, never from the viewport width you asked for
+  (2026-09-02):** Chrome's media-query width and Playwright's `set_viewport_size` differ by
+  the scrollbar, so a test that asserts "1101px must use the wide tier" is asserting a
+  browser detail and will flip on a scrollbar change. Ask the page which tier it resolved
+  and assert the shape THAT tier must produce — then add one test proving the width sweep
+  still reaches every tier, or the coverage rots silently.
+
+- **A missing-set fill rule is stale-blind to REVISIONS (2026-08-21, W6 review):** the
+  `signal_history` backfill fills dates that are ABSENT and re-evaluates the HEAD — a
+  provider correcting a close mid-series changes neither, so every downstream row whose
+  trailing window shifts stays stale (probed live: a filled 5-day hole healed the gap
+  dates, and a pre-existing row kept reading `tech_score=77.5` where a fresh replay over
+  the repaired series reads 82.5). When a cache's fill rule is "what's missing", its
+  docstring must also answer "what about what CHANGED" — the remedy here is the
+  derived-cache doctrine (`delete_symbol` + rescan), now written where it lives
+  (`strategy/signal_history.py`, `api/signals_service.py::_fill_signal_history`).
+- **A returned value nobody unpacks is a decoy (2026-08-21, W6 review):** `_read_series`
+  grew a third return (the last price date) for the history keying, then the fill loop
+  keyed rows on the loop date instead — provably identical, so nothing broke, but all five
+  call sites unpacked it into `_`. A reader meeting the signature later would treat the
+  third element as load-bearing. Reverted to the 2-tuple; if a caller ever needs the last
+  price date it can take `closes[-1]`'s date from its own read.
+- **Decimal returns: subtract FIRST, divide LAST (2026-08-21, W6):** hand-checked backtest
+  tests caught `(a/b) − 1` and `(a−b)/b` disagreeing at the 27th digit — divide-first spends
+  significant figures on the leading `1.0` and truncates the fraction's tail (values near
+  zero are where the digits are lost, and returns are near zero). The repo formula is
+  subtract-first (`insight_service._window_return` already did it that way). Write the
+  hand-check as EXACTLY the shipped formula, and when the two disagree, suspect your
+  hand-math's formula before the module's placement — this time it was both: the module's
+  formula was worse AND the test's event indices were off by one (the silent-seed day
+  shifts every event one day right).
+- **Variable-registry count pins live in THREE files (2026-08-21, W6):** flipping a
+  variable's `available` or adding one touches `test_prompts_api.py`, `test_prompts_-
+  external_vars.py`, AND `test_variables.py` (registry size, per-category counts, the
+  available/unavailable split, and the unavailable-render fixture). Two of the three were
+  missed by an otherwise-thorough exploration pass — the lesson is not "search harder" but
+  that ANY change to the registry's size/availability must grep all three files' count
+  assertions, and when the last unavailable token is lit, the marker-path test needs a
+  SYNTHETIC `VarSpec(available=False)` (monkeypatched into `BY_TOKEN`), not a real token.
+
+- **A prompt's one-shot example is code — parse it in a test (2026-08-19, W4 review):** the
+  v6 AI-door prompt's cash example broke a Python string-concatenation line INSIDE a JSON
+  string value, so the rendered `<example_output>` was invalid JSON — in the model's
+  strongest anchor, where it teaches the output contract. The ast.parse check on the module
+  passed (the Python was valid; the payload wasn't). The guard that catches it:
+  `json.loads` every `<example_output>` block of the formatted prompt in a registry test.
+- **A loop that settles results only at the happy end strands completed work on a mid-loop
+  failure (2026-08-19, W4 review, two sites):** the per-kind AI commit loop posted kind 1,
+  then kind 2 500'd — and the catch-all returned without retiring kind 1's section,
+  refreshing the ledger, or reporting its counts. The rows were IN the ledger but looked
+  uncommitted, inviting a retry that re-posts them. Settle what already succeeded BEFORE
+  reporting the failure; the remainder stays retry-able. Same defect, two sites (main loop
+  and the 422-ack retry loop) — a pattern introduced by the loop itself, so check every
+  loop that accumulates results for its mid-loop failure path.
+- **"Deterministic" verified within one day proves nothing across days (2026-08-18):** the
+  stress-audit phase-1 pass count was recorded as `4780, deterministic (fixed ASOF dates)` —
+  verified three times, all on the SAME day. Two days later the identical commit reports 4787.
+  Something in the harness counts date-sensitively despite the pinned ASOF. The attribution
+  that settles any count surprise in two runs, without guessing: snapshot
+  `evidence/assertions.jsonl`, detached-checkout the reference commit, re-run THE SAME DAY,
+  diff the `(check, scope)` multisets. A count compared across days is noise; a count compared
+  same-day is signal.
+- **A script that prints zh/symbols on Windows must reconfigure stdout BEFORE the expensive
+  part, not after (2026-08-18):** the W4 accuracy runner's first smoke run completed its whole
+  (paid, network) pass and then crashed on the FINAL summary print — `⚠` is not in cp1252,
+  the default Windows console codec. `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`
+  at the top of `main()`. A report that crashes after the tokens are spent is the worst failure
+  mode a measurement tool has.
+- **A `type: ignore[code]` comment may not carry trailing prose without a second `#`
+  (2026-08-18):** `# type: ignore[call-arg] — the missing arg IS the test` is a mypy SYNTAX
+  error ("Invalid type: ignore comment"), and the invalid ignore then surfaces the very error
+  it meant to suppress — two errors for the price of one. The form is
+  `# type: ignore[call-arg]  # the missing arg IS the test`.
+- **A provider's "convenience" object is not a stable schema — probe it, don't trust the
+  docs' key names (2026-08-18):** the W3 yfinance fundamentals leg read `fast_info["last_price"]`
+  (snake_case, per yfinance docs and older versions) and got nothing — this yfinance version's
+  `dict(fast_info)` yields **camelCase** keys (`lastPrice`/`marketCap`). Every
+  fast_info-dependent field silently vanished while the statement-derived fields all worked,
+  so the block looked healthy at a glance (7 fields present, all ratios missing). The live
+  probe (`scripts/probe_fundamentals.py`) caught it on its first run, before any test existed
+  — the probe-first discipline paid for itself immediately. Two rules: **(1)** external-field
+  key names go through a candidate tuple (`("lastPrice", "last_price", …)`), never a single
+  literal, for any provider object that isn't a documented JSON contract. **(2)** When a new
+  fetch leg is mostly green, ask which fields share a single upstream object — a dead seam
+  fails *by field family*, not by symbol.
+- **Decimal multiplication sums exponents — `× 100` for a percent rewrites the text
+  (2026-08-18):** `Decimal("0.015") * 100` is `1.500`, not `1.5`; the value is exact and `==`
+  agrees, but the stored TEXT changes (the same trap as `Decimal(1)` vs `Decimal("1.0")` in the
+  split-basis seam). Any ratio → percent conversion at a storage seam needs a canonical-string
+  step that strips trailing zeros (string-level `rstrip`, NOT `normalize()` — that one turns
+  `40000` into `4E+4`). Pinned by `fundamentals_source._clean`.
+
+- **When one validator serves two doors, check that BOTH doors pass the argument
+  (2026-08-14):** `cash_import.py` fixed sibling-awareness a release earlier and wrote the rule
+  down in its own module docstring — *"The whole file is one batch … the E1a class of failure"* —
+  and `validate_cash_movement` and `validate_corporate_action` both grew a `batch` parameter.
+  `validate_transaction` never did, and nothing noticed, because the parameter's absence is not a
+  type error, a lint, or a failing test: the single-row door (the manual form) is the majority
+  caller and behaves identically either way. The bulk door then raised 賣超 on **7 of 47** rows of
+  a synthetic broker export whose covering buys were three lines above them.
+  Two rules come out of it:
+  **(1)** A fix expressed as a *named class of failure* is a search instruction. When you write
+  one down, grep for every other caller of the same guard **in the same change** — the note in
+  the docstring cost nothing and still did not travel.
+  **(2)** ⚠ **Widen the WALKER, not the answer.** The obvious version adds the pending siblings to
+  the count the validator got back. That version is corporate-action-*unaware* about them, so a
+  sibling buy of 100 dated before a 4-for-1 split meets a later sell of 400 as 100 — reintroducing
+  the split-then-sell cascade through the import door. The pending rows have to enter the same
+  date-ordered replay the stored ones do. Exactly one test fails on the naive version, and it is
+  the one worth writing first.
+
+- **A counter that means two things reports the more comforting one (2026-08-14):**
+  `commit_preview` put rows the caller *deselected* and rows the importer *refused* in the same
+  `skipped` bucket. An import that hard-rejected 3 of 5 corporate actions therefore announced
+  「成功 2 筆・跳過 3 筆」 — every word true, and read by everyone as *I didn't tick three of
+  them*. The ledger was then wrong by a split ratio with nothing on any screen saying so. The
+  giveaway is the sentence you would write to explain the number: if it needs an "or", it is two
+  numbers. Same shape as the `duplicates` split that preceded it, which is why the fix had a
+  convention to copy (`rejected` is additive and present only when non-zero).
+
+- **A failure printer that can crash is a failure printer that hides failures (2026-08-14):**
+  `run_phase1.py`'s summary loop printed each failed check's free-text scope, and many of those
+  are Traditional Chinese, so on a cp1252 console the loop raised `UnicodeEncodeError` — **only
+  on a run that had a failure**, i.e. the one run whose output matters. The `ops=… pass=… fail=1`
+  line had already printed, so it read as a harness bug rather than as the detail going missing.
+  Any code path that only executes when something has gone wrong needs to be exercised
+  deliberately; this one had been latent since the scopes were written.
+
+- **An inventory of a dependency must cover RUNTIME-INJECTED loads, not just markup
+  (2026-08-12):** vendoring ECharts looked like a three-line change — `index.html`,
+  `insights.html`, `settings.html` each carry a `<script src="https://cdn.jsdelivr.net/...">`
+  tag, and `grep` over `web/*.html` returns exactly those three. There was a **fourth** copy:
+  `web/shell.js::pdEnsureDrawer` held `const echartsCdn = '<url>'` and injected a `<script>` at
+  runtime, on **every** page, the first time a symbol drawer opened. No HTML grep finds a URL
+  that lives in a JS string, and the module map's "web/ … + ECharts CDN" line reads as though
+  there were one dependency edge when there were four.
+  It had **zero** test coverage, and the reason is worth remembering because it looks like
+  coverage: seven e2e tests open the symbol drawer, but every one of them reaches it from
+  `/index.html` (including `test_corporate_actions_flow.py::_open_drawer`, which navigates
+  there first), where the `<head>` tag has already set `window.echarts` — so the
+  `window.echarts ? null : pdLoadScript(...)` branch never took the load path in any test that
+  has ever run. **A lazy path is only exercised from a page that does not eagerly satisfy it.**
+  Rules: (1) inventory a front-end dependency by searching `web/*.js` for the loader functions
+  (`pdLoadScript`, `pdLoadCss`, `.src =`) as well as the markup — the guard for this is now
+  `tests/contract/test_vendored_assets.py::test_js_never_injects_a_remote_script`, which
+  requires every loader argument to be a **string literal** so it is knowable from source at
+  all; (2) when a feature has an eager path and a lazy path, the lazy one needs a test that
+  starts somewhere the eager one is absent; (3) a runtime rejection (`pdLoadScript` now refuses
+  any `src` containing `://`) beats a source scan, because it holds for code the scan never
+  read.
+  Two smaller things fell out of the same change, both measured rather than reasoned:
+  **`core.autocrlf=true` silently breaks a byte-pinned artifact** — the committed
+  `web/echarts.min.js` checks out as 1,029,248 bytes with 45 LF→CRLF conversions instead of the
+  pinned 1,029,203, on a file nobody edited, and it still *runs*, so only the digest notices
+  (fix: `.gitattributes` `*.min.js -text`, plus a test that fails if the rule disappears). And
+  **an unavailable chart library is not a blank chart** — `charts.js::initAll` threw at the
+  first `echarts.init()` *before* `wireModeOnce()`, so three button groups rendered normally
+  and carried no click listeners at all. Dead controls that look alive are a worse failure than
+  an empty panel, which at least explains itself; the degraded path must wire the controls
+  **before** it gives up on the drawing.
+
 - **An audit finding's SYMPTOM and its ROOT CAUSE do not deserve the same confidence
   (2026-07-26):** the full-site audit measured every symptom on a running instance
   (a 1,257px page scroll width, a −1399.07% rendered percentage, a 593px overflow, a
@@ -395,6 +573,18 @@ prevents recurrence.
   longer than a couple minutes, use the detached `.cmd` + exit-file + Monitor pattern —
   exit codes are authoritative (ignore the trailing Windows ProactorEventLoop teardown
   noise and the missing pytest summary line).
+  - **2026-08-09 addendum — the exit file is not optional, and this entry was re-learned
+    by skipping it.** `tests/e2e` was launched as a `Bash run_in_background` job first and
+    killed again (this lesson exists precisely for that), then relaunched detached via
+    `Start-Process` — but with only `-RedirectStandardOutput`, no exit file. The run
+    finished cleanly and the summary line raced with process exit, so the log ended at
+    `-- Docs: …` with **no count line at all**: the Monitor's `grep "passed"` never
+    matched and it reported "exited without a pytest summary" on a fully green run. The
+    verdict had to be reconstructed by counting progress characters (131 outcome chars,
+    zero `F`/`E`/`s`). That reconstruction is sound but it is evidence-by-inference on a
+    release gate. Rule: `Start-Process` **plus** `$p.ExitCode | Set-Content <file>`, and
+    make the Monitor watch the exit file — never the summary line, which this entry
+    already warned is unreliable.
 
 - **2026-07-24 — an idempotency/suppression key must be structural, never editable
   free-text.** The 折讓款 inbox suppressed an already-booked month by matching the cash
@@ -512,7 +702,13 @@ prevents recurrence.
   and sent me hunting an `Exception ignored in: BaseEventLoop.__del__` teardown traceback that
   was pre-existing, harmless (Python explicitly ignores GC-time exceptions; exit code stayed 0)
   and completely unrelated. Check `addopts` before adding verbosity flags — and read the
-  process **exit code**, which no verbosity setting can suppress. (b) PowerShell's `*>`
+  process **exit code**, which no verbosity setting can suppress.
+  **Recurred 2026-08-13**, in a session that had already read this entry: the `-q` went into the
+  gate script again, and the same `BaseEventLoop.__del__` traceback was sitting in stderr again.
+  A rule you have to remember at the moment of typing is not a control. The durable fix is to
+  stop passing `-q` at all (`addopts` already has it) and, when a run does come back mute, to
+  count the progress characters rather than re-run: `.`/`s`/`F`/`E` in the `[NN%]` lines are the
+  verdict, and they cannot be suppressed either. (b) PowerShell's `*>`
   redirection writes **UTF-16LE**; `grep`/`Select-String` from Git Bash then match nothing
   because every character is separated by a NUL byte. A layout probe that had actually found
   68 clean results was reported as "0 overflows" from a log the grep could not read at all —
@@ -597,3 +793,1362 @@ prevents recurrence.
   forever. Two rules: check Windows process liveness with `Get-Process`, not `kill -0`; and
   before blaming a slow suite, list the stray servers (`Get-CimInstance Win32_Process`) — a
   previous session's "instances stopped" claim is not evidence they stopped.
+
+- **2026-08-09 — PowerShell's escape character is a BACKTICK, so `\"` does not escape a
+  quote — it ends the string.** A remote command for `vm_exec.py` was written as
+  `--cmd "… c.execute(\"SELECT COUNT(*) FROM \"+t) …"`. Each `\"` closed the PowerShell
+  string, leaving `COUNT(*)` outside it, and PowerShell tried to run `*` as a command:
+  *"The term '*' is not recognized"* — an error that points at the SQL and says nothing
+  about quoting, on a command that would have been valid in bash. The payload crosses
+  three parsers (PowerShell → gcloud/base64 → remote bash), and per-layer escaping is
+  unmaintainable at that depth. Rule: build any multi-line or quote-bearing remote command
+  as a **single-quoted here-string** (`$cmd = @'` … `'@` with the terminator at column 0)
+  and pass it as `--cmd $cmd`. Nothing inside is interpolated or escaped, so the remote
+  shell receives exactly what you wrote — nested `'…'` for awk and `"…"` for `python -c`
+  both survive untouched.
+
+- **2026-08-11 — "as of when?" is the question a validation reading a REPLAYED state must
+  answer, and the answer is almost never "the end of the ledger".** `validate_corporate_action`
+  replayed the whole ledger, and four hard rejections read it (E3 oversold source, E22 oversold
+  destination, E5/E18 short). On a bulk import the post-action trades are already loaded — that
+  is what a broker export *is* — so the position was **already 賣超 when its own action was
+  validated**, and E3 rejected the split that made those trades legal, advising 「請先補登缺少的
+  買進或期初庫存」: *fabricate a buy instead of recording the split*. Measured on the feature's
+  own headline case (buy 100, 7-for-1, sell 400). This is the **third** occurrence of one shape
+  — a guard evaluated against a state the action itself would fix (F-08's naive share count;
+  D13's ⚠ that provably never fired; now this) — and the third time it survived review, because
+  the **primary** entry door is the one door that cannot exhibit it: at the 賣超 confirm dialog
+  the sell is not committed yet, so the future the guard wrongly reads does not exist. Two
+  rules. **(1)** When a check consumes a replay, the cut is part of the check's specification —
+  write it down beside the rule, not in the caller. **(2)** Take the **inputs**, not the
+  computed state: the parameter changed from `book` to `bundle`, so a caller now *cannot* hand
+  in a wrongly-scoped replay. A hoist that caches the wrong object is worse than no hoist.
+
+- **2026-08-11 — a degradation is per-CALL-SITE and per-EXCEPTION-TYPE; handling one class and
+  leaving its sibling is invisible.** `strategy/whatif.py` caught `UnbookableLedgerError` around
+  `build_book`, but `OversellError` is a **separate hierarchy** (`Exception`, not `ValueError`),
+  so it escaped as a 500 — and the symbol drawer posts 試算 on open, so ONE undeclared oversell
+  anywhere made *every* symbol's drawer 500, across other accounts and other markets. Separately,
+  `store.load_ledger_bundle` raised on a malformed corporate-action row from **above**
+  `build_book`'s graceful path, taking down every page. The 2026-06 lesson said "apply never-500
+  degradation at EVERY `build_book` call site"; both of these obeyed the letter. Extend it: also
+  at every **layer above** it that can raise first, and for every exception type the call can
+  produce — when you add a catch, `grep` the exception hierarchy rather than the one name you
+  came for.
+
+- **2026-08-11 — the third option for an unreadable row is neither "raise" nor "drop".** Three
+  copies of the stored-row → domain-model conversion all raised, each with a docstring correctly
+  arguing against *dropping* ("a silently omitted action leaves a share count wrong by the ratio
+  and looking entirely normal") and then choosing the only worse option. **Record and flag** was
+  already the codebase's answer for "this exists and cannot be trusted" — the row became an
+  `UnappliedAction` with a zh reason, which blanks XIRR with a named cause and marks the position
+  待釐清. No new vocabulary was needed. Corollary: a conversion open-coded three times is three
+  chances for one copy to keep raising after the others learned not to, and the divergence is
+  invisible until a bad row happens to arrive through that particular path — collapse it to one
+  owner while you are there.
+
+- **2026-08-11 — a scenario list is a specification of DETECTION POWER, not of coverage.** The
+  spec's own stress-audit scenario list named a "2-for-7 exchange (the exactness case)" — but
+  `700 × (2/7)` is **exactly 200** at 28 digits, a fact the document had itself measured two days
+  earlier and then left the sentence pointing at. Every other ratio in the list also had a
+  terminating quotient, so an oracle built literally to the list was blind to the rounded-ratio
+  trap the whole feature exists to prevent; and every action in it sat alone on its date, so a
+  mis-ordered event priority produced identical numbers. Found only because the oracle's author
+  mutated the app and watched the list stay green. Rule: **every entry in a scenario list should
+  name the mutation it is the only one to catch** — an entry that names none is decoration.
+
+- **2026-08-11 — put the private-data prohibition in EVERY subagent brief, not only the one that
+  obviously touches it.** One brief carried an explicit 🔒 rule for `sample-trade-data/` /
+  `broker-statements/` / `docs/human_noted/`; a sibling brief said "you may READ anything". The
+  sibling's agent read the real broker export and wrote a 245-line derived-statistics document
+  into `docs/spec/`. No ticker, amount or position leaked and nothing reached version control —
+  but the boundary was crossed by omission, not by disagreement. A prohibition that appears in
+  one of N parallel briefs is not a control; it is a coin flip on which agent picks up the task.
+
+- **2026-08-11 — "the baseline run was green" is weak evidence against an intermittent
+  failure, and I used it as if it were strong.** Chasing an e2e failure that hit **2 of 135**
+  browser tests per run — a different pair each time, always "every static asset on the page
+  404s" — I cited the previous full run (2,994 passed, 0 failed) as evidence the session's
+  own changes had introduced it. Do the arithmetic before leaning on that: at ~1.5% per test,
+  `P(zero failures across 135) = 0.985^135 ≈ 13%`. A clean run was **quite likely even if the
+  flake already existed**, so the baseline established almost nothing. Rule: before treating
+  "it passed last time" as a bisect result, compute the probability that it would have passed
+  anyway — for a low-rate intermittent, one green run is a coin flip, not a control.
+
+- **2026-08-11 — a correct assertion over a corpus that cannot exercise it is not a test.**
+  `tests/scripts/test_verify_corporate_actions.py::test_output_never_leaks_an_amount` whitelists
+  every printed line against three regexes and then greps the output for fixture amounts. The
+  assertion is exactly right. Its fixture is `AAA` / `BBB` / `CCC` — three symbols that
+  **cannot carry an amount** — so the assertion had never been put under load, and the acceptance
+  script shipped with a real leak: it prints the *symbol*, and a broker writes option contracts as
+  `TICKER MM/DD/YYYY STRIKE C|P`, so the strike printed. Same shape as the demo site catching three
+  phone overflows the local seed could not (v0.1.24). Rule: for a **"never emits X"** test, the
+  fixture must contain something that **would** emit X. If you cannot name the row that would fail
+  it, the test is a comment.
+
+- **2026-08-11 — a type-level safety argument is necessary and not sufficient the moment a free
+  string is in the output.** The same script's docstring argued: exactly one function prints
+  per-ticker output, it takes a symbol and three booleans, therefore *"there is no code path from a
+  `Decimal` to stdout"*. True, checkable, and it misses the case completely — a **symbol is a
+  string an external system fills in**. Rule: when a privacy or safety claim is made about types,
+  enumerate every field in the output that is *user- or vendor-controlled text* and ask what the
+  worst thing anyone could put in it is. `str` is not a safe type; it is an unconstrained one.
+
+- **2026-08-11 — a sanitiser calibrated on one market destroys the others.** The obvious fix for
+  the leak above is "strip anything that looks like a number from the symbol". Two of this app's
+  three markets quote **numeric tickers** (TW `2330` / `0050`, MY `3182`), so that rule would blank
+  most of the report on a TW or MY ledger while adding nothing on a US one — and "contains a dot"
+  fails on `BRK.B`. The discriminator has to be a property no real ticker in **any** served market
+  has (here: whitespace, or `\d\.\d`). Rule: before shipping a filter, run it over the identifier
+  shapes of every market/locale the system serves, and write the false-positive cases as tests.
+
+- **2026-08-11 — "already counted elsewhere, so excluded here" needs the exclusion set checked for
+  reachability. Fourth recurrence.** `_missing_action_rows` excluded a supplied-but-**rejected**
+  action from the oversold population by testing membership of `covered`, built from
+  `list_corporate_actions` — the rows actually **written**. A rejected row is never written, so it
+  could never be in `covered`, so the exclusion **provably never fired** and one missing row was
+  counted twice. Identical in shape to D13's 「the ⚠ provably never fires」, E15/D29's unreachable
+  duplicate warning, and F-08's guard read against a state the action itself would fix. Rule:
+  whenever a comment says *"X is already counted by (1) and is excluded here"*, construct an X and
+  assert it is in the exclusion set — and note that a count labelled 「下限」 that over-reports is
+  not a lower bound. **A label is a claim, and claims get tested.**
+
+- **2026-08-11 — an engine capability with no entry path is invisible until real data arrives.**
+  `short_sale` shipped with the declared-short-sale engine on 2026-07-31 (v0.1.25) and the
+  canonical transaction CSV was never given a column for it, so **every imported declared short
+  became an ordinary sell** — flagged as an undeclared oversell, cost basis discarded, stickily.
+  Nothing failed: the manual form had the checkbox, the engine had the flag, the tests exercised
+  the engine directly. It surfaced only when an acceptance run replayed a **real broker export**
+  that happens to contain one. Rule (a sharper form of the P3 「engine-supports-but-entry-never-
+  passes」 lesson): when a ledger field is added, list every write path into that table — manual
+  form, CSV import, broker converter, seed, API — and make the gap explicit if you are not filling
+  it. A field reachable from one of five doors is a field that is wrong four ways.
+
+- **2026-08-11 — before theorising about an intermittent failure, diff the failing artifact against
+  a known-good one of the same kind.** A 135-test browser suite reddened ~2 tests per run, always
+  "every asset on the page 404s together". Two sessions chased a port TOCTOU in the harness; the
+  hypothesis survived because it was never *tested* — until a full run came back green while a
+  3,066-test suite hammered the same machine, the opposite of what port pressure predicts. The
+  answer was sitting in the failure text: `a status of 404 ()`, with **empty parentheses**. Our
+  uvicorn is HTTP/1.1 and always writes `404 (Not Found)`; an empty reason phrase can only come
+  from HTTP/2, i.e. an HTTPS third party. One 30-second probe — *"what does a real 404 from our own
+  server print?"* — falsified the whole port hypothesis and named the culprit: Google Fonts subset
+  files, rotated under a stylesheet Google serves `stale-while-revalidate=604800`. Corollary:
+  **a count is a fingerprint.** The recorded "16 assets" matched no page's local asset count (the
+  failing page has 11) but matched its font-subset fan-out exactly. Count the thing before assuming
+  what it is.
+
+- **2026-08-11 — a test suite that loads a CDN has made a third party a gate on your releases.**
+  The e2e assertions said "the app produced zero console errors" while the browser fetched ~30,000
+  files per run from `fonts.gstatic.com` — so Google's cache-rotation schedule was an input to our
+  pass/fail. The fix is to **remove the dependency** (route every non-loopback request offline), not
+  to filter the assertion or add a retry: filtering leaves the traffic in place and every other
+  assertion stays exposed to it. Note the shape of the enforcement — the static guard that keeps
+  browser contexts stubbed **found a second unstubbed context on its first run**, which is the whole
+  argument for writing the control rather than the note. And check the *product* too: the same pages
+  ship those CDN tags to prod, where an outage at the chart CDN is not cosmetic.
+
+- **2026-08-12 — sizing an overlay only inside a narrow-width media query is a desktop bug in
+  waiting.** `.modal` capped its **width** for the viewport unconditionally and its **height** only
+  below 760px. The ≤760px branch was the only place anyone ever looked, so the defect shipped on
+  every desktop: a dialog taller than the window overflowed **both** ends of a `position: fixed;
+  align-items: center` backdrop with `overflow-y: visible` and nothing to scroll — measured at
+  1,089px in a 1280×720 window, primary button 184px below the fold, **unsavable**. Rule: when a
+  rule exists to keep something *inside the viewport*, it belongs on the **base** rule; the media
+  query is for *tuning* it, never for introducing it. And verify by reading the computed style back
+  out of a real browser at the widths users actually have — three of this repo's layout fixes have
+  now turned on something the stylesheet did not predict.
+
+- **2026-08-12 — a source-scanning guard proves a string exists, not that a feature runs.** The
+  contract test for E23's one-click repair asserted that every field of the repair appears in
+  `web/corp-action-form.js`. Deleting exactly one line — `col.appendChild(btn)` — un-mounts the
+  button while leaving every string in the file: the contract test stayed **green** and only the
+  browser test went red. The same session had already seen the weaker version of this (a wiring
+  guard that passed with its render branch set to `if (false)`). Both are the same shape: the guard
+  tests the *text* of the implementation, and the thing that can break is the *behaviour*. A
+  source scan is a cheap tripwire for "somebody deleted the feature"; it is not evidence the
+  feature works, and it must not be counted as the coverage for a user-facing path.
+
+- **2026-08-12 — a green test can pin the wrong behaviour, and it reads as reassurance.**
+  `test_e4_oversell_soft_warning_gates_confirm_until_ack` walked the most destructive confirmation
+  in the system — acknowledge an oversell, discard the position's cost basis permanently — and
+  asserted it ends in 201. Every part of that was true, and the test was still the problem: it
+  pinned "tick the box and proceed" as *the* oversell flow at the moment that box was the only
+  thing on offer, so a green E4 read as "the oversell path is fine" and nobody asked why §6.7's
+  primary door never appeared. Rule: for a test over a **destructive** confirmation, assert what
+  the user was **offered** as well as what happened. A test that only checks the outcome cannot
+  tell "the owner chose this" from "the owner had no alternative".
+
+- **2026-08-13 — a two-valued predicate is a silent bug the day a third value exists.** Three
+  places wrote the cash-direction test as *"`WITHDRAW` → debit, everything else → credit"*, which
+  was correct while there were four kinds. Adding `BROKER_FEE` and `INTEREST_EXPENSE` made a fee
+  **increase** the cash balance and count as an unbased foreign-currency acquisition, dragging
+  `covered_ratio` down on a pool that had lost nothing — two wrong numbers, no exception, nothing
+  on screen to notice. The fix was a table keyed by kind, and the reason it needed **two** columns
+  is the real lesson: `INTEREST` is a **credit that is not an acquisition**, so a single boolean
+  could not have expressed it however carefully it was named. Rule: when an enum grows, grep for
+  the places that test it by **inequality to one member** (`!= X`, `not in {X}`, `if kind == X …
+  else`) — those are the sites that compile, pass, and answer wrongly. And when two questions
+  about the same value have ever disagreed for any member, they are two columns, not one flag.
+
+- **2026-08-13 — a check whose two sides come from the same source is not a check.** The broker
+  reconciler's share-conservation gate built its "expected" figure by reading `reinvest_shares`
+  back out of the very `DividendEvent` it was verifying, so the two sides agreed unconditionally:
+  a fold that invented **999 shares** passed. The module's own docstring promised that every
+  blocking check re-measures from the original rows — the promise was written first and violated
+  four functions later. It surfaced only because a hostile fixture was written for a gate that
+  already looked finished. Rule: for any conservation or reconciliation check, name the two
+  sources out loud and confirm they are different **artifacts**, not two reads of one value; then
+  prove it by breaking the thing under test and watching the check go red.
+
+- **2026-08-13 — a derivation that is right half the time, silently, is worse than a blank
+  field.** A forward stock split states only its share delta, and the ratio looks recoverable:
+  replay the file for the holding it applied to and it falls out. Implemented, it returned `4:1`
+  for one real split (correct) and `109:24` for a 3-for-1 (garbage) — because that position
+  predated the export and a replay cannot know it is incomplete. Both answers arrive with the same
+  confidence and no flag. It was removed: the converter now leaves the two ratio columns **empty**
+  and says what it is waiting for. Rule: when a derived money-of-record value depends on data that
+  may be absent, the failure mode to design against is not "no answer" but "**a plausible answer**"
+  — and if the code cannot detect which one it produced, it must not produce either. A blank costs
+  the owner one entry; a wrong share count is questioned by nothing downstream.
+
+- **2026-08-13 — the test that runs the script as a *program* is a different test.** Every
+  in-process test of the new converter passed, including the ones that captured and asserted on
+  its stdout — because pytest hands the process a UTF-8 stream. Run the same script the way its
+  owner runs it (`subprocess`, real console) and it died on its **first printed line** with
+  `UnicodeEncodeError`: Windows still gives a fresh shell the ANSI code page, and every label this
+  project prints is Traditional Chinese. Rule: any script with a human as its interface gets one
+  test that invokes it through `subprocess` with the real interpreter. The in-process tests check
+  what it computes; only that one checks that it **runs**.
+
+- **2026-08-15 — narrowing a hard validation moves work onto every path that PREVIEWS the thing,
+  not just the one that writes it.** D48a downgraded E10's rejection of an unregistered SPINOFF
+  destination to a soft warning, so the row commits and the child is auto-created. Every contract
+  test of the *write* passed immediately. The **preview** 500'd — `ledger_unbookable: unknown
+  instrument: CHILD` — because the always-on before/after replay needs the child's quote currency
+  to value the position the action creates, and previewing must never write. The fix was to hand
+  the preview an **in-memory** draft built by the same inheritance rule the save uses (one function,
+  two callers), never a second copy of that rule: two copies would let the preview print
+  ✓ 成本不變 over a book computed under a different currency than the save assigns. Rule: when a
+  guard stops rejecting something, list every surface that *previously never saw it* — a rejection
+  is also a shield for the code behind it.
+
+- **2026-08-15 — `quantize` and "cap to N dp" are different operations, and the difference is
+  invisible to `==`.** The restated target band came back as `60.0000` where the ledger had `60`.
+  `Decimal("60.0000") == Decimal("60")` is `True`, so no value assertion could see it — but this
+  project persists Decimals as **canonical TEXT**, and stored bytes are what D38's reversibility
+  invariant and every golden payload compare. `pricing/store` and `data_ingestion/store` had each
+  already written the cap-not-pad idiom privately for exactly this reason; the third occurrence is
+  what made it worth one home (`shared/money.cap_dp`). Rule: reach for `quantize` only when padding
+  to a fixed scale is the intent (settlement). For a precision *ceiling*, cap — and if a helper for
+  it already exists twice, the third caller is the signal to move it, not to copy it again.
+
+- **2026-08-16 — when the commit RE-DERIVES the preview, the handoff format is the contract, and
+  every field the preview priced has to be in it.** The AI input door built a `TxnInput` carrying
+  `daytrade`, so the preview quoted the TW same-day sell tax of 0.15%. It then handed the commit
+  route a CSV with no `daytrade` column, and that route rebuilds its own preview from the CSV on
+  purpose — "the preview's answer is advisory, this one writes". The row was written at 0.3%:
+  **double the tax the user had just been shown**, silently, with the difference flowing into
+  `original_total` as cost basis. Nothing could catch it, because every test on each side was
+  individually correct — the preview really did price a day trade, and the importer really did
+  honour a `daytrade` column. The bug lived in the gap.
+  Three rules:
+  **(1)** A re-derive-at-commit design (which is the right design — it stops a tampered preview
+  from writing) creates a **lossy channel**. Enumerate the preview's inputs against the channel's
+  columns, not against the writer's capabilities. `TRANSACTION_COLUMNS` had `daytrade` all along;
+  the generator simply never emitted it.
+  **(2)** Test the two sides **against each other**, not each against its own expectation. The
+  disproof here is one line — `assert re_derived.tax == previewed.tax` — and no amount of
+  single-side coverage substitutes for it.
+  **(3)** ⚠ **Making a dropped field effective gives it teeth, and teeth need to be visible.**
+  While `daytrade` was being discarded, a wrong inference by the model cost nothing; carrying it
+  to the ledger makes the same inference a money error. Shipping the fix therefore had to ship the
+  UI marker with it, in the same change — otherwise the correction quietly converts a harmless
+  parse error into an uncorrectable one.
+
+- **2026-08-16 — hand-rolled CSV generation fails as a CRASH, not as a shifted column.** The same
+  generator did no quoting, and its docstring said so as though that settled it. The prompt
+  *instructs* the model to write a free-text note; one comma made the row parse to more fields
+  than the header declared, `csv.DictReader` filed the surplus under a `None` key, and the parser
+  raised `AttributeError` at its first line — **outside** the try/except that catches malformed
+  rows. Rule: never hand-roll CSV output. `csv.writer` with QUOTE_MINIMAL leaves clean values
+  byte-identical, so there is no cost to reaching for it. And when a docstring says "this does no
+  X", read it as an open defect report, not as documentation — the note is only a defence if
+  someone proved the unhandled case is unreachable, and here the prompt made it routine.
+
+- **2026-08-16 — a `.catch` that swallows the error hides the bug the e2e was written to catch.**
+  The W2 assistant drawer section caught a Promise rejection with `.catch(() => {...})` and
+  rendered "AI 建議暫時無法取得". The rejection was NOT a fetch failure — it was a
+  `ReferenceError: runAdvice is not defined` thrown INSIDE the `.then`, because `renderAdvice`
+  wired a button's click to `runAdvice`, a `function` declared *after* the call site, and a
+  function declaration is not hoisted into the enclosing function's scope the way the pattern
+  assumed. Two rules:
+  **(1)** A `function f(){}` declaration is hoisted to the TOP of its *script/module*, not to
+  the top of the enclosing *function* — code that works when called "later" (pollRun firing after
+  a network round-trip) can still break when called "now" (renderAdvice running synchronously in
+  the same tick). When a helper is called by a sibling, declare it before the sibling, or pass it
+  in as an argument (the fix here).
+  **(2)** The `.catch` did its *degrade* job and hid its *diagnose* job. The drawer's smoke
+  contract asserts zero console **errors**; a caught-and-relabelled `console.warn` still shows in
+  the trace, which is how this surfaced. A truly silent `.catch(() => {})` would have left the
+  button dead and the test green on the empty-state assertion. Degrade for the user; never
+  degrade for the person reading the console.
+
+- **2026-08-16 — "one red" is not a verdict; the machine's resource state is part of the test.**
+  The W2 full-suite run reported ONE failure: an e2e asserting zero console errors tripped on
+  `net::ERR_INSUFFICIENT_RESOURCES` — the 8 GB dev machine was under memory pressure (0 GB free,
+  ~50 browser processes, Memory Compression already at 1.45 GB), so Chromium could not allocate a
+  resource mid-flow. The failure was environmental, not the change: the SAME test passed in
+  isolation seconds later, and the full run reached 100% with **0 F / 0 E** on every other line.
+  Two rules:
+  **(1)** A zero-console-errors e2e is a *load-sensitive* assertion. `ERR_INSUFFICIENT_RESOURCES`
+  is the signature that says "the machine, not the code" — read the error text before treating a
+  single red e2e as a regression. If it passes in isolation, the suite was the environment.
+  **(2)** A full-suite run on a resource-tight box is itself a flaky test. The right reading is
+  per-module green (which W2 had: every changed module's suite passed on its own) plus a targeted
+  re-run of the lone failure — not a blanket "the suite is red".
+
+- **2026-08-20 — a disproof fixture must place its anomaly in exactly ONE window, or it disproves nothing.**
+  W5's volatility measurement compares two 30-day windows (create vs due). The first draft of the
+  split-disproof fixture put the SPLIT on the create date — so the resulting −86% jump appeared in
+  BOTH windows, both vols inflated by the same amount, and the raw (unfixed) path measured
+  ``change ≈ 0``: the "fabricated spike" the test claimed to demonstrate was not there, and the
+  assertion (``vol_change_pct > 1``) would have failed for the WRONG reason — or worse, been
+  weakened into passing vacuously. Caught in self-review before any gate ran. The fix: the split
+  moved to created+5, inside the due window only, with a wiggly (non-zero-vol) pre-regime so the
+  raw baseline is a real denominator. Rule: when a test's claim is "path X mis-measures THIS
+  event", compute both windows' contents by hand before writing the assertion — an anomaly both
+  sides share is invisible to a ratio.
+- **2026-08-20 — an edit after gate-launch invalidates the gate; kill and relaunch, don't "top up".**
+  A one-line production edit (benchmark leg through ``series_in``) landed ~2 minutes after the
+  detached mypy + pytest runs started. Both gates were certifying the PRE-edit tree. The tempting
+  shortcut — "let them finish, then re-run just the affected files" — certifies the final tree
+  only for those files and leaves the other 600+ files verified against code that no longer
+  exists. The right move is mechanical: kill the detached processes, clear the ``.done`` markers,
+  relaunch on the final tree. (Also: the kill/restart one-liner failed with a bare exit 255 and
+  no output — compose destructive-and-restart steps separately, and verify "nothing is running"
+  before relaunching.)
+
+## A unit that lives in the documentation is not a unit (2026-08-23, W7.1)
+
+`signal_backtest_json` emitted returns as fraction strings and said so — in the variable
+registry's `desc`, which is rendered in the settings UI for the human and **never reaches the
+model**. The first live batch of cards printed `0.1336` as 「+0.1336%」 (the true value 100×
+smaller), as `+0.0640 USD`, and as a bare `0.1053`, all in one run.
+
+**The lesson is about WHERE meaning lives, not about the model.** A JSON payload handed to an
+LLM is a self-contained document: anything the reader must know to interpret a number has to
+travel *inside* it. Docstrings, registry descriptions, and the prompt author's memory are all
+out of band. The same failure appeared twice more the same day, in two directions:
+
+- **A sign is meaning too.** `calibration_gap_json` shipped `{"gap": "-0.466"}` with the
+  convention 「正值＝我最近低估自己」 stated in the template's own section, one line above the
+  variable — and the card still read it as 「低估自身表現」, the exact opposite. A signed number
+  is one negation away from asserting the reverse of the truth, so the direction now ships as
+  a pre-worded `reading` the model copies instead of interprets.
+- **A withheld number is an invitation.** A sub-gate cell honestly emits `insufficient: true`
+  with no mean — but the same payload carries a `baseline` block full of numbers, and two cards
+  simply used those instead, presenting an unconditional average as the signal's conditional
+  performance. One card went further and invented a value present nowhere in the input.
+  "Absent" is not self-explaining either: the rule against substitution has to be written down.
+
+Corollary for any future variable: put the unit, the sign convention, and the "what you may NOT
+do with this" **in the payload**, next to the value. The registry `desc` is for the human.
+
+## A law the model must execute is not a law (2026-08-23, W7.1)
+
+AI-D33 put the confidence-anchoring rule in the prompt and deliberately refused a code-side
+clamp — a validator silently rewriting the model's own stated confidence is the same defect
+class as averaging two providers' fundamentals. That reasoning still holds. What did not hold
+was the *form* of the rule: it asked the model to find its intended confidence's bucket in a
+bins table, read that bucket's actual hit rate, add 5, check a sample gate, then subtract a
+rolling gap — mid-generation, while also writing the card. **0 of 13 cards complied**, and the
+one card that restated the law correctly violated it in the same sentence.
+
+The fix keeps the doctrine and changes the shape: the backend computes the largest
+self-consistent ceiling once and the prompt says 「不得超過 confidence_ceiling」. Nothing clamps
+anything; the model is handed one integer instead of a procedure.
+
+**Generalise:** an instruction that requires multi-step arithmetic over a table is a
+*computation*, and computations belong on the deterministic side of the seam. Keep the
+*judgement* in the prompt; move the *arithmetic* to code. That line is not the same as the line
+AI-D33 drew, and confusing the two costs you either a silent override or an ignored rule.
+
+⚠ And measure the law's behaviour at its extremes on real data before trusting it: with the
+demo's record the ceiling computes to **0**, i.e. "your track record supports asserting
+nothing". That is an honest reading of a degenerate input, but a rule that outputs 0 for every
+card is a product decision, not just a calculation — surface it, do not paper over it with an
+invented floor.
+
+## "No output growth" is not "frozen" (2026-08-26)
+
+Detached gate runs are watched by a monitor that flags a stall when the redirected output file
+stops growing — written after a real freeze, where process liveness was useless because a
+frozen process is still alive. It fired again, on a run whose output file was **0 bytes**. The
+conclusion "the suite hangs" was wrong twice over:
+
+1. `pytest` had been given `--timeout=300`, and **`pytest-timeout` is not installed** in this
+   venv (only `pytest-asyncio` and `pytest-socket` are). Argparse rejected it, the process died
+   in under a second, and the exit status went to a file nobody read. Zero bytes of stdout is
+   what an **instant startup failure** looks like — it is also what a freeze looks like at
+   t=0, and the monitor cannot tell them apart.
+2. Redirected `pytest` stdout is **block-buffered**, so even a healthy run shows 0 bytes for a
+   while. `python -u` fixes it, and without it "no growth" carries almost no information early.
+
+**Rules that follow:**
+- A stall detector must read **stderr and the process table**, not just the stdout size. Zero
+  bytes + no live process = it never started; zero bytes + a live process = possibly buffering;
+  bytes that stopped + a live process = the freeze the detector was built for.
+- Always pass `-u` when redirecting pytest, and always check the `.err` file before diagnosing.
+- Verify a plugin flag exists before putting it in a long detached command — a typo'd flag
+  costs a whole gate cycle, and the failure is silent by construction.
+
+⚠ **The wider damage:** an earlier session recorded "the e2e suite hangs" partly on this
+evidence. That claim now has to be re-established from scratch rather than inherited. A wrong
+diagnosis that gets written down is worse than no diagnosis, because the next person spends
+their budget on the wrong hypothesis — the machine's real constraint here is 8.5 GB of RAM with
+~1.5 GB free against 166 e2e tests that each spawn a uvicorn subprocess plus a browser context.
+
+## The toolchain was never broken — measured, 2026-08-26
+
+Three symptoms had been recorded across sessions as if they were a single defect in the test
+tooling: the e2e suite "hangs indefinitely"; two subprocess tests fail with `0xC0000142`
+(`STATUS_DLL_INIT_FAILED`); `stress-audit --ui` cannot start Playwright's driver
+(`Connection closed while reading from the driver`). A measurement pass, run with nothing else
+competing for the machine, retired all three:
+
+| claim | measured |
+| --- | --- |
+| e2e hangs | **173/173 pass in ~25 min** (collected count verified against result chars) |
+| Playwright driver dead | launches in isolation; 173 browser tests pass; `--ui` DOM leg ran (7 `phase1:dom` assertions) |
+| two subprocess tests fail | passed inside the 3792-test core run |
+| uvicorn processes leak | python-process count **stable and falling** across the run (6 → 4 → 6 → 0) — teardown works |
+| memory pressure | **real**: 8.5 GB total, min **452 MB free** during e2e, running ALONE |
+
+The last row is the whole explanation. Every one of those failures happened while **two or more
+heavy detached gates were running concurrently** (a full pytest plus mypy plus e2e). Alone, e2e
+already dips to 452 MB free; add another gate and the machine crosses into the region where
+Windows cannot commit memory for a new process's DLL initialisation — which is *precisely* what
+`0xC0000142` means, and equally what kills a freshly-spawned Playwright driver mid-handshake.
+
+**The rule, then, is a scheduling rule, not a code change:** run `tests/e2e` (and
+`stress-audit --ui`) **alone**. `mypy` and the core `pytest` may overlap with each other; neither
+may overlap with a browser suite. Nothing in `tests/e2e/conftest.py` needs changing — in
+particular do NOT raise its 60 s health-check ceiling, which is expect-polling, not a sleep mask;
+raising it converts a fast resource failure into a slow one.
+
+⚠ **The meta-lesson is about the diagnoses, not the machine.** "The e2e suite hangs" was written
+down twice on evidence that did not support it (once it was an instant `--timeout` argparse
+failure; once it was contention I had caused myself), and each time it was inherited by the next
+session as established fact. Symptoms observed while the observer is perturbing the system are
+not findings. Before recording an environment defect: reproduce it on a quiet machine, and
+record the *measurement*, not the impression.
+
+## A button that reports success is invisible to a wiring sweep (2026-08-27)
+
+The 設定 → 匯出中心 rendered five export cards, each with a ⬇ glyph and a 「產生並下載」 button.
+Every one of those buttons ran `toast('已排入產生佇列', 'ok')` and did nothing else. There is no
+queue. All five endpoints (`holdings` · `ledgers` · `llm-usage` · `job-runs` · `tax-package`) had
+existed for months, while the card's own tooltip still said 「等待 export endpoint」 — a
+Design-preview stub that outlived the thing it was standing in for.
+
+**v0.1.26's button-wiring sweep checked 2,287 controls and reported 0 dead.** It was not wrong:
+these buttons have listeners. They are wired — to a lie. A sweep that asks *「does this control
+have a handler?」* cannot see the difference between a handler that works and a handler that
+congratulates you, and the second is strictly worse than a dead button: a dead button gets
+reported, a lying one gets believed.
+
+Two things follow.
+
+**1. Prefer a guard over a sweep, where the guard can exist.** The permanent check is
+`tests/contract/test_export_endpoints_have_callers.py`: every `POST /api/export/*` route must
+have a real frontend caller, and the export centre must call the download seam. That is
+structural — it compares router source against `web/` source — and it works precisely because the
+failure mode (an endpoint nobody calls) is invisible to anything that exercises the endpoint.
+Every API test of `/api/export/tax-package` passed the whole time.
+
+**2. My first version of that guard had the same blind spot it was written to fix.** It searched
+for the path literal anywhere in `web/`, and `/api/export/ledgers` has BOTH a GET (「what would the
+zip contain?」) and a POST (build it). The GET's literal satisfied the POST's coverage, so the
+orphaned whole-ledger zip stayed invisible — until the test was tightened to strip `pdApi.get(...)`
+calls first, at which point it immediately found the second orphan. **A coverage test that
+searches for a string will pass on a coincidence; make it search for the CALL.**
+
+⚠ Related, from the same change: I told the owner 「tax-package is the only export endpoint with
+no frontend button」 and asked them to rule on where to put one. That premise was incomplete — a
+button existed and lied — and the ruling was therefore made on a partial picture. Check the
+surface before framing a decision about the surface; a grep for the path found the router and the
+absence of a `download(` call, but not the card. Say so plainly when it happens, and record the
+corrected premise in the ruling itself (AI-D50 carries it).
+
+## Moving a shared figure moves its LABEL too (2026-08-27)
+
+AI-D48 put three cash kinds into B (含匯兌總損益) to close an asymmetry with XIRR. Directly
+beside B on the same KPI band sits `principal_fx_effect`, computed as `B − A` and labelled
+「本金匯率效果」. The moment B counted a broker fee, that label was carrying a trading cost under
+an exchange-rate name — **the exact defect the ruling was raised to remove, reproduced one field
+over, in the same commit.**
+
+It was caught by reading the rendering code while writing the ruling's own justification, not by
+any test: every assertion about `principal_fx_effect` was about its arithmetic, and the
+arithmetic was still correct. The fix is to make the third term its own field
+(`trading_financing_cost`) so the decomposition is `B = A + 本金匯率效果 + 交易與融資成本`,
+rather than leaving a residual that silently absorbs whatever joins B next.
+
+**The check to run whenever a figure changes definition: grep for every OTHER figure derived
+from it, and re-read the words printed next to each one.** A derived value whose formula is
+`X − Y` inherits every change to X and Y, and its label does not.
+
+## Counting pytest's result characters proves COMPLETION, not success (2026-08-27)
+
+The technique recorded earlier in this file — when the summary line does not print, count the
+`.FEsxX` characters after stripping `[ N%]` and compare against `--collect-only -q`'s total —
+answers exactly one question: *did the run finish?* It cannot answer *did it pass*, because
+**`F` and `E` are result characters too**. A run of 3,834 tests with two failures produces
+3,834 characters.
+
+That is how `pytest 3834/3834` was reported for the R5/R6 commit while
+`test_no_horizontal_scroll[768]` was already red. The number was true and the claim built on it
+was not. It was found only because a later change touched the same KPI card and a `git stash
+push web/` bisect showed the SAME 881px overflow with every web change removed — i.e. the
+regression predated the work being blamed for it.
+
+**The rule:** when reading a redirected pytest run without a summary line, count `F` and `E`
+separately and report that count, or grep `^(FAILED|ERROR)` — never infer success from a total.
+And when a gate turns red next to new work, *bisect before diagnosing*: a stash of the changed
+directory costs one run and is the difference between fixing a defect and inventing a cause for
+one.
+
+## A `page.route` on a session-scoped Playwright page leaks into every later test (2026-08-27)
+
+`tests/e2e/conftest.py::browser_page` is **session-scoped** — one Page for the whole e2e run —
+and Playwright routes are per-page and permanent until `unroute`. No file in `tests/e2e` called
+`unroute` before this date. That had been survivable only by accident: every stub so far
+targeted an endpoint nobody else requests (`/api/input/ai/preview`,
+`/api/insight-types/*/run`, `/api/instruments/lookup`).
+
+The first stub of a **universal** endpoint — `/api/dashboard`, which nearly every page fetches
+— broke the very next test in its own file, and would otherwise have fed a doctored payload to
+every test after it. It failed loudly only because the neighbouring assertion happened to be
+「this text must NOT appear」.
+
+**Rule:** stubbing a shared endpoint means installing and removing the route around your own
+navigation (a `@contextmanager` with `unroute` in `finally` — see
+`test_kpi_trading_cost_layout.py`). Noted in the `browser_page` docstring too, because that is
+where the next person looks. A leaked route never fails where it was installed.
+
+## mypy's incremental cache can report a clean tree over a real error (2026-08-27)
+
+`mypy` was recorded as `Success: no issues found in 665 source files` for commit `9fcc832`.
+Re-run on the SAME commit with `.mypy_cache` deleted, it found a genuine error that had been
+sitting in the tree — a three-term decomposition summed over `Decimal | None` operands in
+`tests/portfolio/test_review_r7_b_takes_cash_kinds.py`. The file count differed too (667, not
+665), which was the visible tell and was not noticed at the time.
+
+A cached run only re-checks what it believes changed. The error was introduced in the same
+session that produced the cache entry, so nothing invalidated it afterwards.
+
+**The rule:** the pre-ship mypy gate runs with a **cold cache** — `rm -rf .mypy_cache` before
+`python -m mypy` — or its "clean" is a statement about the cache, not about the code. The file
+count is part of the result: if it moves without files being added or removed, the run is not
+comparable to the previous one.
+
+This is the SECOND over-read of a gate in this programme; the first is the section above, on
+counting pytest result characters. Both had the same shape — a number that was true, and a
+claim built on it that was not. Both were caught only by a deliberate re-derivation (`git
+stash push` there, a cache wipe here). **When a gate result is going to be reported to the
+owner, re-derive it rather than reading it off a convenient artefact.**
+
+## A defensive `if (window.x)` turns a typo into permanent silence (2026-08-27)
+
+`web/broker-import.js` called `window.pdAfterLedgerChange()` from two places. Nothing in the
+repository has ever assigned that name; the seam `ledger.js` exposes is `pdLedgerRefresh`.
+Because every such call site is written as `if (window.pdX) window.pdX()`, the wrong name did
+not throw, did not log, and did not appear in a console-error sweep — an undo deleted three
+rows, toasted 「已復原 刪除 3 筆」, and left the table below still listing all three.
+
+The idiom is right (these seams are genuinely optional per page). What was missing is that
+nothing checked the NAMES. A wiring sweep cannot see this: the listener exists and fires.
+
+**The rule:** an optional cross-file global needs a static guard that every `window.pd*()`
+call has a matching `window.pd* =` somewhere in `web/`
+(`tests/contract/test_web_globals_are_defined.py`). Same family as the export-centre buttons
+that toasted success and downloaded nothing, and as the checkbox column bound to nothing:
+**a control or seam that fails SILENTLY is invisible to every sweep that counts things.** What
+finds them is asking, one at a time, "what actually changed when I pressed that?"
+
+## A green harness proves nothing about what it cannot see (2026-08-28)
+
+The stress harness reported `ops=128 pass=5663 fail=0` for weeks while being structurally
+blind to an entire defect class. `seed_all` seeds ONE close per symbol dated `ASOF`, so every
+earlier day was unpriced, therefore `incomplete`, therefore SKIPPED by `trend.total_value` —
+and a defect confined to a window between two dates lives exactly there. R6's ex-date is that
+shape: a 配股 booked on the payment date instead of the ex-date moves the share count only
+BETWEEN those dates and ends at the same position either way.
+
+The blindness was not obvious from the outside. Every number in that line was true; the
+inference "5,663 assertions passed, so the ledger is verified" was not.
+
+**How it was settled — and the shape worth copying.** The defect was deliberately reintroduced
+into the ORACLE (`facts_through` cutting dividends on the payment date, exactly the pre-R6
+behaviour) and the harness run in BOTH configurations:
+
+| harness | result |
+| --- | --- |
+| pre-change (one close at ASOF) | `pass=5663 fail=0` — silent |
+| after the daily series | `fail=53`, all `trend.total_value`, all inside the ex→pay window |
+
+The pre-change run reproducing the previously recorded baseline **to the digit** was itself the
+proof that the probe had restored the old state faithfully — without that, "it was blind
+before" would have been an assertion about code that no longer existed.
+
+**Rules:**
+1. **A new assertion family's detection power is MEASURED, by breaking the thing on purpose.**
+   Adding assertions and observing `fail=0` demonstrates only that two implementations agree
+   where they both run.
+2. **When a fixture makes an assertion unreachable, say so in the fixture's own words.** The
+   README had disclosed this gap for two days before it was closed, which is why closing it was
+   a morning's work rather than a rediscovery.
+3. Watch for the family that can only run where the answers already coincide. `trend.*` sampled
+   the ex-date and the payment date from day one — the SAMPLING was right and the VALUATION was
+   unreachable, and only one of those two was written down.
+
+## A killed background job leaves its children alive, holding the output file (2026-08-28)
+
+Killing a `run_in_background` bash job terminates the wrapper, not the `python -m pytest` it
+spawned. Observed: an e2e run "stopped" at 18:43 was still running at 18:44 with its uvicorn
+children, and a detached PowerShell relaunch then failed silently on its FIRST command because
+the old process still held the redirect target — so it skipped to the next step and produced a
+result for the wrong gate.
+
+**Rules:** before relaunching a long gate, kill strays explicitly
+(`Get-CimInstance Win32_Process -Filter "Name='python.exe'"` → `Stop-Process`) and verify the
+count is zero. Give each chunk its OWN output file, so no result can be attributed to the wrong
+run. And ⚠ `Remove-Item "$sp\ec*.txt"` also deletes `ec_chunks.txt` — a glob that eats its own
+plan file makes the loop iterate over nothing and look like it ran.
+
+## Four ways to read a green that isn't there (2026-08-28)
+
+All four happened in one session, on the same codebase, to the same person. They are not one
+mistake repeated — each hid the failure at a different layer, which is why "be careful reading
+gates" is not a usable rule and the four checks below are.
+
+1. **A stale `.mypy_cache`** reported "665 files, 0 errors" over a real error. → Delete the
+   cache before a gate run; a cold run is the only run that counts.
+2. **Counting result characters** in pytest output proved the run had FINISHED, not that it had
+   PASSED. → Never infer a verdict from progress output.
+3. **The wrong invocation.** `mypy .` overrides `pyproject.toml`'s
+   `files = ["portfolio_dash", "tests", "scripts/probe"]` and pulls in gitignored
+   `sample-trade-data/` plus the deliberately-unchecked `scripts/stress_audit/` — 528 errors,
+   none of them in checked code. The correct call is bare `mypy`, no path argument. A gate is
+   only a gate if it is INVOKED right, not just READ right.
+4. **A masked exit code.** `pytest > out.txt 2>&1; echo "EXIT=$?"; grep -E "FAILED" out.txt | head`
+   run in the background reports the exit status of the LAST command in the pipeline (`head`,
+   always 0). The notification said "exit code 0" while a test was genuinely failing.
+
+**Rules:**
+- Write the verdict INTO the artefact: `pytest ... > out.txt 2>&1; echo "REAL_EXIT=$?" >> out.txt`,
+  then read `REAL_EXIT` from the file. A number that travels separately from its run can be
+  attributed to the wrong run.
+- Never end a gate command with a pipe. The pipeline's status is not the gate's status.
+- Grep the artefact for `^FAILED|^ERROR` **as well as** checking the code — two independent
+  reads, because each of the four failures above defeated exactly one of them.
+
+## A stale file in the scratchpad silently hijacked a test run (2026-08-28)
+
+A driver script run from the shared scratchpad printed `pageerrors: []` and exited 0 without
+executing anything it was asked to. Cause: Python puts the SCRIPT'S OWN DIRECTORY first on
+`sys.path`, and the scratchpad still held a `click.py` from an old Playwright session — so
+`import click`, deep inside litellm, resolved to that browser script and ran it.
+
+**Rules:** the scratchpad is shared across sessions and accumulates modules with ordinary names
+(`click.py`, `types.py`, `json.py`). Run throwaway drivers from a fresh subdirectory, and treat
+"exited 0 with output from something else entirely" as a shadowing symptom, not a fluke.
+
+## A control experiment that keeps the suspect variable confirms the wrong cause (2026-09-01)
+
+Third recurrence of the `-qq` trap above (2026-08-02, again 2026-08-13, now here), but the
+recurrence is not the lesson — the diagnosis is.
+
+A 4,548-test gate run finished at `[100%]`, printed its warnings summary, and stopped: no
+`N passed` line. To find out why, a single-test control run was executed — and it was mute
+too. That looked conclusive, so the conclusion recorded was **"this pytest build never prints
+the final summary line"**, and it travelled into the commit message of `9b7c272` as a stated
+fact about the environment.
+
+It was false. Both runs carried `-q` on the command line, and `pyproject.toml`'s `addopts`
+already supplies one, so both were `-qq`. The control reproduced the symptom because it
+reproduced the **cause** — it varied the test count, which was never the suspect, and held the
+flag, which was. Re-running the same single test with no extra `-q` printed
+`1 passed, 1 warning in 1.62s` on the first try.
+
+The verdict itself survived (the status-character histogram was `4548 × .` with `F`/`E` counted
+separately and zero, and a later clean re-run returned exit 0 and `4548 passed`), so this cost
+no wrong decision — only a false sentence in a permanent record.
+
+**Rules:**
+- A control experiment must **remove the suspect**, not shrink the workload. Shrinking the
+  input reproduces everything the input did not cause, which is most things.
+- When a tool behaves oddly, the first variable to strip is **your own flags**, before any
+  claim about the tool, the build, or the environment. An assertion about the environment is
+  the most expensive kind to get wrong: it outlives the session and gets believed.
+- The three existing entries on this trap all say "check `addopts` before adding verbosity
+  flags", and all three were read in this session's own memory index. A rule that fires only
+  when you remember it at the moment of typing is not a control — **stop passing `-q`**; the
+  config already has it.
+
+## Two pytest sessions driving one Chrome wedge each other, and the "isolated" re-run was not isolated (2026-09-01)
+
+A full-suite run sat at `[51%]` for **two hours** with zero CPU while still spawning fresh
+uvicorns. `tests/e2e` sorts into the middle of the suite alphabetically, so 51% is exactly where
+the browser tests begin — the run was not hung at a random point, it was hung at the e2e
+boundary. A leaked uvicorn from 9:18 was still listening two hours later.
+
+Cause: the e2e suite drives the **installed Google Chrome** (Playwright `channel`), not a
+private bundled chromium, so two pytest sessions — or one session plus the leftovers of a
+previous killed one — contend for the same browser installation. Chunking e2e into 7 groups of
+7 files turned the same tests green in 4–10 minutes per chunk.
+
+**The diagnostic mistake is the more valuable half.** One chunk failed
+`test_kpi_trading_cost_layout` with an EMPTY `#kpi-band`, so the whole dashboard had not
+rendered. Re-running it "alone" also failed; stashing `web/` made it pass; restoring made it
+pass again. Three of those four runs happened **while the chunk runner was still going**, so the
+"isolated" control was sharing the machine with five more browser sessions. With the runner
+finished, the same test passed **6/6** with the changes in place. The change was innocent, and a
+`git stash` A/B of n=1 nearly convicted it.
+
+**Rules:**
+- Never run two pytest sessions concurrently when either touches `tests/e2e`. Serialise them,
+  and confirm the previous runner's process tree is gone before starting the next.
+- An A/B is evidence only when the two arms differ in exactly ONE variable. "I ran it alone"
+  is a claim about the machine, not about the command — verify no other run is live before
+  believing either arm. (Same failure shape as the `-qq` control earlier the same day, which
+  also kept the suspect variable and confirmed a false cause.)
+- A single pass/fail pair is not a verdict on a browser test. Sample it — 6 runs cost minutes
+  and turned "my change broke the dashboard" into "this test fails under load".
+- Kill only your own process tree by walking `ParentProcessId`. The stale browser processes on
+  this machine belonged to the USER's Chrome session, and killing them to tidy up would have
+  closed their windows.
+
+## Eight fixers on one working tree: what only breaks at that scale (2026-09-06)
+
+A site-wide stability round dispatched eight Fable-5.1 fixers (≤3 concurrent) against ONE
+checkout, each range-locked to a disjoint file set. The locks held. What did not hold was
+everything AROUND the locks.
+
+**A guard test goes red in the OWNER's files for the OTHER agent's change.** X1 finished
+clean, then `tests/data_ingestion/test_holdings_containment.py::test_the_call_site_census_is_
+still_accurate` failed — the census of `current_shares` call sites. X1 owned none of it: X2
+had added `held_symbols()` to `api/routers/actions.py` for the quote-job partial threshold.
+X1 diagnosed it correctly by reading the failure's OWN evidence (`added {('…/actions.py',
+'current_shares')}`) plus `grep` proving its own diff contained no such call. X8a did the same
+later with 8 failures that belonged to X5's in-flight red tests, and proved it from the import
+graph rather than from "those aren't my files".
+→ **Under a shared tree, a red test's owner is the agent named by the failure's evidence, not
+the agent whose area it sits in.** Never let an agent "fix" a red it cannot attribute to its
+own diff; make it report instead. Three separate fixers correctly ignored each other's
+in-flight edits this round because the brief said to.
+
+**A trap you have trained yourself out of comes back through the instructions you write for
+others.** The `-qq` trap (three prior entries) reappeared as a FOURTH recurrence — not in my
+own command, but in the dispatch template I handed to subagents, which said to run `pytest -q`
+while `addopts` already carries `-q`. One fixer identified it correctly; another
+misattributed it to "Windows stdout buffering" and re-derived the count from progress
+characters.
+→ **Audit your own delegation text against your own lessons file.** A rule that lives only in
+your habits does not survive being handed to someone else.
+
+**`git stash` is process-global; in a shared checkout it is a destructive act.** The reflex
+A/B (`stash` → measure → `stash pop`) would have swept every other agent's uncommitted work
+out from under them mid-edit. Use `git show HEAD:<file>` into a scratch path instead, or apply
+the inverse edit in place and restore it immediately (measured exposure: ~30 s, and only on a
+file no live agent owned).
+
+**Baselines pinned before the fixture is final are wrong twice over.** The shared environment
+brief told testers the alerts baseline was 28 (actual 22 — measured before a backfill script
+finished, and drawdown compares against each symbol's own 52-week high, so it drifts with the
+WALL CLOCK) and claimed the fixture was frozen (it is not: the app fetches yfinance and writes
+rows mid-test). Both errors were found BY the testers, against the document that was supposed
+to orient them.
+→ **Measure a baseline only after the fixture is final, and state what makes it drift.** A
+number in a brief is read as an invariant.
+
+**A "free semantic consequence" derived by reading code is a hypothesis.** The exploration
+report argued a spinoff child's provenance label would vanish on a clear-out because
+`build_book` drops `shares == 0`. The behaviour was right; the MECHANISM was not — that is
+only the holdings loop's `continue`, and the `_Position` object survives in the map, so a
+re-buy would have carried a stale "carried 270 from KEMB" beside `dividend_portion = 0`. The
+fixer verified instead of inheriting, and added an explicit clear at four seams.
+→ Inherit findings from an explorer; re-derive mechanisms.
+
+**A start command handed to someone else must ship with its stop command.** Fourteen agent
+briefs told each fixer how to launch its own sandbox (`launch.ps1 -Name X -Port N -Fresh`) and
+none told it to call the `stop.ps1` sitting next to it. Fourteen uvicorns — three explorers on
+8701-8703, eleven fixers on 8801-8811, 28 processes counting children — were still listening
+hours later and had squeezed free memory to 1.3 GB of 8 GB. The symptom did not look like a
+leak: the harness started killing my background *monitors* for low memory, twice, while the
+e2e suite underneath them needed that memory for Chrome. Cleanup identified targets by
+`--port` on the command line, never by process name or start time, so the running suite's own
+harness server (port 57940) and its two pytest processes were provably out of scope — the same
+"kill only your own tree" rule as the earlier Chrome entry, applied to servers.
+
+**Fix-introduced regressions are the round's own product.** Two landed and were caught the
+same day: a new third toast face made "官方套組已存在" — a successful no-op — persist forever,
+and an implicit string concatenation put an f-string inside an `else` branch so a flagged row
+printed an empty `<tr>`. Both were found by the new tests written for the fix, not by review.
+
+## A "provable no-op" that rested on a category, not on the registry (2026-09-10)
+
+**Context.** The 2026-09-09 site architecture map listed two things about the price write
+seam: the benchmark history jobs omitted `factor_of` (D-11), and the pricing entry points
+defaulted it to the identity against `architecture.md`'s "no default" obligation (D-05).
+
+**What went wrong.** Two docstrings argued the omission was safe: "a benchmark is a market
+INDEX, never the subject of a corporate action — injecting would be a provable no-op". True of
+`^GSPC` and `^KLSE`. The third benchmark in the SAME registry is `0050`, an ETF that can split
+(and did, 1→4, in 2025-06) and that the owner may also hold. For a held 0050 with a SPLIT row,
+the instrument sweeps store `close_raw × factor` and the benchmark sweep stored `close_raw × 1`
+on the SAME `(instrument, as_of_date)` keys — and it runs LAST in both jobs, so every deep
+backfill quietly reverted the pre-split rows the reconcile had just repaired, and both readers
+(the holding's trend replay and the benchmark overlay) divided a provider-adjusted price
+again. The `benchmarks.py` docstring's "the two writers can never disagree on a stored row"
+had been true before D30 and nobody re-read it when the split basis landed.
+
+**Lessons.**
+- **A "no-op by category" claim must be checked against the registry, not the category.**
+  The sentence "an index never splits" was correct; the list it was applied to contained a
+  non-index. When a docstring says *provable*, the proof is one grep away — do it.
+- **A default on an injection seam is the exact failure the convention forbids.** The seam's
+  own docstring said the identity was "safe" because "no ledger injected means store what the
+  provider sent" — but that is only as-traded when no split lies in `(as_of, fetched_at]`. The
+  two omitting callers were found by the map, not by a test. Now the two entry points take
+  `factor_of` with no default and `tests/architecture/test_injection_seams.py` walks every
+  call in `portfolio_dash/` by AST, so an omitting caller cannot return.
+- **When a fix "harmless-ifies" a collision, write the invariant as a test on both writers.**
+  `tests/scheduler/test_benchmark_history.py` now writes the same pre-split row through the
+  instrument path and the benchmark path and asserts byte-identity.
+
+## A float that never touches money can still corrupt a verdict (2026-09-16, demo audit H1)
+
+**What happened.** The 再平衡試算 drawer kept its target weights as JS numbers — a UI
+percentage, deliberately outside the "no money in floats" rule — and sent them as
+`String(ratio)`. `0.7 / 100` serialises as `"0.006999999999999999"`, `3.6 / 100` as
+`"0.036000000000000004"`; the backend parsed those strings as EXACT Decimals, summed them to
+`1.000000000000000004`, and `over_allocated = submitted_sum > 1` was true. The footer,
+computed from the same floats with a `> 1.0001` fallback, said 100.00% beside the warning.
+Neither side was "wrong" by its own rule; the defect lived in the seam between them.
+
+**Lessons.**
+- **The Decimal rule is about the WIRE, not only about money.** A value that is exact on
+  one side and float on the other is a float value with an exact-looking spelling. Any
+  number a browser sends is built from what the user typed (integer tenths, digit surgery,
+  `toFixed` on an exact quotient), never from `String(float)` — and a static contract test
+  now pins that for `rebalance.js`.
+- **A tolerance-less comparison on a value that crossed a float boundary is a bug in
+  waiting, whatever the other side promises.** The backend now compares against
+  `1 + 0.0001`, with the comment recording why the tolerance can never mask a real
+  overshoot (the coarsest step of a 1-dp percent field is 0.001).
+- **Seeding through display precision and rounding each row independently can open the
+  page in an error state.** Largest-remainder apportionment keeps F-06's "fields ≡ POSTed
+  plan" invariant AND sums to what the raw weights round to — the fix that looked like
+  "add a tolerance" was three fixes.
+
+## A checker certified by tests that feed it what production never does (2026-09-17, demo audit M9 re-verification)
+
+**What happened.** The M9 fix added a read-time figure check comparing each AI card's
+numbers against "the variable snapshot the card was generated from" (`insights.input_snapshot`).
+Its unit tests supplied a synthetic JSON snapshot and passed; the report said 「舊卡片因快照仍在，
+讀取時同樣會被標」. The audit author re-verified on the demo: `unverified_figures` had fired
+**0 times on 148 cards**, the ×1000 card included. The stored snapshot was
+`"2026-07-05|US"` on **149 of 149 rows** — the fingerprint fallback — because
+`RunInputs.input_snapshots`, the seam the docstring called "fed by the service", has no
+caller. The check had never once run against a real card. Meanwhile its other half,
+`unknown_symbols`, flagged 48 codes of which 47 were `MA20` / `PBR` / `KLCI` / `BUY`: a
+name-only allowlist cannot enumerate period-suffixed indicators.
+
+**Lessons.**
+- **Before shipping a checker, measure the population it checks against on real data — one
+  `SELECT length(col), count(*) GROUP BY 1` would have shown 13–20-character tags.** A unit
+  test that hands the function the input it wishes it had certifies the function, not the
+  system. The regression test now runs the real generation path with a stubbed model and
+  asserts on the STORED row.
+- **A seam nobody feeds is a defect wearing a docstring.** "Fed by the service, else the
+  fallback" reads as a design; it was a fallback running 100% of the time. When a field's
+  meaning depends on an optional feeder, grep for the feeder before trusting the meaning.
+- **"Cannot check" must be its own state, never a clean `[]`.** The first version returned
+  no flags when the population was empty — conservative on paper, and in practice it
+  painted the worst cards as clean. Three states (checked / flagged / no population), and
+  the pill text follows the state; a red 「數值待核」 on a card whose only hit was a code was
+  two sentences contradicting each other.
+- **An allowlist of names is the wrong tool for a family with a free parameter.** `MA` was
+  listed; `MA20` was not, and never could be. Match the SHAPE (`^(MA|EMA|RSI|…)\d+$`) and
+  keep the list for the genuinely enumerable (ratios, index names, ratings).
+- **Instance vs class, again (L5, L8 in the same re-verification).** The audit quoted three
+  sentences and named "the 換匯 dropdown"; the fix changed those three sentences and the
+  file that held the label derivation. 25 more sentences and two more dropdowns had the
+  same defect. When a finding names an example, the deliverable is the scan that finds
+  every example plus the guard that keeps the count at zero — the reviewer's word for the
+  alternative was 「修了實例、沒修類別」.
+- **Addendum, the same day's second re-verification: a false flag on a correct card points
+  UPSTREAM.** Fourteen fresh cards produced four flags; three looked false. Two were the
+  model's *correct* sum of two per-account rows — and the right question was not "how does
+  the checker tolerate sums" but "why did the model have to add": the prompt handed it the
+  parts and asked for the whole, which is the model recomputing a number the rule says the
+  system supplies. The fix went into the prompt (hand it the total, from the drawer's own
+  aggregate) and the checker stayed strict — a pairwise-sum tolerance would have let ≈20,000
+  derived values through a 200-number population. The third was the card's own `prediction`
+  echoed in its body, the one number a card is *supposed* to originate; the population now
+  includes the stored forecast, tied to the field and not to the word. The fourth, marked
+  undecidable by the reviewer, was decided by one SELECT of the stored population: a ×10
+  error — the checker's first real catch on a new card. Read a checker's false positives as
+  evidence about its INPUT before touching its tolerance.
+- **Addendum, third re-verification (2026-09-21): the checker's own vocabulary is part of
+  what must be tested against real output.** The ×1000 detector was built around a scale
+  table — 千 / 萬 / 億 — and every test fed it units from that table. The first batch of
+  fresh cards that talked about market caps wrote 「4.51 兆」, and four correct figures wore
+  「數值待核」 because the table stopped one row short. The reviewer's fix was the row; the
+  corpus said it was a grammar. One grep of the 176 stored cards for "number + any unit the
+  table lacks" returned 兆 ×19, 百萬 and 千萬 (read as 3.66 and 1,380 — the second a
+  *wrong* scale, not merely no scale), and 「1兆1,300億」 (one number the checker read as
+  two). Two practices came out of it: when a detector's input is free text, survey what the
+  producer actually writes before trusting the detector's vocabulary; and when two sides
+  parse the same notation (here, the card and the prompt it was generated from), give them
+  ONE scanner — two grammars would store 「3.82 兆」 from a news line as 3.82 and then flag
+  the card that quoted it. The offline A/B over the whole corpus (before vs after, per
+  card) was the acceptance evidence, not the unit tests: exactly four cards changed.
+
+## A class guard is only as wide as its scope and its definition of "adjacent" (2026-09-22, demo audit M5-b / L5-b)
+
+- **What happened:** the second full re-verification re-tested all 38 closed items (38/38 held)
+  and found two escapes of fixes that had been done *as a class*, each with a contract test
+  holding the count at zero. Both guards were green over a live defect.
+  **M5-b:** the account-name guard had a per-file test for the context list's English `a.name`,
+  and its file tuple was written by hand — `("cash.js", "input.js")`, the two files where the
+  defect had been measured. The same test file's comment even named `broker-import.js` as a
+  KNOWN LIMIT "to be found by reading". Nobody read it; the 券商對帳單 select still printed
+  「TW Broker（tw_broker）」. **L5-b:** the punctuation guard flagged a half-width mark only when
+  it TOUCHED a CJK character. English typing puts a space after the mark, and f-string
+  interpolation split the line further, so 「組合 +2.53%, 警示 0, 訊號 0; …」 had no touching
+  mark at all.
+- **Rules:** (1) A guard's SCOPE must be discovered from the property that defines the class
+  (here: "fetches an account list"), never listed from the files where it was first seen —
+  and it needs a positive control that the discovery still finds the known members, or an
+  empty discovery passes forever. (2) A known limit written in a comment is a to-do list, not
+  a control; either enforce it or say in the report that it is unguarded. (3) When widening a
+  detector, run the widened version over the whole tree BEFORE deciding anything: here it
+  measured 16 more hits, 12 real and 4 legitimate notation. Fix the real ones in the same
+  change and allow the rest by name with a reason, so the widening lands at zero. (4) Prove
+  the new guard on the pre-fix file (it fails) and prove the old guard was blind to it (the
+  old detector returned 0 hits on the pre-fix `digest_service.py`), so the report can say
+  why the class fix had escaped, not just that it had.
+
+- **2026-09-24 — Functional-test manual R1 → R2 (29 defects, 9 agents, 3 rate-limit outages).**
+  **Context:** the verifier's 120-case pass found 38 defects; 29 were fixed under the manual's
+  §4 contract (root cause to a line, class scan with numbers, a failing test plus a recorded
+  mutation, the missed defence repaired). **What went wrong, three ways.** (a) **Tests that pin
+  a defect as the spec.** Five guards were green over the defect because they asserted the wrong
+  behaviour: `BUY < SELL` same-day order, the broker e2e's `commit == 200` on an oversell, the
+  overdraft sentence with 「TW Broker」 and `3033798.0000`, `row.as_of == date.today()`, and
+  `fired_symbol == "schwab"` for an account-level alert. A pinned expectation is only as right as
+  the day it was recorded. (b) **A scan that stops at its owner's files.** Every agent's class
+  scan found members outside its scope (43 account-name sites, 45 late field writes, 45 table
+  builders, 26 `commit` forwarders); a sweep agent had to close them or the verifier would
+  rightly call the fix an instance. (c) **A mutation test interrupted by a 429.** Agent G died
+  mid-mutation with the OLD worker body possibly on disk; the resume had to prove the tree was
+  the fixed state (grep the mutation markers, then the fixed-state signatures) before doing
+  anything else. Agent D's replace script also truncated `agents.py` to 0 bytes on an encoding
+  error and had to restore from HEAD plus another agent's uncommitted hunk.
+  **Rules:** (1) When a fix flips an assertion, say so in the test's docstring — 「新行為即裁定」
+  — and look for the OTHER assertions that pinned the same wrong rule (grep the value, not the
+  test name). (2) A class scan's hit list is a work list, not a report: route every out-of-scope
+  hit to an owner in the same round, and keep the guard's pending list executable (it must
+  shrink to zero or fail). (3) A mutation script restores in `finally`, writes a marker while
+  the mutant is on disk, and the resume protocol after any interruption is: markers = 0, fixed
+  signatures present, then re-run the mutations. (4) Never edit a source file with a script that
+  rewrites the whole file through a text codec; edit in place and verify the blob hash.
+
+- **2026-09-24 — Functional-test manual R2 → R3 (2 bounced fixes, 17 rulings / new items, 4 agents).**
+  **Context:** the verifier's R2 pass closed 27 of 29, bounced two, and the owner ruled 17 more
+  items into work. **What went wrong.** (a) **Both bounced fixes had green guards that matched
+  source strings.** DEF-023's test asserted `"renderUnappliedBanner();" in <function body>` — the
+  call was present, but after an early `return` guarded by an unrelated condition, so the block
+  never rendered; the guard pinned the bug's exact position as the spec. DEF-017's guards tested
+  the API and grepped the page; nobody deleted a row and then looked at the same page. (b) **A
+  per-row acknowledgement that lived only in one page's JS** (DEF-027, R2) was a convention: the
+  server still accepted a file-wide `ack_warnings: true`, and the CSV and AI doors pre-ticked the
+  very rows the broker page asked about one by one (DEF-025). (c) **A wrong id in a handoff note
+  became a deletion order.** The R2 note said the bad card was "#207"; the verifier copied it and
+  the owner ruled "delete #207". #207 is a legitimate 2884 card — the bad one was #192, and a
+  second of the same class (#97) existed. A read-only look at the row before acting caught it.
+  (d) **A lock can be a dedup key in disguise.** The rebate row's date/kind/note were locked
+  because the inbox recognised a credited month from exactly those fields (DEF-009); unlocking
+  them first needed a structural link column, or an edit would have re-opened the month.
+  **Rules:** (1) A guard for "X is rendered / refreshed / enforced" must EXECUTE the code — Node
+  against a stub DOM, Playwright, or TestClient — never search the source for the call; a string
+  guard certifies the text, not the control flow around it. (2) A safety rule belongs to the
+  server that writes; the page only explains it. If one door asks per row, every door that can
+  reach the same write must, and the endpoint must refuse otherwise. (3) Before any ordered
+  deletion, re-identify the target from the database by its CONTENT (symbol, title, date), not by
+  the id in a note — and make the deletion script refuse targets that look legitimate (here: a
+  card whose symbol is a registered instrument). Write every id you hand over from a query, not
+  from memory. (4) Before removing a lock, find what the locked fields are keys FOR; give that
+  use its own column, then unlock. (5) In this harness subagents cannot write report files into
+  the lead's scratchpad — their report arrives in the hand-back message; save it to disk at once.
+- **2026-09-25 — Functional-test manual R3 → R4 (1 bounced fix, 13 rulings / new items, 4 agents).**
+  **Context:** the verifier's R3 pass closed 18 of 19 and bounced DEF-040. **What went wrong.**
+  (a) **The bounced fix was right on the reproduction path and destructive on the neighbour.** The
+  seed price was written and removed correctly when the child had no quote that day; when it
+  already had one, the save replaced it and the delete removed the replacement — while the API
+  promised `restorable` and answered `restored`. The fix had been tested against the reported
+  steps, not against the states the slot could already be in. (b) **A class scan that searched
+  for the defect's SQL missed the defect's doors.** DEF-049's first scan looked for bare
+  `DELETE FROM <ledger>` outside the store and found one; the three 公司行動 delete/edit doors
+  went THROUGH the store and still skipped the replay guard. Walking the route table (every
+  DELETE/PUT that changes a ledger row) found them. (c) **A hand-picked field list certified the
+  fields it named.** DEF-016's guard compared `sell_hint_adjusted_avg` but not the hint's share
+  count, which came from a second holdings path that read all dates — the one value that stayed
+  wrong. (d) **Ellipsis is invisible to an overflow guard.** The 390-px guard looked for page-level
+  horizontal scroll and deliberately skipped `overflow: hidden` elements, so 23 truncated
+  subtitles never registered. **Rules:** (1) For any fix that writes or removes shared state,
+  enumerate what the target slot can already hold (nothing / the market's row / another writer's
+  row / an orphan of our own) and test save + every undo path for each; a promise to restore must
+  come from a record of what was written, not from a signature an orphan can also carry. (2) Scan
+  a class by its ENTRY POINTS (routes, doors, callers) as well as by its statements; the defect is
+  "a door that mutates without the guard", and a statement scan only sees doors that write SQL
+  themselves. (3) Guard a projection by comparing the WHOLE payload before/after, not a list of
+  fields chosen by the author of the fix. (4) A "nothing overflows" guard must also measure
+  clipped content (`scrollWidth > clientWidth` on elements that hide overflow), or truncation
+  passes as tidy.
+
+## 2026-09-25 — Functional-test manual R4 → R5
+
+**What happened.** The verifier bounced DEF-056 a second time for a surface, not a rule: the
+valuation cut was right everywhere, the API flagged the row, the printed report drew the line —
+and the on-screen 現金收支明細 printed the future row under a header whose 目前餘額 excluded it.
+R4's guard listed the seven tables it knew about. Separately, the verifier's e2e runs went red
+2 of 3 times on a single console line, `500 GET /api/ui-prefs`, which I had reported as 288/288
+green because my one run happened not to hit it.
+
+**Root causes.** (1) A guard that enumerates known surfaces cannot notice an unknown one — the
+same shape as R2's hand-written file list for the account-name scanner. (2) A read path that
+seeds: `config_store.ensure_seeded` checked "seeded?" with a plain SELECT and then INSERTed, so
+two first reads collided on `settings_meta`; and 22 of 81 GET routes wrote on their first call
+(15 on every call), none of which any test could see because TestClient sends one request at a
+time and the hermetic fixture never runs the real boot.
+
+**Rules.**
+1. **Guard the class by sweeping the output, not by listing the inputs.** For "every future row
+   is badged": seed one of every kind, open every view that lists rows, fail on any row that
+   prints the date without the badge. A new table is covered the day it ships.
+2. **A GET never writes.** Every table a read touches is created at boot; seed-once is decided
+   under the write lock. Prove it by booting the real lifespan and tracing every GET's SQL with
+   the write lock held elsewhere — `CREATE TABLE IF NOT EXISTS` on an existing table is a
+   prepare-time no-op and survives that; anything else does not.
+3. **One green e2e run is not a gate verdict for a flaky class.** When a failure is timing-shaped
+   (a console 500, a race), reproduce it deterministically off-browser (interleave the two
+   threads at the window) before claiming the cause, and report the full suite run several times.
+4. **My own earlier fix can be the class.** The every-call write on `/api/dashboard` was the R3
+   DEF-033 version backfill I added; the scan by entry point found it, a grep for the verifier's
+   named line would not have.
+5. **Stopping a background task does not stop what it spawned.** Stopping the old-code e2e loop
+   left its pytest, uvicorn and headless Chromium alive and still iterating; together with the
+   first gate run they exhausted the 8 GB machine and the gate run was reaped. After any
+   background test loop, list python / chromium processes and kill the whole tree; run the heavy
+   gates one at a time in the foreground, in batches that finish inside one call.
+
+## 2026-09-26 — Functional-test manual R5 → R6
+
+**What happened.** The verifier ran the eight cases that had been BLOCKED on the demo (no
+scheduler, no LLM key, no way to move the clock) in a local environment with the scheduler on,
+a fake LLM and a frozen clock, and four of them failed: a missing dependency that only an error
+path imports, a job that recorded 成功 while every symbol failed, shadow cards in user lists, and
+a shadow cap that stopped the self-correction loop after its first batch. None of these could be
+seen by a suite that mocks the provider, runs one batch, or checks only a return type.
+
+**Root causes.** (1) **A dependency missing on an error-only path.** LiteLLM imports `tenacity`
+only when a provider call fails and retries are on; every LLM test replaced
+`litellm.completion` wholesale, so the library's own exception branch never ran in-process.
+(2) **A permissive default nobody pinned.** `_outcome_of` turns a bare string into `ok`; one job
+family had been taught to return a status and the rest kept the default. (3) **Tests that
+encoded the defect as a step or as a fixture.** The door-2 e2e selected the right account by hand
+after a comment noting it opened on the wrong one; the calibration fixture labelled misses
+`calibration_version=1` where real data writes NULL, so sampling "v1" happened to work; the only
+two-run calibration test asserted that the same misses produce v2. (4) **An allowlist reason
+that was never true** ("the newest live version is active by default") excused a route with no
+caller — and hid a missing button for two rounds. (5) **A guard that checks form, not content.**
+The full-width punctuation guard listed 「3 alert(s) [a, b], 2 dispatched」 as a string it must
+NOT flag: an all-English sentence has no Chinese for a half-width mark to touch.
+
+**Rules.**
+1. **Drive the real library through its failure path at least once.** For every external client
+   we wrap (LiteLLM here), one test calls the REAL entry point with an injected failure
+   (`mock_response=<Exception>`), no network — that is the only place a lazily imported
+   dependency or a global side effect shows up. Better still, own retries ourselves and pass
+   the library `num_retries=0`.
+2. **A permissive default is a decision; pin it or remove it.** If a job can finish without
+   raising yet lose part of its work, it returns an explicit outcome; a test runs every job on
+   both branches and asserts the status AND the sentence.
+3. **A fixture must look like production data.** Before trusting a fixture, write down what the
+   real writer stores for the same state (NULL vs 1, one batch vs two, same instant vs a day
+   later) — a fixture that is "convenient" is where a defect hides.
+4. **An allowlist reason is a claim about the product; verify it when you read it.** Re-read each
+   remaining entry's reason whenever the guarded thing changes, and delete the entry if the
+   reason is false.
+5. **Guard the property, not a proxy for it.** "Chinese detail" is a language property —
+   scan for English words, not for half-width marks next to Chinese. "The badge is shown" is a
+   visibility property — assert `to_be_visible`, not `to_have_text` (R6 measured: the old
+   DEF-056 tests passed 4/4 with the cut line and badges hidden by CSS).
+6. **When the spec leaves a choice or my reading differs, ask the owner in chat the same
+   round** (owner directive 2026-09-26) — the workbook records the answer for the verifier, it
+   does not carry the question for another round trip.
+
+## 2026-09-26 — Functional-test manual R6 → R7
+
+**What happened.** DEF-077 passed on its verdict and failed on its colour. The FX-triangle note
+said 「（一致）」 inside the same amber box as 「排程器未啟動」: `.fresh-note` is amber by DEFAULT,
+and the fix set an inline amber on `ok === false` and nothing on the other two states. The R6 e2e
+read `n.style.color` and asserted it was empty — which is true of any element whose colour comes
+from a stylesheet. R6's own lesson 5, written the same day, was "guard the property, not a proxy
+for it", and the test that shipped beside it asserted a proxy.
+
+**Root causes.** (1) **An inline colour can only ADD a state.** It cannot remove what the
+element's class already paints, and a branch that sets it without every other branch clearing
+it hands its colour to the next render (the AI status chip: 偏低 → 已關閉 stayed amber).
+(2) **A rule guarded by name is a rule for two functions.** M10-02 wrote "the warn face is a
+class, not inline" and pinned the toast and the partial dot; nothing looked at the other 13
+files.
+
+**Rules.**
+1. **Colour is a computed property.** A test of what the user sees reads `getComputedStyle`
+   (colour AND background) and compares it with the page's own tokens resolved in the page —
+   never `element.style`, never the class list.
+2. **Test every state of a tri-state display, including the one you did not change** — R6
+   pinned the two neutral states and skipped `ok === false`, so "all neutral" would have passed.
+3. **A state colour is a class with a stylesheet rule.** An inline colour is allowed only where
+   no state can inherit another's (built fresh for one state, or every branch assigns), and
+   `tests/contract/test_def077_state_colour_is_a_class.py` makes each such site a reviewed entry.
+
+## 2026-09-27 — Functional-test manual R8 → R9
+
+**What happened.** The verifier's full re-run on the final commit found the M9 symbol check
+telling the owner that 「3008 (LARGAN)」 was 「可能是模型幻覺」. LARGAN is 3008's registered name. The
+check asked "is this token a registered symbol?" and never "is it the registered NAME of one?".
+Its allowlist had been tuned on the 48 hits measured on 2026-09-17 (indicators, ratios, ratings),
+all correct then; the first card to write a company by its English name arrived after R1.
+
+**Root causes.** (1) **A "does this exist?" check knew one of the entity's two identifiers.**
+The registry names an instrument by `symbol` AND `name`; a card may cite either. (2) **An
+allowlist built from observed hits covers the observations.** New data brings new shapes; the
+known forms should come from the registry's columns, not from the false positives seen so far.
+
+**Rules.**
+1. **Check existence against every identifier the registry holds**, derived from its columns
+   (symbol, name, their normalised forms), not from a list of hits.
+2. **When a rule says "X is never a Y", apply it at the ONE place every path goes through.** The
+   first draft filtered digits and one-letter tokens from name WORDS but added the whole name
+   unfiltered — the docstring promised more than the code did, and only a self-review read the
+   two side by side. One filter over all forms made a whole-name 「6883」 as safe as a word.
+3. **A mutation that stops failing after a refactor may be equivalent, not a hole** — widening
+   the word regex to digits survived once the digit filter covered every form; confirm by the
+   neighbouring mutation (dropping the digit filter) before adding a test.
+
+## 2026-09-29 — Functional-test manual R10 → R11
+
+**What happened.** The verifier's full re-run found that the fallback model of all three AI
+roles had never answered a structured request on a real provider. `shared/llm.py` sent
+pydantic's `model_json_schema()` as `response_format`; every `Decimal` field carries a
+lookahead `pattern` Anthropic's regex compiler refuses, and the AI door's union is a `oneOf`
+Bedrock refuses. DEF-066 (R5) had fixed the fallback's retry path, and its re-verification ran
+against a fake endpoint — which, like every fake in the suite, accepts any schema. The failover
+then hid the failure: the AI door showed the answering model's name under 「✓ 解析完成」.
+
+**Root causes.** (1) **The only validator of an outbound contract was the real counterparty.**
+Every LLM test replaced `litellm.completion`, so what a provider would REFUSE was untestable by
+construction; the one test about `response_format` asserted a property name was present.
+(2) **A seam that returns only the value hides everything else it knows** — which model
+answered, which failed first, which usage row it billed. The AI door reconstructed the model
+from "the newest usage row" and could not know a failover had happened; its confession capture
+could not name a model at all (DEF-084).
+
+**Rules.**
+1. **Encode the counterparty's documented limits as a checker, and run it over everything you
+   send** — found by scan, not by list. A fake that accepts anything proves nothing about a
+   contract the real peer enforces.
+2. **A judge may not be built from the defendant's constants.** The first `schema_violations`
+   derived its allowed keywords from the transform's own copy-list, so the mutation "copy
+   `pattern` through" blinded the transform and the checker at once and the per-schema test
+   stayed green. Spell the judge's rule out on its own.
+3. **A silent fallback is a reporting obligation.** When a chain answers with a candidate other
+   than the first, the caller gets the failures with the answer; a page that names the model
+   must also say why it is not the one asked for.
+4. **A frontend action no backend path sends is a dead fix** — check both directions. The
+   dry run's red 「AI 額度」 row had no button while 「前往額度設定」 had been defined for it all
+   along; the existing guard checked only backend → frontend.
+
+## 2026-09-30 — Functional-test manual R11 → R12 (three follow-ups after the sign-offs)
+
+**What happened.** After R11 closed, the verifier's notes named three things nobody had tested:
+a gemini reply cut off mid-string was booked 0 tokens / $0 (the provider sent no usage block and
+LiteLLM filled in zeros); `evaluate_insights` #212 spent $0.0021532 on a run row that said
+nothing; and the quota alert printed its amounts with a private `_usd` while R11 had just
+unified three other surfaces on `usd_display`.
+
+**Root causes.** (1) **A default read as a measurement.** Three seams took the provider's token
+counts on trust; zero is what an absent field becomes, and a call always has prompt tokens.
+(2) **A total re-derived at read time instead of recorded at write time.** A static run's spend
+was reconstructed for one popover from agent names and a time window, so the run history — the
+same run — printed —; an insight run added up what it PRODUCED, not what it PAID, and every fake
+provider in the suite answered on the first try, so the two sums never differed in a test.
+(3) **A class check written as a list.** R11 pinned the three surfaces it had fixed by name; the
+fourth USD formatter sat in a module the list did not name.
+
+**Rules.**
+1. **"Missing" is not "zero".** When a counterparty may omit a figure, decide explicitly what
+   absence means (here: not reported → local estimate, marked), and never let a library default
+   stand in for a measurement.
+2. **Record a total where it is incurred, from the ledger rows themselves.** A context-scoped
+   tally at the one writer (`log_usage`) makes "the run's cost = the sum of its usage rows" true
+   by construction; innermost-only keeps a nested run from being booked twice. A test must make
+   the paid and the produced sums differ (a retry, a failover) or it cannot tell them apart.
+3. **A class guard scans; it does not enumerate.** Every "the N sites we fixed" test is a list
+   waiting for the N+1st — derive the sites from the code (AST over every f-string, every
+   `log_usage` call, every run closer) and whitelist the exceptions with their reasons.
+4. **An export is a surface.** The class scan for both findings reached the CSVs only on the
+   second pass (the usage export printed an estimate as measured; the job_runs export dropped the
+   spend) — list a finding's surfaces by doors and downloads, not by pages.
+
+## 2026-09-30 — the owner's 18 rulings after closure (three parallel agents + the lead)
+
+**What happened.** Ten fixes went through three subagents and the lead at once. Twice the
+parallelism nearly cost work: the lead's mutation runner rewrote `api/routers/insights.py` for
+20 seconds while an agent owned that file (nothing was lost — the agent had not edited it yet),
+and an agent's full-tree test run hit the lead's half-finished `cost_basis.py` edit, where a new
+local `gross` shadowed the function's existing `gross` dict. The full suite then found a pinned
+census (`_EXPECTED_HTML_TABLES`) no agent had run, because each ran only its targeted tests.
+
+**Rules.**
+1. **Never mutate a file another live agent may own.** A mutation runner restores what it READ,
+   so an edit made inside its window is silently reverted. Run mutations on your own files, or
+   after the other agents report.
+2. **Before introducing a local in a long function, grep the name.** `gross` meant "gross
+   invested per currency" 200 lines up; the new `gross` made it a Decimal and every
+   dashboard-building test failed with `'Decimal' object is not subscriptable`.
+3. **Tell every agent to run the repo's census and guard tests, not only the tests near its
+   change.** A new page element changes a pinned count far from the code that added it.
+4. **Settle before you sum.** A value of record that is a product (quantity × price) needs the
+   same quantization at every reader, or the cash pool, the cost basis and the preview disagree
+   by fractions of a cent; one helper plus an AST scan of every product makes that a rule.
+
+## 2026-10-01 — item 8: a card names each code by one of its names
+
+**What happened.** Three things were caught by the checks, not by eye. (a) The first naming
+table listed the whole registry, and the per-market isolation guard failed: the TW prompt now
+carried AAPL. (b) The first name check, measured on the demo's 224 real cards, flagged unit
+words (USD), generic referents (標的, 美股) and date notes in brackets. It shipped only after the
+corpus read 27 pairings on 10 cards, each one checked by hand. (c) A subagent found the alias
+rule enforced in one direction only: an alias equal to another instrument's name was refused,
+but a NAME equal to another instrument's alias was accepted, so 「長榮」 could still mean 2603
+and 2618.
+
+**Rules.**
+1. **Text appended to a prompt inherits the prompt's scope.** A table built from the registry
+   must be cut to the codes the prompt already mentions, or it leaks exactly what the
+   per-market guard exists to keep out.
+2. **Measure a free-text validator on the real corpus before wiring it to a gate.** Every false
+   alarm on 224 stored cards becomes a dropped card at generation time (寧缺勿錯 costs
+   something only when the check is wrong).
+3. **A uniqueness rule between two sets has two directions.** "An alias may not be another
+   instrument's name" needs its mirror, "a name may not be another instrument's alias". Test
+   both doors and the rename path (a rename onto its own alias drops that alias from the list).
+4. **Write regex character classes for CJK and full-width punctuation as `\u` escapes.** They
+   are patterns, not copy; the zh punctuation guard reads every string literal, and a literal
+   「（」 inside a pattern reads to it as a mixed-width sentence.
+
+## 2026-10-01 — R13: the verifier's full rerun before prod
+
+**What happened.** The pre-prod rerun on 830056c found three defects my own gates had passed.
+(a) DEF-087: the export guard (`test_exports_never_print_scientific_notation`) was red from
+e8bcf53 on. The bare `str()` it flags came in as the fix for ANOTHER guard's failure late in
+that round, and afterwards only the failed tests were re-run, never the batch that holds the
+export guard. (b) DEF-090: the withdraw and 換匯 guards compared the pool's lowest point before
+and after, so a new negative stretch shallower than an older dip went through — the same
+"aggregate hides the event" class as the net-only sell check of 2026-07-31. (c) DEF-089: the
+name check accepted any two-character leading part, so 「長榮 (2618)」 passed although 長榮 is
+2603's alias — the mix-up item 8 exists to stop, let back in by its own convenience rule.
+
+**Rules.**
+1. **The last full suite runs after the last code change of the round — and its batches must
+   add up to the collection.** A fix for one guard can break another that already ran green;
+   re-running only the failures certifies only the failures. Compare the batch totals with
+   `pytest --collect-only -q` before reporting a pass.
+2. **Never compare two timelines by their extremes.** "Did the low get lower" cannot see a new
+   dip that is shallower than an old one. Compare day by day, and say which question each
+   door asks: the hard guards refuse any day made worse; a correction door asks only about a
+   day it turns negative or pushes below the old low.
+3. **A leniency must be checked against every OTHER entry it could match.** A prefix rule that
+   only asks "is this a prefix of my name" accepts other instruments' names; ask "does it point
+   at me alone".
+4. **A confirmation must be about what the action causes.** The single-row cash doors asked
+   about ANY dip in the pool and phrased it 「此筆會使…」, so deleting a withdrawal quoted an
+   older, unrelated −220,000 (DEF-092, R14). A prompt that fires on conditions the action did
+   not create is either false or trains the owner to click through; one rule (`caused_dip`)
+   now serves every ack-able cash door.
+5. **A door that edits a two-legged row checks every pool it touches.** `fx_delete_guard`'s own
+   docstring said "a guard that inspects one leg is a guard that misses the next one", and the
+   edit door next to it inspected one leg: a smaller 換入金額 drained the TO-pool with no
+   question (DEF-093, R15). When one door of a row is fixed, read its siblings' guards against
+   the same sentence.
+
+## 2026-10-04 — the pre-merge code review: what a closed black-box manual could not see
+
+**Context.** The day after the functional-test workbook closed (120 cases, three-party
+sign-off on d9f1c68), an xhigh code review of `feat/corporate-actions` before the merge into
+`main` found 14 issues (CR-01..CR-14), five reproduced by probe: a 賣超 netted back to zero
+vanished on delete; one dividend CSV row for a never-held symbol took the dashboard to 500; an
+edit that moved a row's date replayed a different same-day order than the ledger would have; a
+期初 edit rewrote the original cost. Three parallel fixers closed them; a final review of the
+merged tree then found 12 more (R1..R12), one of them a regression of a fix.
+
+**Why the manual missed them** (investigated against the workbook's 120 cases and 93 defects):
+(a) cases are one per feature door on a clean path, while all 11 functional findings need a
+specific prior HISTORY plus a correction (edit / delete / undo); (b) every delete / undo case
+deletes a row the tester had just created (B-14 「刪除自建交易」, I-08 after I-07, D-10, J-03),
+which nothing depends on and is therefore always safe — the one time a test deleted a row with
+dependents (DEF-049, found in passing) it found a defect; (c) 2 of 6 ledgers have edit cases
+(trades, cash) — none for 期初, dividends, FX or corporate actions, hence CR-04 / CR-09 had no
+case at all; (d) class scans followed the axis of the reported defect: DEF-042's root-cause
+line IS CR-03's line (`would_be = [edited if t.id == txn_id else t …]`), fixed for the missing
+date warnings while DEF-012 fixed same-day order at the ENTRY doors; DEF-049 made the batch undo
+call the oversell guard without asking whether the guard sees a zero-net position; DEF-061
+unified four type checks, not "what makes `build_book` raise"; DEF-009 freed date / type /
+amount / note while the account was the other half of the inbox link (CR-10); (e) the manual's
+own R13 rule told the tester to use another holding after D-06 had vacated 2884 — routing around
+CR-06; (f) CR-04's symptom is 10⁻²³ — invisible at two decimals.
+
+**And in the fix round.** (g) CR-07 bound a warning acknowledgement to the warning's TEXT; its
+tests used a warning that names no account, and `web/api.js` rewrites every `{account:<id>}`
+token in every response — so any account-naming warning could never be acknowledged (R1, found
+by the final review, not by the fixer's green e2e). (h) The `isolation: "worktree"` agents came
+up on `main` (v0.1.28, 170 commits behind), not on the branch. (i) Merging the fixers' work, A's
+orphan fix re-read the dividends that C had just made a one-read; C's count test caught it.
+(j) I started the full gates while the final review was still running; its findings changed the
+tree and ~1 h of gates had to be re-run.
+
+**Rules.**
+1. **Test a correction door against a history, not a fresh row.** The dangerous inputs are an
+   OLD row with dependents, a date moved across a same-day sibling, a position that nets to
+   zero, a ticker reused after an exchange. A contract matrix (history shape × correction door,
+   asserting "the guard's would-be replay = the replay after the write" and "the dashboard never
+   500s") covers what scripted manual cases cannot.
+2. **A class scan includes every function the defect's line lives in, along every axis.** When a
+   root cause names a line, list the other questions that line answers (order, completeness,
+   dating) and check each.
+3. **Bind a client's acknowledgement to an opaque server key, never to text the client may have
+   rewritten.** Any transport that resolves tokens, localises or trims makes text equality a
+   coin toss; and a fix's test must use data that goes through that transport (an
+   account-naming warning).
+4. **A mutation test proves a fix is load-bearing, not that the guard is complete.** Also ask
+   which inputs the guard never sees.
+5. **Worktree agents: check the base first** (`git log -1`, reset to the target sha, report the
+   merge-base) and re-run every count / contract test of the seams after merging parallel work.
+6. **The final review belongs to the round.** Merge → review → fix → THEN the heavy gates once.

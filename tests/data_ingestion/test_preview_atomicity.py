@@ -141,9 +141,10 @@ def test_hard_rows_skipped_rest_written_no_rollback(
     summary = commit_preview(
         conn, preview, accept=accept, writer=write_transaction_row
     )
-    # The two valid rows are written; the hard row is skipped (no rollback).
+    # The two valid rows are written; the hard row is REJECTED (no rollback). Its own
+    # bucket since C3 — an intentional partial success, still not a rollback trigger.
     assert len(summary.written) == 2
-    assert summary.skipped == [1]
+    assert [r.index for r in summary.rejected] == [1] and summary.skipped == []
     assert len(list_transactions(conn, account_id="tw_broker")) == 2
 
 

@@ -353,6 +353,18 @@ textarea.input { font-family: var(--font-num); line-height: 1.6; resize: vertica
 table.vars-table td { height: auto; padding: 6px 8px; }
 .vars-name { font-weight: 600; white-space: nowrap; }
 .vars-desc { color: var(--text-2); font-size: 11px; }
+/* DEF-002: `table.data td` is `nowrap`, so the 說明 column alone laid each table out at
+   1,780-3,652px. The description is prose — let it wrap (with a readable floor) so the
+   `.table-wrap` scroller only has to carry the short code/name/scope columns. */
+table.vars-table td.vars-desc { white-space: normal; min-width: 220px; }
+/* DEF-002 class sweep: settings-users.js renders its 授權用戶 table straight into this host
+   (the host is shared with the empty-state sentence, so the scroller is the host itself). */
+#users-wrap { overflow-x: auto; }
+/* DEF-002: a `.table-wrap` only scrolls if its box is allowed to be narrower than the table.
+   A grid item's automatic minimum is its min-content width, and `.table-wrap table` is
+   `min-width: 640px` at phone widths — so wrapping the 加值歷史 table grew the 1fr track to
+   640px and pushed the page 283px sideways at 390px (measured by the expanded sweep). */
+.billing-grid > * { min-width: 0; }
 .vars-scope { white-space: nowrap; color: var(--text-3); font-size: 10.5px; }
 .tpl-var-sel { max-width: 240px; font-size: 11px; }
 
@@ -396,7 +408,29 @@ table.vars-table td { height: auto; padding: 6px 8px; }
 .tpl-head .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .tpl-body { padding: 0 14px 12px; display: none; }
 .tpl-card.open .tpl-body { display: block; }
-.tpl-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+.tpl-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;
+  flex-wrap: wrap; }
+/* DEF-033: 版本記錄 modal — the history list and the server-computed line diff. */
+.ver-list { display: flex; flex-direction: column; gap: 4px; }
+.ver-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 11px; padding: 6px 8px; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); }
+.ver-row.is-current { border-color: rgba(88, 166, 221, 0.45); }
+.ver-no { font-family: var(--font-num); font-weight: 700; min-width: 32px; }
+.ver-time, .ver-size { font-family: var(--font-num); color: var(--text-3); }
+.ver-src { color: var(--text-2); }
+.ver-acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.ver-diff-pre { max-height: 320px; }
+.ver-confirm { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--amber); border-radius: var(--radius-sm); font-size: 11.5px;
+  line-height: 1.6; color: var(--text-2); }
+.ver-confirm[hidden] { display: none; }
+.ver-confirm-acts { display: flex; gap: 8px; justify-content: flex-end; }
+.ver-line { display: block; white-space: pre-wrap; }
+.ver-line.ver-add { background: rgba(63, 185, 80, 0.14); color: var(--text); }
+.ver-line.ver-del { background: rgba(248, 81, 73, 0.14); color: var(--text-2);
+  text-decoration: line-through; }
+.ver-line.ver-same { color: var(--text-3); }
 .tpl-vars { font-size: 10px; color: var(--text-3); margin-top: 6px; }
 .tpl-vars code {
   font-family: var(--font-num);
@@ -526,6 +560,18 @@ table.data td.log-msg {
 /* prompt: system card */
 .sys-prompt-card { padding: 12px var(--pad) 14px; display: flex; flex-direction: column; gap: 8px; }
 .sys-prompt-card textarea.input { min-height: 170px; }
+
+/* prompt: news-organizer panel (spec 2026-09-10) — official/custom badge + field reminder.
+   The badge is `.badge` (styles.css) with two states the backend decides; the reminder is
+   amber like a soft issue and never blocks (owner D4(a)). */
+.prompt-badge { margin-left: 8px; vertical-align: 1px; font-weight: 500; letter-spacing: 0; }
+.prompt-badge.is-official { color: var(--ok); border-color: rgba(79, 174, 108, 0.4); background: var(--ok-soft); }
+.prompt-badge.is-custom { color: var(--amber); border-color: rgba(217, 161, 63, 0.4); background: var(--amber-soft); }
+.prompt-schema-hint {
+  font-size: 11px; color: var(--amber); background: var(--amber-soft);
+  border: 1px solid rgba(217, 161, 63, 0.35); border-radius: var(--radius-sm); padding: 6px 9px;
+}
+.prompt-schema-hint[hidden] { display: none; }
 
 @media (max-width: 1000px) {
   .billing-grid { grid-template-columns: 1fr; }

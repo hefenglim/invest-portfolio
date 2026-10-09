@@ -149,7 +149,8 @@ def test_csv_unknown_account_hard_blocks(conn: sqlite3.Connection) -> None:
     p = build_opening_preview(conn, csv)
     assert p.rows[0].has_hard_issue
     summary = commit_preview(conn, p, accept={0}, writer=write_opening_row)
-    assert summary.written == [] and 0 in summary.skipped
+    assert summary.written == [] and summary.skipped == []
+    assert [r.index for r in summary.rejected] == [0]
 
 
 # --- boot-seam migration: legacy DB drops the retired column, data preserved ---------------

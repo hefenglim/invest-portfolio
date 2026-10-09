@@ -25,38 +25,88 @@ New in round-8.1 Wave A:
   · ``activity_reconcile`` — the 期初＋買−賣(＋配股/DRIP)＝部位摘要 share identity, computed
     server-side (total + per-account) so the drawer footer never sums shares in JS.
 
+New in W5 (corporate actions, spec §6.3):
+  · the identity gains a ``＋公司行動`` term — ``corporate_delta_shares`` — WITHOUT which
+    every symbol carrying an action reports ⚠ 對帳不一致 (measured on the demo corpus
+    2026-08-11: ORBT −60/−40, VRTA −40, VRTB +40, KEMG −1,000).
+  · ``activity`` gains the corporate-action rows, so the term is traceable to the events
+    that produced it.
+  · ``action_issues`` — the three distinct "this position is not trustworthy" channels a red
+    footer needs beside it (F-17): the replay's refused rows, the depth-capped walks (D31)
+    and the negative-side skips (D33).
+
+New in CR-01 / CR-02 (2026-10-04):
+  · ``ledger_issues`` — a 賣超 netted back to zero shares, and a dividend with no position:
+    the two trade / dividend ledger problems no holding row can carry.
+
 ``cost_basis`` binds to the account holding the most shares of the symbol (Q1); ``null`` for
 a non-held / watchlist symbol.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
+
+# The correction doors' own 賣超 sentence (a sibling module of this router, same layer), so the
+# drawer names the day a 賣超 broke in exactly the words the 422 that asked about it used.
+from portfolio_dash.api.replay_guard import _oversell_phrase as oversell_phrase
+from portfolio_dash.api.wire import unbooked_wire
+from portfolio_dash.data_ingestion.holdings import (
+    _shares_until as shares_naive,  # §6.3's second term, by NAME — see _corporate_delta
+)
+from portfolio_dash.data_ingestion.holdings import (
+    load_action_index,
+    shares_through,
+)
 from portfolio_dash.data_ingestion.store import (
+    StoredCorporateAction,
     list_accounts,
+    list_corporate_actions,
     list_dividends,
     list_instruments,
     list_opening,
     list_transactions,
+    load_ledger_bundle,
+)
+from portfolio_dash.portfolio.cost_basis import (
+    CASH_MOVEMENT_REMEDY,
+    ORPHAN_DIVIDEND_REMEDY,
+    orphan_dividend_message,
 )
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import HoldingRow
-from portfolio_dash.portfolio.results import RealizedRow
+from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
+from portfolio_dash.portfolio.position_aggregate import aggregate_position
+from portfolio_dash.portfolio.price_basis import series_in
+from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
+from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.shared.corporate_actions import ActionIndex, kind_label
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import OpeningInventory, Transaction
+from portfolio_dash.shared.models.ledger import (
+    Dividend,
+    OpeningInventory,
+    Transaction,
+    counts_by,
+    dividend_effective_date,
+    pending_from,
+)
+from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
 _ZERO = Decimal("0")
+# 100% payback — the 已回本 threshold, materialised so the two wire sites below test the
+# same Decimal and neither can drift into a float or a string comparison.
+_ONE = Decimal("1")
 
 # Share-reconciliation tolerance (owner ruling 2026-08-06): ignore anything past the 6th
 # decimal place of a SHARE COUNT. DRIP/STOCK reinvest shares are stored as `net / price`, a
@@ -80,6 +130,11 @@ _DIV_TYPE_WIRE = {
     DividendType.DRIP: "drip",
     DividendType.NET: "net",
 }
+
+
+def _iso_or_none(d: date | None) -> str | None:
+    return d.isoformat() if d is not None else None
+
 
 # DividendTypes that ADD SHARES (reinvest) rather than reduce cost — they contribute a row to
 # the unified activity list and to the reconciliation's reinvest bucket. CASH/NET reduce the
@@ -129,94 +184,324 @@ def _account_wire(h: HoldingRow) -> dict[str, Any]:
         "oversold": h.oversold,
         "short_open": h.short_open,
         "unbookable_dividend": h.unbookable_dividend,
+        "unbookable_action": h.unbookable_action,
+        # M1-03 / D21: whose dividends `payback_ratio` is built on (None unless a SPINOFF fed
+        # this position). Decimal strings like every other money field of the row.
+        "payback_from_symbol": h.payback_from_symbol,
+        "payback_carried_dividends": _dstr_or_none(h.payback_carried_dividends),
+        "payback_own_dividends": _dstr_or_none(h.payback_own_dividends),
         # 已回本: cumulative cash dividends have fully repaid the original cost, so the
         # adjusted basis has gone <= 0 (legal per domain-ledger.md). Decided HERE with an
         # exact Decimal comparison so the UI never threshold-tests a Decimal string.
-        # The `not short_open` gate is load-bearing: a short's basis is NEGATIVE by
-        # construction, so the bare <= 0 test labelled every open short
-        # 「配息已完全沖減成本」 without a single dividend having been paid.
-        "fully_recovered": h.adjusted_cost_total <= _ZERO and not h.short_open,
+        #
+        # THREE conditions, because a basis reaches zero-or-below three ways and only one
+        # of them is a payback:
+        #  · `payback_ratio >= 1` — the reduction actually CAME FROM DIVIDENDS. Without it
+        #    a 賣超 qualified: an acked oversell DISCARDS the basis (`build_book` zeroes
+        #    both totals), so `<= 0` was true with `dividend_portion` 0, and the drawer
+        #    printed 「配息已完全沖減成本」 above 「累計配息 0」 — on the very position whose
+        #    賣超 badge was asking the owner to fix it. It also covers a zero-cost position
+        #    left by a SPINOFF with `cost_carry == 1`, and an `-ε` basis residue surviving
+        #    a full short cover. This is the ratio the LABEL IS ABOUT (manual §6.4).
+        #  · `adjusted_cost_total <= _ZERO` — the original condition, kept: the ratio is
+        #    over the ORIGINAL total, so this is the statement about the CURRENT basis.
+        #  · `not short_open` — kept for its own reason, not because a short's ratio is
+        #    incidentally 0 today: a short's basis is NEGATIVE by construction, which is
+        #    the trap this gate was added for (domain-ledger.md, 2026-07-31) and which
+        #    should stay written down rather than be absorbed into the ratio test.
+        "fully_recovered": (h.payback_ratio >= _ONE
+                            and h.adjusted_cost_total <= _ZERO
+                            and not h.short_open),
     }
 
 
 def _aggregate_position(
     rows: list[HoldingRow], inst: Instrument | None
 ) -> dict[str, Any] | None:
-    """Cross-account aggregate of a symbol's holdings (owner #2c) — server-side Decimal only.
+    """Cross-account aggregate of a symbol's holdings (owner #2c), serialized for the drawer.
 
-    All holdings of one symbol share the same quote currency, so the aggregate is a plain
-    Decimal sum (money) + a shares-weighted average cost (``total_cost / total_shares``,
-    computed on read per domain-ledger.md — never a stored rounded average). The frontend
-    prints these strings; it does NOT sum market value / unrealized / cost across accounts
-    (that would breach the "frontend never computes money" invariant — which is exactly why
-    this aggregation lives here). ``None`` when the symbol is not held.
-
-    Missing-price degradation mirrors the dashboard: a 缺價 holding carries ``None`` market
-    fields and is excluded from the value sums; because price is per-symbol, either every
-    holding of the symbol is valued or none is, so no partial-blend can occur.
+    The arithmetic is ``portfolio.position_aggregate.aggregate_position`` — lifted out of
+    this router on 2026-09-17 so the per-symbol LLM prompt can hand the model the SAME
+    totals (see that module's docstring); this router only serializes it, Decimal → string.
+    The frontend prints these strings; it does NOT sum market value / unrealized / cost
+    across accounts (that would breach the "frontend never computes money" invariant —
+    which is exactly why the aggregation is server-side). ``None`` when the symbol is not
+    held.
     """
-    if not rows:
+    agg = aggregate_position(rows)
+    if agg is None:
         return None
-    quote_ccy = rows[0].quote_ccy
-    total_shares = _sum([h.shares for h in rows])
-    original_total = _sum([h.original_cost_total for h in rows])
-    adjusted_total = _sum([h.adjusted_cost_total for h in rows])
-    dividend_portion = _sum([h.dividend_portion for h in rows])
-
-    mv = [h.market_value for h in rows if h.market_value is not None]
-    ur = [h.unrealized_pnl for h in rows if h.unrealized_pnl is not None]
-    cg = [h.capital_gain for h in rows if h.capital_gain is not None]
-    wt = [h.weight for h in rows if h.weight is not None]
-
-    # market_price / staleness are per-symbol identical; take them from a priced row.
-    src = next((h for h in rows if h.market_price is not None), rows[0])
-
-    original_avg = original_total / total_shares if total_shares != _ZERO else _ZERO
-    adjusted_avg = adjusted_total / total_shares if total_shares != _ZERO else _ZERO
-    payback = dividend_portion / original_total if original_total != _ZERO else _ZERO
-    # Aggregate unrealized % on the SAME basis as the per-holding figure (audit H1):
-    # Σ unrealized / Σ original cost. Server-side Decimal; the drawer only prints it.
-    unrealized_sum = _sum(ur) if ur else None
-    # abs(): a short's basis is negative (proceeds received) and would flip the sign, showing
-    # a profitable short as a loss. Same guard as the per-holding figure in dashboard.py.
-    unrealized_pct = (
-        unrealized_sum / abs(original_total)
-        if unrealized_sum is not None and original_total != _ZERO
-        else None
-    )
-
     return {
-        "account_count": len(rows),
-        "symbol": rows[0].symbol,
-        "quote_ccy": quote_ccy.value,
+        "account_count": agg.account_count,
+        "symbol": agg.symbol,
+        "quote_ccy": agg.quote_ccy.value,
         "name": inst.name if inst is not None else None,
         "market": inst.market.value if inst is not None else None,
         "board": inst.board if inst is not None else "",
-        "shares": decimal_str(total_shares),
-        "original_avg": decimal_str(original_avg),
-        "adjusted_avg": decimal_str(adjusted_avg),
-        "original_cost_total": decimal_str(original_total),
-        "adjusted_cost_total": decimal_str(adjusted_total),
-        "dividend_portion": decimal_str(dividend_portion),
-        "payback_ratio": decimal_str(payback),
-        "market_price": _dstr_or_none(src.market_price),
-        "market_value": decimal_str(_sum(mv)) if mv else None,
-        "unrealized_pnl": decimal_str(unrealized_sum) if unrealized_sum is not None else None,
-        "unrealized_pct": _dstr_or_none(unrealized_pct),
-        "capital_gain": decimal_str(_sum(cg)) if cg else None,
-        # weight is a dimensionless ratio; summing the per-account weights server-side
-        # (Σ mv_i/total) gives the aggregate share of portfolio value. Still done here, not
-        # in JS, to keep ALL of 部位摘要's numbers server-authoritative.
-        "weight": decimal_str(_sum(wt)) if wt else None,
-        "price_stale": src.price_stale,
-        "price_as_of": src.price_as_of.isoformat() if src.price_as_of is not None else None,
-        "oversold": any(h.oversold for h in rows),
-        "short_open": any(h.short_open for h in rows),
-        "unbookable_dividend": any(h.unbookable_dividend for h in rows),
-        # 已回本 across the aggregated position (see _account_wire).
-        "fully_recovered": (adjusted_total <= _ZERO
-                            and not any(h.short_open for h in rows)),
+        "shares": decimal_str(agg.shares),
+        "original_avg": decimal_str(agg.original_avg),
+        "adjusted_avg": decimal_str(agg.adjusted_avg),
+        "original_cost_total": decimal_str(agg.original_cost_total),
+        "adjusted_cost_total": decimal_str(agg.adjusted_cost_total),
+        "dividend_portion": decimal_str(agg.dividend_portion),
+        "payback_ratio": decimal_str(agg.payback_ratio),
+        "market_price": _dstr_or_none(agg.market_price),
+        "market_value": _dstr_or_none(agg.market_value),
+        "unrealized_pnl": _dstr_or_none(agg.unrealized_pnl),
+        "unrealized_pct": _dstr_or_none(agg.unrealized_pct),
+        "capital_gain": _dstr_or_none(agg.capital_gain),
+        "weight": _dstr_or_none(agg.weight),
+        "price_stale": agg.price_stale,
+        "price_as_of": agg.price_as_of.isoformat() if agg.price_as_of is not None else None,
+        "oversold": agg.oversold,
+        "short_open": agg.short_open,
+        "unbookable_dividend": agg.unbookable_dividend,
+        "unbookable_action": agg.unbookable_action,
+        "payback_from_symbol": agg.payback_from_symbol,
+        "payback_carried_dividends": _dstr_or_none(agg.payback_carried_dividends),
+        "payback_own_dividends": _dstr_or_none(agg.payback_own_dividends),
+        "fully_recovered": agg.fully_recovered,
     }
+
+
+def _corporate_delta(
+    conn: sqlite3.Connection, index: ActionIndex, account_id: str, symbol: str,
+    *, as_of: date,
+) -> Decimal:
+    """§6.3's ``corporate_delta`` for one (account, symbol) — the DEFINITION, not arithmetic.
+
+    ::
+
+        corporate_delta(symbol, account) := shares_action_aware(...) − shares_naive(...)
+
+    Both terms live in ``data_ingestion/holdings.py``; both are SQL-path; **neither is
+    ``build_book``**. The spec spells out four reasons, and every one of them is a reason NOT
+    to re-derive the number here from the ratio arithmetic (``×(ratio−1)`` on a SPLIT,
+    ``+carried`` on an EXCHANGE's destination, …):
+
+    1. **Exact by construction.** The delta is *defined* as the action-attributable component
+       of the action-aware count, so no per-kind rule is restated and none can drift from the
+       replay's. A hand-written ``×(ratio−1)`` is a third implementation of §4's algebra.
+    2. **The identity stays a genuine cross-check** of two independent implementations — the
+       SQL share path against ``build_book``. Deriving the delta from ``build_book``'s own
+       output instead would make it circular: the footer would prove a number equals itself,
+       and §7.3's detection-power test would be testing the test.
+    3. **The transitive closure comes free.** A destination's shares reach back through
+       ANOTHER symbol's entire history (and a chain of them — a de-SPAC into a ticker later
+       renamed). ``symbol_detail`` loads only THIS symbol's ledgers — every one of the three
+       loads in the route body filters on this symbol — so the data is simply not here; the
+       walker reaches it, and this router never learns another symbol's ledger.
+    4. It answers per-account and (summed) aggregated, which the footer and the per-account
+       breakdown both need.
+
+    *index* is the ONE per-request :class:`ActionIndex` (F-24 / trap #21). It is threaded
+    rather than rebuilt for a second, load-bearing reason: it also carries D31's depth-cap
+    sink and D33's negative-side-skip sink, which the walk MUTATES. A caller that builds its
+    own throwaway index loses those records and the 待釐清 chip silently never appears.
+
+    *as_of* is the valuation day (DEF-056, owner ruling 2026-09-24): both terms count only
+    what has happened by then — the action-aware walk at the CLOSE of *as_of*
+    (``shares_through``) and the naive sum strictly before the next day — because the book
+    they reconcile against (``build_dashboard``) is cut at that day. Taken over the whole
+    ledger, an action dated next week would add its shares to the footer while the book,
+    correctly, does not hold them yet. Required, with no default, so a caller cannot fall
+    back to the whole ledger by omission.
+    """
+    # `shares_naive` is holdings.py's `_shares_until` under §6.3's own name for it. Imported
+    # privately on purpose: the spec defines the second term AS that function ("shares_naive
+    # stays exactly as it is … renaming or 'improving' it silently changes the drawer's
+    # footer"), so re-summing an equivalent from this router's already-loaded ledger lists
+    # would make the delta `aware − our_own_sum` instead of `aware − naive`. Those agree
+    # today, and on the day they stop agreeing the second form ABSORBS the disagreement into
+    # the corporate term and the footer stays green over it. This form reports it.
+    return shares_through(conn, account_id, symbol, on=as_of, index=index) - shares_naive(
+        conn, account_id, symbol, as_of + timedelta(days=1)
+    )
+
+
+def _action_wire(
+    a: StoredCorporateAction, symbol: str, account_name: str, ccy: str | None
+) -> dict[str, Any]:
+    """One corporate-action row, serialized into the unified activity list's shape.
+
+    ⚠ **``shares`` is deliberately ``None``, not the row's own share delta.** Computing it
+    would mean re-deriving §4's ratio algebra per kind (``×(ratio−1)`` on a SPLIT,
+    ``−pre-action shares`` on an EXCHANGE's source, ``apply_ratio(source)`` on either
+    destination, ZERO on a SPINOFF's parent) against the position as it stood at the action's
+    own ``(date, priority)`` cut — a THIRD implementation of the walker's ``_delta_of``,
+    living in a router, and one whose only public approximation (``shares_on`` with a
+    ``before`` cut) gets F-18's same-day opening wrong. Written without the parentheses on
+    purpose: ``test_the_call_site_census_is_still_accurate`` greps for a CALL, and a prose
+    mention that looks like one would pin a call site this module does not have. §6.0's
+    "one owner per concept" is the rule and the
+    same-day case is the drift it would produce. The EXACT aggregate lives in the footer's
+    ``corporate_delta_shares``, sourced from the walker itself; this row's job is to name the
+    event that produced it — kind, ratio, counterpart symbol, date, account.
+
+    ``role`` is what the action did to THIS symbol, which is not a property of the row: the
+    same EXCHANGE is a departure for its source and an arrival for its destination, and a
+    SPINOFF's parent keeps its position entirely (§4.3 carves cost, not shares).
+    """
+    if a.from_symbol == a.to_symbol:
+        role = "self"          # SPLIT (E20 forces to == from): re-denominates in place
+    elif symbol == a.to_symbol:
+        role = "destination"   # shares arrive from another symbol's position
+    else:
+        role = "source"        # EXCHANGE empties it; SPINOFF leaves the shares alone
+    return {
+        "date": a.date.isoformat(),
+        "account_id": a.account_id,
+        "account": account_name,
+        "side": "action",
+        "shares": None,
+        "price": None,
+        "fee": None,
+        "tax": None,
+        "total": decimal_str(_ZERO),  # a corporate action moves no cash
+        "ccy": ccy,
+        "kind": a.kind,
+        # I-14: the ledger's own word (分割／換股／分拆), so the drawer prints the server's
+        # vocabulary instead of a private table (detail.js's said 「拆併股」 and SPINOFF 「分割」).
+        "kind_label": kind_label(a.kind),
+        "role": role,
+        "from_symbol": a.from_symbol,
+        "to_symbol": a.to_symbol,
+        # Two terms, never a quotient: `data-and-pricing.md` forbids a rounded quotient as
+        # the authority, and the drawer renders "3 股換 1 股" from the pair.
+        "ratio_to": decimal_str(a.ratio_to),
+        "ratio_from": decimal_str(a.ratio_from),
+        "cost_carry": _dstr_or_none(a.cost_carry),
+        "note": a.note,
+    }
+
+
+def _action_issues(
+    symbol: str,
+    unapplied: list[UnappliedAction],
+    index: ActionIndex,
+    acct_names: dict[str, str],
+) -> dict[str, Any]:
+    """The three DISTINCT "this position is not trustworthy" channels, for one symbol.
+
+    §6.3's red footer only works when the mismatch comes with its cause attached, and audit
+    F-17 found the cause had no way to reach the wire at all. They are three channels and not
+    one because they fail in three different places and need three different sentences:
+
+    * **``unapplied``** — ``Book.unapplied_actions``: rows the REPLAY refused. Not a
+      substitute for ``HoldingRow.unbookable_action`` and not substitutable BY it — two of
+      the three refusal shapes leave no surviving position to carry a flag (an EXCHANGE that
+      already emptied the source, and a source that never existed), so the flag is False and
+      the dashboard looks clean while an action was silently ignored.
+    * **``depth_capped``** — D31: the share WALK hit ``MAX_ACTION_DEPTH`` and fell back to
+      the action-unaware count. The replay may well have succeeded, so nothing else records
+      it; without this the footer would go red with a corporate term of 0 and no reason.
+    * **``negative_side_skipped``** — D33: the share path skipped an EXCHANGE/SPINOFF whose
+      source or destination count was ``< 0`` on the action date. The skip is the correctness
+      fix; this is the "and flag it" half of the same ruling.
+
+    The last two are read off the per-request :class:`ActionIndex` the walks mutated, which is
+    why this function must be called AFTER them.
+    """
+    def _pair(account_id: str) -> dict[str, str]:
+        return {"account_id": account_id, "account": acct_names.get(account_id, account_id)}
+
+    return {
+        "unapplied": [
+            {
+                "account_id": u.account_id,
+                "account": acct_names.get(u.account_id, u.account_id),
+                "date": u.date.isoformat(),
+                # StrEnum -> its value ("SPLIT"/"EXCHANGE"/"SPINOFF"); this router builds
+                # plain dicts and never passes through `to_wire`, so the cast is explicit.
+                "kind": str(u.kind),
+                # I-11: the same two structured fields the dashboard's unapplied_actions
+                # carries — the row id (the drawer's link targets it; it was read and never
+                # sent) and the ledger's word for the kind.
+                "kind_label": kind_label(str(u.kind)),
+                "action_id": u.action_id,
+                "from_symbol": u.from_symbol,
+                "to_symbol": u.to_symbol,
+                # The same zh sentence the strict path raises, so both paths explain the
+                # refusal identically (UnappliedAction.reason).
+                "reason": u.reason,
+            }
+            for u in unapplied
+            if symbol in (u.from_symbol, u.to_symbol)
+        ],
+        "depth_capped": [
+            _pair(acct) for acct, sym in sorted(index.depth_capped_symbols()) if sym == symbol
+        ],
+        "negative_side_skipped": [
+            _pair(acct) for acct, sym in sorted(index.negative_side_skips()) if sym == symbol
+        ],
+    }
+
+
+def _ledger_issues(symbol: str, data: DashboardData) -> dict[str, Any]:
+    """The ledger problems this symbol can have that NO holding row can show (CR-01 / CR-02 /
+    CR-11, 2026-10-04; K3, 2026-10-05) — read off the SAME book ``build_dashboard`` built.
+
+    * **``oversold_flat``** — a 賣超 a later buy netted back to exactly zero shares. The
+      position has no holding row, so no 賣超 chip either, and its activity footer reconciles
+      to ✓ (0 = 0) — the drawer looked clean over a discarded basis and a sell with no realized
+      row. A 賣超 that still holds shares is NOT listed: its per-account row carries the chip.
+    * **``orphan_dividends``** — a dividend the account never held the symbol for by its
+      date, refused by the replay (never booked as income, never a ghost holding). Each row
+      carries ``reinvest`` (R8, round 2): a DRIP / 配股 row ADDS shares on the SQL share path
+      that the book does not hold, so it turns the 交易明細 footer red and the drawer names it
+      beside the footer as well — a red footer never renders without its cause.
+    * **``unbookable_dividends``** (K3) — a dividend refused on a position that DID exist: an
+      open declared short (``cause: "short"``) or a ticker an EXCHANGE had moved away
+      (``"vacated"``). Listed on the dividend's own symbol (``role: "own"`` — its 配息史 row and,
+      for a DRIP / 配股, its red footer) AND on the position that carries the flag
+      (``role: "carrier"``). That carrier may be flat, and a flat position has no holding row
+      and so no 股利待釐清 chip: before K3 this refusal was shown nowhere. ``reinvest`` as above.
+
+    A separate key rather than more ``action_issues`` lists, because all three are about the
+    trade / dividend ledgers, not corporate actions. ``reason`` is a server sentence the
+    drawer renders verbatim; account references in it are tokens the fetch layer resolves.
+    Each dividend row also carries ``remedy`` (Y1, 2026-10-05): the phrase its ``reason`` ends
+    with, from its one owner in ``cost_basis``, which the drawer's remedy line renders instead
+    of keeping a copy of its own.
+    """
+    def _row(account_id: str, on: date | None, reason: str) -> dict[str, Any]:
+        return {"account_id": account_id, "date": _iso_or_none(on), "reason": reason}
+
+    return {
+        "oversold_flat": [
+            _row(p.account_id, p.oversold_on,
+                 f"{oversell_phrase(p.symbol, p)}，成本基礎已捨棄、這筆賣出沒有已實現損益；"
+                 "之後的買進使部位歸零，所以持倉沒有這一列 — 請補登缺少的買進或期初庫存")
+            for p in data.oversold_positions
+            if p.symbol == symbol and p.shares == _ZERO
+        ],
+        "orphan_dividends": [
+            {**_row(d.account_id, d.effective_date, orphan_dividend_message(d)),
+             "reinvest": DividendType(d.type) in _REINVEST_TYPES,
+             "remedy": ORPHAN_DIVIDEND_REMEDY}
+            for d in data.orphan_dividends if d.symbol == symbol
+        ],
+        "unbookable_dividends": [
+            {**_row(u.dividend.account_id, u.dividend.effective_date, u.reason),
+             "symbol": u.dividend.symbol,
+             "carrier_symbol": u.carrier_symbol,
+             "cause": u.cause,
+             "role": "own" if u.dividend.symbol == symbol else "carrier",
+             "reinvest": DividendType(u.dividend.type) in _REINVEST_TYPES,
+             "remedy": CASH_MOVEMENT_REMEDY}
+            for u in data.unbookable_dividends
+            if symbol in (u.dividend.symbol, u.carrier_symbol)
+        ],
+    }
+
+
+def _refused_dividends(symbol: str, data: DashboardData) -> list[Dividend]:
+    """Every dividend on *symbol* the book refused that the reconciliation footer counts: the
+    orphans (CR-02) and the ones refused on an open short or a vacated ticker (K3). Both lists
+    come from the book ``build_dashboard`` cut at the valuation day, so they are a subset of the
+    footer's own received dividends by the same predicate."""
+    return ([d for d in data.orphan_dividends if d.symbol == symbol]
+            + [u.dividend for u in data.unbookable_dividends if u.dividend.symbol == symbol])
 
 
 def _reconcile(
@@ -224,8 +509,11 @@ def _reconcile(
     opening: list[OpeningInventory],
     txs: list[Transaction],
     divs: list[Any],
+    corporate_delta: Decimal,
+    *,
+    refused: list[Dividend],
 ) -> dict[str, Any]:
-    """The 期初＋買−賣(＋配股/DRIP)＝部位摘要 share identity, computed server-side.
+    """The 期初＋買−賣(＋配股/DRIP)(＋公司行動)＝部位摘要 share identity, computed server-side.
 
     ``book_shares`` is the authoritative holding share count (``build_dashboard``); the other
     buckets are raw-ledger share sums. ``balances`` is True when the ledger flow reproduces the
@@ -233,6 +521,26 @@ def _reconcile(
     #2a, Fable F1); ``diff_shares`` carries the exact signed gap either way. Shares are
     quantities, not money, but the totals are still computed here so the drawer footer renders
     server values under ONE definition rather than re-summing rows in the browser.
+
+    *corporate_delta* (spec §6.3, W5) is the fifth term. A corporate action adds shares
+    OUTSIDE the four ledger buckets — no transaction, no opening, no dividend row — so before
+    this term existed every affected symbol reported ⚠ 對帳不一致 while being perfectly
+    consistent. See :func:`_corporate_delta` for why it is a difference of two share paths and
+    not ratio arithmetic re-derived here.
+
+    ⚠ A **flagged** position (賣超 / 待釐清 / short-conflicted) SHOULD still fail to reconcile
+    and is deliberately not special-cased: ``build_book`` skips an action on such a position
+    while the SQL path applies it, and §6.3 rules that "a position whose basis was discarded
+    genuinely does not reconcile — reporting ⚠ 對帳不一致 on it is the correct answer, not a
+    false alarm." The drawer shows the cause beside the mismatch (``action_issues`` +
+    the ``oversold`` / ``unbookable_*`` chips) instead of forcing the number green.
+
+    *refused* (K1, 2026-10-05) is this slice's dividends the BOOK refused (no position, an open
+    short, a vacated ticker). A refused DRIP / 配股 still adds its shares on the ledger path
+    above, so the footer goes red by exactly those shares — and the drawer must then offer that
+    dividend's remedy, not 補登公司行動. ``gap_is_refused_dividends`` says whether the WHOLE gap
+    is those shares, so the drawer chooses its remedies from a server fact rather than from a
+    reading of the activity rows; any other share of the gap keeps the corporate-action door.
     """
     opening_sh = _sum([o.shares for o in opening])
     buy_sh = _sum([t.quantity for t in txs if t.side is Side.BUY])
@@ -243,13 +551,23 @@ def _reconcile(
         if DividendType(d.type) in _REINVEST_TYPES and d.reinvest_shares is not None
     ])
     book_sh = _sum([h.shares for h in holdings])
-    net = opening_sh + buy_sh - sell_sh + reinvest_sh
+    net = opening_sh + buy_sh - sell_sh + reinvest_sh + corporate_delta
     diff = net - book_sh
+    refused_sh = _sum([
+        d.reinvest_shares
+        for d in refused
+        if DividendType(d.type) in _REINVEST_TYPES and d.reinvest_shares is not None
+    ])
     return {
         "opening_shares": decimal_str(opening_sh),
         "buy_shares": decimal_str(buy_sh),
         "sell_shares": decimal_str(sell_sh),
         "reinvest_shares": decimal_str(reinvest_sh),
+        # Shown by the drawer only when non-zero, exactly like the 配股/DRIP term: a
+        # 「＋公司行動 0」 in the equation explains nothing.
+        "corporate_delta_shares": decimal_str(corporate_delta),
+        # The WHOLE left-hand side, corporate term included — so `net − book` stays the
+        # footer's single gap figure and the printed equation sums to the printed total.
         "net_shares": decimal_str(net),
         "book_shares": decimal_str(book_sh),
         # Exact on the wire (full precision, as everywhere else); the tolerance lives in the
@@ -257,6 +575,11 @@ def _reconcile(
         # break without its size is unactionable.
         "diff_shares": decimal_str(diff),
         "balances": abs(diff) < _SHARE_EPS,
+        # K1: the reinvest shares of the refused dividends above (a term of `net_shares` the
+        # book does not hold), and whether they are the whole of a non-zero gap.
+        "refused_reinvest_shares": decimal_str(refused_sh),
+        "gap_is_refused_dividends": (abs(diff) >= _SHARE_EPS and refused_sh != _ZERO
+                                     and abs(diff - refused_sh) < _SHARE_EPS),
     }
 
 
@@ -315,10 +638,44 @@ def symbol_detail(
         for s in list_opening(conn) if s.symbol == symbol
     ]
     sym_divs = list_dividends(conn, symbol=symbol)
+    # ONE ActionIndex for the whole request (F-24 / D23 rule 2 / trap #21). `_reconcile` is
+    # called 1 + len(acct_ids) times and each call needs the action-aware share count, so a
+    # per-call index would re-read and re-group the entire action ledger every time. It is
+    # ALSO the object the share walk writes its two 待釐清 sinks onto (D31 depth cap, D33
+    # negative-side skip), so it must be the same instance every walk below runs through —
+    # a throwaway index would lose the record and the chip would silently never appear.
+    action_index = load_action_index(conn)
+    # Matches EITHER end (store.list_corporate_actions): a symbol's history includes the
+    # actions that CREATED it, not only those it was the source of.
+    sym_actions = list_corporate_actions(conn, symbol=symbol)
+    # DEF-056 (owner ruling 2026-09-24): 交易明細 (`activity`) and its footer describe the
+    # position the book holds AS OF the valuation day, and the book counts every row from its
+    # own date (`LedgerBundle.valued_as_of`). A row dated later is not part of that position
+    # yet, so it is neither a line here nor a term of the footer — the same call DEF-016 made
+    # for a future DRIP. `trade_events` / `dividend_events` still carry every row (they are
+    # the ledger's markers, not the position); the ledger page lists the future row with its
+    # 「未來日期：YYYY-MM-DD 起計入」 badge.
+    act_txs = [t for t in sym_txs if counts_by(t.trade_date, as_of)]
+    act_opening = [o for o in sym_opening if counts_by(o.build_date, as_of)]
+    act_actions = [a for a in sym_actions if counts_by(a.date, as_of)]
 
     # price_history — STORED prices over [as_of - days, as_of] (read-only; no backfill).
+    #
+    # §5.1(d) / W6c, re-expressed into `as_of` on the SAME `action_index` built above (trap
+    # #21 — never a second one). The drawer draws this line together with horizontal cost
+    # mark-lines at `original_avg` / `adjusted_avg`, and those are `total / shares` over the
+    # replay's ALREADY re-denominated share count: leaving the series as-traded puts the
+    # pre-split part of the line a whole ratio away from its own cost line (a 20-for-1 draws
+    # the cost line at 1/20 of the plotted price). The buy/sell markers are plotted at the
+    # SERIES' close on their date (`closeOn`), so they follow this line automatically;
+    # `trade_events.price` below stays RAW on purpose — it is the historical execution price
+    # paired with the historical share count in the same tooltip ("買 100 股 @ 350"), and
+    # both legs of that pair are as-traded.
     start = as_of.fromordinal(as_of.toordinal() - days)
-    history = get_price_history(conn, symbol, start, as_of)
+    history = series_in(
+        action_index, symbol, get_price_history(conn, symbol, start, as_of),
+        valued_on=as_of,
+    )
     if history:
         last = history[-1]
         price_history: dict[str, Any] = {
@@ -337,13 +694,26 @@ def symbol_detail(
             "last_date": None,
             "stale": True,
             "partial": False,
-            "note": f"no stored price history for {symbol}",
+            # Rendered VERBATIM as the drawer's empty state (web/detail.js::chartSection),
+            # where every other empty state on the site is Chinese (G-02, 2026-09-02).
+            "note": f"尚無 {symbol} 的歷史價格資料",
         }
 
     # dividend_events — all ledger dividends for this symbol; lowercase type, UPPER ccy.
+    # ``counts_from`` (DEF-056 R5, class scan): this list — the drawer's 配息史 — shows EVERY
+    # row, a dividend paying next month included, while the position above already leaves it
+    # out; so it carries the ledger tab's own flag (the same effective date and predicate as
+    # ``/api/ledgers/dividends``), and the drawer badges it like the ledger does.
+    # X1 (owner ruling 2026-10-05): and the ledger tab's booking marks — a row the replay
+    # refused is listed 「未入帳（待釐清）」 with the replay's reason. The whole ledger's replay,
+    # as the ledger tab reads it (a future row is marked by the same answer it will get), once
+    # per request; the 待釐清 lines under the table (``ledger_issues``) stay as they are.
+    refusals = replay_dividend_refusals(load_ledger_bundle(conn))
     dividend_events = [
         {
             "date": d.date.isoformat(),
+            "counts_from": _iso_or_none(
+                pending_from(dividend_effective_date(d.type, d.date, d.ex_date), as_of)),
             "type": _DIV_TYPE_WIRE[DividendType(d.type)],
             "gross": decimal_str(d.gross),
             "net": decimal_str(d.net),
@@ -354,6 +724,7 @@ def symbol_detail(
                 decimal_str(d.reinvest_price) if d.reinvest_price is not None else None
             ),
             "ccy": ccy,
+            **unbooked_wire(refusals, d),
         }
         for d in sym_divs
     ]
@@ -377,22 +748,36 @@ def symbol_detail(
     trade_events = [e[2] for e in tev]
 
     # activity — the UNIFIED, account-tagged, share-affecting event list (owner #2a). Signed
-    # ``total`` is the cash flow (buy −, sell +, opening −cost, reinvest 0-cost). Openings carry
-    # no fee/tax and use original_avg (total/shares) as the price; reinvest rows carry the DRIP
-    # reinvest price (配股 has none -> null). This is the ONE list 交易明細 renders, so its share
-    # sum reconciles with 部位摘要 by construction.
+    # ``total`` is the cash flow (buy −, sell +, opening −cost, reinvest 0-cost, corporate
+    # action 0). Openings carry no fee/tax and use original_avg (total/shares) as the price;
+    # reinvest rows carry the DRIP reinvest price (配股 has none -> null). This is the ONE
+    # list 交易明細 renders, so its share sum reconciles with 部位摘要 by construction.
+    #
+    # Sort keys are the REPLAY's own ``EventPriority`` values rather than 0/1/2/3 invented
+    # here, because W5 inserts a row in the middle of that order: a corporate action is
+    # effective at the START of its date — after a same-day opening (D3) and before that
+    # day's trades, whose quantities are already quoted in post-action terms. Hand-numbering
+    # around the new row is exactly how the list would drift from the replay it displays.
     aev: list[tuple[Any, int, dict[str, Any]]] = []
-    for o in sym_opening:
-        aev.append((o.build_date, 0, {
+    for o in act_opening:
+        aev.append((o.build_date, int(EventPriority.OPENING), {
             "date": o.build_date.isoformat(),
             "account_id": o.account_id, "account": acct_names.get(o.account_id, o.account_id),
             "side": "open", "shares": decimal_str(o.shares),
             "price": decimal_str(o.original_avg), "fee": None, "tax": None,
             "total": decimal_str(-o.original_cost_total), "ccy": ccy}))
-    for tx in sym_txs:
+    for a in act_actions:
+        aev.append((a.date, int(EventPriority.CORPORATE_ACTION),
+                    _action_wire(a, symbol, acct_names.get(a.account_id, a.account_id), ccy)))
+    for tx in act_txs:
+        # The settled 價金 the cash pool booked (owner 2026-09-30). A symbol with no registry
+        # row has no ledger rows either (every write door registers first), so the raw
+        # product below is the unreachable fallback, not a second definition.
+        gross = (settled_notional(tx.quantity, tx.price, inst.quote_ccy) if inst is not None
+                 else tx.quantity * tx.price)
         if tx.side is Side.BUY:
-            total = -(tx.quantity * tx.price + tx.fees + tx.tax)
-            aev.append((tx.trade_date, 1, {
+            total = -(gross + tx.fees + tx.tax)
+            aev.append((tx.trade_date, int(EventPriority.BUY), {
                 "date": tx.trade_date.isoformat(),
                 "account_id": tx.account_id,
                 "account": acct_names.get(tx.account_id, tx.account_id),
@@ -400,19 +785,33 @@ def symbol_detail(
                 "price": decimal_str(tx.price), "fee": decimal_str(tx.fees),
                 "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy}))
         else:
-            total = tx.quantity * tx.price - tx.fees - tx.tax
-            aev.append((tx.trade_date, 2, {
+            total = gross - tx.fees - tx.tax
+            aev.append((tx.trade_date, int(EventPriority.SELL), {
                 "date": tx.trade_date.isoformat(),
                 "account_id": tx.account_id,
                 "account": acct_names.get(tx.account_id, tx.account_id),
                 "side": "sell", "shares": decimal_str(tx.quantity),
                 "price": decimal_str(tx.price), "fee": decimal_str(tx.fees),
                 "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy}))
-    for d in sym_divs:
+    # Only what has been RECEIVED moves the position (DEF-016, owner ruling 2026-09-24): the
+    # book behind 部位摘要 is cut at the valuation day (``build_dashboard``), so a DRIP / 配股
+    # whose effective date is still ahead is neither a share event here nor a term of the
+    # footer below — or the footer would add shares the position does not hold yet and print
+    # ⚠ 對帳不一致 over a correct book. ``dividend_events`` above still lists every row.
+    received_divs = [d for d in sym_divs
+                     if counts_by(dividend_effective_date(d.type, d.date, d.ex_date), as_of)]
+    for d in received_divs:
         dt = DividendType(d.type)
         if dt in _REINVEST_TYPES and d.reinvest_shares is not None:
-            aev.append((d.date, 3, {
-                "date": d.date.isoformat(),
+            # Keyed AND labelled by the date the replay books it (round 2 (b), CR-05's class):
+            # a 配股 with an ex-date moves the share count ON the ex-date
+            # (``Dividend.effective_date``), so a sale between the ex-date and the payment date
+            # sells shares it already holds. Keyed by the payment date, the list put that sale
+            # ABOVE the shares it sold — an oversell on screen over a correct book. A DRIP, and
+            # a 配股 with no ex-date, are unchanged: their effective date is the payment date.
+            booked_on = dividend_effective_date(d.type, d.date, d.ex_date)
+            aev.append((booked_on, int(EventPriority.DIVIDEND), {
+                "date": booked_on.isoformat(),
                 "account_id": d.account_id,
                 "account": acct_names.get(d.account_id, d.account_id),
                 "side": "drip" if dt is DividendType.DRIP else "stock",
@@ -425,20 +824,44 @@ def symbol_detail(
 
     # activity_reconcile — total + per-account share identities (owner #2a). Per-account so the
     # drawer's account filter can show a matching footer without any client share arithmetic.
+    #
+    # The account set now includes the CORPORATE-ACTION accounts (via the action rows just
+    # added to `activity`), which closes audit F-45: a symbol whose whole life is two actions
+    # — created by one, consumed by the next, so it owns no transaction, no opening and no
+    # surviving holding — previously got `acct_ids = ∅` and an EMPTY per-account breakdown
+    # while its activity list showed two events. It now gets a footer per account, and that
+    # footer carries the corporate term that makes the empty position add up.
     acct_ids = sorted({str(ev["account_id"]) for ev in activity}
                       | {h.account_id for h in sym_holdings})
+    # ONE walk per account, reused by the total and by that account's own footer. The total's
+    # delta is the SUM of the per-account deltas rather than a separate cross-account query:
+    # positions are keyed (account, symbol) and every action row binds to one account, so the
+    # sum IS the aggregate — and computing it twice by two routes is how the drawer's
+    # aggregate/detail pairs have drifted three times before.
+    deltas = {aid: _corporate_delta(conn, action_index, aid, symbol, as_of=as_of)
+              for aid in acct_ids}
+    refused = _refused_dividends(symbol, data)
     activity_reconcile = {
-        "total": _reconcile(sym_holdings, sym_opening, sym_txs, sym_divs),
+        "total": _reconcile(sym_holdings, act_opening, act_txs, received_divs,
+                            _sum(list(deltas.values())), refused=refused),
         "by_account": {
             aid: _reconcile(
                 [h for h in sym_holdings if h.account_id == aid],
-                [o for o in sym_opening if o.account_id == aid],
-                [t for t in sym_txs if t.account_id == aid],
-                [d for d in sym_divs if d.account_id == aid],
+                [o for o in act_opening if o.account_id == aid],
+                [t for t in act_txs if t.account_id == aid],
+                [d for d in received_divs if d.account_id == aid],
+                deltas[aid],
+                refused=[d for d in refused if d.account_id == aid],
             )
             for aid in acct_ids
         },
     }
+
+    # action_issues — the three channels that EXPLAIN a red footer (audit F-17). Read AFTER
+    # the walks above, because two of them are sinks those walks write into.
+    action_issues = _action_issues(
+        symbol, data.unapplied_actions, action_index, acct_names
+    )
 
     # realized_rows — dashboard realized.rows shape, filtered to this symbol.
     realized_rows = [_realized_wire(r) for r in data.realized.rows if r.symbol == symbol]
@@ -459,6 +882,17 @@ def symbol_detail(
         "trade_events": trade_events,
         "activity": activity,
         "activity_reconcile": activity_reconcile,
+        # W5 / F-17: what the drawer renders BESIDE a ⚠ 對帳不一致 footer. Always present
+        # (three empty lists on a clean symbol) so the frontend needs no existence check.
+        "action_issues": action_issues,
+        # CR-01 / CR-02: the trade / dividend ledger problems no holding row can carry. Always
+        # present (two empty lists on a clean symbol), for the same reason.
+        "ledger_issues": _ledger_issues(symbol, data),
+        # S9 (round 3): did the replay ever OPEN a position in this symbol, in any account, by
+        # the valuation day — an opening, a non-zero trade, or a corporate action it APPLIED.
+        # The drawer's 「部位已結清」 rests on this, never on the activity rows: a refused
+        # action and a 0-share row are listed there and opened nothing.
+        "position_opened": any(p.symbol == symbol for p in data.opened_positions),
         "realized_rows": realized_rows,
     }
 
@@ -475,5 +909,10 @@ def _realized_wire(r: RealizedRow) -> dict[str, str]:
         "original_cost_removed": decimal_str(r.original_cost_removed),
         "adjusted_cost_removed": decimal_str(r.adjusted_cost_removed),
         "realized": decimal_str(r.realized),
-        "kind": r.kind,  # "sale" | "dividend" (post-close payout, audit H2)
+        # "sale" | "dividend" (post-close payout, audit H2) | "short_cover" (the
+        # declared-short cover, `results.py:144`). The third value shipped with the
+        # short-sale work and this comment never grew it, so the drawer rendered a
+        # cover identically to a sale until M2-06 — a stale enumeration reads as an
+        # exhaustive one.
+        "kind": r.kind,
     }

@@ -27,19 +27,30 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from datetime import time as dt_time
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-from portfolio_dash.llm_insight import assemble
+from portfolio_dash.llm_insight import assemble, figure_check, name_check
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import insights_store as istore
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import InsightCard
 from portfolio_dash.llm_insight.gating import GateContext, GateResult, evaluate_gates, skip_reasons
-from portfolio_dash.llm_insight.insights_store import HorizonBasis
+from portfolio_dash.llm_insight.insights_store import HorizonBasis, InsightTrigger
+from portfolio_dash.llm_insight.official_templates import (
+    INSIGHT_NAMING_NOTE as _NAMING_NOTE,
+)
+from portfolio_dash.llm_insight.official_templates import (
+    INSIGHT_NAMING_RETRY as _NAMING_RETRY,
+)
+from portfolio_dash.llm_insight.official_templates import ON_ALERT_CONTEXT as _ON_ALERT_CONTEXT
 from portfolio_dash.llm_insight.official_templates import ON_ALERT_NOTE as _ON_ALERT_NOTE
+from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
 from portfolio_dash.shared import llm
-from portfolio_dash.shared.llm_config import LLMBudgetExceeded, LLMError
+from portfolio_dash.shared.account_ref import resolve_account_refs
+from portfolio_dash.shared.llm_config import AINotActivated, LLMBudgetExceeded, LLMError
+from portfolio_dash.shared.money import to_db
 
 # The agent tag recorded in llm_usage for an insight generation call.
 _AGENT = "insight_generate"
@@ -78,6 +89,33 @@ class RunInputs(BaseModel):
     # on_alert (R7): the fired event the dispatcher is acting on.
     fired_rule: str | None = None
     fired_symbol: str | None = None
+    # DEF-037 (2026-09-23): what started this run — stamped on every card it stores, and for
+    # an alert the source of the fired alert's facts in the prompt (see ``_alert_note``).
+    trigger: InsightTrigger | None = None
+
+
+def _alert_note(trigger: InsightTrigger | None) -> str:
+    """The on_alert prompt addendum: the ≤3-day rule, plus WHICH alert fired (DEF-037).
+
+    The fired alert's title and detail are the rule engine's own computed text (the same
+    words the bell showed), so the model describes the alert it was handed instead of
+    guessing one — measured on the demo, a ``target_cross`` card came back as 「RSI過熱警示」.
+    Only the DATE of ``fired_at`` goes in: the note is part of the cache fingerprint, and a
+    same-day re-dispatch of the same alert must stay a cache hit. A run without an alert
+    trigger (a legacy caller) keeps the bare note.
+    """
+    if trigger is None or trigger.source != "alert":
+        return _ON_ALERT_NOTE
+    # An account-level alert's title carries the backend's `{account:<id>}` token (the
+    # frontend resolves it in api.js). The model has no resolver, so spell the account out
+    # here — the LLM must never see, or echo, a wire token.
+    plain = "帳戶 {}".format
+    return _ON_ALERT_NOTE + _ON_ALERT_CONTEXT.format(
+        rule=trigger.rule or "（未記錄）",
+        title=resolve_account_refs(trigger.title or "（未記錄）", plain),
+        detail=resolve_account_refs(trigger.detail or "（未記錄）", plain),
+        fired_on=(trigger.fired_at or "")[:10] or "（未記錄）",
+    )
 
 
 class RunResult(BaseModel):
@@ -162,6 +200,26 @@ def _canonical_fingerprint_prompt(
     return assembled.prompt + alert_note
 
 
+def _ceiling_at_create(external_vars: dict[str, Any]) -> int | None:
+    """The confidence ceiling this run handed the model, read from the rendered payload.
+
+    ⑫c (AI-D38 step three). ``backtest_json`` is assembled ONCE per run by the router and
+    is the same object the prompt rendered, so reading it here records exactly the number
+    the model was shown — not a re-derivation that could disagree with it.
+
+    ``None`` whenever the payload degraded (no scored history yet) or carries no integer
+    ceiling: those cards were never governed by a ceiling, and
+    :func:`evaluations_store.ceiling_violations` keeps them OUT of the population rather
+    than counting them as obedient.
+    """
+    payload = external_vars.get("backtest_json")
+    if not isinstance(payload, dict) or payload.get("unavailable") is True:
+        return None
+    value = payload.get("confidence_ceiling")
+    # bool is an int subclass — exclude it explicitly so a stray True never reads as 1.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _anomaly_card(symbol: str) -> InsightCard:
     """The deterministic zero-LLM "資料異常" card for a missing-price symbol (R4)."""
     return InsightCard(
@@ -171,6 +229,11 @@ def _anomaly_card(symbol: str) -> InsightCard:
         tags=["data_anomaly"],
         symbol=symbol,
     )
+
+
+#: The last-resort ``job_runs.detail`` for a caller that passes none (every caller in this
+#: module now passes its own sentence; ``api/insight_service.py``'s skip does too).
+_STATUS_ZH = {"ok": "完成", "partial": "部分完成", "skipped": "未執行", "error": "執行失敗"}
 
 
 def _write_job_run(
@@ -184,6 +247,7 @@ def _write_job_run(
     now: datetime,
     run_id: int | None = None,
     is_shadow: bool = False,
+    usage: llm.UsageTally | None = None,
 ) -> None:
     """Record an insight run in ``job_runs`` (raw SQL; no scheduler import).
 
@@ -193,10 +257,17 @@ def _write_job_run(
 
     ``reason`` is the single machine enum (spec 07 §7.4); ``detail`` is the human text
     (defaults to ``reason`` / ``status``). A SHADOW batch (Loop 4) stamps ``is_shadow=1`` so
-    the user-facing /runs lists can exclude it (spec 04 fix #3).
+    the user-facing /runs lists can exclude it (spec 04 fix #3). ``usage`` is the run's
+    :class:`~portfolio_dash.shared.llm.UsageTally`: its calls and tokens go beside the cost
+    (NULL when the run made no AI call, as for every other job).
     """
     job_id = f"insight:{insight_type_id}"
-    detail_text = detail if detail is not None else (reason or f"{status}")
+    counted = usage if usage is not None and usage.calls else None
+    calls = counted.calls if counted is not None else None
+    tokens_in = counted.tokens_in if counted is not None else None
+    tokens_out = counted.tokens_out if counted is not None else None
+    # DEF-073: never the enum or the status word — the 排程中心 prints this field as it is.
+    detail_text = detail if detail is not None else _STATUS_ZH.get(status, "已結束")
     shadow_flag = 1 if is_shadow else 0
     # finished_at shares started_at's timezone (get_now feeds +08:00); a UTC finish next
     # to a +08:00 start renders as an 8-hour-negative run in any naive display.
@@ -204,17 +275,19 @@ def _write_job_run(
     if run_id is not None:
         conn.execute(
             "UPDATE job_runs SET finished_at = ?, status = ?, detail = ?, payload = ?, "
-            "reason = ?, cost_usd = ?, is_shadow = ? WHERE id = ?",
+            "reason = ?, cost_usd = ?, is_shadow = ?, llm_calls = ?, tokens_in = ?, "
+            "tokens_out = ? WHERE id = ?",
             (
                 finished_at, status, detail_text, str(insight_type_id),
-                reason or None, str(cost), shadow_flag, run_id,
+                reason or None, to_db(cost), shadow_flag, calls, tokens_in, tokens_out, run_id,
             ),
         )
         conn.commit()
         return
     conn.execute(
         "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, payload, "
-        "reason, cost_usd, is_shadow) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "reason, cost_usd, is_shadow, llm_calls, tokens_in, tokens_out) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id,
             now.isoformat(),
@@ -223,16 +296,61 @@ def _write_job_run(
             detail_text,
             str(insight_type_id),
             reason or None,
-            str(cost),
+            to_db(cost),
             shadow_flag,
+            calls,
+            tokens_in,
+            tokens_out,
         ),
     )
     conn.commit()
 
 
 def _block_reason_text(result: GateResult) -> str:
-    """The full human text of every block reason, joined (goes into ``job_runs.detail``)."""
-    return "; ".join(r["reason"] for r in skip_reasons(result) if r["reason"])
+    """「未執行：<每一個阻擋原因>」 — the human text of every block, joined (``job_runs.detail``).
+
+    DEF-073 (2026-09-26): this joined the ENUMS (「R3_no_live_templates; R2_universe_empty」)
+    under a docstring promising human text, and ``web/pipeline.js`` prints ``r.detail ||
+    ppSkipReason(r.reason)`` — a non-empty enum detail bypassed the zh label map. The gate's
+    own ``msg`` is the zh sentence; the enum stays in ``job_runs.reason``.
+    """
+    msgs = [str(r["msg"]) for r in skip_reasons(result) if r["msg"]]
+    return "未執行：" + "；".join(msgs) if msgs else "未執行"
+
+
+def _kept_text(created: int) -> str:
+    return f"已產出 {created} 張卡保留" if created else "尚未產出卡片"
+
+
+def _stop_detail(exc: LLMError, created: int) -> str:
+    """The zh sentence for a run an LLM refusal stopped part-way (DEF-066 / DEF-073).
+
+    ``LLMUnavailable``'s own text is already the owner's sentence — every candidate model
+    tried and why it failed (``shared/llm.py``) — so it follows the stop verbatim. The other
+    two refusals are named by their kind: their texts are written for other surfaces.
+    """
+    kept = _kept_text(created)
+    if isinstance(exc, LLMBudgetExceeded):
+        return f"AI 額度用盡，本次停止（{kept}）"
+    if isinstance(exc, AINotActivated):
+        return f"AI 未啟用（此角色沒有可用的模型），本次停止（{kept}）"
+    return f"AI 呼叫失敗，本次停止（{kept}）：{str(exc)[:300]}"
+
+
+def _name_dropped_text(dropped: int) -> str:
+    """「；N 張因名稱與代號不符未存」 — cards the naming check refused twice (item 8)."""
+    return f"；{dropped} 張因名稱與代號不符未存" if dropped else ""
+
+
+def _card_text(card: InsightCard) -> str:
+    """Title, summary and body — every field a reader sees a name in."""
+    return f"{card.title}\n{card.summary}\n{card.body_md}"
+
+
+def _ok_detail(created: int, cache_hits: int) -> str:
+    """「產生 N 張卡（M 張沿用當日快取）」 — a clean run's detail (it read 「ok」 until DEF-073)."""
+    text = f"產生 {created} 張卡"
+    return text + (f"（{cache_hits} 張沿用當日快取）" if cache_hits else "")
 
 
 def _first_block_reason(result: GateResult) -> str:
@@ -264,11 +382,35 @@ def run_insight_type(
     layer feeds one per resolved target. Returns a :class:`RunResult` and records the run in
     ``job_runs`` (finalizing *run_id* when the async path pre-inserted a running row, else
     inserting a fresh row). Pure controller — no pricing/data_ingestion read here.
+
+    The run's cost is every ``llm_usage`` row it wrote (owner 2026-09-30), counted by a
+    :func:`~portfolio_dash.shared.llm.usage_tally` opened here — the one point every insight
+    run passes through, whichever door started it. It used to be the sum of the cards'
+    costs, so a retry after a broken reply, or a primary model that failed before the
+    fallback answered, was paid for and left off the run.
     """
+    with llm.usage_tally() as usage:
+        return _run_insight_type(
+            conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now,
+            run_id=run_id, usage=usage,
+        )
+
+
+def _run_insight_type(
+    conn: sqlite3.Connection,
+    insight_type_id: int,
+    *,
+    var_contexts: dict[str | None, V.VarContext],
+    inputs: RunInputs,
+    now: datetime,
+    run_id: int | None,
+    usage: llm.UsageTally,
+) -> RunResult:
     it = cs.get_insight_type(conn, insight_type_id)
     if it is None:
         _write_job_run(
             conn, insight_type_id, status="skipped", reason="unknown_insight_type",
+            detail=f"找不到洞察任務 #{insight_type_id}，未執行",
             cost=Decimal("0"), now=now, run_id=run_id, is_shadow=inputs.is_shadow,
         )
         return RunResult(
@@ -291,8 +433,13 @@ def run_insight_type(
         )
 
     remaining = inputs.budget_remaining
-    total_cost = Decimal("0")
     created = 0
+    # Item 8 (owner 2026-09-30, 「新的名稱代號確保正確不會再錯誤」): every prompt carries the
+    # registry's names, and a reply that pairs a registered code with another name is asked
+    # for once more and, still wrong, not stored. Read once per run.
+    registry = name_check.registry_from_db(conn)
+    name_dropped = 0
+    cache_hits = 0
     stopped_early = False
     stop_reason = ""
     stop_detail: str | None = None
@@ -325,7 +472,12 @@ def run_insight_type(
                     fingerprint=fp, calibration_version=stamp_version,
                     horizon_days=effective_horizon, input_snapshot=snapshot, model="(none)",
                     cost_usd=Decimal("0"), now=now, is_shadow=inputs.is_shadow,
-                    horizon_basis=inputs.horizon_basis,
+                    horizon_basis=inputs.horizon_basis, trigger=inputs.trigger,
+                    # DEF-033: no prompt was assembled for this card — an empty list, which
+                    # the page reads as "nothing to name", not as 「未記錄」.
+                    strategy_versions=[],
+                    # DEF-057: likewise no system layer — recorded as not used, never NULL.
+                    system_prompt_ref=SystemPromptRef(used=False),
                 )
                 created += 1
             continue
@@ -334,6 +486,7 @@ def run_insight_type(
         if remaining <= 0:
             stopped_early = True
             stop_reason = "budget_exhausted_mid_run"
+            stop_detail = f"AI 額度用盡，本次停止（{_kept_text(created)}）"
             break
 
         ctx = var_contexts.get(target)
@@ -344,7 +497,7 @@ def run_insight_type(
             conn, insight_type_id, ctx,
             calibration_version=inputs.calibration_version_override,
         )
-        alert_note = _ON_ALERT_NOTE if is_alert else ""
+        alert_note = _alert_note(inputs.trigger) if is_alert else ""
         prompt = assembled.prompt + alert_note
         snapshot = _snapshot_for(inputs, target, ctx)
         canon_prompt = _canonical_fingerprint_prompt(
@@ -357,13 +510,27 @@ def run_insight_type(
             istore.snapshot_digest(snapshot), inputs.prompt_version,
         )
         if istore.find_by_fingerprint(conn, fp, is_shadow=inputs.is_shadow) is not None:
+            cache_hits += 1
             continue  # cache hit — same-day identical inputs, no LLM, no duplicate row
 
-        before = remaining
+        # The names of the instruments THIS prompt mentions (never another market's).
+        table = name_check.naming_table(registry, within=prompt)
+        naming_note = _NAMING_NOTE.format(table=table) if table else ""
         try:
             completion = llm.complete_structured_meta(
-                prompt, InsightCard, agent=_AGENT, conn=conn
+                prompt + naming_note, InsightCard, agent=_AGENT, conn=conn
             )
+            wrong = name_check.mismatches(_card_text(completion.value), registry)
+            if wrong:
+                completion = llm.complete_structured_meta(
+                    prompt + naming_note
+                    + _NAMING_RETRY.format(lines=name_check.feedback_lines(wrong)),
+                    InsightCard, agent=_AGENT, conn=conn,
+                )
+                if name_check.mismatches(_card_text(completion.value), registry):
+                    name_dropped += 1      # 寧缺勿錯: a card that still misnames is not stored
+                    remaining = inputs.budget_remaining - usage.cost
+                    continue
         except LLMError as exc:
             # Graceful degradation: a provider/budget/activation failure stops the run as
             # partial (produced cards kept); never crash the scheduler/dashboard. The
@@ -375,16 +542,15 @@ def run_insight_type(
                 if isinstance(exc, LLMBudgetExceeded)
                 else f"{exc.kind}_mid_run"
             )
-            stop_detail = f"{stop_reason}: {str(exc)[:300]}"
+            stop_detail = _stop_detail(exc, created)
             break
         card = completion.value
         # The model that produced this card (its registry alias) and this call's cost,
         # threaded out of the LLM seam so the stored row records the model used — not a
         # card field (spec 04 fix #1: insights.model was wrongly set to card.symbol).
         used_model = completion.model
-        spent = completion.cost
-        total_cost += spent
-        remaining = before - spent
+        spent = completion.cost  # this CARD's call; the run's spend is the tally's
+        remaining = inputs.budget_remaining - usage.cost
         if target is not None:
             card = card.model_copy(update={"symbol": target})
         # For an on_alert card, also cap the card's own prediction horizon to the forced
@@ -402,22 +568,40 @@ def run_insight_type(
         # M4 fix (decision Q1c): snapshot the last close the model actually saw — the
         # Loop-2 scoring baseline. None when no close series was fed (portfolio/market).
         seen_price = ctx.closes[-1] if ctx.closes else None
+        # ⑫c (AI-D38): snapshot the confidence ceiling this card was HANDED, from the same
+        # payload the prompt rendered. Derived from calibration bins that keep moving, so
+        # it is unrecoverable later — same reason price_at_create is stamped here.
+        seen_ceiling = _ceiling_at_create(ctx.external_vars)
         istore.add_card(
             conn, insight_type_id=insight_type_id, card=card, fingerprint=fp,
             calibration_version=stamp_version, horizon_days=effective_horizon,
             input_snapshot=snapshot, model=used_model, cost_usd=spent,
             now=now, is_shadow=inputs.is_shadow, horizon_basis=inputs.horizon_basis,
-            price_at_create=seen_price,
+            price_at_create=seen_price, ceiling_at_create=seen_ceiling,
             tokens_in=completion.tokens_in, tokens_out=completion.tokens_out,
+            trigger=inputs.trigger,  # DEF-037: what produced this card
+            # M9 (2026-09-17): the numbers this card was FED, taken from the very string
+            # handed to the model above — the figure check's comparison population. Same
+            # reason as price_at_create / ceiling_at_create: unrecoverable after the fact.
+            prompt_figures=figure_check.prompt_figures_json(prompt),
+            # DEF-033 (owner ruling 2026-09-24): the strategy versions this prompt was
+            # assembled from — the same Assembly object that produced ``prompt`` above.
+            strategy_versions=assembled.strategy_versions,
+            # DEF-057: and the system-prompt layer of that same Assembly.
+            system_prompt_ref=assembled.system_prompt_ref,
         )
         created += 1
 
-    status = "partial" if stopped_early else "ok"
-    reason = stop_reason if stopped_early else ""
+    status = "partial" if stopped_early or name_dropped else "ok"
+    reason = stop_reason if stopped_early else ("name_mismatch" if name_dropped else "")
+    run_detail = (
+        (stop_detail or _STATUS_ZH["partial"]) if stopped_early
+        else _ok_detail(created, cache_hits)
+    ) + _name_dropped_text(name_dropped)
     _write_job_run(
-        conn, insight_type_id, status=status, reason=reason, detail=stop_detail,
-        cost=total_cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow,
+        conn, insight_type_id, status=status, reason=reason, detail=run_detail,
+        cost=usage.cost, now=now, run_id=run_id, is_shadow=inputs.is_shadow, usage=usage,
     )
     return RunResult(
-        status=status, reason=reason, cards_created=created, cost_usd=total_cost
+        status=status, reason=reason, cards_created=created, cost_usd=usage.cost
     )

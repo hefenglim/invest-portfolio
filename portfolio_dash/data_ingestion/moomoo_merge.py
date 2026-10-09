@@ -32,6 +32,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from portfolio_dash.data_ingestion.config_seed import DEFAULT_ACCOUNTS, AccountConfig
+from portfolio_dash.shared import ledger_registry
 
 _MERGED_ID = "moomoo_my"
 _LEGACY_IDS: tuple[str, str] = ("moomoo_my_us", "moomoo_my_my")
@@ -40,24 +41,18 @@ _CONTINUITY_ACCOUNTS: tuple[str, ...] = (*_LEGACY_IDS, _MERGED_ID)
 
 # accounts-column tables that must hold ZERO legacy-id rows after the merge (ledger_audit is
 # EXEMPT — its before_json is immutable history). data_source_fallbacks + pending_dividend_skips
-# are checked separately (existence-guarded / TEXT-embedded id).
+# are checked separately (existence-guarded / TEXT-embedded id). The ledgers come from
+# shared/ledger_registry.py: a new ledger that is NOT checked here is silently orphaned on the
+# dead account id, so it must not be possible to forget it.
 _ACCOUNT_ID_TABLES: tuple[str, ...] = (
-    "transactions",
-    "dividends",
-    "fx_conversions",
-    "cash_movements",
-    "opening_inventory",
+    *ledger_registry.TABLE_NAMES,
     "accounts",
     "account_market_rules",
 )
-# Ledgers relabelled by a plain UPDATE (surrogate PK, no account-scoped UNIQUE — verified
-# against schema.py, so a blind account_id rewrite cannot collide).
-_FLOW_TABLES: tuple[str, ...] = (
-    "transactions",
-    "dividends",
-    "fx_conversions",
-    "cash_movements",
-)
+# Ledgers relabelled by a plain UPDATE (surrogate PK, no account-scoped UNIQUE — declared
+# ``account_relabel="update"`` in the registry, verified against schema.py, so a blind
+# account_id rewrite cannot collide). ``opening_inventory`` is "keyed" and handled at U2.
+_FLOW_TABLES: tuple[str, ...] = ledger_registry.PLAIN_RELABEL_TABLES
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

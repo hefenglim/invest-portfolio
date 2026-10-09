@@ -102,7 +102,9 @@
                   <button type="button" id="m-side-buy" class="active buy-on">買進</button>
                   <button type="button" id="m-side-sell">賣出</button>
                 </div>
-                <label class="hint daytrade-line" for="m-daytrade" title="台股當日沖銷賣出：證交稅 0.15%">
+                <!-- 當沖 is a SELL-side tax rate; hidden on 買進 like 放空 (input.js setSide). -->
+                <label class="hint daytrade-line" id="m-daytrade-line" for="m-daytrade" hidden="hidden"
+                       title="台股當日沖銷賣出：證交稅 0.15%">
                   <input type="checkbox" id="m-daytrade"> 當沖（賣出稅 0.15%）
                 </label>
                 <!-- 放空 is DECLARED, never inferred: only a flagged sell may exceed
@@ -160,6 +162,16 @@
 
       <!-- Tab: CSV -->
       <div class="mode-pane" id="pane-csv">
+        <!-- 來源: 標準範本 (the six canonical kinds) vs 券商對帳單 (raw statement -> converter).
+             A chip row rather than a separate page: the owner is already here when they have a
+             statement to load, and a converter behind its own nav item is a converter nobody
+             finds. The two modes share the pane and swap the block below. -->
+        <div class="sub-chips">
+          <span class="group-label">來源</span>
+          <span id="csv-source" style="display:flex;gap:6px;"></span>
+          <span class="hint" id="csv-source-note"></span>
+        </div>
+        <div id="csv-standard">
         <div class="sub-chips">
           <span class="group-label">資料類型</span>
           <span id="csv-kinds" style="display:flex;gap:6px;"></span>
@@ -177,7 +189,7 @@
           </div>
           <div class="field">
             <label for="csv-paste">或貼上 CSV 文字</label>
-            <textarea class="input" id="csv-paste" style="min-height:96px;" placeholder="account,symbol,side,date,shares,price,fee,tax,daytrade,note" spellcheck="false"></textarea>
+            <textarea class="input" id="csv-paste" style="min-height:96px;" placeholder="account,symbol,side,date,shares,price,fee,tax,daytrade,short_sale,note" spellcheck="false"></textarea>
           </div>
         </div>
         <input type="file" id="csv-file-input" accept=".csv,text/csv" hidden="hidden"></input>
@@ -190,15 +202,56 @@
         </div>
         <div class="ai-result-head"><span>解析預覽：<b class="num" id="csv-file"></b></span><span class="num" id="csv-counts"></span></div>
         <div class="table-wrap">
-          <table class="data"><thead><tr><th></th><th>#</th><th>日期</th><th class="col-text">帳戶</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th class="col-text">狀態</th><th class="col-text">原因</th></tr></thead><tbody id="csv-body"></tbody></table>
+          <!-- DEF-004: the header is PER KIND — input.js renderCsvHead() rewrites #csv-head from CSV_COLS on every kind switch; this is the 交易 default for the first paint. -->
+          <table class="data"><thead id="csv-head"><tr><th></th><th>#</th><th>日期</th><th class="col-text">帳戶</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>手續費</th><th>稅</th><th class="col-text">狀態</th><th class="col-text">原因</th></tr></thead><tbody id="csv-body"></tbody></table>
         </div>
         <div class="result-banner" id="csv-result" hidden="hidden"></div>
         <div class="import-summary"><span class="spacer"></span><button class="btn btn-primary" id="csv-confirm" type="button">確認寫入勾選列</button></div>
+        </div><!-- /#csv-standard -->
+
+        <!-- 券商對帳單 mode. Built by web/broker-import.js; the raw statement goes to
+             POST /api/broker/convert and the CSVs it returns are committed through the SAME
+             /api/import/* path as a hand-made file, so every validation, the duplicate
+             detection and the undo batch apply unchanged. -->
+        <div id="csv-broker" hidden="hidden">
+          <div class="sub-chips">
+            <span class="group-label">券商</span>
+            <select class="select" id="bk-broker" style="width:auto;max-width:100%;"></select>
+            <span class="group-label" style="margin-left:8px;">匯入到帳戶</span>
+            <select class="select" id="bk-account" style="width:auto;max-width:100%;"></select>
+            <span class="hint" id="bk-note"></span>
+          </div>
+          <div class="dc-grid" style="padding-bottom:0;">
+            <div class="dropzone" id="bk-dropzone">
+              <span class="glyph">⇪</span>
+              <span class="big">拖放券商原始匯出檔，或點擊選取（可多檔）</span>
+              <span class="hint" id="bk-dz-hint">直接使用券商網站下載的交易明細 CSV，不需要先整理格式。檔案只在轉換期間留在記憶體，不會存到伺服器。</span>
+            </div>
+            <div class="field">
+              <label>已選檔案</label>
+              <div id="bk-files" class="hint">尚未選擇</div>
+            </div>
+          </div>
+          <input type="file" id="bk-file-input" accept=".csv,text/csv" multiple="multiple" hidden="hidden"></input>
+          <div id="bk-report"></div>
+          <div class="import-summary">
+            <span class="spacer"></span>
+            <button class="btn" id="bk-clear" type="button">清除</button>
+            <button class="btn btn-primary" id="bk-commit" type="button" disabled="disabled">寫入勾選列</button>
+          </div>
+        </div>
+
+        <!-- Import history + undo (#83). Visible in BOTH modes: an ordinary CSV import is
+             just as worth taking back, and the endpoint has existed since v0.1.29's
+             provenance work with nothing on any page calling it. -->
+        <div class="panel-sub" style="margin-top:14px;font-weight:600;">最近匯入</div>
+        <div class="table-wrap">
+          <table class="data"><thead><tr><th class="col-text">時間</th><th class="col-text">類型</th><th class="col-text">來源檔</th><th>筆數</th><th></th></tr></thead><tbody id="bk-batches"></tbody></table>
+        </div>
       </div>
 
       <!-- Tab: AI -->
       <div class="mode-pane" id="pane-ai">
-        <div class="state-switch"><span>設計檢視：</span><span id="ai-states" style="display:flex;gap:6px;"></span></div>
         <div id="ai-normal">
           <div class="dc-grid" style="padding-bottom:0;">
             <div class="field"><label for="ai-text">貼上對帳單文字…</label><textarea class="input" id="ai-text" style="min-height:110px;" spellcheck="false"></textarea></div>
@@ -215,13 +268,32 @@
             <button class="btn btn-primary" id="ai-parse" type="button">解析</button>
           </div>
           <div class="ai-result-head"><span>解析來源：<b class="num" id="ai-source"></b></span><span>模型：<b class="num" id="ai-model"></b></span></div>
-          <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>費用</th><th>稅</th><th class="col-text">模型備註</th><th></th></tr></thead><tbody id="ai-body"></tbody></table></div>
+          <!-- DEF-083: the chain fails over silently — when the model that answered is not the
+               one tried first (a picked model, or the role primary), say which failed and why. -->
+          <div class="result-banner warn" id="ai-failover" hidden="hidden"></div>
+          <!-- W4 (AI-D17): rows the model saw but could NOT classify (換匯／公司行動／
+               選擇權) are confessed here — surfaced, never silently dropped. -->
+          <div class="result-banner" id="ai-unparsed" hidden="hidden"></div>
+          <!-- W4 (AI-D21): one section per kind; a kind with zero drafts stays hidden.
+               Each section commits through its OWN existing /api/import/commit kind. -->
+          <div id="ai-sec-transactions" hidden="hidden">
+            <div class="panel-sub" style="margin:10px 0 6px;font-weight:600;">交易</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">買賣</th><th class="col-text">代號</th><th>股數</th><th>價格</th><th>費用</th><th>稅</th><th class="col-text">狀態／原因</th><th></th></tr></thead><tbody id="ai-body-transactions"></tbody></table></div>
+          </div>
+          <div id="ai-sec-dividends" hidden="hidden">
+            <div class="panel-sub" style="margin:10px 0 6px;font-weight:600;">股利</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">代號</th><th class="col-text">類型</th><th>毛額</th><th>扣繳</th><th>淨額</th><th>再投資股數</th><th>再投資價格</th><th class="col-text">狀態／原因</th><th></th></tr></thead><tbody id="ai-body-dividends"></tbody></table></div>
+          </div>
+          <div id="ai-sec-cash" hidden="hidden">
+            <div class="panel-sub" style="margin:10px 0 6px;font-weight:600;">資金</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th></th><th class="col-text">帳戶</th><th class="col-text">日期</th><th class="col-text">類型</th><th class="col-text">幣別</th><th>金額</th><th>取得成本（家幣）</th><th class="col-text">狀態／原因</th><th></th></tr></thead><tbody id="ai-body-cash"></tbody></table></div>
+          </div>
           <div class="result-banner" id="ai-result" hidden="hidden"></div>
           <div class="import-summary"><span class="spacer"></span><button class="btn btn-primary" id="ai-write-all" type="button">寫入全部勾選</button></div>
         </div>
-        <div class="degrade-panel" id="ai-degrade-off" hidden="hidden"><span class="glyph">◈</span><span class="ttl">AI 未啟用</span><span class="sub">尚未設定任何 LLM 模型</span><a class="btn btn-primary" href="settings.html#llm">前往 AI 與額度設定</a></div>
+        <div class="degrade-panel" id="ai-degrade-off" hidden="hidden"><span class="glyph">◈</span><span class="ttl">AI 未啟用</span><span class="sub">尚未設定任何 AI 模型</span><a class="btn btn-primary" href="settings.html#llm">前往 AI 與額度設定</a></div>
         <div class="degrade-panel" id="ai-degrade-quota" hidden="hidden"><span class="glyph">$</span><span class="ttl">AI 額度用盡</span><span class="sub">補充額度後即可繼續使用</span><a class="btn btn-primary" href="settings.html#llm">前往額度設定</a></div>
-        <div class="degrade-panel" id="ai-degrade-down" hidden="hidden"><span class="glyph">⚠</span><span class="ttl">LLM 服務暫時無法連線</span><span class="sub">請稍後重試</span><button class="btn btn-primary" type="button">重試</button></div>
+        <div class="degrade-panel" id="ai-degrade-down" hidden="hidden"><span class="glyph">⚠</span><span class="ttl">AI 服務暫時無法連線</span><span class="sub">請稍後重試</span><button class="btn btn-primary" id="ai-retry" type="button">重試</button></div>
       </div>
 
       <!-- Tab: 股利 -->
@@ -231,19 +303,35 @@
             <div class="form-grid">
               <div class="field"><label for="d-account">帳戶</label><select class="select" id="d-account"></select></div>
               <div class="field" id="d-symbol-field" style="position:relative;"><label for="d-symbol">代號</label><input class="input" id="d-symbol" spellcheck="false" autocomplete="off"></input><div class="sym-picker" id="d-sym-picker" hidden="hidden"><div class="sym-pick-empty" id="d-sym-empty" hidden="hidden"></div><div id="d-sym-list"></div><div class="sym-pick-foot" id="d-sym-foot" hidden="hidden"><label class="sym-pick-toggle"><input type="checkbox" id="d-sym-closed-toggle"></input>顯示已清倉標的</label></div></div></div>
-              <div class="field"><label for="d-date">日期</label><input class="input" id="d-date" type="date"></input></div>
+              <div class="field"><label for="d-date">日期（發放日）</label><input class="input" id="d-date" type="date"></input></div>
+              <!-- R6 (review ⑧): the ex-dividend date. Optional, and only 配股 uses it —
+                   the shares attach on the ex-date while the cash/DRIP purchase happens on
+                   the payment date. Left blank the row replays exactly as it did before. -->
+              <div class="field" id="d-exdate-field" hidden="hidden"><label for="d-exdate">除息／除權日（選填）</label><input class="input" id="d-exdate" type="date"></input></div>
             </div>
             <div id="d-tw" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
               <div class="field"><label>類型</label><div class="segmented"><button type="button" id="d-type-cash" class="active">現金股利</button><button type="button" id="d-type-stock">配股</button></div></div>
               <div class="field"><label id="d-tw-gross-label" for="d-tw-gross">Gross（總額）</label><input class="input" id="d-tw-gross" type="number"></input></div>
               <div class="field" id="d-tw-net-field"><label for="d-tw-net">Net（淨入帳）</label><input class="input" id="d-tw-net" type="number"></input></div>
             </div></div>
+            <!-- P1b (2026-08-13): a US payout that arrives as PLAIN CASH had no manual door
+                 at all — this pane assumed every US dividend is reinvested. The type switch
+                 mirrors the TW pane's; the 預扣 field gains the SAME pencil override the
+                 manual trade's fee/tax use, because a real broker's withholding differs
+                 from gross x 0.30 by its own rounding and a readonly field cannot
+                 reproduce a statement to the cent. -->
             <div id="d-drip" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
+              <div class="field"><label>類型</label><div class="segmented"><button type="button" id="d-us-drip" class="active">再投資（DRIP）</button><button type="button" id="d-us-cash">現金股利</button></div></div>
               <div class="field"><label for="d-drip-gross">Gross</label><input class="input" id="d-drip-gross" type="number" step="0.01"></input></div>
-              <div class="field"><label for="d-drip-wh">預扣 30%（自動）</label><input class="input" id="d-drip-wh" readonly="readonly"></input></div>
+              <div class="field"><label id="d-drip-wh-label" for="d-drip-wh">預扣 30%（自動） <span class="ovr-chip" id="d-drip-wh-ovr" hidden="hidden">已覆寫</span></label>
+                <div class="fee-line">
+                  <input class="input" id="d-drip-wh" readonly="readonly"></input>
+                  <button class="pencil" id="d-drip-wh-pencil" type="button" title="覆寫" aria-pressed="false" aria-label="覆寫預扣稅">✎</button>
+                </div>
+              </div>
               <div class="field"><label for="d-drip-net">Net（自動）</label><input class="input" id="d-drip-net" readonly="readonly"></input></div>
-              <div class="field"><label for="d-drip-shares">再投資股數</label><input class="input" id="d-drip-shares" type="number" step="0.0001"></input></div>
-              <div class="field"><label for="d-drip-price">再投資價格</label><input class="input" id="d-drip-price" type="number" step="0.01"></input></div>
+              <div class="field" id="d-drip-shares-field"><label for="d-drip-shares">再投資股數</label><input class="input" id="d-drip-shares" type="number" step="0.0001"></input></div>
+              <div class="field" id="d-drip-price-field"><label for="d-drip-price">再投資價格</label><input class="input" id="d-drip-price" type="number" step="0.01"></input></div>
             </div></div>
             <div id="d-net" hidden="hidden"><div class="form-grid" style="margin-top:14px;">
               <div class="field"><label for="d-net-amt">淨額</label><input class="input" id="d-net-amt" type="number" step="0.01"></input></div>
@@ -281,7 +369,10 @@
   <section class="panel ledger-section" data-screen-label="帳本記錄">
     <div class="panel-head">
       <h2 class="panel-title">帳本記錄</h2>
-      <span class="panel-sub">所有交易・四帳本・更正以全帳重播檢核，原值留存稽核軌跡</span>
+      <!-- No ledger count here. It said 四帳本 (ledger-count-ok: historical quote) while the
+           tab bar below showed five and the system has six — a number in prose sitting beside
+           the tabs that contradicted it. -->
+      <span class="panel-sub">所有交易・各帳本・更正以全帳重播檢核，原值留存稽核軌跡</span>
       <span class="spacer"></span>
       <span id="ledger-export-slot"></span>
       <div class="segmented">
@@ -289,18 +380,33 @@
         <button type="button" id="tab-ldiv">股利</button>
         <button type="button" id="tab-lfx">換匯</button>
         <button type="button" id="tab-lopen">期初庫存</button>
+        <!-- The 5th ledger (spec 2026-08-06 §6.7 door 3). Deliberately here rather than as
+             a 6th tab on the input pane above: that pane is high-frequency capture, this
+             section is low-frequency corrective record-keeping. -->
+        <button type="button" id="tab-laction">公司行動</button>
+        <!-- The 6th ledger. Writable since 2026-08-13 and readable nowhere on this page
+             until 2026-08-16 — the tab bar showed five of six. -->
+        <button type="button" id="tab-lcash">資金收支</button>
       </div>
     </div>
     <div class="filter-bar" id="ledger-filters"></div>
     <div class="filter-bar" style="gap: 8px;">
       <span class="group-label">篩選</span>
+      <!-- M3-06 (2026-09-03): this title used to say 「帳戶與日期為全帳本篩選」 flatly, and the
+           期初庫存 tab has no date filter at all (GET /api/ledgers/openings takes no from/to,
+           and ledger.js::ledgerParams skips them for `open`). A 2026 range therefore emptied
+           the other five tabs and left 期初庫存 showing all five 2021 rows — five empty tables
+           and one full one, with the tooltip insisting the range was global. The claim is
+           narrowed to what is true; the exception is ALSO stated visibly inside the 期初庫存
+           pane, because a tooltip is not read by someone who is not hovering it. -->
       <input class="input" id="ledger-sym-search" type="search" placeholder="代號或名稱（篩選本頁）…"
-             style="width: 190px;" spellcheck="false" title="關鍵字僅過濾目前頁面；帳戶與日期為全帳本篩選"></input>
+             style="width: 190px;" spellcheck="false"
+             title="關鍵字僅過濾目前頁面；帳戶為全帳本篩選；日期區間套用於交易／股利／換匯／公司行動／資金收支（期初庫存不受影響）"></input>
       <input class="input" id="ledger-date-from" type="date" style="width: 150px;"
-             title="起日（含）"></input>
+             title="起日（含）— 期初庫存不受此區間影響"></input>
       <span class="group-label">→</span>
       <input class="input" id="ledger-date-to" type="date" style="width: 150px;"
-             title="迄日（含）"></input>
+             title="迄日（含）— 期初庫存不受此區間影響"></input>
     </div>
 
     <div class="mode-pane" id="pane-tx">
@@ -325,11 +431,38 @@
       <div id="lfx-pager" hidden="hidden"></div>
     </div>
     <div class="mode-pane" id="pane-lopen">
+      <!-- M3-06: the visible half of the correction above. 期初庫存 is a per-(帳戶,代號)
+           opening balance, not a dated flow, so the shared 日期區間 does not apply to it —
+           said here, on the tab where the range appears to be ignored, rather than only in a
+           tooltip on a control two rows up. 帳戶 篩選 still applies. -->
+      <div class="append-note" id="lopen-date-note" style="padding: 8px var(--pad) 0;">期初庫存是各帳戶標的的期初餘額，不是有日期的流水，因此不受上方日期區間篩選（帳戶篩選仍有效）。</div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th class="col-text">帳戶</th><th class="col-text">代號</th><th>股數</th><th>原始均價</th><th>原始總成本</th><th>建檔日</th><th></th></tr></thead>
         <tbody id="open-body"></tbody>
       </table></div>
       <div id="lopen-pager" hidden="hidden"></div>
+    </div>
+    <div class="mode-pane" id="pane-laction">
+      <div class="filter-bar" style="gap: 8px;">
+        <button class="btn btn-primary btn-sm" id="action-add" type="button"
+                title="補登分割／換股／分拆，並自動套用到所有持有此標的的帳戶">＋補登公司行動</button>
+        <span class="hint">分割／換股／分拆會改變股數而不改變成本；一筆行動會同時登錄到所有持有該標的的帳戶。</span>
+      </div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>日期</th><th class="col-text">帳戶</th><th class="col-text">類型</th><th class="col-text">來源代號</th><th class="col-text">目的代號</th><th class="col-text">比例</th><th>成本分攤</th><th class="col-text">備註</th><th></th></tr></thead>
+        <tbody id="action-body"></tbody>
+      </table></div>
+      <div id="laction-pager" hidden="hidden"></div>
+    </div>
+    <div class="mode-pane" id="pane-lcash">
+      <div class="filter-bar" style="gap: 8px;">
+        <span class="hint">入金／出金／期初資金／折讓款／利息／融資利息／券商費用。金額的正負由類型決定，伺服器已算好；新增與修改在「現金」頁。</span>
+      </div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>日期</th><th class="col-text">帳戶</th><th class="col-text">類型</th><th class="col-text">幣別</th><th>金額</th><th>取得成本（家幣）</th><th class="col-text">備註</th></tr></thead>
+        <tbody id="cash-body"></tbody>
+      </table></div>
+      <div id="lcash-pager" hidden="hidden"></div>
     </div>
     <div class="append-note">帳本更正為顯式操作：編輯／刪除前會以全帳本重播檢核（賣超與孤兒紀錄防呆），更正前的原值會寫入稽核軌跡留存。點擊交易列展開費率規則快照。</div>
   </section>
@@ -338,15 +471,21 @@
 </div>
 </div>
 
+<!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
+     tokens through window.pdNames on every response, so the resolver must exist before the
+     first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
+<script src="names.js?v=0.1.28"></script>
 <script src="api.js?v=0.1.28"></script>
 <script src="shell.js?v=0.1.28"></script>
 <script src="format.js?v=0.1.28"></script>
-<script src="names.js?v=0.1.28"></script>
 <script src="pager.js?v=0.1.28"></script>
 <script src="export.js?v=0.1.28"></script>
 <script src="alerts.js?v=0.1.28"></script>
 <script src="inst-quickadd.js?v=0.1.28"></script>
 <script src="sym-picker.js?v=0.1.28"></script>
+<script src="corp-action-form.js?v=0.1.28"></script>
+<script src="import-ack.js?v=0.1.28"></script>
+<script src="broker-import.js?v=0.1.28"></script>
 <script src="input.js?v=0.1.28"></script>
 <script src="ledger.js?v=0.1.28"></script>
 <script>
@@ -356,7 +495,7 @@ document.getElementById('input-toggle').addEventListener('click', function (e) {
   document.getElementById('input-section').classList.toggle('open');
 });
 /* glue: ledger tabs */
-const LEDGER_TABS = ['tx','ldiv','lfx','lopen'];
+const LEDGER_TABS = ['tx','ldiv','lfx','lopen','laction','lcash'];
 LEDGER_TABS.forEach(function(t) {
   var btn = document.getElementById('tab-' + t);
   if (!btn) return;
@@ -377,7 +516,11 @@ document.getElementById('tab-tx').click();
 (function () {
   var slot = document.getElementById('ledger-export-slot');
   if (!slot || !window.pdApi) return;
-  var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening' };
+  /* Tab -> export kind. The keys are shared/ledger_registry.py's `export_kind` values,
+     which is also what /api/export/ledger validates against — a 5th tab that is not here
+     silently exports the transactions ledger under the corporate-action tab. */
+  var KIND = { tx: 'transactions', ldiv: 'dividends', lfx: 'fx', lopen: 'opening',
+               laction: 'actions', lcash: 'cash' };
   var btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-sm btn-export';
@@ -418,7 +561,11 @@ document.getElementById('tab-tx').click();
   reportBtn.className = 'btn btn-sm';
   reportBtn.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⎙' }));
   reportBtn.appendChild(Object.assign(document.createElement('span'), { textContent: '匯出報告' }));
-  reportBtn.title = '下載帳本報告（可列印 HTML，四帳本＋期初庫存，依目前日期區間）';
+  /* 「四帳本＋期初庫存」 (ledger-count-ok: historical quote) counted five things over a
+     report that had four sections — and
+     期初庫存 was one of the four, so it was counted twice. The report gained its 公司行動
+     section on 2026-08-16; it still excludes 資金收支, which its own page header now says. */
+  reportBtn.title = '下載帳本報告（可列印 HTML，依目前日期區間）';
   reportBtn.addEventListener('click', async function () {
     var restore = window.pdBusy ? window.pdBusy(reportBtn, '產出中…') : function () {};
     try {
@@ -437,6 +584,69 @@ document.getElementById('tab-tx').click();
     }
   });
   slot.appendChild(reportBtn);
+})();
+/* glue: 年度稅務包 — POST /api/export/tax-package. Until 2026-08-27 nothing on the site
+   actually called it, so R1's 申報用原始成本 column (realized_original + its subtotal — the
+   number that goes on a return) shipped unreachable from a browser.
+
+   「Nothing called it」 is not the same as 「there was no button」, and the difference is the
+   finding: the 設定頁 匯出中心 had a 年度報稅包 card with a ⬇ glyph and a 「產生並下載」 button
+   whose handler fired a SUCCESS toast (「已排入產生佇列」 — there is no queue) and downloaded
+   nothing. That card is wired for real in the same change; a control that reports success
+   and does nothing is worse than a missing one, and it is invisible to a wiring sweep that
+   asks only whether a control has a listener.
+
+   Placement here (owner ruling 2026-08-27): beside the ledger exports, where the ledgers a
+   tax package is built from are read. NOT the dashboard's 已實現損益 panel — it has no year
+   concept and would need a selector of its own. Two surfaces, one export, is the same shape
+   as 匯出 CSV living on both a panel head and in the 匯出中心.
+
+   The year list is DERIVED, never invented — see window.pdExport.fillTaxYearSelect, which
+   the 設定頁 匯出中心 shares so the two menus cannot disagree. */
+(function () {
+  var slot = document.getElementById('ledger-export-slot');
+  if (!slot || !window.pdApi) return;
+
+  var sel = document.createElement('select');
+  sel.className = 'select';
+  sel.id = 'tax-package-year';
+  sel.setAttribute('aria-label', '稅務包年度');
+  sel.title = '稅務包年度（依帳本最早一筆推出）';
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-sm';
+  btn.title = '下載該年度稅務包 ZIP（已實現損益／股利／換匯已實現，三張對帳級 CSV）';
+  btn.appendChild(Object.assign(document.createElement('span'), { className: 'ico', textContent: '⎘' }));
+  btn.appendChild(Object.assign(document.createElement('span'), { textContent: '稅務包' }));
+
+  /* The year menu is DERIVED, never typed: window.pdExport.fillTaxYearSelect reads each
+     ledger's oldest row (GET /api/db-stats) so the options span 「最早一筆帳本」..今年 and
+     default to 去年. ONE definition, shared with the 設定頁 匯出中心 — the copy that lived
+     there was a hard-coded ['2026','2025','2024']. */
+  if (window.pdExport && window.pdExport.fillTaxYearSelect) {
+    window.pdExport.fillTaxYearSelect(sel);
+  }
+
+  btn.addEventListener('click', async function () {
+    var restore = window.pdBusy ? window.pdBusy(btn, '產出中…') : function () {};
+    try {
+      /* An empty menu (db-stats unreachable AND the helper absent) must not post NaN.
+         去年 is the same default the helper would have chosen. */
+      var year = parseInt(sel.value, 10);
+      if (!isFinite(year)) year = new Date().getFullYear() - 1;
+      await window.pdApi.download('/api/export/tax-package', { year: year });
+    } catch (err) {
+      if (window.toast) {
+        window.toast(err && err.message ? err.message : '稅務包產出失敗', 'fail', err && err.code);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  slot.appendChild(sel);
+  slot.appendChild(btn);
 })();
 /* 待確認匯入收件匣：真實接線在 inbox.js（2026-07-03, R4）。 */
 /* #10: the new-row flash is no longer a fixed-300ms guess wired to #m-confirm (that flashed

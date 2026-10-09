@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from portfolio_dash.shared.money import usd_display
+
 # Node/aggregate severity. ``idle`` is "not applicable / off" and sits below ``ok`` for
 # the aggregate (a disabled task is wholly idle; a never-run output is idle).
 NodeLevel = Literal["ok", "info", "warn", "fail", "idle"]
@@ -44,18 +46,25 @@ class PipelineFacts(BaseModel):
     """The fed facts for one task's node-state derivation (gathered in the api layer).
 
     Everything here is already resolved against the DB/dashboard; this module computes no
-    number of record. ``missing_or_stale_symbols`` is the freshness of THIS task's symbols
-    taken from the dashboard's own freshness computation (the locked R4-source decision).
-    ``removed_recently`` is the R2 auto-removed list within the last
+    number of record. ``missing_price_symbols`` / ``stale_price_symbols`` are the freshness of
+    THIS task's symbols taken from the dashboard's own freshness computation (the locked
+    R4-source decision). ``removed_recently`` is the R2 auto-removed list within the last
     :data:`REMOVAL_INFO_WINDOW_DAYS` days. Quota figures are Decimals.
     """
 
     enabled: bool
-    scope: str  # 'per_symbol' | 'portfolio' | 'on_alert'
+    scope: str  # 'per_symbol' | 'per_market' | 'portfolio' | 'on_alert'
     scheduled: bool  # a kind=insight schedule_config binding exists (manual when False)
     universe_symbols: list[str]
     removed_recently: list[str]
-    missing_or_stale_symbols: list[str]
+    # M8 (2026-09-16): SPLIT from the old single ``missing_or_stale_symbols`` list. The card
+    # flattened "missing OR stale" into one warn while the dry-run preflight's R4 tested
+    # MISSING only, so one task read 「⚠ … 8299 缺價/過期」 on its card and 「R4 價格資料 ✓ 通過」
+    # in its own dry run. Two fields, two levels, one source (``insight_service.
+    # _price_state_for`` feeds both surfaces): missing → warn (the R4 anomaly card),
+    # stale-only → info (the card still generates, off an older close).
+    missing_price_symbols: list[str]
+    stale_price_symbols: list[str]
     live_template_count: int  # enabled + non-archived strategies in the combo (R3)
     total_template_count: int  # all linked strategies (to tell "some off" from "none")
     r1_mismatch: bool  # a scope×per_symbol-variable conflict in existing linked bodies
@@ -75,27 +84,66 @@ class PipelineNodes(BaseModel):
 
 
 def _trigger(f: PipelineFacts) -> NodeState:
-    """Trigger node: manual (unscheduled) → warn ("won't auto-run"); scheduled → ok."""
+    """Trigger node: scheduled → ok; ``on_alert`` → ok (event-triggered); otherwise manual →
+    warn ("won't auto-run").
+
+    DEF-043 (2026-09-24): this read ``scheduled`` alone, so an ``on_alert`` task — which by
+    design can never carry a schedule (``PUT …/schedule`` refuses it, spec 03) and runs every
+    time a subscribed alert fires — read 「未排程（手動）・不會自動執行」 and was counted under
+    需注意 on the pipeline page, while the task's own dry-run G1 said 「由風險預警事件觸發」 ✓
+    and ``alert_scan`` was dispatching it. The scope decides first, exactly as G1
+    (``insight_service._g0_g1``) does: one task, one answer to "how does this run?".
+    """
+    if f.scope == "on_alert":
+        return NodeState(lv="ok", text="預警觸發", sub="風險預警命中時自動執行")
     if not f.scheduled:
         return NodeState(lv="warn", text="未排程（手動）", sub="不會自動執行")
     return NodeState(lv="ok", text="已排程")
 
 
+def _input_head(f: PipelineFacts) -> str:
+    """The input node's head text — decided by SCOPE, BEFORE any branch (M2, 2026-09-16).
+
+    ``universe_symbols`` is only a symbol list for ``per_symbol``; it is the held MARKET
+    codes for ``per_market`` and empty for portfolio/on_alert. The scope-aware label existed
+    only on the ok branch, so a warning task fell back to ``len(universe_symbols)`` and
+    printed the counts measured on the demo site: 「0 檔標的」 for a portfolio task and
+    「3 檔標的」 for a per_market one (its 3 markets) — both above a list of 14 symbols. Deciding
+    the head once, before the branches, is what makes the warn/info subs impossible to
+    mislabel again.
+    """
+    if f.scope == "per_symbol":
+        return f"{len(f.universe_symbols)} 檔標的"
+    if f.scope == "per_market":
+        return f"{len(f.universe_symbols)} 個市場"
+    return "全持倉"  # portfolio / on_alert: the whole book, no universe of its own
+
+
 def _input(f: PipelineFacts) -> NodeState:
-    """Input node: empty universe (R2) → fail; missing/stale price (R4 source) → warn;
-    a recent R2 auto-removal → info. Portfolio/on_alert scopes have no universe lifecycle.
+    """Input node: empty universe (R2) → fail; missing price (R4 source) → warn; a stale
+    price or a recent R2 auto-removal → info. Portfolio/on_alert have no universe lifecycle.
+
+    M8: missing and stale are separate levels because the dry-run preflight already treats
+    them differently (R4 tests MISSING only). Flattening them into one warn is what made the
+    two surfaces contradict each other on the same task; see :class:`PipelineFacts`.
     """
     if f.scope == "per_symbol" and not f.universe_symbols:
         return NodeState(lv="fail", text="標的宇宙為空", sub="清單已出清")
-    count_text = f"{len(f.universe_symbols)} 檔標的"
-    if f.missing_or_stale_symbols:
-        joined = ", ".join(f.missing_or_stale_symbols)
-        return NodeState(lv="warn", text=count_text, sub=f"{joined} 缺價/過期")
+    head = _input_head(f)
+    if f.missing_price_symbols:
+        sub = f"{', '.join(f.missing_price_symbols)} 缺價"
+        if f.stale_price_symbols:
+            # Both present: warn wins, but the stale list is still named — dropping it would
+            # lose information the dry run reports.
+            sub += f"；{', '.join(f.stale_price_symbols)} 價格過期"
+        return NodeState(lv="warn", text=head, sub=sub)
+    if f.stale_price_symbols:
+        joined = ", ".join(f.stale_price_symbols)
+        return NodeState(lv="info", text=head, sub=f"價格過期（以舊價產生）：{joined}")
     if f.removed_recently:
         joined = ", ".join(f.removed_recently)
-        return NodeState(lv="info", text=count_text, sub=f"近期移除：{joined}")
-    text = count_text if f.scope == "per_symbol" else "全持倉"
-    return NodeState(lv="ok", text=text)
+        return NodeState(lv="info", text=head, sub=f"近期移除：{joined}")
+    return NodeState(lv="ok", text=head)
 
 
 def _assemble(f: PipelineFacts) -> NodeState:
@@ -110,7 +158,7 @@ def _assemble(f: PipelineFacts) -> NodeState:
             sub="停用段跳過",
         )
     if f.r1_mismatch:
-        return NodeState(lv="warn", text="範圍不相容", sub="既有模板含 per_symbol 變數")
+        return NodeState(lv="warn", text="範圍不相容", sub="既有模板含「單一標的」變數")
     if f.unapplied_calibration:
         return NodeState(lv="info", text="有未套用校正版本", sub="可手動套用")
     return NodeState(lv="ok", text=f"{f.live_template_count} 模板啟用")
@@ -118,9 +166,10 @@ def _assemble(f: PipelineFacts) -> NodeState:
 
 def _usd_display(x: Decimal) -> str:
     """USD for NodeState display text: 2 dp（FM5 fix — the task card printed the raw
-    full-precision Decimal「$3.8014615」）. Display-only quantize; the comparisons
-    above it stay full precision."""
-    return f"${x.quantize(Decimal('0.01'))}"
+    full-precision Decimal「$3.8014615」）. Display-only; the comparisons above it stay full
+    precision. Delegates to the one server-side formatter since DEF-085, so the node and the
+    R6 gate message print one balance one way."""
+    return usd_display(x)
 
 
 def _exec(f: PipelineFacts) -> NodeState:

@@ -15,11 +15,13 @@ evaluation), not from rendered cells.
 """
 
 import sqlite3
+from decimal import Decimal
 from typing import Any
 
 from portfolio_dash.export.artifact import ExportArtifact, csv_artifact
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
+from portfolio_dash.shared.wire import decimal_str
 
 # Mirrors the 預測明細 table's data source (``_row_wire``): task/calib/shadow/quant/
 # narrative/result/actual/evaluated + the reconciliation ids (insight_id, status,
@@ -31,11 +33,18 @@ _COLUMNS = [
 
 
 def _s(value: object) -> str:
-    """Raw cell: value -> str; None -> empty; bool -> 'true'/'false' (never 'True')."""
+    """Raw cell: value -> str; None -> empty; bool -> 'true'/'false' (never 'True').
+
+    A Decimal goes through ``decimal_str`` (never scientific notation — owner 2026-09-30,
+    the rule holdings.py's ``_s`` has followed since M8-01): ``actual_value`` is computed,
+    and an exact zero from a division is ``0E-8`` in ``str()``'s form.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, Decimal):
+        return decimal_str(value)
     return str(value)
 
 
@@ -45,7 +54,8 @@ def build_ai_predictions_csv(conn: sqlite3.Connection) -> ExportArtifact:
     # rows_limit=None -> the whole (archived-excluded) set, matching the table's source
     # before its client-side paging slice.
     score: dict[str, Any] = es.ai_score(
-        conn, exclude_type_ids=cs.archived_type_ids(conn), rows_limit=None
+        conn, min_samples=int(cs.get_evolution_config(conn)["min_samples"]),
+        exclude_type_ids=cs.archived_type_ids(conn), rows_limit=None,
     )
     rows: list[list[str]] = [
         [_s(r.get(col)) for col in _COLUMNS] for r in score["rows"]

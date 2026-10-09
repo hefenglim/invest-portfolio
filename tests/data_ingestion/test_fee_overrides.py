@@ -100,9 +100,20 @@ def test_reset_all(conn: sqlite3.Connection) -> None:
         assert get_fee_rule_set(name, conn) == get_fee_rule_set(name)
 
 
-def test_rounding_override(conn: sqlite3.Connection) -> None:
-    fee_overrides.set_overrides(conn, "schwab", {"rounding": "floor"})
-    assert get_fee_rule_set("schwab", conn).rounding == "floor"
+def test_rounding_is_read_only(conn: sqlite3.Connection) -> None:
+    """QA-07 (2026-08-29): ``rounding`` is a MARKET FACT, not an overlay field.
+
+    ``fees.py`` hard-codes its quantization per market and never reads this field, so an
+    accepted override changed no money — it only stamped a regime that never ran into every
+    subsequent row's ``fee_rule_snapshot``, which ``data-and-pricing.md`` defines as
+    PROVENANCE. The door refuses the write instead. (Was: ``set_overrides(conn, "schwab",
+    {"rounding": "floor"})`` succeeded and ``get_fee_rule_set("schwab", conn).rounding``
+    reported ``"floor"``.)
+    """
+    with pytest.raises(FeeOverrideError) as exc:
+        fee_overrides.set_overrides(conn, "schwab", {"rounding": "floor"})
+    assert exc.value.field == "rounding"
+    assert get_fee_rule_set("schwab", conn).rounding == "half_up"  # the regime that runs
 
 
 def test_reject_unknown_field(conn: sqlite3.Connection) -> None:

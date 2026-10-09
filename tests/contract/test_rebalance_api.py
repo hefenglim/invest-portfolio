@@ -9,7 +9,9 @@ ONE row over the combined position; the response adds per-row `accounts` (consti
 The wire REQUEST is unchanged: still `{"targets": {symbol: ratio_string}}`.
 """
 
+import re
 from decimal import Decimal
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -51,6 +53,82 @@ def test_rebalance_missing_price_excluded(api_client: TestClient) -> None:
     body = r.json()
     assert "NOPRICE" in body["summary"]["excluded"]
     assert body["rows"] == []
+
+
+def test_rebalance_summary_carries_a_reason_for_every_empty_row(
+    api_client: TestClient,
+) -> None:
+    """L11 on the wire: `excluded_reasons` (a symbol->reason map) and `holds` (a list of
+    {symbol, reason}) ride beside the back-compatible `excluded` list of symbols.
+
+    The execution-report builder reads `excluded` as a list of strings, so the reasons are
+    added ALONGSIDE it rather than by changing its shape.
+    """
+    body = api_client.post(
+        "/api/rebalance/preview",
+        json={"targets": {"2330": "0.30", "AAPL": "0.70", "NOPRICE": "0.5"}},
+    ).json()
+    summary = body["summary"]
+    assert summary["excluded"] == ["NOPRICE"]
+    assert summary["excluded_reasons"] == {"NOPRICE": "no_price"}
+    assert isinstance(summary["holds"], list)  # both traded symbols -> no holds here
+    assert summary["holds"] == []
+
+
+# --- the client half of audit H1: what web/rebalance.js puts ON THE WIRE ------------------
+#
+# The backend tolerance (tests/strategy/test_rebalance.py) stops the float residue from
+# tripping the over-100% flag; this stops the residue from being SENT. Both halves are kept
+# because either alone leaves the other's arithmetic load-bearing — and the wire format is a
+# contract, which is why its guard lives in tests/contract rather than beside the JS.
+
+_REBALANCE_JS = Path(__file__).resolve().parents[2] / "web" / "rebalance.js"
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT = re.compile(r"//[^\n]*")
+# Anything assigned into the outgoing `targets` dict that is NOT built by ratioStr(). The
+# lookahead swallows the whitespace itself: `\s*(?!ratioStr\()` would let the optional gap
+# match nothing and then "fail to see" ratioStr one space later — i.e. flag the fix.
+_TARGET_ASSIGN = re.compile(r"targets\[[^\]]*\]\s*=(?!\s*ratioStr\()")
+
+
+def _js_code() -> str:
+    """rebalance.js with comments stripped — its comments QUOTE the banned expression to
+    explain what went wrong, the same convention test_frontend_never_computes_money uses."""
+    src = _REBALANCE_JS.read_text(encoding="utf-8")
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", src))
+
+
+def _wire_violations(code: str) -> list[str]:
+    return [f"{n}: {ln.strip()}" for n, ln in enumerate(code.splitlines(), start=1)
+            if _TARGET_ASSIGN.search(ln)]
+
+
+def test_the_detector_sees_the_pre_fix_assignment() -> None:
+    """Positive control: the shipped line that caused H1 must trip this, or the scan below
+    would certify the fix by being blind."""
+    assert _wire_violations("        targets[r.symbol] = String(ratio);")
+    assert _wire_violations("targets[sym] = (t / 1000).toString();")
+    assert _wire_violations("targets[sym] = ratioStr(tenths);") == []
+
+
+def test_rebalance_js_sends_exact_fixed_point_target_strings() -> None:
+    """The drawer must POST the number its 1-dp field shows, not a printed IEEE double.
+
+    Measured 2026-09-16: fields reading 0.7 / 3.6 / 2.6 went out as
+    "0.006999999999999999" / "0.036000000000000004" / "0.026000000000000002" because the
+    state was `Number(inp.value) / 100` and the wire value was `String(ratio)`.
+    """
+    code = _js_code()
+    assert not _wire_violations(code), (
+        "web/rebalance.js must build every target ratio with ratioStr() over the integer "
+        "tenths-of-a-percent state: " + "; ".join(_wire_violations(code))
+    )
+    assert "function ratioStr" in code, "ratioStr (the exact fixed-point builder) is gone"
+    # the state itself is integer tenths, and the client-side Σ check is integer too — the
+    # float sum was correctly BELOW `1.0001` while the exact Decimal sum was above 1.
+    assert "Number(inp.value) / 100" not in code
+    assert "1.0001" not in code
+    assert "sumTenths > TENTHS_MAX" in code
 
 
 def test_rebalance_negative_ratio_400(api_client: TestClient) -> None:

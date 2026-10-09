@@ -25,12 +25,20 @@ Adapter / storage-key decision (verified against
     same ticker ``pricing/index_source.py`` already uses for the sentiment variable), so
     no ``SPY``-style proxy is needed and the series is a genuine index price-return series.
 
-Collision conclusion (senior review): the key ``"0050"`` MAY equal a user-registered
-symbol if the owner also holds 元大台灣50. That collision is **harmless**: the benchmark
-ref and the user's instrument both resolve to the SAME yfinance ticker ``"0050.TW"`` and
-write byte-identical ``PriceRow``s through the idempotent ``(instrument, as_of_date)``
-upsert — the two writers can never disagree on a stored row. ``"^GSPC"`` cannot collide
-(a ``"^"``-prefixed symbol is not a valid user instrument). Orphan benchmark rows (no
+Collision conclusion (senior review, amended 2026-09-10): the key ``"0050"`` MAY equal a
+user-registered symbol if the owner also holds 元大台灣50. The collision is harmless **only
+while both writers apply the same split basis**: the benchmark ref and the user's
+instrument resolve to the SAME yfinance ticker ``"0050.TW"`` and go through the idempotent
+``(instrument, as_of_date)`` upsert, but since D30 a stored close is
+``close_raw × split_basis``, and 0050 is an ETF that can split (it did, 1→4, in 2025-06).
+The benchmark jobs therefore bind ``split_factor_fn`` exactly like the instrument sweeps
+(``scheduler/jobs.py::_refresh_benchmark_history`` / ``_backfill_benchmarks``); until
+2026-09-10 they wrote the identity and, running last, reverted a held 0050's pre-split rows
+to the provider's basis after every deep backfill (site-architecture map D-11). With the
+same factor on both sides the rows are byte-identical again —
+``tests/scheduler/test_benchmark_history.py`` holds the two writers to it. ``"^GSPC"`` /
+``"^KLSE"`` cannot collide (a ``"^"``-prefixed symbol is not a valid user instrument), so
+for them the bound factor is the identity by construction. Orphan benchmark rows (no
 matching ``instruments`` row) are fine too: holdings come from the ledger, never from
 ``prices``, so a benchmark series is invisible to portfolio valuation.
 """
@@ -68,6 +76,12 @@ BENCHMARKS: tuple[Benchmark, ...] = (
         ref=InstrumentRef(symbol="^GSPC", market=Market.US, board=""),
         quote_ccy=Currency.USD,
     ),
+    Benchmark(
+        key="klci",
+        label="富時大馬 KLCI",
+        ref=InstrumentRef(symbol="^KLSE", market=Market.MY, board=""),
+        quote_ccy=Currency.MYR,
+    ),
 )
 
 
@@ -82,3 +96,30 @@ def get_benchmark(key: str) -> Benchmark | None:
         if b.key == key:
             return b
     return None
+
+
+#: Fixed market → benchmark map for prediction scoring (AI-D22, owner ruling 2026-08-19):
+#: the yardstick for a ``relative`` prediction is chosen by the CODE from the instrument's
+#: market, never by the LLM.
+#:
+#: MY was deliberately absent until 2026-08-27, because ``yf_symbol`` would have routed
+#: ``^KLSE`` with ``Market.MY`` to ``^KLSE.KL`` — a ticker that does not exist. That routing
+#: is now re-derived (a ``^``-prefixed Yahoo ticker is an index and takes no suffix in any
+#: market), so KLCI is wired and every market has a yardstick. ``benchmark_for_market`` still
+#: returns ``None`` for anything unmapped, and every caller must keep honouring it: the
+#: degradation path is the honest answer for a market added later, not dead code.
+_MARKET_BENCHMARK: dict[Market, str] = {
+    Market.TW: "0050",
+    Market.US: "sp500",
+    Market.MY: "klci",
+}
+
+
+def benchmark_for_market(market: Market) -> Benchmark | None:
+    """The fixed benchmark for a market's ``relative`` predictions, or ``None`` (AI-D22).
+
+    ``None`` is the honest answer for a market with no wired benchmark (MY today): the
+    caller turns it into ``pending_data``, never a guessed proxy.
+    """
+    key = _MARKET_BENCHMARK.get(market)
+    return None if key is None else get_benchmark(key)

@@ -57,6 +57,19 @@ seeded config as constants — parameters-from-config is allowed; the **logic is
 harness's own**. Because the two implementations never share a code path, they agree only
 when *both* are correct: a bug in the app cannot hide behind a shared helper.
 
+The corporate-action spec's §6.0 says "ONE owner per concept", and **this file is the one
+deliberate suspension of that rule** (§7.4). The ratio algebra, the event-priority enum and
+the §4.4 field table are duplicated here ON PURPOSE; `oracle.py` states the reason in its
+own docstring so a future cleanup pass does not "de-duplicate" the oracle into uselessness.
+
+**Corporate-action entry surfaces are W7 and do not exist yet**, so the scenario writes
+`corporate_actions` rows through the app's own `insert_corporate_action` as a SETUP fixture
+(`common.write_corporate_action`), exactly as instruments and prices are seeded. Move them
+onto the API the moment W7 lands: an entry surface never exercised end-to-end is how the
+ETF-sell and daytrade tax bugs survived. `load_facts_from_api` likewise does **not** read
+actions (no public read endpoint), which is correct only while the demo corpus has none —
+D25 seeds one, so that loader must gain them in the same change.
+
 ### 2. Two independent layers (keep them separate)
 1. **Fee-engine oracle** (`fee_tax`) recomputes expected fee/tax from the rules and
    compares against the app's stored fee/tax.
@@ -91,16 +104,178 @@ for touched cash pools and newly-registered instruments. It never deletes pre-ex
 demo data. No FX rates are exposed remotely, so reporting-currency blended KPIs (incl.
 XIRR) are out of phase-2 scope; every native-currency figure is still reconciled exactly.
 
+### 6. Point-in-time state: CLOSED (2026-08-28)
+
+**The gap, as disclosed on 2026-08-26.** Every reconciliation ran **at the current state** —
+`/api/dashboard` holdings, realized rows, cash pools and KPIs against `oracle.replay(facts)`.
+Nothing compared the app and the oracle **as at a past date**, because the oracle had no daily
+replay: it produced one final `OracleResult`, not a series.
+
+That is not academic, and R6 (the ex-dividend date) is the case that exposed it. A STOCK
+dividend booked on its ex-date rather than its payment date changes the share count **only
+between those two dates** — the final position is identical either way by construction. So the
+scenario's permanent 配股 op genuinely exercises the app's ex-date path while every assertion
+compared a point where the two answers coincide.
+
+**Half one (AI-D51, 2026-08-27).** The oracle gained `facts_through` / `replay_through` /
+`net_invested_through`, and `phase1.py` gained the `trend.*` family, which samples the daily
+replay at **every ledger event date and the day before it** — dividends contributing BOTH
+`effective` (the ex-date for a 配股) and `d` (the payment date), so the two edges of R6's window
+are sampled by construction — plus `ASOF` and the last point.
+
+| check | price-free? | what it pins |
+| --- | --- | --- |
+| `trend.start` · `trend.contiguous_days` | yes | the replay's span, dividends on their EFFECTIVE date |
+| `trend.net_invested` | **yes** | the subtrahend of **B** (`total_value − net_invested`), AI-D41 |
+| `trend.incomplete` | yes | the app's honesty about days it cannot value |
+| `trend.total_value` | no | the per-day valuation — see below |
+| `trend.net_worth` | no | `total_value` + every cash pool's end-of-day balance at that day's rate (YQ3, 2026-10-05) |
+
+Since YQ1/YQ3 (2026-10-05) two questions are kept apart: whether a day is **incomplete**
+(`_day_incomplete`) and whether its **value** is honest (`_day_value_judgeable`). A refused
+dividend marks every day from its date, but the shares are right, so `total_value` and
+`net_worth` are still asserted on that day — the held carrier's value stays in both (Y3). The
+family runs whenever no UNDECLARED oversell (sticky 賣超) is held, so it also runs while a
+declared short is open (`short_open`); the KPI / XIRR gate is unchanged.
+
+`trend.net_invested` remains the family's first job: it is exactly what AI-D48 moves when B
+takes the three cash kinds, so the app and the oracle must move together or this goes red in
+between.
+
+**Half two (AI-D59, 2026-08-28) — the per-symbol SHARE COUNT, which was R6's actual 落點.**
+The blocker was never the assertion, it was the fixture: `seed_all` seeds exactly ONE close per
+symbol, dated `ASOF`, so every earlier day was unpriced by construction, every pre-ASOF day was
+`incomplete`, and `trend.total_value` was skipped precisely where the defect lives.
+
+`_ensure_daily_prices` now seeds a close for every fixture symbol on **every day** from the
+first ledger event through `ASOF`. At a KNOWN price, `total_value` pins the share count: the
+app and the oracle read the same close, so any disagreement that survives is a quantity. Two
+properties keep the fixture honest rather than merely green:
+
+* **The closes are AS TRADED on their own date.** `oracle.price_as_traded` multiplies the ASOF
+  quote back out by the splits between that day and ASOF — one action at a time, division
+  last, never a product of quotients (trap #2a) — which is the invariant
+  `data-and-pricing.md` states for the column. Seeding the post-split quote on a pre-split day
+  would store a basis the ledger never traded on. It quantizes to 4 dp, deliberately: a ratio
+  like `1/3` makes the price a repeating decimal that the capped column cannot hold, and one
+  expression owning both the seed and the valuation is what keeps them equal (measured: 91
+  `trend.total_value` failures off by 0.0070 before that line existed).
+* **Each row is stamped `fetched_at` = its own date**, so the write window
+  `(as_of, fetched_at]` and the read window `(priced_on, day]` are both empty. Nothing
+  re-expresses these rows — not `upsert_prices`, not `reconcile_prices` — so inserting or
+  deleting a SPLIT can never repaint the history this family asserts against.
+
+Seeding is derived from `facts` inside `reconcile`, before the dashboard is fetched, so it is
+self-correcting: a checkpoint that runs before the scenario's corporate actions exist seeds an
+unadjusted series, and the next one re-seeds the same dates on the corrected basis.
+
+**Detection power, measured — not claimed.** The R6 defect was deliberately reintroduced into
+the ORACLE (`facts_through` cutting dividends on the payment date instead of the ex-date, which
+is exactly the pre-R6 behaviour) and the harness re-run:
+
+| harness | result |
+| --- | --- |
+| **pre-change** (one close at ASOF, pre-daily completeness rule) | `ops=128 pass=5663 fail=0` — **silent** |
+| **current** (daily as-traded series) | `ops=128 pass=6022 fail=53` |
+
+All 53 are `trend.total_value`, on **2026-05-02 … 2026-05-29** — exactly the ex-date-to-payment
+window — each off by 70,000 TWD, the value of the 配股 shares that should exist in that gap.
+The pre-change row reproducing the previously-recorded baseline *to the digit* is itself the
+evidence that the probe faithfully restored the old state: that `fail=0` was not coverage, it
+was blindness.
+
+Baseline after this change: **`ops=128 pass=6075 fail=0`**. `ops` is unchanged and must stay
+128 — this closed a gap with fixture data and assertions, not with a new route.
+
+**What is still reviewed rather than reconciled.** The oracle derives the STOCK-only ex-date
+rule independently (`DivFact.effective`), and that derivation is now *exercised* by the family
+above, but the rule itself — that a 配股 attaches on the ex-date and a CASH dividend does not —
+is still a reading of `domain-ledger.md` by both sides. Two independent implementations of the
+same misreading would still agree. The hermetic hand-checked tests
+(`tests/portfolio/test_review_r6_ex_date.py`) walk the share count day by day against
+hand-computed values, which is the only thing that catches that class.
+
+### 7. Refused dividends: all three classes, measured (YQ1 / YQ3, 2026-10-05)
+
+**The gap.** The oracle modelled one refusal class — a dividend on an open declared short.
+A dividend with no position made it RAISE, and a dividend on a ticker an EXCHANGE vacated was
+BOOKED (post-close income for cash, a zero-cost resurrection for a 配股), while the app has
+refused both since CR-02 / E24. The only scenario state carrying a refusal (2609's
+`short_open`) was also exactly where the trend family was gated off, so Y3 (a held carrier
+keeps its value) was never reconciled at all.
+
+**Detection power, measured.** Each line is one deliberate break in the APP, a full phase-1
+run (API-only, `run_phase1.py`), then a restore. The baseline it is compared with is
+`ops=137 pass=11399 fail=0`.
+
+| break (app) | result | failing families |
+| --- | --- | --- |
+| ⑪ — a refused payout moves the cash pool; the net-worth cash series counts it; the listing marks every row booked; the trend's book-level marking (K3) removed | `pass=10951 fail=448` | `cash.balance` / `cash.statement.terminal` (+3,000 on tw_broker TWD), `trend.net_worth`, `ledger.div.booked`, `trend.incomplete` on the flat-carrier and orphan days, `kpi.fx_complete_withheld` / `kpi.trading_financing_cost` |
+| Y3 — the trend drops a held flagged position; XIRR counts refused payouts; an orphan no longer withholds XIRR | `pass=11150 fail=249` | `trend.total_value` / `trend.net_worth` (incl. `short_open`: the short's −192,000), `kpi.xirr` at every vacated checkpoint, `xirr.withheld_for_orphan_dividend`, `xirr.orphan_reason_names_row` |
+| E24 — the replay books a dividend on a vacated ticker | `pass=9827 fail=1572` | `holdings.keyset` (VCO resurrected at 50 shares), `realized.*` (a 3,000 income row), `cash.*`, `kpi.*`, `trend.*`, `ledger.div.booked`, `export.*`, `refused.anchor.*` |
+
+A fourth state is worth naming: the first run of the new scenario failed 4
+`kpi.trading_financing_cost` lines that were an ORACLE assumption, not an app bug. B is
+withheld when the trend's last day is incomplete, and its third term rides with it (AI-D48).
+No KPI checkpoint had ever had an incomplete last day before, so the oracle had never had to
+say so. It now does (`kpi.fx_complete_withheld`).
+
+Baseline after this change (`run_all.py --phase 1`, with the UI read-back):
+**`ops=137 pass=11406 fail=0`** (was `ops=128 pass=6025 fail=0`).
+
+**`ops` moved 128 → 137 (+9)**: `run_refused_dividends` adds a deposit, a buy, an action, two
+E24 dividends, the orphan door probe, the legacy write, the successor's sale and the orphan's
+delete. The pass count moved by much more, because the trend family now runs at `short_open`
+and at four new checkpoints, and `trend.net_worth` doubles its assertions.
+
 ## Must-pass assertion families
 
 A run is only green when **all** of these hold (exact Decimal unless noted):
 
 - **Per-stock cost basis** — for every `(account, symbol)` holding: `shares` (SIGNED —
   an open declared short is negative), `original_cost_total`, `adjusted_cost_total`,
-  `original_avg`, `adjusted_avg`, `dividend_portion`, the three state flags
-  (`oversold` / `short_open` / `unbookable_dividend`), and (when valued) `market_value`,
-  `unrealized_pnl`, `capital_gain`, `unrealized_pct` (÷ `abs(basis)` — sign-safe on a
-  short's negative basis).
+  `original_avg`, `adjusted_avg`, `dividend_portion`, the four state flags
+  (`oversold` / `short_open` / `unbookable_dividend` / `unbookable_action`), and (when
+  valued) `market_value`, `unrealized_pnl`, `capital_gain`, `unrealized_pct`
+  (÷ `abs(basis)` — sign-safe on a short's negative basis).
+- **Corporate actions** (SPLIT / EXCHANGE / SPINOFF — spec `2026-08-06-corporate-actions.md`)
+  — the oracle applies §4.4's complete field-transfer table and the §5 refusal matrix
+  (E1/E2/E3/E5/E18/E22) itself, from the SPEC, with its **own** two-term ratio arithmetic
+  and its **own** `EventPriority`; it must never import `shared/corporate_actions.py` or
+  `shared/ledger_events.py` (§7.4, trap #11 — and trap #10, which an imported enum makes
+  invisible). Three legs, and the third is what the other two cannot do:
+  1. oracle-vs-app on every derived figure (`holding.*`, `realized.*`, cash, KPIs, XIRR);
+  2. `corp.refusal_codes` — WHICH §5 rule fired, so "the oracle skipped and the app
+     applied" is triageable apart from "both applied and disagreed on the arithmetic";
+  3. **`corp.anchor.*` — the app's number against a hand-computed literal.** Agreement
+     between two replays cannot prove either landed on the share count the broker's
+     statement says: a rounded ratio in BOTH agrees at 199.99. Note that `700 × 2/7`
+     cannot discriminate evaluation order (the parenthesised form also lands on 200 at 28
+     digits), so the scenario carries `210 × 1/3` — exactly 70 multiply-first,
+     `69.999…99` parenthesised — and then sells exactly 70, which is the measured 賣超
+     cascade. Same-day trades sit on two action dates, without which the whole event
+     ordering is unobservable.
+  4. `corp.xirr_blanked_by_unapplied` — an unapplied action blanks XIRR **portfolio-wide**
+     (D38 invariant 2) and the reason names the account, symbol and date. Two of the three
+     refusal shapes leave no surviving position to flag, so no holdings-level check can
+     see them at all.
+- **Refused dividends — all three classes** (YQ3, 2026-10-05). `domain-ledger.md` refuses a
+  payout with no position by its date (CR-02), one landing on an open declared short, and one
+  on a ticker an EXCHANGE vacated (E24, with CR-06's reopen rule). The oracle refuses all
+  three from its own reading — `_Pos.vacated_to`, `_reopen`, `_live_successor` — and records
+  them on `OracleResult` (`refused_dividends`, `refused_dividend_ids`, `orphan_dividends`).
+  A refused row is booked nowhere (no income, no resurrection), moves no cash pool, statement
+  line or FX cash (⑪), no `net_invested` and no XIRR flow (K2), marks every trend day from its
+  date (K3) — held carrier or flat — while a held carrier keeps its value (Y3). An ORPHAN also
+  withholds XIRR and B, and the XIRR reason names the row (`xirr.withheld_for_orphan_dividend`,
+  `xirr.orphan_reason_names_row`); B's third term rides with B (`kpi.fx_complete_withheld`).
+  The ledger listing marks each refused row (`ledger.div.booked`, X1). Scenario
+  (`run_refused_dividends`): the E24 rows go through the REAL dividend door (VCO was held
+  before its exchange, so the door accepts them; the replay refuses them) and are reconciled
+  with the successor held, then flat, then at `final`; the orphan is a **legacy-data** row —
+  every door refuses it since CR-02 (proved first: `refused.orphan_door_refuses`), so it is
+  written below the validators (`common.write_legacy_dividend`), reconciled, then deleted
+  through the door. The open-short class is the 2609 block.
 - **Per-(account, currency) cash pool** — every pool balance, **and** the reconstructed
   running-balance **statement terminal** (deposits/withdrawals + trade settlements + FX
   legs + cash dividends) equals the app's reported balance.

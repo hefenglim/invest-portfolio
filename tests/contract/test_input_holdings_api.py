@@ -162,14 +162,18 @@ def test_holdings_held_carries_shares_and_adjusted_avg(
 def test_holdings_unbookable_ledger_degrades_adjusted_avg_to_null(
     dashboard_client_factory: DashboardClientFactory
 ) -> None:
-    """Never-500 at the build_book call site: an orphan dividend (dated before ANY
-    position exists) makes the ledger un-bookable — the read still serves held/closed +
-    shares, with adjusted_avg degraded to null (the hint hides; nothing crashes)."""
+    """Never-500 at the build_book call site: an un-bookable ledger — a 配股 row with no share
+    count, which the replay refuses on every path — still serves held/closed + shares, with
+    adjusted_avg degraded to null (the hint hides; nothing crashes).
+
+    The fixture was an ORPHAN dividend (dated before any position) until CR-02 (2026-10-04):
+    the replay now records an orphan on ``Book.orphan_dividends`` and keeps booking, so it no
+    longer makes the ledger un-bookable. A STOCK row without its share count still does."""
     def seed(conn: sqlite3.Connection) -> None:
         _seed_holdings(conn)
-        insert_dividend(conn, account_id="tw_broker", symbol="2317",
-                        div_date=date(2025, 1, 1), div_type="CASH",
-                        gross=Decimal("1"), withholding=Decimal("0"), net=Decimal("1"))
+        insert_dividend(conn, account_id="tw_broker", symbol="2330",
+                        div_date=date(2026, 4, 1), div_type="STOCK",
+                        gross=Decimal("0"), withholding=Decimal("0"), net=Decimal("0"))
         conn.commit()
 
     client: TestClient = dashboard_client_factory(seed)

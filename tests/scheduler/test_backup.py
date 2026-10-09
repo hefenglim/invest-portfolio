@@ -253,7 +253,7 @@ def test_backup_daily_ok_run_writes_backup(
     rid = run_job(conn, "backup_daily", now=_NOW)
     row = conn.execute("SELECT status, detail FROM job_runs WHERE id=?", (rid,)).fetchone()
     assert row["status"] == "ok"
-    assert row["detail"].startswith("backup ok -> portfolio_2026-06-16")
+    assert row["detail"].startswith("備份完成：portfolio_2026-06-16")  # DEF-073: zh
     # The gz landed in <db_parent>/backups (default dir).
     assert (real_db.parent / "backups" / "portfolio_2026-06-16.db.gz").exists()
 
@@ -281,7 +281,7 @@ def test_backup_daily_integrity_failure_records_error_run(
 
     row = conn.execute("SELECT status, detail FROM job_runs WHERE id=?", (rid,)).fetchone()
     assert row["status"] == "error"
-    assert "integrity_check failed" in row["detail"]
+    assert "資料庫完整性檢查未通過" in row["detail"]  # DEF-073: zh raise text
     assert "malformed db page 3" in row["detail"]
     assert called["backup"] is False
     assert any(r.levelno >= logging.WARNING for r in caplog.records)

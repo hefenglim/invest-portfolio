@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 
 import common as C
 import phase1 as P1
@@ -94,6 +95,12 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     op.dividend("moomoo_my", "1155", "2026-04-15", "NET", 300)                      # MY cash
     op.dividend("tw_broker", "2330", "2026-06-10", "CASH", 5000)
     op.dividend("tw_broker", "0050", "2026-06-12", "CASH", 800)
+    # R6 / review ⑧ — a TW 配股 whose ex-date and payment date are a month apart. Permanent
+    # scenario op (accumulation rule ①): without one, the ex-date replay agrees with the
+    # oracle by both never exercising it. The oracle derives the same STOCK-only rule
+    # independently, so the two must agree on the share count between the two dates.
+    op.dividend("tw_broker", "2330", "2026-05-30", "STOCK", 0,
+                reinvest_shares=100, ex_date="2026-05-02")
 
     # ---- oversell attempt -> block, then ack-write (creates 賣超 holding) ----
     # 0050 held here = B3(10)+B4(100)+B20(50)-S2(50) = 110; sell 200 > 110 -> oversell.
@@ -117,6 +124,38 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     op.fx("schwab", "2026-06-20", "USD", 5000, "TWD", 162000)  # realized FX -2375
     op.cash_move("tw_broker", "withdraw", "TWD", "2026-06-25", 50000)
 
+    # ---- the three broker-statement cash kinds (2026-08-13, P1a/B1) --------------------
+    # Booked in USD on schwab ON PURPOSE: that pool has two FX conversions behind it, so it
+    # is the only place where the SECOND axis is observable. Each of these is a cash movement
+    # that is NOT an acquisition of foreign currency, and the oracle carries its own
+    # ``DEBIT_KINDS`` / ``ACQUIRING_KINDS`` written independently of the app's table.
+    #
+    # What this scenario is here to catch, and what a TWD-only version would miss entirely:
+    #   * a BROKER_FEE or INTEREST_EXPENSE that INCREASES the balance — the old predicate was
+    #     "WITHDRAW vs everything else", so a third debit kind silently credited the pool;
+    #   * an INTEREST credit that DILUTES ``covered_ratio`` — income arising inside the pool
+    #     inherits the pool average (like sale proceeds and foreign cash dividends), so a USD
+    #     account that never left a conversion unbased must still report a ratio of exactly 1
+    #     after being paid interest. Booking it as an unbased acquisition would raise a FALSE
+    #     "basis incomplete" flag over the whole foreign exposure, cash AND stocks (F3).
+    # XIRR (AI-D42, 2026-08-24 — this paragraph SUPERSEDES the D1=A note that stood here, and
+    # the claim it rested on: ``xirr_reporting`` now DOES take cash movements, so the guarantee
+    # is no longer "held by the signature"). The four rows below straddle the new line, which
+    # is why all four are here rather than only the ones that count:
+    #   * ``rebate`` / ``interest_expense`` / ``broker_fee`` — costs of TRADING and FINANCING;
+    #     they enter the flow series and the oracle must reproduce each sign independently.
+    #   * ``interest`` — pool income, but the principal earning it never entered XIRR's
+    #     denominator, so it stays OUT. A test that only covered the included kinds could not
+    #     tell a correct exclusion from a forgotten one.
+    # ``rebate`` is the row that matters most and had no coverage until now: FE-D1's
+    # charge-first model refunds 77% of a TW commission next month, which is 0.229% of capital
+    # per round trip and the owner's ordinary billing — the single largest figure this change
+    # makes visible.
+    op.cash_move("schwab", "interest", "USD", "2026-06-27", "12.34")
+    op.cash_move("schwab", "interest_expense", "USD", "2026-06-28", "5.67")
+    op.cash_move("schwab", "broker_fee", "USD", "2026-06-29", "8.90")
+    op.cash_move("schwab", "rebate", "USD", "2026-06-30", "21.50")
+
     buy("B14", "schwab", "MSFT", "2026-05-05", 20, 410)
     sell("S7", "schwab", "MSFT", "2026-06-05", 10, 420)
     buy("B15", "schwab", "AAPL", "2026-06-15", 30, 210)
@@ -130,6 +169,13 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("B22", "tw_broker", "2330", "2026-04-15", 100, 630)
     buy("B23", "moomoo_my", "NVDA", "2026-05-28", 5, 580)
     op.dividend("schwab", "MSFT", "2026-06-08", "DRIP", 40, reinvest_price=415)
+    # P1b (2026-08-13): the SAME US position pays plain cash in another quarter. Before this
+    # the `drip_us` model accepted only DRIP, so every real US cash payout was rejected row by
+    # row as a `dividend_type_mismatch`. It needs no accounting change — a CASH row is in
+    # `CASH_DIVIDEND_TYPES` and reduces `adjusted_total` like any other (D35) — which is
+    # exactly why it belongs here: the claim "no accounting change" is only worth anything if
+    # an independent oracle recomputes the position and agrees.
+    op.dividend("schwab", "AAPL", "2026-06-10", "CASH", 25, withholding="7.50")
     sell("S8", "tw_broker", "2330", "2026-06-22", 100, 710)
     sell("S9", "schwab", "AAPL", "2026-06-23", 20, 208)
     sell("S10", "moomoo_my", "1155", "2026-06-24", 100, "11.50")
@@ -200,7 +246,406 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("SC1", "tw_broker", "2609", "2026-07-01", 800, 95)
     buy("SC2", "tw_broker", "2609", "2026-07-06", 1200, 98)
 
+    run_corporate_actions(ev, api, db_path, op, buy, sell)
+    run_batch_import(ev, api, db_path, op)
+    run_refused_dividends(ev, api, db_path, op, buy, sell)
+
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
+
+
+def _written(resp) -> int:
+    """How many rows a CSV commit wrote (0 when the door refused every row)."""
+    body = resp.get("json") if isinstance(resp, dict) else None
+    return int((body or {}).get("written") or 0) if isinstance(body, dict) else 0
+
+
+def run_refused_dividends(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """The two dividend-refusal classes the declared-short block above does not reach (YQ3).
+
+    ``domain-ledger.md`` defines three dividends the replay refuses — booked nowhere, no
+    realized income, no cash (⑪), no flow (K2), the days marked incomplete (K3), a held
+    carrier still valued (Y3):
+
+    * an OPEN declared short (2609 above — removed before its cover, so it is the HELD case);
+    * a ticker an EXCHANGE vacated (E24) — here, through the real doors: the dividend door
+      accepts the row because VCO WAS held before its exchange, and the replay refuses it.
+      A CASH row (no income on a dead ticker) and a 配股 (no zero-cost resurrection). It is
+      reconciled twice: with the successor VCN HELD (Y3: its value stays in the trend and net
+      worth) and after VCN is sold FLAT (K3: the flag has no carrier, the record stands). It
+      is NOT resolved, so the ``final`` checkpoint carries it too — XIRR computes without it.
+    * no position at all (CR-02) — a LEGACY-DATA row, see below.
+
+    Placed after every other block so each existing expectation stays a control, and with
+    dedicated symbols (VCO / VCN / ORP) so nothing else can satisfy or disturb them.
+    """
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 100000)
+
+    # ---- E24 through the doors -------------------------------------------------------------
+    buy("VCOB", "tw_broker", "VCO", "2026-02-09", 1000, 50)
+    op.corporate_action("tw_broker", "EXCHANGE", "2026-03-09", "VCO", "VCN", 1, 1,
+                        note="E24 setup: VCO's whole position moves to VCN")
+    r = op.dividend("tw_broker", "VCO", "2026-04-09", "CASH", 3000)
+    ev.check("refused.vacated_cash_door_accepts", "tw_broker/VCO CASH 2026-04-09",
+             1, _written(r), "phase1:refused")
+    r = op.dividend("tw_broker", "VCO", "2026-04-16", "STOCK", 0, reinvest_shares=50)
+    ev.check("refused.vacated_stock_door_accepts", "tw_broker/VCO STOCK 2026-04-16",
+             1, _written(r), "phase1:refused")
+
+    res = reconcile(ev, api, db_path, "refused_vacated_held", valuation=True)
+    # Scenario knowledge, asserted so a silent oracle cannot pass: both rows ARE refused, and
+    # neither is an orphan (VCO was held before its exchange).
+    ev.check("refused.oracle_refuses_both_vacated_rows", "refused_vacated_held",
+             [("tw_broker", "VCO", "2026-04-09"), ("tw_broker", "VCO", "2026-04-16")],
+             [(a, s, d.isoformat()) for a, s, d in res.refused_dividends],
+             "phase1:refused_vacated_held")
+    ev.check("refused.vacated_rows_are_not_orphans", "refused_vacated_held", [],
+             res.orphan_dividends, "phase1:refused_vacated_held")
+    # ABSOLUTE anchors (literals, not the oracle): the live successor holds the 1,000 shares
+    # and carries the flag; the old ticker was NOT resurrected by the 配股 (no VCO row).
+    P1.anchor(ev, api, "refused.anchor.successor_shares", "tw_broker", "VCN", "shares", "1000",
+              phase="phase1:refused_vacated_held")
+    P1.anchor(ev, api, "refused.anchor.successor_flagged", "tw_broker", "VCN",
+              "unbookable_dividend", True, phase="phase1:refused_vacated_held")
+    P1.anchor(ev, api, "refused.anchor.no_resurrection", "tw_broker", "VCO", "shares", None,
+              phase="phase1:refused_vacated_held")
+
+    # ---- K3: the successor sold out — the flag has no carrier, the refusal stands ------------
+    sell("VCNS", "tw_broker", "VCN", "2026-05-11", 1000, 55)
+    reconcile(ev, api, db_path, "refused_vacated_flat", valuation=True)
+
+    # ---- CR-02: a dividend with no position — LEGACY DATA ----------------------------------
+    # It cannot come through a door: since CR-02 every dividend door refuses a row whose
+    # account had opened no position in the symbol by its date (`dividend_without_position`).
+    # Proved first, then the same row is written below the validators, as a pre-CR-02 import
+    # or a hand-edited database would hold it — the replay must refuse it without a 500.
+    r = op.dividend("tw_broker", "ORP", "2026-03-23", "CASH", 900)
+    ev.check("refused.orphan_door_refuses", "tw_broker/ORP CASH 2026-03-23 (never held)",
+             0, _written(r), "phase1:refused")
+    did = C.write_legacy_dividend(db_path, "tw_broker", "ORP", "2026-03-23", "CASH",
+                                  C.dec("900"))
+    ev.op("phase1", "DB", "legacy.dividend_without_position",
+          {"account_id": "tw_broker", "symbol": "ORP", "date": "2026-03-23", "net": "900"},
+          {"status": 201, "json": {"dividend_id": did}},
+          note="legacy-data scenario: no door accepts this row since CR-02")
+    ev.check("refused.legacy_orphan_dashboard_200", "a stored orphan must not 500",
+             "200", str(api.get("/api/dashboard").status_code), "phase1:refused")
+    res = reconcile(ev, api, db_path, "refused_orphan", valuation=True)
+    ev.check("refused.oracle_names_the_orphan", "refused_orphan",
+             [("tw_broker", "ORP", "2026-03-23")],
+             [(a, s, d.isoformat()) for a, s, d in res.orphan_dividends],
+             "phase1:refused_orphan")
+
+    # ---- the owner's remedy for the orphan: delete it, through the door ---------------------
+    # (The vacated rows stay: the `final` checkpoint reconciles XIRR, cash and the trend with
+    # a refused payout and a flat carrier in the ledger.)
+    rd = api.delete(f"/api/ledgers/dividends/{did}")
+    ev.op("phase1", "API", "delete.dividend", {"id": did},
+          {"status": rd.status_code, "json": _json(rd)}, note="remove the legacy orphan row")
+    ev.check("refused.orphan_removable", "delete the legacy orphan dividend",
+             "200", str(rd.status_code), "phase1:refused")
+
+
+def run_batch_import(ev: C.Evidence, api: C.Api, db_path, op: Ops):
+    """A CSV batch is validated against the ledger PLUS its own siblings (C1/C2, 2026-08-14).
+
+    Every other op in this scenario writes ONE row, which is the one shape in which "the
+    whole file is one batch" is unobservable — a batch of one has no siblings. Both defects
+    this block exists for were measured on a synthetic broker export and both are invisible
+    to a single-row door:
+
+    **C1 — a sell covered by a buy in the SAME file.** ``build_transaction_preview``
+    validated each row against the STORED ledger alone, so it raised 賣超 on a position the
+    file itself creates (7 of 47 rows). The numbers end up right if the owner confirms, and
+    that is precisely the harm: 賣超 is the ONE confirmation whose acknowledgement
+    permanently discards a cost basis, so every false one trains the owner to click it.
+
+    **C2 — a corporate-action CHAIN in the same file.** The importer built its
+    ``ActionIndex`` from stored rows only, so a SPLIT whose shares arrive from an EXCHANGE
+    earlier in the same file was hard-rejected ``no_position_on_action_date`` — and
+    ``commit_preview`` reported it as merely 「跳過」, so the import announced success while
+    the share count stayed wrong by the whole ratio. Both of the owner's real chains have
+    this shape.
+
+    The oracle needs no new arithmetic for either: what changed is which ROWS reach the
+    ledger, and it replays whatever is there. That is the point — before C2 the app and the
+    oracle would have DISAGREED on CCB's share count, which is exactly what this harness is
+    for. Placed last so everything above stays a control.
+    """
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 200000)
+
+    # ---- C1: buy then sell, ONE file. The sell is covered only by its sibling. ----------
+    sibling_csv = ("account,symbol,side,date,shares,price\n"
+                   "tw_broker,CBS,buy,2026-05-04,300,300\n"
+                   "tw_broker,CBS,sell,2026-05-20,200,320\n")
+    # ⚠ PREVIEW FIRST, on a ledger that does not hold these rows yet. Probing after the
+    # commit measures a re-upload, where both rows raise the M7 `duplicate_trade` warning —
+    # a true statement about a different question, and it made the first version of this
+    # check fail for a reason that had nothing to do with the guard under test.
+    warns = _preview_warnings(api, "transactions", sibling_csv)
+    ev.check("batch.sibling_cover_no_oversell", "buy+sell in one file raises no 賣超",
+             0, len(warns), "phase1:batch")
+    r = op.import_csv(
+        "transactions", "batch_sibling_cover",
+        ["account", "symbol", "side", "date", "shares", "price"],
+        [["tw_broker", "CBS", "buy", "2026-05-04", "300", "300"],
+         ["tw_broker", "CBS", "sell", "2026-05-20", "200", "320"]],
+    )
+    body = r.get("json") or {}
+    # The row count alone would pass even with the guard firing — a 賣超 warning is
+    # confirmable and `ack_warnings=True` writes it anyway. That is what the probe above is
+    # for; this asserts the rows actually landed.
+    ev.check("batch.sibling_cover_writes_both", "both rows of the sibling file are written",
+             2, body.get("written"), "phase1:batch")
+
+    # ---- C2: EXCHANGE then SPLIT on the destination, ONE file --------------------------
+    op.import_csv(
+        "transactions", "batch_chain_position",
+        ["account", "symbol", "side", "date", "shares", "price"],
+        [["tw_broker", "CCA", "buy", "2026-05-05", "400", "120"]],
+    )
+    r = op.import_csv(
+        "corporate_actions", "batch_action_chain",
+        ["account", "date", "kind", "from_symbol", "to_symbol",
+         "ratio_to", "ratio_from", "cost_carry", "note"],
+        [["tw_broker", "2026-05-25", "EXCHANGE", "CCA", "CCB", "1", "1", "", "chain leg 1"],
+         ["tw_broker", "2026-06-05", "SPLIT", "CCB", "CCB", "2", "1", "", "chain leg 2"]],
+    )
+    body = r.get("json") or {}
+    ev.check("batch.action_chain_writes_both", "both legs of an in-file action chain are written",
+             2, body.get("written"), "phase1:batch")
+    # ⚠ The load-bearing one. Before C2 the second leg was REJECTED and reported as
+    # 「跳過」 — `written` alone read 1 and nothing said why. `rejected` is absent when zero
+    # (the `duplicates` convention), so `or 0` is the honest read of a clean response.
+    ev.check("batch.action_chain_nothing_rejected", "no row of the chain is rejected",
+             0, body.get("rejected") or 0, "phase1:batch")
+
+    res = reconcile(ev, api, db_path, "batch_import", valuation=True)
+    # 400 CCA → 1:1 EXCHANGE → 400 CCB → 2-for-1 SPLIT → 800. If the chain's second leg is
+    # dropped the app reports 400 here while the oracle says 800: the disagreement the
+    # reconcile above would surface, pinned to a literal so it is also visible on its own.
+    P1.anchor(ev, api, "batch.anchor.chain_split_applied", "tw_broker", "CCB", "shares", "800")
+    P1.anchor(ev, api, "batch.anchor.sibling_cover_left", "tw_broker", "CBS", "shares", "100")
+    ev.check("batch.refusal_codes", "batch_import", [], [c for c, _ in res.action_refusals],
+             "phase1:batch_import")
+
+
+def _preview_warnings(api: C.Api, kind: str, csv_text: str) -> list[dict]:
+    """Preview-only probe: the rows a commit would ask the owner to confirm.
+
+    Read-only, and it is the ONLY way to see the guard from outside — a committed row that
+    was confirmed looks identical to one that never raised anything.
+    """
+    r = api.post("/api/import/preview", {"kind": kind, "csv_text": csv_text})
+    try:
+        rows = (r.json() or {}).get("rows", [])
+    except Exception:
+        return []
+    return [row for row in rows if row.get("status") == "warn"]
+
+
+def run_corporate_actions(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """SPLIT / EXCHANGE / SPINOFF — spec 2026-08-06 §7.4's required scenario set.
+
+    Placed last so every existing expectation above runs as a CONTROL: the ledger is
+    settled and flat at this point (the declared short is covered), so the corporate-action
+    checkpoint reconciles at full strength — holdings, realized, cash, FX, KPIs and XIRR —
+    and any failure above is attributable to something other than this block.
+
+    Dedicated symbols (CA*), funded by their own TWD deposit. tw_broker is not FX-exposed,
+    so the whole block moves no FX pool.
+
+    §7.4's list, and where each item is: forward split -> sell (CA1) · reverse split ->
+    cash-in-lieu sell (CA2) · exchange into an EXISTING position (CA3 -> CA4) · spinoff ->
+    sell the child (CA7 -> CA8) · split on a dividend-adjusted position, adjusted != original
+    (CA9) and on a DRIP position (CAD) · a 2-for-7 exchange, the §3.1(ii) exactness case
+    (CA5 -> CA6) · rejection paths (E5 on CAX, E2 on CAZ, E1 on CAN).
+    """
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-01-05", 400000)
+
+    # ---- positions the actions will act on (all pre-action, all before any action date) --
+    buy("CA1B", "tw_broker", "CA1", "2026-02-03", 100, 600)     # -> 3-for-1 split
+    buy("CARB", "tw_broker", "CAR", "2026-02-06", 210, 90)      # -> 1-for-3, exactly 70
+    buy("CA2B", "tw_broker", "CA2", "2026-02-05", 705, 30)      # -> 1-for-10 reverse split
+    buy("CA4B", "tw_broker", "CA4", "2026-02-11", 40, 500)      # EXCHANGE DESTINATION,
+    buy("CA3B", "tw_broker", "CA3", "2026-02-12", 100, 200)     #   already held: merge
+    buy("CA5B", "tw_broker", "CA5", "2026-02-17", 700, 40)      # -> 2-for-7 exchange
+    buy("CA7B", "tw_broker", "CA7", "2026-02-19", 400, 250)     # -> spinoff parent
+    buy("CA9B", "tw_broker", "CA9", "2026-02-21", 200, 300)     # -> split, adjusted != orig
+    buy("CADB", "schwab", "CAD", "2026-02-24", 80, 25)          # -> split on DRIP history
+    # CA9 takes a CASH dividend so its adjusted_total diverges from original_total BEFORE
+    # the split: the split must move neither, and dividend_portion / 回本進度 must be
+    # identical either side of it (§4.1). CAD takes a US DRIP, so the split also lands on
+    # a position whose share count already includes zero-cost reinvested shares.
+    op.dividend("tw_broker", "CA9", "2026-03-05", "CASH", 4000)
+    op.dividend("schwab", "CAD", "2026-03-06", "DRIP", 40, reinvest_price=25)
+    # ---- SAME-DAY trades, on an action's own effective date -------------------------
+    # §4: an action is effective at the START of its date, so a same-day trade is quoted
+    # in POST-action terms. Without these two rows the whole EventPriority ordering is
+    # unobservable — every other date in this block has an action alone on it, and a
+    # replay that ran CORPORATE_ACTION after BUY would produce identical numbers.
+    #   sell 40 CA1 @ 205 — a post-SPLIT price and quantity on the split's own date;
+    #   buy 100 CA7 @ 190 — after the SPINOFF, so the child is carved from 400 shares and
+    #   the parent then holds 500. Ordered the other way the child would be 125.
+    sell("CA1SD", "tw_broker", "CA1", "2026-03-02", 40, 205)
+    buy("CA7SD", "tw_broker", "CA7", "2026-03-24", 100, 190)
+
+    # ---- the action rows (spec §3's ledger; ratio as TWO INTEGER TERMS, never a quotient)
+    op.corporate_action("tw_broker", "SPLIT", "2026-03-02", "CA1", "CA1", 3, 1,
+                        note="forward split 3-for-1")
+    op.corporate_action("tw_broker", "SPLIT", "2026-03-14", "CAR", "CAR", 1, 3,
+                        note="1-for-3 of 210 — evaluation order decides the integer")
+    op.corporate_action("tw_broker", "SPLIT", "2026-03-10", "CA2", "CA2", 1, 10,
+                        note="reverse split 1-for-10; fraction paid in cash (§3.2)")
+    op.corporate_action("tw_broker", "EXCHANGE", "2026-03-16", "CA3", "CA4", 1, 2,
+                        note="merger into an already-held destination")
+    op.corporate_action("tw_broker", "EXCHANGE", "2026-03-18", "CA5", "CA6", 2, 7,
+                        note="2-for-7 — the §3.1(ii) exactness case")
+    op.corporate_action("tw_broker", "SPINOFF", "2026-03-24", "CA7", "CA8", 1, 4,
+                        cost_carry="0.30", note="8-K allocation 30% to the child")
+    op.corporate_action("tw_broker", "SPLIT", "2026-04-02", "CA9", "CA9", 2, 1,
+                        note="split on a dividend-adjusted position")
+    op.corporate_action("schwab", "SPLIT", "2026-04-04", "CAD", "CAD", 5, 4,
+                        note="split on a DRIP-grown position")
+
+    res = reconcile(ev, api, db_path, "corp_applied", valuation=True)
+
+    # ---- ABSOLUTE anchors: the app's number vs a hand-computed literal ----------------
+    # Oracle-vs-app agreement proves both replays match; it cannot prove either landed on
+    # the share count the statement says, because a rounded ratio in BOTH agrees at 199.99.
+    # These literals come from the ratio and the pre-action count, nothing else.
+    # 100 x 3 / 1 = 300, then the SAME-DAY sell of 40 (SELL runs after CORPORATE_ACTION).
+    P1.anchor(ev, api, "corp.anchor.split_forward", "tw_broker", "CA1", "shares", "260")
+    P1.anchor(ev, api, "corp.anchor.split_reverse", "tw_broker", "CA2", "shares", "70.5")
+    # 210 x 1 / 3 = EXACTLY 70. Written 210 x (1/3) it is 69.99999999999999999999999999,
+    # and the sell of exactly 70 below then fails validate.py's bare `>` (spec §3.1(ii)(a)).
+    P1.anchor(ev, api, "corp.anchor.split_ratio_exact", "tw_broker", "CAR", "shares", "70")
+    P1.anchor(ev, api, "corp.anchor.exchange_merge", "tw_broker", "CA4", "shares", "90")
+    # 700 x 2 / 7 == exactly 200. Written 700 x (2/7) it is 200.0000000000000000000000000
+    # here but a hair under an integer for 3,530 other measured (shares, to, from) triples,
+    # and THAT is what trips validate.py's bare `>` on the next sell (spec §3.1(ii)).
+    P1.anchor(ev, api, "corp.anchor.exchange_2for7", "tw_broker", "CA6", "shares", "200")
+    # The child is carved from the 400 shares held BEFORE the same-day buy; the parent
+    # then holds 400 + 100. Run CORPORATE_ACTION after BUY and these become 125 and 500.
+    P1.anchor(ev, api, "corp.anchor.spinoff_child", "tw_broker", "CA8", "shares", "100")
+    P1.anchor(ev, api, "corp.anchor.spinoff_parent", "tw_broker", "CA7", "shares", "500")
+    # The parent's basis is `total - carved`, never `total x (1-c)` (§4.3): buy 400 @ 250
+    # = 100,000 + TW fee floor(100000 x 0.001425) = 142  ->  100,142 all-in; the child
+    # carries 30% = 30,042.60 and the parent keeps exactly the remainder, 70,099.40, plus
+    # the same-day buy's all-in 19,000 + floor(19000 x 0.001425)=27  ->  89,126.40.
+    P1.anchor(ev, api, "corp.anchor.spinoff_child_basis", "tw_broker", "CA8",
+              "original_cost_total", "30042.60")
+    P1.anchor(ev, api, "corp.anchor.spinoff_parent_basis", "tw_broker", "CA7",
+              "original_cost_total", "89126.40")
+    # A split moves NEITHER total, so the dividend portion and 回本進度 are untouched: the
+    # 4,000 cash dividend is still exactly 4,000 of the cost recovered after a 2-for-1.
+    P1.anchor(ev, api, "corp.anchor.split_keeps_dividend_portion", "tw_broker", "CA9",
+              "dividend_portion", "4000")
+    P1.anchor(ev, api, "corp.anchor.split_shares_dividend_adj", "tw_broker", "CA9",
+              "shares", "400")
+    ev.check("corp.refusal_codes", "corp_applied", [], [c for c, _ in res.action_refusals],
+             "phase1:corp_applied")
+
+    # ---- dependent trades: the sells that only make sense post-action -----------------
+    # CA1: 50 <= the PRE-split count still unsold, so this one commits regardless of
+    # whether the date-aware guard is action-aware yet; its P&L is still computed against
+    # the POST-split adjusted average (a third of the pre-split one), which is the point.
+    sell("CA1S", "tw_broker", "CA1", "2026-04-03", 50, 210)
+    # CAR: a sell of EXACTLY the post-split count. `validate.py` compares with a bare `>`
+    # and no epsilon, so a share count a hair under 70 — which is what `210 x (1/3)` gives —
+    # rejects this row, the owner acknowledges it, and the STICKY 賣超 guard discards the
+    # cost basis permanently. That is the §1 disaster produced by the arithmetic alone.
+    r = sell("CARS", "tw_broker", "CAR", "2026-05-18", 70, 280)
+    ev.check("corp.sell_exact_ratio_accepted", "tw_broker/CAR sell 70 (== 210 x 1/3)",
+             "201", str(r.get("status")), "phase1:corp")
+    # CA2: the reverse split leaves 70.5 shares. The broker pays cash for the 0.5 and that
+    # is a REAL disposal with real realized P&L, so it is an ORDINARY SELL at the implied
+    # price (§3.2) — never folded into the action row, which must apply the ratio exactly.
+    sell("CA2S", "tw_broker", "CA2", "2026-03-12", "0.5", 300)
+    # CA6/CA8 exist ONLY because of an action, so these two sells prove the date-aware
+    # guard walks the action-aware share path (W4/§6.2, E1a.1). A sell of exactly 200 is
+    # also §3.1(ii)'s named case: it must pass validate.py's bare `>` with no epsilon.
+    r = sell("CA6S", "tw_broker", "CA6", "2026-04-20", 200, 150)
+    ev.check("corp.sell_exact_200_accepted", "tw_broker/CA6 sell 200 (== 700 x 2/7)",
+             "201", str(r.get("status")), "phase1:corp")
+    r = sell("CA8S", "tw_broker", "CA8", "2026-04-28", 60, 320)
+    ev.check("corp.sell_spinoff_child_accepted", "tw_broker/CA8 sell 60 of the child",
+             "201", str(r.get("status")), "phase1:corp")
+    sell("CADS", "schwab", "CAD", "2026-05-06", 40, 22)
+    # PROBE (op-logged, no assertion): a sell that EXCEEDS the pre-split count and is
+    # covered only by the split — the headline case of spec §1. It commits only when the
+    # oversell guard walks the action-aware path; a 422 here is a W4 state report, not a
+    # harness failure, and either outcome reconciles because the oracle replays whatever
+    # actually committed.
+    rp = op.trade("tw_broker", "CA1", "sell", "2026-04-06", 150, 205, fee_check=False)
+    ev.op("phase1", "API", "probe.sell_past_pre_split_count",
+          {"symbol": "CA1", "shares": 150, "pre_split_remaining": 10},
+          {"status": rp.get("status")},
+          note="201 = the date-aware guard is corporate-action aware (W4); 422 = it is not")
+
+    # ---- REJECTION paths: the action is NOT applied (spec §5) -------------------------
+    # E5 — EXCHANGE out of an OPEN DECLARED SHORT. No honest booking exists (precedent:
+    # dividend-on-short), so the event is skipped and the position flagged; the shares stay
+    # in pre-action terms, which is exactly what the flag announces.
+    op.trade("tw_broker", "CAX", "sell", "2026-03-01", 500, 80, short=True)
+    cax_id = op.corporate_action("tw_broker", "EXCHANGE", "2026-03-20", "CAX", "CAY", 1, 1,
+                                 note="E5: refused — source holds an open declared short")
+    # E2 — an action on a CLOSED (0-share, 0-basis) position. Scaling nothing gives
+    # nothing; re-animating it would invent a ghost.
+    buy("CAZB", "tw_broker", "CAZ", "2026-02-26", 50, 100)
+    sell("CAZS", "tw_broker", "CAZ", "2026-03-04", 50, 110)
+    caz_id = op.corporate_action("tw_broker", "SPLIT", "2026-03-26", "CAZ", "CAZ", 2, 1,
+                                 note="E2: refused — position closed before the action date")
+    # E1/E1a — an action whose from_symbol was NEVER held. The dashboard calls build_book
+    # with no try/except, so this row must SKIP, not raise: a 500 here is the never-500
+    # rule breached at a call site the standing rule already covers.
+    can_id = op.corporate_action("tw_broker", "SPLIT", "2026-03-28", "CAN", "CAN", 3, 1,
+                                 note="E1: refused — no position on the action date")
+    ev.check("corp.e1a_dashboard_200", "action on a never-held symbol must not 500",
+             "200", str(api.get("/api/dashboard").status_code), "phase1:corp")
+
+    res = reconcile(ev, api, db_path, "corp_refused", valuation=False)
+    ev.check("corp.refusal_codes", "corp_refused", ["E5", "E2", "E1"],
+             [c for c, _ in res.action_refusals], "phase1:corp_refused")
+    # The refused source keeps its position AND carries the flag; the refusal changed no
+    # money at all, only the disclosure. (Asserted per-holding by reconcile's
+    # holding.unbookable_action / holding.shares comparisons.)
+    P1.anchor(ev, api, "corp.anchor.e5_source_unmoved", "tw_broker", "CAX", "shares",
+              "-500", phase="phase1:corp_refused")
+    P1.anchor(ev, api, "corp.anchor.e5_source_flagged", "tw_broker", "CAX",
+              "unbookable_action", True, phase="phase1:corp_refused")
+
+    # ---- XIRR is blanked PORTFOLIO-WIDE by an unapplied action, and says which row ----
+    # The deliberate blast radius (D38 invariant 2): everywhere else one skipped action
+    # damages exactly one stock, but XIRR is a single figure over a terminal value that
+    # sums every holding, so one pre-action share count makes the whole sum wrong. Two
+    # of the three refusals here have NO surviving position to carry a flag (E2's source
+    # is zero-share and dropped, E1's never existed), so a holdings-level check cannot see
+    # them at all — this assertion is the only one that does.
+    d_ref = api.get("/api/dashboard").json()
+    ev.check("corp.xirr_blanked_by_unapplied", "3 unapplied actions -> xirr is None",
+             None, d_ref["kpis"].get("xirr"), "phase1:corp_refused")
+    _reason = (d_ref.get("freshness") or {}).get("xirr_unavailable_reason") or ""
+    for _sym, _acct, _date in (("CAX", "tw_broker", "2026-03-20"),
+                               ("CAZ", "tw_broker", "2026-03-26"),
+                               ("CAN", "tw_broker", "2026-03-28")):
+        # Naming the account, symbol and date is the requirement — a bare "something is
+        # wrong" would force the owner to hunt the row across a multi-account book.
+        ev.check("corp.xirr_reason_names_row", f"{_acct}/{_sym}@{_date}", True,
+                 (_sym in _reason and _acct in _reason and _date in _reason),
+                 "phase1:corp_refused")
+
+    # ---- resolve, so the final checkpoint reconciles at full strength ------------------
+    # Cover the short, then remove all three rows that could not be applied. Each is an
+    # action that should not have been entered against this ledger (a short source, a
+    # closed position, a symbol never held), so deletion is the owner's real remedy —
+    # the same shape as the unbookable-dividend resolution earlier in this scenario.
+    # E16: deleting an action RE-COMPUTES history, nothing was snapshotted, so the
+    # refusals disappear from the next replay rather than lingering as a stored verdict —
+    # which is what lets the `final` checkpoint compare XIRR at full strength again.
+    buy("CAXC", "tw_broker", "CAX", "2026-05-12", 500, 76)
+    op.delete_corporate_action(cax_id)
+    op.delete_corporate_action(caz_id)
+    op.delete_corporate_action(can_id)
 
 
 def main():
@@ -245,7 +690,15 @@ def main():
 
     print(f"ops={ev.op_n} pass={ev.n_pass} fail={ev.n_fail}")
     for f in ev.fails[:60]:
-        print("  FAIL", f["check"], "|", f["scope"], "| exp=", f["expected"], "got=", f["actual"])
+        # ``scope`` is free text and many of them are Traditional Chinese, so on a cp1252
+        # console this line RAISED — and only ever on a run that had a failure to report,
+        # which is the one run whose output matters. Encode-safe rather than encoding-
+        # dependent: the summary above still printed, so the crash looked like a harness
+        # bug rather than the failure detail going missing (measured 2026-08-14).
+        line = (f"  FAIL {f['check']} | {f['scope']} | "
+                f"exp= {f['expected']} got= {f['actual']}")
+        print(line.encode(sys.stdout.encoding or "utf-8", "replace")
+                  .decode(sys.stdout.encoding or "utf-8", "replace"))
 
 
 if __name__ == "__main__":

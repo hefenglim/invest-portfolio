@@ -1,0 +1,14 @@
+# Vendored third-party assets are byte-pinned by size + sha256
+# (tests/contract/test_vendored_assets.py, docs/reference/vendored-assets.md).
+#
+# This repo is developed on Windows with `core.autocrlf=true`, which rewrites LF -> CRLF on
+# CHECKOUT for anything git's heuristic calls text. A minified JS bundle has no NUL bytes, so
+# it is "text" — measured 2026-08-12: web/echarts.min.js checks out as 1,029,248 bytes with 45
+# CRLF conversions instead of the pinned 1,029,203, i.e. a different sha256 on every Windows
+# clone. The file still RUNS (JS tolerates CRLF), so the divergence from upstream would be
+# invisible without the hash guard — and with it, the guard would fail on a file nobody had
+# touched, which is a worse kind of confusing.
+#
+# `-text` disables eol conversion in both directions: the bytes committed are the bytes
+# checked out, everywhere.
+*.min.js -text

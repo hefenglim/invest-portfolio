@@ -7,10 +7,12 @@ stdlib + the LLM tables owned by ``shared/llm_config``.
 """
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from pydantic import BaseModel
+
+from portfolio_dash.shared.clock import app_now
 
 
 class ModelUsage(BaseModel):
@@ -124,7 +126,7 @@ def usage_daily(conn: sqlite3.Connection, *, days: int = 30) -> DailyUsage:
     alias that had any spend in the window. Dates with no spend for a model read 0.
     """
     name_to_alias = _name_to_alias(conn)
-    today = datetime.now(UTC).date()
+    today = app_now().date()
     start = today - timedelta(days=days - 1)
     date_keys = [start + timedelta(days=i) for i in range(days)]
     dates = [d.strftime("%m-%d") for d in date_keys]

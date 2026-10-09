@@ -15,7 +15,7 @@ import csv
 import io
 import sqlite3
 import time
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import common as C
@@ -40,6 +40,48 @@ INSTRUMENTS = [
     # Declared-short lifecycle symbol (2026-07-31): opened short -> dividend-on-short ->
     # covered flat. Dedicated so no other op can satisfy or disturb the short path.
     ("2609", "TW", "TWD", "Yang Ming", "Shipping", False),
+    # ---- Corporate actions (spec 2026-08-06, W8). DEDICATED symbols on purpose: every
+    # existing expectation above stays a control, so a failure is attributable to the new
+    # feature rather than to a perturbed fixture. TW/TWD for most of them, because
+    # tw_broker is NOT FX-exposed (settle == funding) — the action block then moves no FX
+    # pool and cannot mask an FX defect. CAD is the one US position, so a real DRIP model
+    # is exercised under a split.
+    ("CA1", "TW", "TWD", "CA Forward Split", "Industrials", False),   # 3-for-1 -> sell
+    # 210 x 1/3: EXACTLY 70 multiply-first, 69.99999999999999999999999999 parenthesised.
+    # The 2-for-7 case cannot discriminate evaluation order (700 x (2/7) also lands on 200
+    # at 28 digits — measured, and the correction §3.1(ii) records), so without this ratio
+    # trap #2 is unobservable in this scenario. A later sell of exactly 70 then trips
+    # validate.py's bare `>` and discards the basis: the cascade, reproduced.
+    ("CAR", "TW", "TWD", "CA Ratio Rounding", "Industrials", False),  # 1-for-3 of 210
+    ("CA2", "TW", "TWD", "CA Reverse Split", "Industrials", False),   # 1-for-10 -> CIL
+    ("CA3", "TW", "TWD", "CA Exchange Source", "Industrials", False),  # -> CA4
+    ("CA4", "TW", "TWD", "CA Exchange Dest", "Industrials", False),   # already held
+    ("CA5", "TW", "TWD", "CA 2-for-7 Source", "Industrials", False),  # -> CA6, exactness
+    ("CA6", "TW", "TWD", "CA 2-for-7 Dest", "Industrials", False),
+    ("CA7", "TW", "TWD", "CA Spinoff Parent", "Industrials", False),
+    ("CA8", "TW", "TWD", "CA Spinoff Child", "Industrials", False),
+    ("CA9", "TW", "TWD", "CA Dividend-Adjusted", "Industrials", False),  # adjusted != orig
+    ("CAD", "US", "USD", "CA DRIP Split", "Technology", False),       # DRIP then split
+    ("CAX", "TW", "TWD", "CA Short Source", "Shipping", False),       # E5 refusal
+    ("CAY", "TW", "TWD", "CA Short Dest", "Shipping", False),
+    ("CAZ", "TW", "TWD", "CA Closed Position", "Industrials", False),  # E2 refusal
+    ("CAN", "TW", "TWD", "CA Never Held", "Industrials", False),      # E1 refusal
+    # ---- Batch import (C1/C2, 2026-08-14). The rest of this scenario enters one row at a
+    # time, which is the ONE shape in which "the whole file is one batch" is unobservable —
+    # a batch of one has no siblings. These three symbols are only ever touched through a
+    # CSV commit carrying MORE THAN ONE row, which is how the owner's broker export arrives
+    # and is the shape both defects lived in.
+    ("CBS", "TW", "TWD", "CB Batch Sibling", "Industrials", False),   # buy+sell, one file
+    ("CCA", "TW", "TWD", "CC Chain Source", "Industrials", False),    # EXCHANGE -> CCB
+    ("CCB", "TW", "TWD", "CC Chain Dest", "Industrials", False),      # …then SPLIT, same file
+    # ---- Refused dividends (YQ3, owner ruling 2026-10-05). The replay refuses a payout in
+    # three classes — no position by its date (CR-02), an open declared short, a ticker an
+    # EXCHANGE vacated (E24) — and every figure leaves it out. The short class has its own
+    # symbol above (2609); these two give the other two classes dedicated symbols, so no other
+    # op can satisfy or disturb them.
+    ("VCO", "TW", "TWD", "Vacated Source", "Industrials", False),     # EXCHANGEd -> VCN
+    ("VCN", "TW", "TWD", "Vacated Successor", "Industrials", False),  # carries E24's flag
+    ("ORP", "TW", "TWD", "Orphan Payer", "Industrials", False),       # never held (legacy row)
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -51,6 +93,22 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # 2609 is priced so the OPEN-short checkpoint values the negative position for real
     # (market_value / unrealized on signed shares); it too ends FLAT before final.
     "2609": D("96"),
+    # Corporate-action symbols. Every price is quoted in POST-action terms and dated at
+    # ASOF, which is AFTER every action date in the scenario — so §5.1's price
+    # re-expression (W6b) has nothing to re-denominate and the valuation leg stays a
+    # property of the SHARE count alone. Symbols that end flat (CA3/CA5/CAX/CAZ) are
+    # priced anyway: the row is inert for an unheld position and keeps the fixture uniform.
+    "CA1": D("205"), "CAR": D("280"), "CA2": D("320"), "CA3": D("200"), "CA4": D("480"),
+    "CA5": D("40"), "CA6": D("150"), "CA7": D("190"), "CA8": D("330"),
+    "CA9": D("160"), "CAD": D("21"), "CAX": D("76"), "CAY": D("90"),
+    "CAZ": D("110"), "CAN": D("50"),
+    # Batch-import symbols (C1/C2). CCA ends flat (its whole position EXCHANGEs into CCB);
+    # priced anyway, for the same fixture-uniformity reason as CA3/CA5 above.
+    "CBS": D("310"), "CCA": D("120"), "CCB": D("64"),
+    # Refused-dividend symbols (YQ3). VCN is HELD at the first refused checkpoint, so its
+    # price is what Y3's "the carrier keeps its value" is measured with; VCO and ORP are
+    # never held at a checkpoint and are priced for fixture uniformity.
+    "VCO": D("52"), "VCN": D("54"), "ORP": D("30"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -218,6 +276,25 @@ class Ops:
                                 daytrade=True)
         return resp
 
+    def import_csv(self, kind, label, header, rows, *, ack=True):
+        """Commit a MULTI-ROW CSV batch through the real import endpoint, and op-log it.
+
+        The rest of this scenario enters one row at a time, which is exactly the shape in
+        which "the whole file is one batch" cannot be observed — a batch of one has no
+        siblings. Both 2026-08-14 defects (C1: a sell covered by a buy in the same file;
+        C2: a corporate-action chain in the same file) only appear above one row.
+
+        ``ack_warnings`` defaults True because the callers below assert on the RESPONSE
+        counts, and the point of the assertion is usually that the warning is *gone*.
+        """
+        csv_text = ",".join(header) + "\n" + "\n".join(",".join(r) for r in rows) + "\n"
+        r = self.api.post("/api/import/commit",
+                          {"kind": kind, "csv_text": csv_text, "ack_warnings": ack})
+        resp = {"status": r.status_code, "json": _json(r)}
+        self.ev.op(self.phase, "CSV", f"import.{label}",
+                   {"kind": kind, "rows": len(rows)}, resp)
+        return resp
+
     def cash_move(self, account_id, kind, ccy, d, amount, *, ack=False, via_ui=False,
                   expect=201):
         body = {"account_id": account_id, "date": d, "kind": kind, "ccy": ccy,
@@ -254,12 +331,16 @@ class Ops:
         return resp
 
     def dividend(self, account_id, symbol, d, dtype, gross, *, withholding=None,
-                 net=None, reinvest_price=None, reinvest_shares=None):
+                 net=None, reinvest_price=None, reinvest_shares=None, ex_date=None):
+        # `d` is the PAYMENT date; `ex_date` (R6) is the ex-dividend date and is used by the
+        # replay for a STOCK dividend only. Driven through the SAME CSV door the owner uses,
+        # so the column being accepted end to end is part of what this exercises.
         cols = ["account", "symbol", "date", "type", "gross", "withholding", "net",
-                "reinvest_shares", "reinvest_price"]
+                "reinvest_shares", "reinvest_price", "ex_date"]
         row = {"account": account_id, "symbol": symbol, "date": d, "type": dtype,
                "gross": str(gross), "withholding": _s(withholding), "net": _s(net),
-               "reinvest_shares": _s(reinvest_shares), "reinvest_price": _s(reinvest_price)}
+               "reinvest_shares": _s(reinvest_shares), "reinvest_price": _s(reinvest_price),
+               "ex_date": _s(ex_date)}
         csv_text = ",".join(cols) + "\n" + ",".join(row[c] for c in cols) + "\n"
         r = self.api.post("/api/import/commit",
                           {"kind": "dividends", "csv_text": csv_text, "ack_warnings": True})
@@ -278,6 +359,35 @@ class Ops:
         resp = {"status": r.status_code, "json": _json(r)}
         self.ev.op(self.phase, "API", "edit.transaction", {"id": txn_id, **body}, resp)
         return resp
+
+    def corporate_action(self, account_id, kind, d, from_symbol, to_symbol,
+                         ratio_to, ratio_from, *, cost_carry=None, note=None):
+        """Write ONE corporate_actions row (spec §3) and op-log it.
+
+        Surface is ``DB`` because the entry surfaces are **W7** and do not exist yet —
+        there is no ``POST /api/ledgers/corporate-actions``. The row still goes in through
+        the app's own ``insert_corporate_action``, is read back as a raw ledger fact, and
+        every consequence is computed independently by the oracle. Move this to the API
+        the moment W7 lands (see ``common.write_corporate_action``).
+        """
+        aid = C.write_corporate_action(self.db, account_id, d, kind, from_symbol,
+                                       to_symbol, ratio_to, ratio_from,
+                                       cost_carry=cost_carry, note=note)
+        inputs = {"account_id": account_id, "kind": kind, "date": d,
+                  "from_symbol": from_symbol, "to_symbol": to_symbol,
+                  "ratio_to": ratio_to, "ratio_from": ratio_from,
+                  "cost_carry": cost_carry, "note": note}
+        self.ev.op(self.phase, "DB", f"corporate_action.{kind}", inputs,
+                   {"status": 201, "json": {"action_id": aid}},
+                   note=f"{account_id} {from_symbol}->{to_symbol}")
+        return aid
+
+    def delete_corporate_action(self, action_id):
+        """Delete one corporate action — E16: history RE-COMPUTES, nothing is snapshotted."""
+        ok = C.delete_corporate_action_row(self.db, action_id)
+        self.ev.op(self.phase, "DB", "corporate_action.delete", {"id": action_id},
+                   {"status": 200 if ok else 404, "json": {"deleted": ok}})
+        return ok
 
     def delete_tx(self, txn_id, *, ack=False):
         r = self.api.delete(f"/api/ledgers/transactions/{txn_id}", ack_oversell=str(ack).lower())
@@ -302,11 +412,286 @@ def spots() -> C.Spot:
     return C.Spot(dict(FX_RATES))
 
 
+def _trend_sample_dates(facts, by_date, last_iso: str) -> list[str]:
+    """Which trend days to reconcile - the owner's 「事件日取樣」 (ruling 2026-08-27).
+
+    Every ledger date AND the day before it, because a timing defect is only visible across
+    the boundary it moves: the day before an event and the event day differ by exactly that
+    event. Dividends contribute BOTH dates - ``effective`` (the ex-date for a 配股) and ``d``
+    (the payment date) - so the two edges of the very window R6 corrected are sampled by
+    construction.
+
+    ``ASOF`` and its predecessor are added too. They are not a ledger event, they are the
+    FIXTURE boundary: it is where the seeded prices begin, hence where the app's days flip
+    from ``incomplete`` to valued.
+
+    Every point is NOT sampled, deliberately: adjacent days are near-identical, so a full walk
+    multiplies evidence volume without multiplying detection, and a failure buried in a
+    thousand near-identical lines is harder to localise, not easier.
+    """
+    events: set[date] = set()
+    for t in facts.txs:
+        events.add(t.trade_date)
+    for dv in facts.divs:
+        events.add(dv.effective)
+        events.add(dv.d)
+    for o in facts.openings:
+        events.add(o.build_date)
+    for a in facts.actions:
+        events.add(a.d)
+    for c in facts.cash:
+        events.add(c.d)
+    for f in facts.fxs:
+        events.add(f.d)
+    events.add(ASOF)
+    out: set[str] = {last_iso}
+    for e in events:
+        for cand in (e, date.fromordinal(e.toordinal() - 1)):
+            iso = cand.isoformat()
+            if iso in by_date:
+                out.add(iso)
+    return sorted(out)
+
+
+def _daily_price_span(facts) -> date | None:
+    """The first ledger date — where the daily close series has to begin, or ``None``."""
+    days: list[date] = [t.trade_date for t in facts.txs]
+    days += [dv.effective for dv in facts.divs] + [dv.d for dv in facts.divs]
+    days += [o.build_date for o in facts.openings] + [a.d for a in facts.actions]
+    return min(days) if days else None
+
+
+def _ensure_daily_prices(db_path, facts) -> int:
+    """Seed a DAILY close for every fixture symbol across the whole replay span.
+
+    This is what closes the last half of the point-in-time gap. ``seed_all`` seeds exactly
+    ONE close per symbol, dated :data:`ASOF`, so every earlier day was unpriced by
+    construction and ``trend.total_value`` could not be asserted before ASOF — which is
+    precisely where a share-count defect confined to a window (R6's ex-date) lives. With a
+    price on every day, ``total_value`` at a KNOWN price pins the SHARE COUNT: the app and
+    the oracle read the same close, so any disagreement left is a quantity.
+
+    Two properties make this safe rather than a fixture that quietly lies:
+
+    * **The closes are AS TRADED on their own date** — :func:`oracle.price_as_traded`
+      multiplies the ASOF quote back out by the splits between that day and ASOF, which is
+      the invariant ``data-and-pricing.md`` states for the column. Seeding the post-split
+      quote on a pre-split day would store a basis the ledger never traded on.
+    * **Each row is stamped ``fetched_at`` = its own date**, so both the write window
+      ``(as_of, fetched_at]`` and the read window ``(priced_on, day]`` are empty. Nothing
+      re-expresses these rows — not ``upsert_prices``, not ``reconcile_prices`` — so a SPLIT
+      inserted or deleted later cannot repaint the history this family asserts against.
+
+    Called from :func:`reconcile` BEFORE the dashboard is fetched, and derived from ``facts``
+    each time, so it is self-correcting: a checkpoint that runs before the scenario's
+    corporate actions exist seeds an unadjusted series, and the next one re-seeds the same
+    dates on the corrected basis (idempotent upsert on ``(instrument, as_of_date)``).
+    """
+    start = _daily_price_span(facts)
+    if start is None or start > ASOF:
+        return 0
+    mkt_of = {i[0]: i[1] for i in INSTRUMENTS}
+    rows_by_date: dict[date, list] = {}
+    day = start
+    while day <= ASOF:
+        batch = [
+            (sym, mkt_of[sym],
+             O.price_as_traded(facts, sym, day, quote=quote, quoted_on=ASOF))
+            for sym, quote in PRICES.items() if sym in mkt_of
+        ]
+        rows_by_date[day] = batch
+        day += timedelta(days=1)
+    return C.seed_prices_daily(db_path, rows_by_date)
+
+
+def _day_incomplete(res_d, day: date) -> bool:
+    """Whether the app must publish this trend day as ``incomplete`` - derived, not read.
+
+    Three causes, from ``domain-ledger.md`` plus this fixture's own price schedule:
+
+    * a held position that is 賣超 / 待釐清 (``oversold`` / ``unbookable_dividend`` /
+      ``unbookable_action``). The first and last have no honest value that day; a refused
+      dividend leaves the value honest and only the payout 待釐清 (Y3, owner ruling
+      2026-10-05) — the day is marked all the same, and :func:`_day_value_judgeable` decides
+      the value separately;
+    * a held position with NO stored price on-or-before ``day`` cannot be valued. Since
+      :func:`_ensure_daily_prices` seeds a close for every fixture symbol on every day from
+      the first ledger event through :data:`ASOF`, the only symbol that can now hit this is
+      one absent from :data:`PRICES` entirely — a future scenario symbol nobody priced.
+    * a day holding nothing is COMPLETE with a zero total - the app's loop simply adds nothing.
+
+    FX is not a cause: the fixture seeds every needed pair at ``EARLY_ASOF``, which precedes
+    the first ledger event, so an on-or-before rate always resolves.
+
+    K3 (owner ruling 2026-10-05) adds a fourth, independent of what is held: a dividend
+    refused by ``day`` because it landed on an open short. The 2609 lifecycle covers that short
+    back to exactly zero, so after the cover no holding carries ``unbookable_dividend`` — and
+    the ruling is that the 待釐清 must not die with a flat carrier. The days stay incomplete.
+    """
+    if res_d.refused_dividends:
+        return True
+    for h in res_d.holdings.values():
+        if h.shares == O.ZERO:
+            continue
+        if h.oversold or h.unbookable_dividend or h.unbookable_action:
+            return True
+        if h.symbol not in PRICES:
+            # No seeded close AT ALL. Written as a derivation rather than assumed: without
+            # this a future scenario symbol with no price would CRASH this family on the
+            # `PRICES[...]` lookup below instead of failing an assertion, and a harness that
+            # crashes on new data is a harness people stop extending.
+            #
+            # A day AFTER the seeded series is NOT incomplete: the read carries the last
+            # close forward (on-or-before), which is a valid valuation and what the app does.
+            # Measured — treating `day > ASOF` as unpriced reddened four days the app values
+            # correctly from the ASOF close.
+            return True
+    return False
+
+
+def _day_value_judgeable(res_d) -> bool:
+    """Whether ``trend.total_value`` is assertable on a day - every held position has an
+    honest value, derived from ``domain-ledger.md``, not read off the app.
+
+    Separate from :func:`_day_incomplete` since Y3 (owner ruling 2026-10-05): a day can be
+    INCOMPLETE and still have an honest total. A refused dividend (held carrier flagged
+    ``unbookable_dividend``, or a refusal whose carrier is flat) leaves every SHARE right, so
+    the app counts the position and this family asserts the total on that day too. A held
+    賣超 (basis discarded) or ``unbookable_action`` (pre-action shares against a post-action
+    price) has no honest value: the app leaves it out, so the total is not asserted. An
+    unpriced symbol cannot be valued either (see :func:`_day_incomplete`).
+    """
+    for h in res_d.holdings.values():
+        if h.shares == O.ZERO:
+            continue
+        if h.oversold or h.unbookable_action or h.symbol not in PRICES:
+            return False
+    return True
+
+
+def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
+    """POINT-IN-TIME reconciliation of the daily replay (the ``trend.*`` family).
+
+    Why it exists: every other family in this harness compares the app and the oracle at the
+    CURRENT state, and a whole class of defect is invisible there - anything whose effect is
+    confined to a window between two dates ends at the same place either way. R6's ex-date is
+    exactly that shape (a 配股's shares arrive a month earlier; the position at ``as_of`` is
+    identical), which is why ``fail=0`` was silent about it. Disclosed in README section 6 on
+    2026-08-26 and closed here to the extent the app's surfaces allow.
+
+    What is compared:
+
+    * ``trend.start`` / ``trend.contiguous_days`` - the replay's span, derived from the
+      earliest ledger event with dividends on their EFFECTIVE date.
+    * ``trend.net_invested`` - EXACT and price-free, the subtrahend of B
+      (``total_value - net_invested``) in AI-D41's A / B / B-A decomposition. This is the
+      assertion that guards the owner's 「B 收三類」 ruling: the app and the oracle must move
+      onto the three cash kinds together, and this family goes red in between.
+    * ``trend.incomplete`` - the app's honesty about days it cannot value, derived
+      independently by :func:`_day_incomplete` over a point-in-time replay.
+    * ``trend.total_value`` - on every day whose holdings all have an honest value
+      (:func:`_day_value_judgeable`), INCLUDING a day marked incomplete only for a refused
+      dividend (Y3: the app keeps that position's value). Asserting it on an unpriced day would
+      be asserting the fixture, not the app.
+    * ``trend.net_worth`` - on the same days: ``total_value`` plus every cash pool's
+      end-of-day balance, each converted at that day's on-or-before rate (FU-D29 / C8). The
+      pools are the oracle's own point-in-time replay (``res_d.cash``), so a refused payout
+      moves no day's net worth (⑪) while the carrier's value stays in it (Y3).
+
+    What is NOT compared, and why: a point-in-time per-symbol SHARE COUNT, because no app
+    surface returns one. ``trend.points`` carries four portfolio-level numbers, and the sell
+    preview's date-awareness lives in the 賣超 guard, not in a report. Closing that needs a
+    DAILY price fixture so ``total_value`` becomes assertable across the whole span - and that
+    is not one line, because back-dating this fixture's post-action prices would hand the read
+    side a wrong split basis. Recorded in the README rather than approximated here.
+    """
+    trend = (dash.get("trend") or {})
+    pts = trend.get("points") or []
+    ev.check("trend.available", "series", True, bool(trend.get("available")), phase)
+    if not pts:
+        return
+    by_date = {p["date"]: p for p in pts}
+    first_iso, last_iso = min(by_date), max(by_date)
+    span = date.fromisoformat(last_iso).toordinal() - date.fromisoformat(first_iso).toordinal()
+    ev.check("trend.contiguous_days", "series", span + 1, len(pts), phase)
+
+    starts = ([t.trade_date for t in facts.txs]
+              + [dv.effective for dv in facts.divs]
+              + [o.build_date for o in facts.openings])
+    if starts:
+        ev.check("trend.start", "series", min(starts).isoformat(), first_iso, phase)
+
+    fx_on = fx_on_resolver()
+    skipped: list[str] = []
+    for day_iso in _trend_sample_dates(facts, by_date, last_iso):
+        p = by_date[day_iso]
+        day = date.fromisoformat(day_iso)
+        try:
+            expected_ni = O.net_invested_through(facts, day, REPORTING, fx_on)
+        except KeyError:
+            # No on-or-before rate for some flow - the app publishes NO trend at all in that
+            # state, so there is nothing to compare rather than a zero to agree with.
+            continue
+        ev.check("trend.net_invested", day_iso, expected_ni, dec(p["net_invested"]), phase)
+
+        res_d = O.replay_through(facts, day)
+        if res_d.action_refusals:
+            # WHICH rule refused is scenario knowledge (see the A0 note in reconcile), and the
+            # app's refusal path marks the day incomplete for reasons this family does not
+            # re-derive. Collected and logged ONCE below — never per day: `ops` is a signal
+            # ("did the scenario change?"), and diagnostic logging that moves it by 75 turns
+            # that signal into noise.
+            skipped.append(day_iso)
+            continue
+        expected_inc = _day_incomplete(res_d, day)
+        ev.check("trend.incomplete", day_iso, expected_inc, bool(p["incomplete"]), phase)
+        if not _day_value_judgeable(res_d):
+            continue
+        total = O.ZERO
+        for h in res_d.holdings.values():
+            if h.shares == O.ZERO:
+                continue
+            # The close for THIS day, as traded on it. `_ensure_daily_prices` seeded one
+            # per symbol per day at exactly this value, so the app reads the same number and
+            # the read-side window (priced_on, day] is empty — no factor on either side. The
+            # comparison that survives is therefore a pure SHARE-COUNT comparison, which is
+            # the whole reason the series exists.
+            rate = (O.ONE if h.quote_ccy == REPORTING
+                    else fx_on(day, h.quote_ccy, REPORTING))
+            close = O.price_as_traded(facts, h.symbol, day,
+                                      quote=PRICES[h.symbol], quoted_on=ASOF)
+            total += close * h.shares * rate
+        ev.check("trend.total_value", day_iso, total, dec(p["total_value"]), phase)
+        cash_total = O.ZERO
+        for (_acct, ccy), bal in res_d.cash.items():
+            if bal == O.ZERO:
+                continue          # a zero pool contributes nothing and needs no rate
+            cash_total += bal * (O.ONE if ccy == REPORTING else fx_on(day, ccy, REPORTING))
+        ev.check("trend.net_worth", day_iso, total + cash_total,
+                 dec(p.get("net_worth")) if p.get("net_worth") is not None else None, phase)
+
+    # No silent caps: a day this family declined to judge is named, not quietly absent.
+    if skipped:
+        ev.op(phase, "ORACLE", "trend.days_not_judged",
+              {"reason": "corporate action refused by the oracle on that day"},
+              {"count": len(skipped), "dates": skipped})
+
+
 def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True,
               reports=False):
     """Full oracle-vs-system reconciliation at the current state."""
     phase = f"phase1:{label}"
-    facts = C.load_facts_from_db(db_path)
+    raw = C.load_facts_from_db(db_path)
+    # BEFORE any API call: the dashboard must be built over the daily series, or the trend
+    # family would compare an app that could not value a day against an oracle that could.
+    _ensure_daily_prices(db_path, raw)
+    dash = api.get("/api/dashboard").json()
+    # DEF-016 / DEF-056: the valuation reads only the rows that count by the app's own as_of
+    # (read back from the response, as the XIRR family does) — every ledger from its own
+    # date. The raw facts stay for the checks that compare stored ROWS (ledger APIs, the
+    # dated cash statement).
+    as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
+    facts = O.facts_valued_as_of(raw, as_of)
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)
@@ -315,8 +700,22 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     # that state (oversold -> not computable; short -> negative terminal value) and the
     # scenario always closes the short before the final full-KPI reconcile.
     oversold = any(h.shares < O.ZERO for h in res.holdings.values())
+    # YQ1 (owner ruling 2026-10-05): the TREND family has its own, narrower gate. A declared
+    # short is a real, priced position the series carries (2026-07-31), and a refused
+    # dividend on it keeps that value (Y3) — so the trend is judged while a declared short is
+    # open and switched off only by an UNDECLARED oversell (sticky 賣超), whose basis is gone
+    # on every day. The KPI / XIRR gate above is unchanged, exactly as its author set it.
+    undeclared_oversell = any(h.oversold for h in res.holdings.values())
 
-    dash = api.get("/api/dashboard").json()
+    # ---- A0. Corporate actions the oracle REFUSED (spec §5) ----
+    # Op-logged, not asserted here: which rule fired is scenario knowledge, so the
+    # scenario asserts the codes (see run_phase1's corp.refusal_codes). Logging it makes a
+    # holdings mismatch triageable — "the oracle skipped E5 and the app applied it" is a
+    # different bug from "both applied it and disagreed on the arithmetic".
+    if res.action_refusals:
+        ev.op(phase, "ORACLE", "corporate_action.refusals",
+              {"count": len(res.action_refusals)},
+              {"refusals": [f"{c}: {s}" for c, s in res.action_refusals]})
 
     # ---- A. Holdings cost basis (per account+symbol) ----
     app_hold = {(h["account_id"], h["symbol"]): h for h in dash["holdings"]}
@@ -341,6 +740,11 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         ev.check("holding.short_open", sc, h.short_open, a["short_open"], phase)
         ev.check("holding.unbookable_dividend", sc, h.unbookable_dividend,
                  a["unbookable_dividend"], phase)
+        # A REFUSED corporate action (spec §5 dashboard path): the shares are still in
+        # pre-action terms against a post-action price series. A fourth distinct state,
+        # rendered differently again — never conflate it with 賣超.
+        ev.check("holding.unbookable_action", sc, h.unbookable_action,
+                 a.get("unbookable_action"), phase)
         # Valuation on the SIGNED quantity: an open short (negative shares) is a real
         # priced position (2026-07-31) — only an oversold row has 待釐清 (null) values.
         if valuation and h.shares != O.ZERO and not h.oversold and key[1] in prices:
@@ -382,21 +786,28 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         exp = res.cash.get(pool, O.ZERO)
         got = app_bal.get(pool, O.ZERO)
         ev.check("cash.balance", "|".join(pool), exp, got, phase)
-    _reconcile_cash_statement(ev, facts, res, app_bal, phase)
+    _reconcile_cash_statement(ev, raw, res, app_bal, phase)
 
     # ---- D. FX pools + realized/unrealized ----
     _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation)
 
     # ---- E. KPI totals + XIRR scalar ----
     if valuation and not oversold:
-        _reconcile_kpis(ev, res, dash, prices, sp, phase)
+        _reconcile_kpis(ev, res, dash, facts, prices, sp, phase)
         _reconcile_xirr(ev, res, dash, facts, prices, sp, phase)
+    if valuation and not undeclared_oversell:
+        # E3. POINT-IN-TIME: the daily replay, sampled at event boundaries. Behind the 賣超
+        # gate only (YQ1): an undeclared oversell has no honest valuation on any day, so
+        # judging its trend would be judging a state the app itself declines to value — but
+        # a declared short is valued, and the `short_open` checkpoint is where a held carrier
+        # of a refused dividend lives (Y3).
+        _reconcile_trend(ev, dash, facts, phase)
 
     # ---- E2. Ledger INTEGRITY (validity, not arithmetic — see oracle layer 4) ----
     _reconcile_integrity(ev, res, facts, phase)
 
     # ---- F. Ledger APIs row-by-row (raw facts) ----
-    _reconcile_ledger_api(ev, api, facts, phase)
+    _reconcile_ledger_api(ev, api, raw, phase)
 
     # ---- G. Exports (CSV) ----
     _reconcile_exports(ev, api, res, prices, phase, valuation)
@@ -406,6 +817,24 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         _reconcile_reports(ev, api, res, prices, sp, phase, valuation)
 
     return res
+
+
+def anchor(ev: C.Evidence, api: C.Api, check: str, account_id: str, symbol: str,
+           field: str, expected, phase="phase1:anchor"):
+    """Assert ONE app-reported holding field against a hand-computed LITERAL.
+
+    The third leg of the corporate-action proof, and the only one that is not a
+    comparison between two replays. ``holding.shares`` proves the app and the oracle agree;
+    it does **not** prove either landed on the integer the broker's statement says, because
+    a rounded ratio in BOTH would agree at 199.99. Spec §3.1(ii) is precisely about that
+    number, so the expected value here is written out by hand from the ratio and the
+    pre-action share count — never derived from the oracle.
+    """
+    rows = api.get("/api/dashboard").json()["holdings"]
+    got = next((h.get(field) for h in rows
+                if h["account_id"] == account_id and h["symbol"] == symbol), None)
+    ev.check(check, f"{account_id}/{symbol}.{field}", expected, got, phase)
+    return got
 
 
 def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
@@ -424,9 +853,10 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         lines.setdefault(key, []).append((d, seq, label, delta))
 
     for m in facts.cash:
-        # WITHDRAW is the only debit; DEPOSIT / OPENING / REBATE credit (audit C4).
+        # Debits reduce the pool (audit C4); every other kind credits it. The set is
+        # oracle.py's, re-derived there independently of the app's own table.
         add((m.account_id, m.ccy), m.d, (0, m.id), f"{m.kind}",
-            -m.amount if m.kind.upper() == "WITHDRAW" else m.amount)
+            -m.amount if m.kind.upper() in O.DEBIT_KINDS else m.amount)
     for c in facts.fxs:
         add((c.account_id, c.from_ccy), c.d, (1, c.id), "FX_OUT", -c.from_amt)
         add((c.account_id, c.to_ccy), c.d, (1, c.id), "FX_IN", c.to_amt)
@@ -434,12 +864,16 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
         inst = facts.instruments.get(t.symbol)
         if inst is None:
             continue
-        delta = -(t.qty * t.price + t.fee + t.tax) if t.side == "BUY" \
-            else (t.qty * t.price - t.fee - t.tax)
+        gross = O.settled(t.qty, t.price, inst.quote_ccy)  # the settled 價金 (2026-09-30)
+        delta = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         add((t.account_id, inst.quote_ccy), t.trade_date, (2, t.id), f"{t.side}", delta)
     for dv in facts.divs:
         inst = facts.instruments.get(dv.symbol)
         if inst is None or dv.type not in O.CASH_DIVIDEND_TYPES:
+            continue
+        if dv.id in res.refused_dividend_ids:
+            # ⑪ (owner ruling 2026-10-05): the statement LISTS a payout the replay refused but
+            # it moves no running balance — the oracle's own replay says which (``res``).
             continue
         add((dv.account_id, inst.quote_ccy), dv.d, (3, dv.id), "DIV", dv.net)
 
@@ -544,10 +978,16 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
         unreal_home = (stock_val + fcash) * ratio * (spot - avg)
         to_rep = O.ONE if funding == REPORTING else sp.rate(funding, REPORTING)
         exp += unreal_home * to_rep
-    ev.check("fx.reporting_unrealized", "rollup", exp, kpis.get("fx_unrealized"), phase)
+    # check_rel, not check: `exp` above is a FOUR-factor product whose operands each
+    # already compare EXACTLY against the app (fx.avg_rate / fx.covered_ratio /
+    # fx.foreign_cash, asserted above). Only the ASSOCIATION differs between the two
+    # implementations, and at 28-digit Decimal context that is worth 1 ULP — ~1e-27
+    # relative. See Evidence.ULP_REL_TOL for why 1e-20 cannot hide a money defect.
+    ev.check_rel("fx.reporting_unrealized", "rollup", exp,
+                 kpis.get("fx_unrealized"), phase)
 
 
-def _reconcile_kpis(ev, res, dash, prices, sp, phase):
+def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
     kpis = dash["kpis"]
     realized_total = O.ZERO
     for ccy, amt in res.realized_by_ccy.items():
@@ -571,6 +1011,24 @@ def _reconcile_kpis(ev, res, dash, prices, sp, phase):
     ev.check("kpi.unrealized_total", "TWD", unreal_total, kpis.get("unrealized_total"), phase)
     ev.check("kpi.total_market_value", "TWD", mv_total, kpis.get("total_market_value"), phase)
     ev.check("kpi.total_return", "TWD", tr, kpis.get("total_return"), phase)
+    # AI-D48's third term. Asserted here because it is a NEW money-of-record figure and the
+    # accumulation rule requires the oracle to derive one independently before it ships; the
+    # other two terms are already pinned (A above, and B through `trend.total_value` /
+    # `trend.net_invested` at the last point).
+    # B (含匯兌總損益) is the trend's LAST day, and it is withheld — never replaced by an
+    # earlier day — when that day is incomplete (AI-D41); its third term rides with it, so the
+    # decomposition is never published half-built (AI-D48). Until YQ3 no KPI checkpoint had an
+    # incomplete last day, so the oracle never had to say so: a refused dividend now marks every
+    # day from its date (K3), and the oracle's OWN day rule decides (`_day_incomplete`, on the
+    # replay as at the app's as_of — which `res` is). B's VALUE is pinned through
+    # `trend.total_value` / `trend.net_invested` at the last point; this pins whether it exists.
+    as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
+    b_withheld = _day_incomplete(res, as_of)
+    ev.check("kpi.fx_complete_withheld", "TWD", b_withheld,
+             kpis.get("total_return_fx_complete") is None, phase)
+    ev.check("kpi.trading_financing_cost", "TWD",
+             None if b_withheld else O.trading_financing_cost(facts, REPORTING, fx_on_resolver()),
+             kpis.get("trading_financing_cost"), phase)
 
 
 def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
@@ -589,6 +1047,17 @@ def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
     def fx_now(base, quote):
         return sp.rate(base, quote)
 
+    if res.orphan_dividends:
+        # CR-02 (domain-ledger.md): a dividend with no position is "named, and withholds
+        # XIRR" — the ledger is missing the position that earned it. The oracle's OWN replay
+        # says whether one exists; the app must then publish no figure and name each row
+        # (account, symbol, effective date) in its reason.
+        ev.check("xirr.withheld_for_orphan_dividend", "TWD", None, app_xirr, phase)
+        reason = (dash.get("freshness") or {}).get("xirr_unavailable_reason") or ""
+        for acct, sym, eff in res.orphan_dividends:
+            ev.check("xirr.orphan_reason_names_row", f"{acct}/{sym}@{eff.isoformat()}", True,
+                     (sym in reason and acct in reason and eff.isoformat() in reason), phase)
+        return
     try:
         dates, amounts = O.xirr_cashflows(res, facts, prices, REPORTING, fx_on, fx_now, as_of)
     except KeyError:
@@ -614,19 +1083,25 @@ def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
         ev.check("ledger.tx.fee", f"id={t.id}", t.fee, a["fee"], phase)
         ev.check("ledger.tx.tax", f"id={t.id}", t.tax, a["tax"], phase)
         # 'total' derived field: BUY negative, SELL positive
-        exp_total = -(t.qty * t.price + t.fee + t.tax) if t.side == "BUY" \
-            else (t.qty * t.price - t.fee - t.tax)
+        gross = O.settled(t.qty, t.price, facts.instruments[t.symbol].quote_ccy)
+        exp_total = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         ev.check("ledger.tx.total", f"id={t.id}", exp_total, a["total"], phase)
     # dividends
     drows = api.get("/api/ledgers/dividends", limit=500).json()["rows"]
     dapp = {r["id"]: r for r in drows}
     ev.check("ledger.div.count", "count", len(facts.divs), len(drows), phase)
+    # X1 / YQ3: the listing marks every row the replay refuses 「未入帳（待釐清）」. Which rows
+    # those are is the oracle's OWN replay of the whole stored ledger (the listing is not a
+    # valuation, so it is not cut at as_of).
+    refused = O.replay(facts).refused_dividend_ids
     for dv in facts.divs:
         a = dapp.get(dv.id)
         if a is None:
             continue
         ev.check("ledger.div.net", f"id={dv.id}", dv.net, a["net"], phase)
         ev.check("ledger.div.gross", f"id={dv.id}", dv.gross, a["gross"], phase)
+        ev.check("ledger.div.booked", f"id={dv.id} {dv.account_id}/{dv.symbol}@{dv.d}",
+                 dv.id not in refused, a.get("booked"), phase)
     # fx
     frows = api.get("/api/ledgers/fx", limit=500).json()["rows"]
     fapp = {r["id"]: r for r in frows}
@@ -637,7 +1112,14 @@ def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
             continue
         ev.check("ledger.fx.from_amt", f"id={c.id}", c.from_amt, a["from_amt"], phase)
         ev.check("ledger.fx.to_amt", f"id={c.id}", c.to_amt, a["to_amt"], phase)
-        ev.check("ledger.fx.implied", f"id={c.id}", c.from_amt / c.to_amt, a["implied_rate"], phase)
+        # L6 (demo audit 2026-09-16): the wire quotes the implied rate the conventional way —
+        # the more valuable currency is the unit, so the figure is >= 1 whichever side was
+        # sold (a USD→TWD row and a TWD→USD row both read 32.4). The oracle transcribes that
+        # rule here (2026-09-24) rather than the old from/to figure, which is now only the
+        # store's internal `StoredFxConversion.implied_rate`.
+        ratio = c.from_amt / c.to_amt
+        conventional = ratio if ratio >= 1 else c.to_amt / c.from_amt
+        ev.check("ledger.fx.implied", f"id={c.id}", conventional, a["implied_rate"], phase)
 
 
 def _reconcile_exports(ev, api, res, prices, phase, valuation):

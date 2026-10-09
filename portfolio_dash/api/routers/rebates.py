@@ -19,10 +19,12 @@ from pydantic import BaseModel
 from portfolio_dash.api import rebates as svc
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.api.routers.cash import MovementBody, _movement_guard
+from portfolio_dash.api.routers.cash import MovementBody, movement_guard
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import rule_sets_for
 from portfolio_dash.data_ingestion.store import insert_cash_movement, list_accounts
+from portfolio_dash.data_ingestion.validate import unknown_account_message
+from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.wire import decimal_str, to_wire
 
 router = APIRouter()
@@ -92,19 +94,24 @@ def confirm(
     """
     accounts = {a.account_id: a for a in list_accounts(conn)}
     acct = accounts.get(body.account_id)
-    # Batch B: rebate-relevant iff ANY bound rule set rebates (>0); that set supplies the rate.
-    # rule_sets_for is consulted only for a KNOWN account (mirrors the pre-swap
-    # `rule_row is not None` guard); an unknown account -> acct None -> the 400 below.
-    rebate_rate = _ZERO
-    if acct is not None:
-        for rule_name in rule_sets_for(conn, body.account_id):
-            rate = get_fee_rule_set(rule_name, conn).rebate_rate
-            if rate > _ZERO:
-                rebate_rate = rate
-                break
-    if acct is None or rebate_rate <= _ZERO:
+    if acct is None:
+        # M6-03: an account nobody registered is told so — the shared sentence, not a claim
+        # about the rebate setting of something that does not exist. Two conditions, two
+        # sentences; they used to share one ``or``.
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", f"帳戶 {body.account_id} 無折讓款設定", field="account_id"))
+            "validation_error", unknown_account_message(body.account_id), field="account_id"))
+    # Batch B: rebate-relevant iff ANY bound rule set rebates (>0); that set supplies the rate.
+    # rule_sets_for is consulted only for a KNOWN account (the unknown one answered above).
+    rebate_rate = _ZERO
+    for rule_name in rule_sets_for(conn, body.account_id):
+        rate = get_fee_rule_set(rule_name, conn).rebate_rate
+        if rate > _ZERO:
+            rebate_rate = rate
+            break
+    if rebate_rate <= _ZERO:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", f"帳戶 {account_ref(body.account_id)} 無折讓款設定",
+            field="account_id"))
 
     # include_older: the default list is windowed for readability, but a month the user
     # revealed via 「顯示更早」 must stay bookable — the window is a view, not a cap (L4).
@@ -124,12 +131,14 @@ def confirm(
     guard = MovementBody(
         account_id=body.account_id, date=refund_date, kind="rebate",
         ccy=acct.settlement_ccy, amount=body.amount, note=note)
-    bad = _movement_guard(conn, guard)
+    bad = movement_guard(conn, guard)
     if bad is not None:
         return bad
+    # DEF-009: the credit carries the month it books as an explicit link, so the cash page
+    # may correct its kind / date / amount / note and the month still reads as booked.
     move_id = insert_cash_movement(
         conn, account_id=body.account_id, move_date=refund_date, kind=svc.REBATE_KIND,
-        ccy=acct.settlement_ccy, amount=body.amount, note=note)
+        ccy=acct.settlement_ccy, amount=body.amount, note=note, rebate_period=body.month)
     return {
         "id": move_id, "account_id": body.account_id, "month": body.month,
         "amount": decimal_str(body.amount), "ccy": acct.settlement_ccy.value,

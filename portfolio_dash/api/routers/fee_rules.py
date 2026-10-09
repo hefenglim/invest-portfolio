@@ -22,7 +22,11 @@ from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion import fee_overrides
 from portfolio_dash.data_ingestion.config_seed import FEE_RULES, FeeRuleSet, get_fee_rule_set
-from portfolio_dash.data_ingestion.fee_overrides import EDITABLE_FIELD_ORDER, FeeOverrideError
+from portfolio_dash.data_ingestion.fee_overrides import (
+    DISPLAY_FIELD_ORDER,
+    FeeOverrideError,
+    is_editable,
+)
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -93,14 +97,21 @@ def _rule_set_wire(conn: sqlite3.Connection, name: str) -> dict[str, Any]:
     effective = get_fee_rule_set(name, conn)
     overlay = fee_overrides.overlay_for(conn, name)
     overridden = overlay.fields if overlay is not None else {}
+    # DISPLAY, not EDITABLE: ``rounding`` stopped being writable (QA-07 — the engine never
+    # read it, yet it was stamped into every row's permanent fee_rule_snapshot as the regime
+    # that produced the numbers). Dropping it from the editable set alone would have made it
+    # INVISIBLE, which is a different wrong answer: TW's 無條件捨去 is FE-D3, 財政部 角以下
+    # 免收 — a market fact the owner should be able to SEE and not change. The ``editable``
+    # flag is what lets the frontend tell "you may not change this" from "this is not here".
     fields = [
         {
             "key": key,
             "default": _field_value(base, key),
             "effective": _field_value(effective, key),
             "overridden": key in overridden,
+            "editable": is_editable(key),
         }
-        for key in EDITABLE_FIELD_ORDER
+        for key in DISPLAY_FIELD_ORDER
     ]
     return {
         "name": name,

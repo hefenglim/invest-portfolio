@@ -10,7 +10,7 @@
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
 <link rel="stylesheet" href="styles.css?v=0.1.28"></link>
 <link rel="stylesheet" href="settings.css?v=0.1.28"></link>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="echarts.min.js?v=0.1.28"></script>
 <style>
   .mode-pane { display: none; }
   .mode-pane.active { display: block; }
@@ -36,6 +36,17 @@
     border-radius: 3px; padding: 0 6px; line-height: 16px; white-space: nowrap;
   }
   .insight-conf b { font-weight: 600; }
+  /* DEF-037: 由預警「…」觸發 — which alert produced the card (amber: an alert, not a verdict) */
+  .insight-trigger {
+    font-size: 9.5px; color: var(--amber); text-decoration: none; white-space: nowrap;
+    border: 1px solid var(--amber); border-radius: 3px; padding: 0 6px; line-height: 16px;
+  }
+  .insight-trigger:hover { text-decoration: underline; }
+  /* DEF-033: 提示詞 vN — the strategy-prompt version the card was generated with. The foot
+     gains a sixth item, so it wraps instead of pushing the attribution off a phone screen. */
+  .insight-foot { flex-wrap: wrap; }
+  .insight-pver { text-decoration: none; white-space: nowrap; }
+  a.insight-pver:hover { text-decoration: underline; }
   .insight-conf .gap-warn { color: var(--amber); }
   .preview-tag {
     position: absolute; top: 10px; right: 12px;
@@ -108,7 +119,7 @@
   .hc-conclusion::before { content: '結論 '; font-size: 10px; color: var(--text-3); letter-spacing: 0.04em; }
 
   /* ---- AI 戰績 ---- */
-  .score-band { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px var(--pad) 4px; }
+  .score-band { display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--gap); padding: 12px var(--pad) 4px; }
   .score-card {
     background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius);
     padding: 10px 13px; display: flex; flex-direction: column; gap: 2px;
@@ -117,7 +128,7 @@
   .score-card .v { font-family: var(--font-num); font-size: 19px; font-weight: 600; }
   .score-card .s { font-size: 10px; color: var(--text-3); }
   .strat-rows { display: flex; flex-direction: column; gap: 7px; padding: 10px var(--pad) 14px; }
-  .strat-row { display: grid; grid-template-columns: 170px 1fr 90px 70px; align-items: center; gap: 12px; font-size: 11.5px; }
+  .strat-row { display: grid; grid-template-columns: 150px 1fr 82px 92px 128px; align-items: center; gap: 12px; font-size: 11.5px; }
   .strat-row .name { color: var(--text); font-weight: 600; }
   .strat-row .track { height: 8px; background: var(--panel-3); border-radius: 4px; overflow: hidden; }
   .strat-row .fill { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
@@ -126,11 +137,24 @@
   .hit-yes { color: var(--ok); }
   .hit-no { color: var(--up); }
   .hit-open { color: var(--text-3); }
+  /* W7 (AI-D36): the trust tier pill + the sample-gate note — server-computed strings,
+     rendered verbatim (the page never computes a tier). */
+  .tier-pill { display: inline-block; font-size: 10px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--border-soft); color: var(--text-3); white-space: nowrap; }
+  .tier-pill.tier-good { color: var(--ok); border-color: rgba(63, 185, 80, 0.4); background: var(--ok-soft); }
+  .tier-pill.tier-early { color: var(--accent); border-color: var(--accent); }
+  .strat-row .gate-closed { opacity: 0.55; }
   .conf-cell { display: inline-flex; align-items: center; gap: 6px; }
   .conf-track { width: 44px; height: 5px; background: var(--panel-3); border-radius: 3px; overflow: hidden; display: inline-block; }
   .conf-fill { display: block; height: 100%; background: var(--series-usd); }
   .backtest-note { padding: 0 var(--pad) 14px; font-size: 10.5px; color: var(--text-3); }
 
+  /* The band went 5 -> 6 cards with the ceiling-violation card (⑫c). Six equal columns
+     at the 980px edge leave ~160px each, which crushes the two cards whose sub-line is a
+     sentence (滾動校準缺口 / 信心上限違規率). One intermediate step to 3x2 first. */
+  @media (max-width: 1280px) {
+    .score-band { grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 980px) {
     .insight-grid-page, .hc-grid { grid-template-columns: 1fr; }
     .score-band { grid-template-columns: repeat(2, 1fr); }
@@ -147,7 +171,7 @@
   <section class="panel" data-screen-label="AI 洞察">
     <div class="panel-head">
       <h2 class="panel-title">AI 洞察</h2>
-      <span class="panel-sub">LLM 只負責敘事 — 所有數字皆由後端計算核心提供</span>
+      <span class="panel-sub">AI 只負責敘事 — 所有數字皆由後端計算核心提供</span>
       <span class="spacer"></span>
       <div class="segmented" id="ins-tabs">
         <button type="button" data-tab="cards" class="active">洞察卡</button>
@@ -171,7 +195,7 @@
     <div class="mode-pane" id="ins-pane-health" data-screen-label="持倉健診">
       <div class="hc-grid" id="ins-health-grid"></div>
       <div id="ins-health-pager" hidden="hidden"></div>
-      <div class="backtest-note">健診卡輸入：後端已算好的部位/回本/權重數字 ＋ FinMind 的 PER/PBR、月營收、法人買賣超。LLM 僅做敘事合成，不重新計算任何數字。</div>
+      <div class="backtest-note">健診卡輸入：後端已算好的部位/回本/權重數字 ＋ FinMind 的 PER/PBR、月營收、法人買賣超。AI 僅做敘事合成，不重新計算任何數字。</div>
     </div>
 
     <!-- ===== Tab: AI 戰績 (booted from GET /api/ai-score) ===== -->
@@ -216,12 +240,23 @@
 </div>
 </div>
 
+<!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
+     tokens through window.pdNames on every response, so the resolver must exist before the
+     first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
+<script src="names.js?v=0.1.28"></script>
 <script src="api.js?v=0.1.28"></script>
 <script src="shell.js?v=0.1.28"></script>
 <script src="format.js?v=0.1.28"></script>
 <script src="pager.js?v=0.1.28"></script>
 <script src="export.js?v=0.1.28"></script>
 <script src="alerts.js?v=0.1.28"></script>
+<!-- G-02: loaded ONLY for window.ppSkipReason — the gate-code -> zh table (SKIP_REASONS).
+     This page rendered a run's `reason` raw, so a skipped 產生洞察 read 「持倉週報：R6_quota」
+     while the 管線 hub's diagnose modal spelled the same code out in Chinese. Copying the
+     table here would make two tables for one enum, which is what test_skip_reason_coverage.py
+     exists to prevent; pipeline.js's init() no-ops on a page with no #pp-list, so importing
+     the page controller costs nothing but the file. -->
+<script src="pipeline.js?v=0.1.28"></script>
 <script>
 /* AI 洞察 — async-booted from the REAL API (decision B, spec 19/04).
    洞察卡 + 持倉健診 ← GET /api/insights (stored cards; cost_usd is a Decimal STRING).
@@ -275,32 +310,169 @@
       f.aiAttrib(card.model, card.tokens_in, card.tokens_out, card.cost_usd));
   }
 
+  /* M7-08: the server could not read this card's stored prediction back (schema drift or
+     a corrupt blob) and serves the narrative flagged (`unreadable`). Same badge as the
+     holdings table's 待釐清 marks — a data problem is shown, never hidden. It replaces the
+     confidence chip: 「純描述・無預測」 would be a lie (there IS a prediction, unreadable),
+     and a stated confidence with nothing readable to anchor it is not a confidence. */
+  function unreadablePill() {
+    var pill = el('span', 'badge badge-missing', '預測待釐清');
+    pill.title = '此卡片儲存的預測資料無法讀取，僅顯示敘述內容';
+    return pill;
+  }
+
+  /* L21: the server sends `confidence` as the model's self-rated 0–100 INTEGER. It used to
+     render as `f.num(c / 100, 2)` — a bare ratio — so 85 printed 「信心 0.85」 and 0 printed
+     「信心 0.00」, which is indistinguishable at a glance from the 「純描述・無預測」 case one
+     line of code above it. The code always distinguished them; only the FORMAT hid it.
+     Now: an integer percent, plus an explicit tooltip on the 0 case, because 0% is a real
+     self-assessment (極低信心) and must not read as "not provided". */
+  /* DEF-003 (owner ruling 2026-09-24): the PREDICTION decides. A card without one is a
+     description — 「純描述・無預測」, never a confidence, even when the stored card carries a
+     confidence value (measured on the demo: 25 of 40 prediction-less cards did, and the
+     page printed 「信心 0%」 for #182). The server already serves such a card with
+     confidence null; this reads the prediction too, so neither half alone decides. */
   function confChip(card) {
-    if (card.confidence == null) {
+    if (card.unreadable) return null;
+    if (card.prediction == null || card.confidence == null) {
       return el('span', 'insight-conf', '純描述・無預測');
     }
     var chip = el('span', 'insight-conf');
     chip.appendChild(document.createTextNode('信心 '));
-    chip.appendChild(el('b', null, f.num(card.confidence / 100, 2)));
+    chip.appendChild(el('b', null, f.num(card.confidence, 0) + '%'));
+    if (Number(card.confidence) === 0) chip.title = '模型自評信心 0%（極低）— 非未提供';
     if (card.calibration_version != null) {
       chip.appendChild(document.createTextNode('・校正 v' + card.calibration_version));
     }
     return chip;
   }
 
+  /* M9: the server's read-time figure check (`figure_flags`) compared what this card PRINTS
+     against the numbers the model was fed (the prompt's figures, recorded at generation).
+     Measured on cached cards: 「未實現獲利 429.1 萬美元」 beside a sibling card's 「4,290.80
+     美元」 (×1000), and a card naming 「LRDIM (6883)」 — a code held nowhere. The card is NEVER
+     hidden: a flagged number sits in narrative the owner may still want. Everything here is
+     server-computed and server-capped; this renders it and nothing else.
+     Three pills, by what was actually found (re-verification 2026-09-17: one pill for every
+     case put 「數值待核」 + "the numbers are not in the snapshot" on cards whose only hit was a
+     code — two sentences contradicting each other):
+       數值待核  — at least one printed figure matches nothing the model was fed;
+       未知代碼  — only a parenthesised code the registry does not know;
+       無快照可核 — the card prints figures, and it was generated before the fed numbers were
+                   recorded (`snapshot: "none"`), so nothing could be checked. Muted, not red. */
+  function figureFlagPill(card) {
+    var ff = card.figure_flags || {};
+    var figs = ff.unverified_figures || [];
+    var syms = ff.unknown_symbols || [];
+    var noSnapshot = ff.snapshot === 'none';
+    if (!figs.length && !syms.length && !noSnapshot) return null;
+    var lines = [];
+    var pill;
+    if (figs.length) {
+      pill = el('span', 'badge badge-missing', '數值待核');
+      lines.push('對不上的數字：' + figs.join('、'));
+      if (syms.length) lines.push('未知代碼：' + syms.join('、'));
+      lines.push('這些數字未出現在餵給模型的資料中，請以儀表板數字為準');
+    } else if (syms.length) {
+      pill = el('span', 'badge badge-missing', '未知代碼');
+      lines.push('未知代碼：' + syms.join('、'));
+      lines.push('卡片提到的代號不在持倉、觀察清單或已註冊標的中，可能是模型幻覺');
+      if (noSnapshot) lines.push('（數字部分無法核對：此卡片產生時未記錄餵入的數字）');
+    } else {
+      pill = el('span', 'badge badge-unchecked', '無快照可核');
+      lines.push('此卡片產生時未記錄餵給模型的數字（2026-09-17 之前產生），無法核對卡片中的數字');
+      lines.push('請以儀表板數字為準');
+    }
+    pill.title = lines.join('\n');
+    return pill;
+  }
+
+  /* DEF-037: what produced this card. An alert card names the alert that fired — the
+     server resolves the rule's zh label (`trigger.rule_label`, from the one rule catalog)
+     and carries the rule engine's own title/detail for the tooltip — and links to the 預警
+     規則 settings. Measured before: a target_cross card read 「RSI過熱警示」 and nothing on
+     it said which alert it was. Schedule / manual cards get a muted source tag; a card
+     from before the field existed (`trigger` null) claims nothing. Display only. */
+  var TRIGGER_SOURCE = { schedule: '排程產生', manual: '手動產生' };
+  function triggerChip(card) {
+    var t = card.trigger;
+    if (!t) return null;
+    if (t.source === 'alert') {
+      /* DEF-062: the server's name (the one rule-name table), never the raw rule id. */
+      var a = el('a', 'insight-trigger',
+        '由預警「' + (t.rule_label || (t.rule ? '未命名規則' : '未記錄規則')) + '」觸發');
+      a.href = 'settings.html#alerts';
+      var lines = [];
+      if (t.title) lines.push(t.title);
+      if (t.detail) lines.push(t.detail);
+      if (t.fired_at) lines.push('觸發時間：' + f.datetime(t.fired_at));
+      lines.push('點擊前往預警規則設定');
+      a.title = lines.join('\n');
+      return a;
+    }
+    var label = TRIGGER_SOURCE[t.source];
+    return label ? el('span', 'insight-time', label) : null;
+  }
+
+  /* DEF-033 (owner ruling 2026-09-24): the strategy-prompt version(s) this card was
+     generated with, as the server recorded them at generation (`prompt_versions`, one entry
+     per strategy layer). null = the card predates the record → 「生成時版本未記錄」, never a
+     version guessed from today's history; [] = no prompt was assembled (the zero-LLM 資料異常
+     card) → nothing to name. Links to 設定 › AI 提示詞, where each strategy's 版本記錄 lives.
+     DEF-057: the SYSTEM-prompt layer rides the same chip (`system_prompt_version`): null =
+     not recorded (the card predates DEF-057 — the strategy half reads exactly as before),
+     {used:false} = no system layer was assembled (nothing to name), {used:true, version} =
+     「系統 vN」 ahead of the strategy versions. */
+  function promptVersionChip(card) {
+    var pv = card.prompt_versions;
+    if (pv === undefined) return null;
+    if (pv === null) {
+      var none = el('span', 'insight-time insight-pver', '生成時版本未記錄');
+      none.title = '此卡片產生於提示詞版本記錄啟用之前，無法得知當時使用的策略提示詞版本';
+      return none;
+    }
+    var sys = card.system_prompt_version;
+    var sysUsed = !!(sys && sys.used);
+    if (!pv.length && !sysUsed) return null;
+    var parts = [];
+    var tips = [];
+    if (sysUsed) {
+      parts.push('系統 ' + (sys.version == null ? '版本不明' : 'v' + sys.version));
+      tips.push('系統提示詞' + (sys.version == null ? ' 版本不明' : ' v' + sys.version));
+    }
+    pv.forEach(function (r) {
+      parts.push(r.version == null ? '版本不明' : 'v' + r.version);
+      tips.push('策略「' + r.name + '」' + (r.version == null ? ' 版本不明' : ' v' + r.version));
+    });
+    if (sys === null || sys === undefined) tips.push('系統提示詞 生成時版本未記錄');
+    else if (!sysUsed) tips.push('未套用系統提示詞');
+    var a = el('a', 'insight-time insight-pver', '提示詞 ' + parts.join('・'));
+    a.href = 'settings.html#prompts';
+    a.title = tips.join('\n') + '\n點擊前往 AI 提示詞，於系統提示詞或策略卡的「版本記錄」檢視該版內文';
+    return a;
+  }
+
   function cardNode(card) {
     var c = el('div', 'insight-card');
     var head = el('div', 'insight-head');
     head.appendChild(el('span', 'badge badge-ai', 'AI'));
-    head.appendChild(el('h3', 'insight-title', card.title || '(未命名洞察)'));
+    head.appendChild(el('h3', 'insight-title', card.title || '（未命名洞察）'));
     if (card.symbol) {
       head.appendChild(el('span', 'insight-time', MARKET_LABEL[card.symbol] || card.symbol));
     }
+    if (card.unreadable) head.appendChild(unreadablePill());
     c.appendChild(head);
     c.appendChild(el('p', 'insight-body', card.summary || card.body_md || ''));
     var foot = el('div', 'insight-foot');
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
-    foot.appendChild(confChip(card));
+    var trig = triggerChip(card);
+    if (trig) foot.appendChild(trig);
+    var conf = confChip(card);
+    if (conf) foot.appendChild(conf);
+    var pver = promptVersionChip(card);
+    if (pver) foot.appendChild(pver);
+    var flagged = figureFlagPill(card);
+    if (flagged) foot.appendChild(flagged);
     foot.appendChild(attribNode(card));
     c.appendChild(foot);
     return c;
@@ -310,6 +482,10 @@
      else a CONSERVATIVE keyword scan of title+summary; null = neutral (no accent).
      Colors follow the app's locked Taiwan convention (紅漲綠跌): 偏多=red 偏空=green. */
   function verdictOf(card) {
+    /* M7-08: an unreadable prediction gets the pill, not a verdict — a surface that
+       cannot know which branch applies says so rather than picking one (domain-ledger.md);
+       the keyword scan below is a fallback for cards that never HAD a prediction. */
+    if (card.unreadable) return null;
     var p = card.prediction;
     if (p && p.direction) {
       if (p.direction === 'up') return 'up';
@@ -335,6 +511,7 @@
       c.classList.add('hv-' + v);
       head.appendChild(el('span', 'hc-verdict v-' + v, VERDICT_LABEL[v]));
     }
+    if (card.unreadable) head.appendChild(unreadablePill());
     c.appendChild(head);
     var sec = el('div', 'hc-section');
     sec.appendChild(el('p', 'hc-text', card.summary || card.body_md || ''));
@@ -342,7 +519,14 @@
     if (card.title) c.appendChild(el('p', 'hc-conclusion', card.title));
     var foot = el('div', 'insight-foot');
     foot.appendChild(el('span', 'insight-time', f.datetime(card.created_at)));
-    foot.appendChild(confChip(card));
+    var trig = triggerChip(card);
+    if (trig) foot.appendChild(trig);
+    var conf = confChip(card);
+    if (conf) foot.appendChild(conf);
+    var pver = promptVersionChip(card);
+    if (pver) foot.appendChild(pver);
+    var flagged = figureFlagPill(card);
+    if (flagged) foot.appendChild(flagged);
     foot.appendChild(attribNode(card));
     c.appendChild(foot);
     if (opts.dimmed) c.classList.add('dimmed');
@@ -431,19 +615,72 @@
       drawCalib(score.calibration_bins || []);
       return;
     }
+    /* M7-03: below the sample gate the band states 「資料不足」 and prints NO percentage —
+       the same rule the 滾動校準缺口 card two lines down has always followed, and the same
+       one 「任務 #1 · 樣本不足 · n=3／門檻 8」 states directly underneath. Until 2026-09-03 the
+       band had no gate at all: `if (!totals.n)` only caught n=0, so n=1..7 fell straight
+       through to 66.67% over three rows. The flag is SERVER-computed (totals.gate_open /
+       resolved_n / min_samples) — the page renders a verdict, it does not derive one. A
+       legacy payload without the flags (gate_open undefined) keeps the old rendering. */
+    var gated = totals.gate_open === false;
+    var gateSub = '樣本 ' + f.num(totals.resolved_n != null ? totals.resolved_n : totals.n)
+      + '／門檻 ' + f.num(totals.min_samples);
+    /* quant_hit_rate is "0" both for「零命中」and for「沒有任何量化預測」— totals.quant_n is the
+       denominator that tells them apart, so a rate with no population reads 資料不足 too. */
+    var noQuant = totals.quant_n === 0;
     /* miss_rate / quant_hit_rate are RATIO Decimal STRINGS (0..1); render as percentages
        via f.pct (Number()-coerced internally). avg_narrative is a 0..100 score string. */
     band.appendChild(scoreCard('累計評估數', f.num(totals.n), '已評分樣本'));
-    band.appendChild(scoreCard('量化命中率', totals.quant_hit_rate == null ? EM : f.pct(totals.quant_hit_rate),
-      '命中 ' + f.num(totals.quant_hit_count) + ' 筆'));
-    band.appendChild(scoreCard('失誤率', totals.miss_rate == null ? EM : f.pct(totals.miss_rate),
-      '失誤 ' + f.num(totals.miss_count) + ' 筆'));
-    band.appendChild(scoreCard('平均敘事分', totals.avg_narrative == null ? EM : f.num(totals.avg_narrative, 2),
-      '滿分 100'));
+    band.appendChild(scoreCard('量化命中率',
+      gated || noQuant ? '資料不足' : totals.quant_hit_rate == null ? EM : f.pct(totals.quant_hit_rate),
+      noQuant && !gated ? '尚無量化預測可對答案' : gated ? gateSub
+        : '命中 ' + f.num(totals.quant_hit_count) + ' 筆'));
+    band.appendChild(scoreCard('失誤率',
+      gated ? '資料不足' : totals.miss_rate == null ? EM : f.pct(totals.miss_rate),
+      gated ? gateSub : '失誤 ' + f.num(totals.miss_count) + ' 筆'));
+    band.appendChild(scoreCard('平均敘事分',
+      gated ? '資料不足' : totals.avg_narrative == null ? EM : f.num(totals.avg_narrative, 2),
+      gated ? gateSub : '滿分 100'));
+    /* W7 (AI-D36): the fifth card is the rolling calibration gap — the SAME definition the
+       prompt variable serves, rendered verbatim. Below the gate the card shows the honest
+       sample progress (樣本不足 n/8), never a number over a handful of rows. */
+    var rg = score.rolling_gap || null;
+    if (rg) {
+      band.appendChild(scoreCard('滾動校準缺口',
+        rg.gap == null
+          ? '樣本不足 ' + f.num(rg.window_n) + '／' + f.num(rg.min_scored)
+          : f.signedPct(rg.gap),
+        rg.gap == null
+          ? '滾動校準 · 滿 ' + f.num(rg.min_scored) + ' 筆解鎖'
+          : '最近 ' + f.num(rg.window_n) + ' 筆 · 負＝高估自己'));
+    }
+    /* ⑫c (AI-D38): how often a card claimed more confidence than its own record supported.
+       RECORDED, never clamped — the card keeps the confidence the model stated. Population
+       = non-shadow cards carrying both a confidence and a recorded ceiling; rate null means
+       no comparable card yet (NOT 0% compliance). Tolerates a legacy payload: the whole
+       card is skipped when the block is absent. */
+    var cv = score.ceiling_violations || null;
+    if (cv) {
+      band.appendChild(scoreCard('信心上限違規率',
+        cv.rate == null ? EM : f.pct(cv.rate),
+        cv.rate == null
+          ? '尚無可比對的卡片'
+          : f.num(cv.n) + ' 張中 ' + f.num(cv.violations) + ' 張超標 · 只記錄不夾取'));
+    }
 
     renderCombos(score.by_combo || []);
     renderScoreRows(score.rows || []);
     drawCalib(score.calibration_bins || []);
+  }
+
+  /* DEF-081 (owner 2026-09-26): a task is named by its NAME — 「任務 #2」 is a number the
+     owner cannot map to anything on this page. The label is the server's
+     (insight_type_label: name / 「名稱（已刪除）」 / 「任務 #N（已刪除）」); the id stays in
+     the tooltip, and a payload without the label keeps the old text. */
+  function taskName(tag, cls, x) {
+    var node = el(tag, cls, x.insight_type_label || ('任務 #' + x.insight_type_id));
+    node.title = '任務 #' + x.insight_type_id;
+    return node;
   }
 
   function renderCombos(combos) {
@@ -458,14 +695,26 @@
          concern; Number() the ratio purely for the CSS width %, never for a number of record. */
       var ratio = c.quant_hit_rate == null ? 0 : Number(c.quant_hit_rate);
       var row = el('div', 'strat-row');
-      row.appendChild(el('span', 'name', '任務 #' + c.insight_type_id));
+      row.appendChild(taskName('span', 'name', c));
       var track = el('span', 'track');
       var fill = el('span', 'fill');
       fill.style.width = Math.max(0, Math.min(100, ratio * 100)) + '%';
       track.appendChild(fill);
       row.appendChild(track);
       row.appendChild(el('span', 'pct', c.quant_hit_rate == null ? EM : f.pct(c.quant_hit_rate)));
-      row.appendChild(el('span', 'n', 'n=' + f.num(c.n)));
+      /* W7 (AI-D36): the trust tier stamp + the sample gate, both server-computed; a legacy
+         payload without them renders the cells empty, never crashes. */
+      if (c.tier == null) {
+        row.appendChild(el('span', null, ''));
+      } else {
+        var pill = el('span', 'tier-pill ' + (c.tier === '可參考' ? 'tier-good'
+          : c.tier === '早期' ? 'tier-early' : ''), c.tier);
+        if (c.calib_error_pp != null) pill.title = '校準誤差 ' + c.calib_error_pp + 'pp';
+        row.appendChild(pill);
+      }
+      var gateTxt = 'n=' + f.num(c.n);
+      if (c.min_samples != null) gateTxt += '／門檻 ' + f.num(c.min_samples);
+      row.appendChild(el('span', 'n' + (c.gate_open === false ? ' gate-closed' : ''), gateTxt));
       wrap.appendChild(row);
     });
   }
@@ -483,14 +732,20 @@
     }
     rows.forEach(function (r) {
       var tr = el('tr');
-      tr.appendChild(el('td', 'col-text', '任務 #' + r.insight_type_id));
+      tr.appendChild(taskName('td', 'col-text', r));
       tr.appendChild(el('td', 'num', r.calibration_version == null ? EM : 'v' + r.calibration_version));
       tr.appendChild(el('td', 'col-text', r.is_shadow ? '影子' : '生效'));
       var quant = r.quant_hit == null ? EM : (r.quant_hit ? '✓' : '✗');
       tr.appendChild(el('td', 'col-text', quant));
       tr.appendChild(el('td', 'num', r.narrative_score == null ? EM : f.num(r.narrative_score)));
-      var res = el('td', 'col-text ' + (r.miss ? 'hit-no' : 'hit-yes'), r.miss ? '✗ 失誤' : '✓ 命中');
-      tr.appendChild(res);
+      /* AI-D26: a row whose evaluation never scored (pending_data / undetermined) carries
+         miss=0 — painting it "✓ 命中" reports a record the ledger does not hold. The wire
+         has always carried status (_row_wire); say what the row actually IS. */
+      var resCls, resTxt;
+      if (r.status === 'pending_data') { resCls = 'hit-open'; resTxt = '… 待資料'; }
+      else if (r.status === 'undetermined') { resCls = 'hit-open'; resTxt = '— 未定'; }
+      else { resCls = r.miss ? 'hit-no' : 'hit-yes'; resTxt = r.miss ? '✗ 失誤' : '✓ 命中'; }
+      tr.appendChild(el('td', 'col-text ' + resCls, resTxt));
       /* actual_value is a Decimal STRING ratio (move pct) -> f.signedPct (no bare .toFixed). */
       tr.appendChild(el('td', 'col-text num', r.actual_value == null ? EM : f.signedPct(r.actual_value)));
       tr.appendChild(el('td', 'num', f.datetime(r.evaluated_at)));
@@ -694,8 +949,15 @@
         if (row.status === 'ok' || row.status === 'partial') {
           if (window.toast) window.toast('產生完成', 'ok', name + (row.detail ? '：' + row.detail : ''));
         } else if (window.toast) {
+          /* `reason` is a GATE CODE (R6_quota, R1_scope_mismatch…), not prose — spell it out
+             through the shared table (pipeline.js) so this toast and the 管線 診斷 modal say
+             the same thing about the same run. Degrades to the raw code if the script is
+             absent, exactly as ppSkipReason itself does for an unmapped code. */
+          var why = row.reason
+            ? (window.ppSkipReason ? window.ppSkipReason(row.reason) : row.reason)
+            : (row.detail || row.status);
           window.toast(row.status === 'skipped' ? '本次略過' : '執行失敗', 'fail',
-            name + '：' + (row.reason || row.detail || row.status));
+            name + '：' + why);
         }
         refresh({ quiet: true });
       }).catch(function () { /* polling is best-effort */ });
@@ -733,8 +995,13 @@
           return t.enabled && t.scope !== 'on_alert'; // on_alert is event-triggered
         });
         if (!runnable.length) {
+          /* F-11: the toast and the navigation were in the same synchronous block, so the
+             message explaining WHY the page was about to change never survived to be read —
+             it was destroyed by the very navigation it was explaining. Pressing a button
+             called 「產生洞察」 and simply landing on another page reads as a misfire.
+             Delayed like shell.js's 重算/報價更新 do it (prog.done → setTimeout(reload)). */
           if (window.toast) window.toast('尚無可執行的洞察任務', 'fail', '前往「洞察管線」建立或啟用任務');
-          window.location.href = 'pipeline-hub.html';
+          setTimeout(function () { window.location.href = 'pipeline-hub.html'; }, 1200);
           return;
         }
         if (runnable.length === 1) { runTask(runnable[0]); return; }

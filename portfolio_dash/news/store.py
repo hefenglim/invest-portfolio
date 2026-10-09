@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.money import to_db
 
 
 def news_db_path() -> Path:
@@ -91,6 +92,11 @@ CREATE INDEX IF NOT EXISTS ix_organized_news_date ON organized_news(news_date);
 #   fetch_status   — last fetch outcome for this link (see news.fetcher.FetchOutcome.status);
 #                    '' until first recorded. Makes an empty body_summary auditable, not silent.
 #   fetch_attempts — how many times the pipeline has fetched this link; caps the retry queue.
+#   prompt_version — DEF-057 (2026-09-25): the news-organizer prompt version the AI summary
+#                    was produced with (``shared/prompt_versions.py`` kind ``news``, which lives
+#                    in the MAIN db — this is its number, not a foreign key). NULL for a
+#                    headline-only degrade (no prompt was used) and for every row organized
+#                    before the column existed.
 _ADDED_COLUMNS = (
     ("cost_usd", "TEXT NOT NULL DEFAULT '0'"),
     ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
@@ -98,13 +104,35 @@ _ADDED_COLUMNS = (
     ("model", "TEXT"),
     ("fetch_status", "TEXT DEFAULT ''"),
     ("fetch_attempts", "INTEGER DEFAULT 0"),
+    ("prompt_version", "INTEGER"),
 )
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
+    """Add ``col`` unless it is already there — safe under CONCURRENT first-run callers.
+
+    The PRAGMA-then-ALTER pair is a TOCTOU: `news.html` issues `GET /api/news` and
+    `GET /api/news/filters` together, each opens its own connection and each calls
+    `create_tables()`. On a brand-new `news.db` both read the column as absent, both
+    ALTER, and the loser raised `OperationalError: duplicate column name: …` out of a
+    plain GET — a 500 on the FIRST load of a fresh install, gone on reload. Observed by
+    three separate QA agents on three different columns (`model`, `fetch_status`,
+    `fetch_attempts`), which is what a race looks like from the outside.
+
+    The check is kept (it skips the ALTER in the overwhelmingly common already-migrated
+    case); the raise is what changes. `duplicate column name` means the column now
+    exists, which is precisely the post-condition this function promises, so it is a
+    success, not an error. Every other `OperationalError` still propagates — a real DDL
+    failure must not be swallowed by a race guard.
+    """
     existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-    if col not in existing:
+    if col in existing:
+        return
+    try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    except sqlite3.OperationalError as exc:  # pragma: no cover - timing-dependent
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def create_tables(conn: sqlite3.Connection) -> None:
@@ -129,6 +157,8 @@ class OrganizedNews(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     model: str | None = None  # model alias that organized this item (AI attribution)
+    # DEF-057: the news-organizer prompt version used (None = no prompt used / not recorded)
+    prompt_version: int | None = None
     fetched_at: str
     organized_at: str
 
@@ -177,18 +207,19 @@ def upsert_news(
     cur = conn.execute(
         "INSERT INTO organized_news "
         "(link, title, news_date, body_summary, related_stocks, source, lang, "
-        " cost_usd, tokens_in, tokens_out, model, fetched_at, organized_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        " cost_usd, tokens_in, tokens_out, model, prompt_version, fetched_at, organized_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(link) DO UPDATE SET title=excluded.title, news_date=excluded.news_date, "
         "body_summary=excluded.body_summary, related_stocks=excluded.related_stocks, "
         "source=excluded.source, lang=excluded.lang, cost_usd=excluded.cost_usd, "
         "tokens_in=excluded.tokens_in, tokens_out=excluded.tokens_out, "
-        "model=excluded.model, organized_at=excluded.organized_at",
+        "model=excluded.model, prompt_version=excluded.prompt_version, "
+        "organized_at=excluded.organized_at",
         (
             item.link, item.title, item.news_date, item.body_summary,
             json.dumps(item.related_stocks, ensure_ascii=False), item.source, item.lang,
-            str(item.cost_usd), item.tokens_in, item.tokens_out, item.model,
-            item.fetched_at, item.organized_at,
+            to_db(item.cost_usd), item.tokens_in, item.tokens_out, item.model,
+            item.prompt_version, item.fetched_at, item.organized_at,
         ),
     )
     row = conn.execute(
@@ -301,6 +332,7 @@ def _from_row(r: sqlite3.Row) -> OrganizedNews:
         tokens_in=r["tokens_in"] if "tokens_in" in keys and r["tokens_in"] else 0,
         tokens_out=r["tokens_out"] if "tokens_out" in keys and r["tokens_out"] else 0,
         model=r["model"] if "model" in keys else None,
+        prompt_version=r["prompt_version"] if "prompt_version" in keys else None,
         fetched_at=r["fetched_at"], organized_at=r["organized_at"],
     )
 

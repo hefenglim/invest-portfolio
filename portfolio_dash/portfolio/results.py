@@ -4,13 +4,56 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.ledger import Dividend
 
 
 class Holding(BaseModel):
-    """An open position with cost basis and (once valued) market fields."""
+    """An open position with cost basis and (once valued) market fields.
+
+    **Adding a 待釐清 flag? Read this first — it is the rule, not the neighbouring flag.**
+
+    The system has THREE independent mechanisms for "this position exists but something
+    about it is not trustworthy", and a new flag must be reasoned onto each one separately:
+
+    1. **the display flag itself** — the boolean below, carried to the wire so the UI can
+       name the problem. EVERY flag uses this one.
+    2. **valuation suppression** (``portfolio/pnl.py``) — null ``market_value`` /
+       ``unrealized_pnl`` / ``capital_gain`` so every aggregate that gates on
+       ``market_value is not None`` drops the position automatically.
+    3. **XIRR suppression** (``portfolio/dashboard.py``) — declare the money-weighted
+       return not computable, with a stated reason.
+
+    The deciding question for (2) and (3) is **"are the SHARES right?"**, because
+    ``market_value = price × shares`` and prices are global, current and already reflect
+    every corporate action:
+
+    * ``unbookable_dividend`` — shares are RIGHT; only ``adjusted_cost_total`` is short one
+      payout. Its market value is genuinely correct, so it takes (1) ONLY. The trend marks
+      its days ``incomplete`` (the ledger holds a row it cannot book, so B is withheld) but
+      COUNTS its value like any other position — a day marker is a disclosure, not mechanism
+      (2). Until Y3 (owner ruling 2026-10-05) ``timeseries.daily_value_series`` dropped the
+      value as it does for the two below, the one reader that disagreed with this line.
+    * ``oversold`` — shares are negative and the basis was discarded: all three.
+    * ``unbookable_action`` — the shares are in PRE-action terms against a POST-action
+      price, so the market value is wrong by the action's whole ratio: all three. It gets
+      (3) via ``Book.unapplied_actions`` rather than via this flag — see that field for why.
+    * ``revived_by_dividend`` — shares are RIGHT and the price is global and current, so the
+      market value is correct: (1) ONLY, the same answer as ``unbookable_dividend`` but reached
+      from the opposite direction. Nothing here is *incomplete*; every figure is individually
+      correct under DRIP accounting. What the flag carries is that the position exists ONLY
+      because a share-adding dividend landed on a flat lot, so its basis is zero and its whole
+      market value reads as profit — a shape a reader cannot otherwise tell from a real holding.
+    * ``short_open`` — NOT a 待釐清 flag at all. A declared short is a real, priced position
+      whose signed quantity every formula already handles; it takes none of the three.
+
+    (Audit F-49, 2026-08-10: ``unbookable_action`` shipped with (1) only, because the brief
+    that produced it said "wire it exactly where ``unbookable_dividend`` is wired". Mirroring
+    a neighbour is how the gap was created — hence this paragraph.)
+    """
 
     account_id: str
     symbol: str
@@ -33,15 +76,58 @@ class Holding(BaseModel):
     # missing opening inventory / buy). STICKY since 2026-07-31: the discarded basis is not
     # restored by a later buy, so the warning must not be cleared by one either.
     oversold: bool = False
+    # WHERE the first oversell happened. NOT a fourth trust mechanism — the docstring's three
+    # (display flag / valuation suppression / XIRR suppression) all belong to `oversold` and
+    # are unchanged; these are detail ON that flag, so a message can name the day the ledger
+    # broke instead of the position's final net quantity (F-16, 2026-08-27: 「部位將為 9.5 股」,
+    # a POSITIVE number, offered as proof of a shortfall). None on a ledger replayed strictly,
+    # and on a position flagged only by the `shares < 0` arm.
+    oversold_on: date | None = None
+    oversold_sold: Decimal | None = None
+    oversold_held: Decimal | None = None
     # A DECLARED short (`short_sale` on the sell) that is still open. ``shares`` is negative
     # and the cost fields hold the proceeds received, so avg/market_value/unrealized are all
     # meaningful — unlike `oversold`, this is a real, priced position, not an unresolved
     # data problem. Covering it books realized P&L at the covering buy's per-share cost.
     short_open: bool = False
-    # A dividend row landed while this position was short. It was NOT booked (a short pays
-    # the dividend in lieu — see cost_basis.build_book), so the position's figures are
-    # incomplete by exactly that payout and the consumer must say so.
+    # A dividend row landed while this position was short, or on a ticker an EXCHANGE moved
+    # to this position (E24). It was NOT booked (see cost_basis.build_book), so the consumer
+    # must say so. The refused ROW is on the book (`Book.unbookable_dividends`, K3), because a
+    # flat carrier has no Holding to wear this flag.
     unbookable_dividend: bool = False
+    # A corporate action could not be applied to this position and was SKIPPED on the
+    # dashboard path (the strict path raises instead). The share count is therefore in
+    # PRE-action terms while prices are global and post-action, so market value and every
+    # figure derived from it are wrong until the ledger is fixed. Same 待釐清 posture as
+    # the two flags above: never silently correct, never a 500 (E1a/E2/E3/E5/E18/E22).
+    # Mechanisms (1) + (2); mechanism (3) is driven by `Book.unapplied_actions`, which sees
+    # the two cases this flag structurally cannot (see that field).
+    unbookable_action: bool = False
+    # QA-06 (owner ruling 2026-09-01: 記錄並標記). This position was FLAT when a DRIP/STOCK
+    # dividend added shares to it, so it exists only because of that payout and carries a cost
+    # basis of exactly zero. Booked deliberately — the shares may really have been received —
+    # but never silent: `original_cost_total == 0` makes `payback_ratio` 0 and `unrealized`
+    # equal to the entire market value, which is indistinguishable from an ordinary holding
+    # unless something says so. Display mechanism (1) only; see the taxonomy above for why
+    # valuation and XIRR are deliberately NOT suppressed.
+    revived_by_dividend: bool = False
+    # M1-03 / D21 (owner-approved 2026-08-09, grill Q9). A SPINOFF scales both totals by the
+    # same cost_carry, so the child's `payback_ratio` equals the parent's to the last digit
+    # while the child may never have paid a dividend — arithmetic that is CORRECT under
+    # weighted average (the cost came across, so the recovery came with it) under a label
+    # that describes something that never happened. The ratio is untouched; these three say
+    # whose dividends it is built on, and every surface that shows the ratio shows them:
+    #   `payback_from_symbol`       — the DIRECT parent the basis was carved from (None when
+    #                                 no SPINOFF ever fed this position);
+    #   `payback_carried_dividends` — the dividend portion carved in AT the SPINOFF, i.e. the
+    #                                 parent's dividend_portion × cost_carry on the action
+    #                                 date (historical: a partial sell does not rescale it);
+    #   `payback_own_dividends`     — cash dividends this position received itself.
+    # The pair is None whenever `payback_from_symbol` is None, so an ordinary holding's row
+    # gains three nulls and nothing else. NOT a 待釐清 flag: nothing is wrong or missing.
+    payback_from_symbol: str | None = None
+    payback_carried_dividends: Decimal | None = None
+    payback_own_dividends: Decimal | None = None
 
 
 class RealizedRow(BaseModel):
@@ -87,12 +173,193 @@ class RealizedPnL(BaseModel):
     by_currency: dict[Currency, Decimal]
 
 
+class UnappliedAction(BaseModel):
+    """One corporate-action row the replay REFUSED to book, recorded at Book level.
+
+    Not a flag on a Holding, and that is the whole point: a corporate action going unapplied
+    is a property of the REPLAY, and there are three ways it happens, two of which have no
+    surviving position to hang a flag on (audit F-47 + E1, 2026-08-10):
+
+    1. the source survives — ``Holding.unbookable_action`` marks it, and this row as well;
+    2. the source is *already empty* (an EXCHANGE moved it away earlier the same day), so
+       ``cost_basis`` flags a zero-share position that the holdings loop then DROPS — the
+       flag is discarded with its carrier and the skipped action leaves no trace;
+    3. the source never existed at all, so there is nothing to flag anywhere.
+
+    Case 2 is E19's laundering one level up: E19 stops a flag being *transferred away*,
+    nothing stopped it being *dropped*. Cases 2 and 3 both produce a dashboard that looks
+    entirely clean while an action in the ledger was silently ignored.
+
+    Every field exists so the consumer can NAME the problem. A bare count would force the UI
+    to say "something went wrong", and this repo's whole 待釐清 vocabulary is built on saying
+    which row, in which account, on which date, and why — ``reason`` is the same zh sentence
+    the strict path raises, so the two paths explain the refusal identically.
+    """
+
+    account_id: str
+    date: date
+    # `CorporateActionKind | str`, because one of the refusal reasons IS an unknown kind
+    # (2026-08-11): a stored row the loader could not convert lands here carrying whatever
+    # string the ledger actually holds. Narrowing this to the enum would make the model
+    # refuse to describe exactly the row it exists to describe — and, since this is a
+    # StrEnum, both branches serialise identically on the wire.
+    kind: CorporateActionKind | str
+    from_symbol: str
+    to_symbol: str
+    reason: str
+    #: The ``corporate_actions.id`` of the refused row, when the replay read it from the
+    #: store (DEF-023, 2026-09-23). ``None`` for an action that was only being validated.
+    #: The dashboard's 待釐清 entry point links the owner to the row by this id — a sentence
+    #: that names the account, symbol and date is an explanation, not a way in.
+    action_id: int | None = None
+
+
+class OversoldPosition(BaseModel):
+    """One (account, symbol) the replay flagged 賣超, recorded at BOOK level (CR-11, 2026-10-04).
+
+    ``Holding.oversold`` cannot be the only record, for the reason ``UnappliedAction`` gives
+    for corporate actions: the flag dies with its carrier. An undeclared oversell discards the
+    basis and the flag is sticky — but a later buy of the same size nets the position back to
+    EXACTLY zero, the holdings loop drops every zero-share position, and the flag went with it
+    (pre-merge review CR-01, measured: buy 1,000 → sell 1,000 → buy 1,000, the first buy
+    deleted — 200, no question, the +100,000 realized row gone, no 賣超 anywhere). Every reader
+    that asks "is there a 賣超 in this book?" reads THIS list: the correction doors' replay guard,
+    the dashboard's XIRR / FX-complete gate, the trend's incomplete flag and the drawer.
+
+    It lists EVERY 賣超 position, not only the dropped ones — a reader must not have to merge
+    two sources to get the whole answer. ``shares`` is the position's final signed net, so
+    ``shares == 0`` is exactly the case no ``Holding`` carries. The three ``oversold_*`` fields
+    are the same detail ``Holding`` carries (the day the ledger broke, not the end state).
+    """
+
+    account_id: str
+    symbol: str
+    quote_ccy: Currency
+    shares: Decimal
+    oversold_on: date | None = None
+    oversold_sold: Decimal | None = None
+    oversold_held: Decimal | None = None
+
+
+class OpenedPosition(BaseModel):
+    """One (account, symbol) the replay OPENED, whatever its share count now (S1/S9, 2026-10-04).
+
+    The replay creates a position object from an opening, a non-zero trade, or an EXCHANGE /
+    SPINOFF it actually applied — never from a refused action, a zero-quantity row or a
+    dividend with no position. ``holdings`` lists only the non-zero ones, so two facts died
+    with every flat position:
+
+    * that it was opened at all — the drawer told 「部位已結清」 from 「從未持有」 by guessing
+      from activity rows, and a refused action row read as an opening (S9);
+    * its two 待釐清 flags — ``oversold`` (``OversoldPosition`` keeps the detail) and
+      ``unbookable_action``, which is sticky on the position: a flat position a refused
+      action flagged comes back flagged when a later trade reopens it, and the manual preview
+      could not see that before the trade (S1).
+
+    The two flags are exactly ``Holding.oversold`` / ``Holding.unbookable_action`` — the
+    ``_unclear`` pair the input path withholds on. ``Holding.unbookable_dividend`` is not here
+    on purpose (K3, 2026-10-05): it does not withhold anything (the shares and the totals are
+    right), and its readers need the refused ROW, not a bit — :class:`UnbookableDividend`.
+    """
+
+    account_id: str
+    symbol: str
+    shares: Decimal
+    oversold: bool = False
+    unbookable_action: bool = False
+
+
+class UnbookableDividend(BaseModel):
+    """One dividend the replay refused on a position it HAD opened (K3, owner ruling 2026-10-05).
+
+    Two shapes, both with a position to flag — which is exactly why they were flag-only:
+
+    * ``"short"`` — it landed while the position was an open declared short. A short seller
+      pays the dividend in lieu, and this ledger has no debit row for that.
+    * ``"vacated"`` — an EXCHANGE had moved the ticker away (E24 / D32). The flag goes on the
+      live successor (``cost_basis._follow_exchange_chain``), the position the owner holds.
+
+    The carrier can be FLAT — the successor sold out, the short covered back to exactly zero —
+    and the holdings loop drops a flat position together with its ``unbookable_dividend``: the
+    CR-11 class (:class:`OversoldPosition`), one flag over. So the refusal is ALSO recorded
+    here, and every reader that shows its 待釐清 — the trend's incomplete days, the FX-complete
+    reason, the drawer — reads this list, held carrier or flat.
+
+    A dividend refused because no position ever existed is NOT one of these: that is
+    ``Book.orphan_dividends`` (CR-02), with its own remedy. Every row here is also in
+    ``Book.refused_dividends``, so XIRR and 股利總覽 exclude it through the one channel they read.
+    """
+
+    dividend: Dividend
+    cause: Literal["short", "vacated"]
+    #: The position the replay set ``unbookable_dividend`` on when it refused the row: the
+    #: short itself, or the end of the EXCHANGE chain. A later EXCHANGE / SPINOFF carries the
+    #: flag on (E19); this names where it was put, not every position it travelled to.
+    carrier_symbol: str
+    #: ``"vacated"`` only: the symbol the EXCHANGE moved the dividend's ticker to (the chain's
+    #: first hop). ``None`` for ``"short"``.
+    vacated_to: str | None = None
+    #: The zh sentence the strict path raises for the same row, verbatim — both paths explain
+    #: the refusal in the same words, remedy included.
+    reason: str
+
+
 class Book(BaseModel):
     """Output of the ledger replay: open holdings, realized, gross capital deployed."""
 
     holdings: list[Holding]
     realized: RealizedPnL
     gross_invested: dict[Currency, Decimal]
+    # Corporate actions the replay could not apply, in replay (date, then ledger) order.
+    # ALWAYS EMPTY on the strict path (``allow_oversell=False``), which raises instead — so a
+    # non-empty list means the dashboard path degraded and the book is 待釐清.
+    #
+    # Consumers: a non-empty list means the SHARE COUNTS in this book are not trustworthy
+    # (the position kept its pre-action shares while prices are global and post-action), so
+    # anything derived from `shares` — market value, weights, the XIRR terminal value — must
+    # be withheld, not merely annotated. `Holding.unbookable_action` cannot serve as that
+    # gate: cases 2 and 3 above emit no flagged holding at all.
+    #
+    # Default empty so every existing ``build_book`` consumer keeps working unchanged, and
+    # so a directly-constructed ``Book`` (tests, fixtures) still validates.
+    unapplied_actions: list[UnappliedAction] = Field(default_factory=list)
+    # Dividend events this replay REFUSED to book, in replay order (review 2026-08-24).
+    #
+    # ``Holding.unbookable_dividend`` says a POSITION is short one payout; it cannot say WHICH
+    # payout, and a consumer that needs to exclude the event itself needs the event. That
+    # consumer is ``returns.xirr_reporting``: the payment 總報酬 refuses was still counted as a
+    # positive cashflow there, so one dividend got three answers on three screens (excluded
+    # from total return, counted by XIRR, and the trend flagging the day 待釐清).
+    #
+    # Excluding by POSITION would over-correct — it would drop that symbol's other, perfectly
+    # bookable dividends too — which is why this carries the rows and not just a flag.
+    #
+    # ALWAYS EMPTY on the strict path (``allow_oversell=False``), which raises instead. Default
+    # empty so every existing consumer and every hand-built ``Book`` keeps working.
+    refused_dividends: list[Dividend] = Field(default_factory=list)
+    # Every position the replay flagged 賣超 — including one that netted back to exactly zero
+    # shares, which ``holdings`` drops (CR-11; see :class:`OversoldPosition`). A non-empty list
+    # means some cost basis in this book was discarded, so XIRR has no honest value. ALWAYS
+    # EMPTY on the strict path, which raises ``OversellError`` instead.
+    oversold_positions: list[OversoldPosition] = Field(default_factory=list)
+    # Every position the replay opened, held or flat, with its two 待釐清 flags (S1/S9 — see
+    # :class:`OpenedPosition`). Populated on BOTH paths (the strict path raises on a 賣超, so
+    # there its flags are only ever the action flag). Default empty for hand-built books.
+    opened_positions: list[OpenedPosition] = Field(default_factory=list)
+    # Dividend events refused because the account held NO position in that symbol by the
+    # dividend's effective date (CR-02, 2026-10-04) — no buy, opening or corporate action had
+    # created it. Each is ALSO in ``refused_dividends`` (so XIRR excludes it like every other
+    # refusal); this list says WHICH refusals mean "the ledger is missing the position", the
+    # case with no position to flag. A dividend after a full CLOSE is not one of these: it
+    # books as realized income (owner ruling H2). ALWAYS EMPTY on the strict path, which raises
+    # ``UnbookableLedgerError`` naming the row instead.
+    orphan_dividends: list[Dividend] = Field(default_factory=list)
+    # Dividends refused on a position the replay HAD opened — an open short, or a ticker an
+    # EXCHANGE vacated — with the position that carries the flag (K3, 2026-10-05; see
+    # :class:`UnbookableDividend`). The carrier may be flat and so absent from ``holdings``;
+    # this list is the whole answer either way. Each is ALSO in ``refused_dividends``. ALWAYS
+    # EMPTY on the strict path, which raises ``UnbookableLedgerError`` with the same ``reason``.
+    unbookable_dividends: list[UnbookableDividend] = Field(default_factory=list)
 
 
 class CurrencyReturn(BaseModel):
@@ -126,5 +393,12 @@ class CombinedView(BaseModel):
     """Per-currency market value + blended reporting-currency total."""
 
     by_currency_value: dict[Currency, Decimal]
+    # The SAME values converted to the reporting currency (R5). ``by_currency_value`` above is
+    # NATIVE, so its entries cannot be compared or summed across currencies — 10,000 USD and
+    # 300,000 TWD are 31 : 300 natively and roughly half-and-half in reality. Anything that
+    # ranks or weights currencies must read THIS field. Computed in the same loop as the
+    # native leg and the blended total so the three can never disagree; additive with an empty
+    # default so CombinedView constructions predating it still validate.
+    by_currency_reporting: dict[Currency, Decimal] = Field(default_factory=dict)
     reporting_total_value: Decimal
     reporting_currency: Currency

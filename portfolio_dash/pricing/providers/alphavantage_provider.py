@@ -12,7 +12,6 @@ I/O goes through ``requests.get`` so it is never exercised without a key.
 
 import os
 from collections.abc import Callable
-from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -22,6 +21,7 @@ from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.results import FxRow, PriceRow
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
 
 _URL = "https://www.alphavantage.co/query"
@@ -48,12 +48,15 @@ class AlphaVantageProvider(ProviderBase):
         return self._token
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
+        # FUNDAMENTALS (AI-D13): AV's OVERVIEW endpoint, US-listed only, key-gated.
+        # Fetch/parse lives in pricing/fundamentals_source.py; the union ingest calls it
+        # (fundamentals are NOT a fallback chain — rules/data-and-pricing.md AI-D4/D14).
         if self._resolve_token() is None:
             return False
         if data_type is DataType.FX:
             return True
         return (
-            data_type in {DataType.QUOTE_LATEST, DataType.QUOTE_HISTORY}
+            data_type in {DataType.QUOTE_LATEST, DataType.QUOTE_HISTORY, DataType.FUNDAMENTALS}
             and market is Market.US
         )
 
@@ -84,7 +87,7 @@ class AlphaVantageProvider(ProviderBase):
             if close is None:
                 continue
             out.append(PriceRow(
-                instrument=ref.symbol, market=Market.US, as_of=date.today(),
+                instrument=ref.symbol, market=Market.US, as_of=app_now().date(),
                 close=close, source=self.name,
             ))
         return out
@@ -111,7 +114,7 @@ class AlphaVantageProvider(ProviderBase):
             if rate is None:
                 continue
             out.append(FxRow(
-                base=pair.base, quote=pair.quote, as_of=date.today(),
+                base=pair.base, quote=pair.quote, as_of=app_now().date(),
                 rate=rate, source=self.name,
             ))
         return out

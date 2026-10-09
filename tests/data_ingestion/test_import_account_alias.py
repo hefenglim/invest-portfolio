@@ -8,15 +8,20 @@ issue would block the commit). A current id passes through untouched.
 
 import sqlite3
 from collections.abc import Iterator
+from datetime import date
+from decimal import Decimal
 
 import pytest
 
+# The pool arithmetic the fx preview now takes as a REQUIRED argument (QA-09), bound from the
+# layer that owns the injection.
+from portfolio_dash.api.routers.cash import cash_pool_fn
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.csv_import import build_transaction_preview
 from portfolio_dash.data_ingestion.dividend_import import build_dividend_preview
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview
 from portfolio_dash.data_ingestion.opening_import import build_opening_preview
-from portfolio_dash.data_ingestion.store import upsert_instrument
+from portfolio_dash.data_ingestion.store import insert_cash_movement, upsert_instrument
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -51,9 +56,14 @@ def test_transaction_legacy_account_aliased(seeded: sqlite3.Connection) -> None:
 
 
 def test_fx_legacy_account_aliased(seeded: sqlite3.Connection) -> None:
+    # The MYR the conversion sells has to be in the pool: since QA-09 this door runs the HARD
+    # no-overdraft rule (FU-D34), and an unfunded row would fail the "nothing hard" assertion
+    # below for a reason that has nothing to do with the alias this test is about.
+    insert_cash_movement(seeded, account_id="moomoo_my", move_date=date(2026, 1, 5),
+                         kind="DEPOSIT", ccy=Currency.MYR, amount=Decimal("4400"))
     csv = "account,date,from_ccy,from_amount,to_ccy,to_amount\n" \
           "moomoo_my_us,2026-01-06,MYR,4400,USD,1000\n"
-    (row,) = build_fx_preview(seeded, csv).rows
+    (row,) = build_fx_preview(seeded, csv, pool=cash_pool_fn(seeded)).rows
     assert row.payload["account_id"] == "moomoo_my"
     assert any(i.kind == "account_alias" for i in row.issues)
     assert not any(not i.needs_confirm for i in row.issues)

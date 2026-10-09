@@ -22,9 +22,10 @@ import sqlite3
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from portfolio_dash.api import auth_store
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight.official_templates import (
     DIGEST_NOTE_PROMPT_BODY,
     DIGEST_NOTE_PROMPT_VERSION,
@@ -37,8 +38,11 @@ from portfolio_dash.portfolio.dashboard_models import (
     ExDividendItem,
     HoldingRow,
 )
+from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.scheduler.jobs import JobOutcome
 from portfolio_dash.shared import llm
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active
 from portfolio_dash.shared.wire import decimal_str
@@ -57,19 +61,55 @@ _MOVERS_N = 3                # top-N up + top-N down
 # imported so all shipped prompt content has one home + a version tag.
 _LLM_PROMPT_VERSION = DIGEST_NOTE_PROMPT_VERSION
 
-# rule_id -> (zh label, severity) from the single push catalog (single source of labels).
-_RULE_META: dict[str, tuple[str, str]] = {
-    rid: (label, sev) for rid, label, sev in notify.RULE_CATALOG
-}
+# rule_id -> severity from the push catalog. The zh LABEL is read from the ONE rule-name table
+# (``shared.alert_rule_names``, DEF-062) by :func:`_rule_label_sev`: the old fallback was the raw
+# id, which is what an uncatalogued ``calibration_regression`` event printed in the digest.
+_RULE_SEVERITY: dict[str, str] = {rid: sev for rid, _label, sev in notify.RULE_CATALOG}
 
 
-def _try[T](fn: Callable[[], T], default: T) -> T:
-    """Run *fn*; on ANY failure log + return *default* (honest per-block degradation)."""
-    try:
-        return fn()
-    except Exception:  # noqa: BLE001 — a failing block degrades to a default, never crashes
-        logger.warning("digest block failed", exc_info=True)
-        return default
+def _rule_label_sev(rid: str) -> tuple[str, str]:
+    """``(zh name, severity)`` of an ``alert_events`` rule id — never the id as its name."""
+    return rule_name(rid), _RULE_SEVERITY.get(rid, "info")
+
+
+class _BlockRun:
+    """Run one digest block; on ANY failure log + return its default, and COUNT it.
+
+    Honest per-block degradation is unchanged: a failing block degrades to its default and
+    the digest is always produced. What changed (DEF-067, 2026-09-26) is that the run no
+    longer reads 成功 over it: this replaced a ``_try`` that swallowed the failure without a
+    trace in ``job_runs``; ``failed > 0`` makes the job ``partial``.
+    """
+
+    def __init__(self) -> None:
+        self.failed = 0
+
+    def __call__[T](self, fn: Callable[[], T], default: T) -> T:
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 — degrade + count, never crash
+            logger.warning("digest block failed", exc_info=True)
+            self.failed += 1
+            return default
+
+
+class PushResult(NamedTuple):
+    """What the digest push did: the zh note, and the counts the verdict reads (DEF-067).
+
+    ``channels == 0`` for every gated skip (demo mode, no channel, unsubscribed, quiet
+    hours) — a deliberate non-push, not a failure."""
+
+    text: str
+    sent: int = 0
+    channels: int = 0
+
+
+def _outcome(detail: str, push: PushResult, blocks: _BlockRun) -> JobOutcome:
+    """``partial`` when a block degraded or the push missed a channel; else ``ok``."""
+    if blocks.failed:
+        detail += f"；{blocks.failed} 個區塊無法產生（以空值代替）"
+    lost = blocks.failed > 0 or push.sent < push.channels
+    return JobOutcome("partial" if lost else "ok", detail)
 
 
 def _today(now: datetime) -> str:
@@ -196,14 +236,24 @@ def _per_symbol_day_change(
     is ``hist[-1]``, whose ``as_of`` is the quote date, ``fetched_at`` the fetch timestamp,
     and ``value`` the close price (FU-D14 tooltip source). Only symbols with a computable pct
     get a metadata entry.
+
+    §5.1(d) / W6c: the pct divides one stored close by another one dated earlier, so a split
+    landing between the two reports the whole ratio as a one-day move (a 7-for-1 as −86%,
+    straight into the digest's 跌幅 movers and into the weighted portfolio move). Both closes
+    are re-expressed into ``now``'s share terms first; the tooltip's close comes from the same
+    re-expressed row, so the number in the tooltip and the number in the pct never disagree.
     """
     start = now.date() - timedelta(days=_DAY_CHANGE_LOOKBACK_DAYS)
     end = now.date()
     out: dict[str, Decimal | None] = {}
     meta: dict[str, tuple[str | None, str | None, str | None]] = {}
     latest_as_of: date | None = None
+    # ONE index for the whole digest, outside the per-symbol loop (trap #21).
+    actions = load_action_index(conn)
     for sym in symbols:
-        hist = get_price_history(conn, sym, start, end)
+        hist = series_in(
+            actions, sym, get_price_history(conn, sym, start, end), valued_on=end
+        )
         pct = _pct_from_last_two([p.value for p in hist])
         out[sym] = pct
         if pct is not None and hist:
@@ -225,7 +275,7 @@ def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any
     """
     extra = "" if ai_active(conn) else " AND rule_id != 'quota_low'"
     rows = conn.execute(
-        "SELECT rule_id, symbol FROM alert_events "
+        "SELECT * FROM alert_events "
         "WHERE substr(fired_at,1,10) = ? AND rule_id NOT LIKE 'signal_%'"
         + extra + " ORDER BY id",
         (_today(now),),
@@ -233,13 +283,17 @@ def _alerts_today(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any
     grouped: dict[str, dict[str, Any]] = {}
     for r in rows:
         rid = str(r["rule_id"])
-        label, sev = _RULE_META.get(rid, (rid, "info"))
+        label, sev = _rule_label_sev(rid)
         g = grouped.setdefault(
             rid,
             {"rule_id": rid, "label": label, "severity": sev, "count": 0, "symbols": []},
         )
         g["count"] = int(g["count"]) + 1
-        if r["symbol"]:
+        # I-16: only a SYMBOL subject is a symbol. The column holds whatever the alert is
+        # about (an account for fx_drift, a sector, a currency — DEF-037's ``scope``); a row
+        # recorded before the column existed reads as a symbol, as it always did.
+        scope = r["scope"] if "scope" in r.keys() else None
+        if r["symbol"] and scope in (None, "symbol"):
             g["symbols"].append(str(r["symbol"]))
     return list(grouped.values())
 
@@ -270,9 +324,11 @@ def _data_health(
             age = (now.date() - pr.as_of).days
             if age > _STALE_AGE_DAYS:
                 stale.append({"symbol": sym, "age_days": age})
+    # A ``partial`` run (a held symbol's quote was lost) is not a success — owner ruling
+    # 2026-09-06, M10-02; counting ``error`` alone called an all-holdings-lost refresh clean.
     failed = conn.execute(
         "SELECT COUNT(*) AS n FROM job_runs "
-        "WHERE status = 'error' AND substr(started_at,1,10) = ?",
+        "WHERE status IN ('error', 'partial') AND substr(started_at,1,10) = ?",
         (_today(now),),
     ).fetchone()["n"]
     return {"stale": stale, "failed_jobs": int(failed)}
@@ -371,8 +427,8 @@ def _push(
     *,
     now: datetime,
     sender: notify.Sender,
-) -> str:
-    """Dispatch the digest to the enabled channels (gated). Returns a short push note.
+) -> PushResult:
+    """Dispatch the digest to the enabled channels (gated). Returns the push note + counts.
 
     Gates (in order): guest/demo mode → suppress outbound dispatch entirely (FU-D4 — the
     digest run is open in guest mode so the demo can be exercised, but outbound push stays
@@ -384,23 +440,23 @@ def _push(
         logger.info(
             "digest push suppressed in guest/demo mode (kind=%s): outbound stays locked", kind
         )
-        return "示範模式略過推播"
+        return PushResult("示範模式略過推播")
     cfg = notify.load_config(conn)
     rule_id = f"digest_{kind}"
     channels = notify.build_enabled_channels(cfg)
     if not channels:
-        return "無啟用通道"
+        return PushResult("無啟用通道")
     if not cfg.subscriptions.get(rule_id, True):
-        return "未訂閱"
+        return PushResult("未訂閱")
     if notify.in_quiet_hours(cfg.quiet_hours, now):
-        return "靜音時段略過推播"
+        return PushResult("靜音時段略過推播")
     # FU-D17: link the digest push to the dashboard when a public base URL is configured
     # (frontend_url(base, None) → base + "/index.html"; empty base → None ⇒ legacy text).
     link = notify.frontend_url(cfg.public_base_url, None)
     title, body = push_text(kind, payload, now=now, linked=link is not None)
     outcome = sender(channels, title, body, "info", link)
     ok = sum(1 for v in outcome.values() if v == "ok")
-    return f"推播 {ok}/{len(channels)} 通道"
+    return PushResult(f"推播 {ok}/{len(channels)} 通道", sent=ok, channels=len(channels))
 
 
 # --- daily / weekly runners ---------------------------------------------------
@@ -413,11 +469,24 @@ def run_digest_daily(
     reporting: Currency = Currency.TWD,
     sender: notify.Sender = notify.dispatch,
 ) -> str:
-    """Assemble → store → push the daily close digest. Returns a ``job_runs`` summary.
+    """Assemble → store → push the daily close digest. Returns the ``job_runs`` summary."""
+    return _daily(conn, now=now, reporting=reporting, sender=sender).detail
+
+
+def _daily(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    reporting: Currency = Currency.TWD,
+    sender: notify.Sender = notify.dispatch,
+) -> JobOutcome:
+    """The daily digest run and its verdict (DEF-067: ``partial`` on a degraded block or a
+    push that missed a channel — both used to read 成功).
 
     Every block degrades honestly (a failing block → null / [] / 0), so a stored digest is
     always produced. The optional LLM one-liner is added last and never fails generation.
     """
+    blocks = _BlockRun()
     cfg = digest_store.load_config(conn)
     data = build_dashboard(conn, now=now, reporting=reporting)
     held, names = _held_symbols_and_names(data)
@@ -430,19 +499,19 @@ def run_digest_daily(
         dict[str, Decimal | None], str | None,
         dict[str, tuple[str | None, str | None, str | None]],
     ] = ({}, None, {})
-    per_symbol_pct, as_of, mover_meta = _try(
+    per_symbol_pct, as_of, mover_meta = blocks(
         lambda: _per_symbol_day_change(conn, held, now=now), empty_day_change
     )
     empty_pf: tuple[Decimal | None, int] = (None, 0)
-    pf_pct, excluded = _try(
+    pf_pct, excluded = blocks(
         lambda: _weighted_pct(_holding_weights(data.holdings), per_symbol_pct), empty_pf
     )
-    movers: dict[str, list[dict[str, str]]] = _try(
+    movers: dict[str, list[dict[str, str]]] = blocks(
         lambda: _movers(per_symbol_pct, names, meta=mover_meta), {"up": [], "down": []}
     )
-    alerts_today: list[dict[str, Any]] = _try(lambda: _alerts_today(conn, now), [])
-    signals_today: list[dict[str, Any]] = _try(lambda: _signals_today(conn, now), [])
-    data_health: dict[str, Any] = _try(
+    alerts_today: list[dict[str, Any]] = blocks(lambda: _alerts_today(conn, now), [])
+    signals_today: list[dict[str, Any]] = blocks(lambda: _signals_today(conn, now), [])
+    data_health: dict[str, Any] = blocks(
         lambda: _data_health(conn, held, now=now), {"stale": [], "failed_jobs": 0}
     )
     payload: dict[str, Any] = {
@@ -472,9 +541,24 @@ def run_digest_daily(
     )
     push = _push(conn, "daily", payload, now=now, sender=sender)
     dc = payload["day_change"]["portfolio_pct"]
-    return (
-        f"daily digest {payload['digest_date']}: 組合 {dc if dc is not None else '—'}, "
-        f"警示 {len(payload['alerts_today'])}, 訊號 {len(payload['signals_today'])}; {push}"
+    # L17: this line is a HUMAN summary (it lands in ``job_runs.detail`` and in the 排程中心
+    # 執行歷史 column), and it printed the raw ratio — measured
+    # 「組合 -0.06720304659217097625472012746」, the full 28-digit tail of the weighted
+    # division. Route it through the SAME ``_signed_pct`` the push body uses, so one number
+    # has one display form everywhere: 「組合 −6.72%」. The STORED payload keeps full
+    # precision (``_signed_pct`` reads it, never replaces it) — quantizing at display is
+    # the rule (data-and-pricing.md), quantizing at storage is the thing that rule forbids.
+    dc_txt = _signed_pct(str(dc)) if dc is not None else "—"
+    # L5-b (second full re-verification 2026-09-22): the marks joining these zh clauses are
+    # full-width, as in the weekly line below. They were `, ` / `; ` — each followed by a
+    # space, which is why the punctuation guard (that then only saw a mark TOUCHING a CJK
+    # character) passed this line while 排程中心 showed it beside 「14 檔事件已更新，1 檔失敗」.
+    # DEF-073: the head is zh — it read 「daily digest 2026-09-25：…」.
+    return _outcome(
+        f"每日摘要 {payload['digest_date']}：組合 {dc_txt}，"
+        f"警示 {len(payload['alerts_today'])}，訊號 {len(payload['signals_today'])}；"
+        f"{push.text}",
+        push, blocks,
     )
 
 
@@ -482,13 +566,11 @@ def run_digest_daily(
 
 
 def _drift_symbols(alerts: list[Alert]) -> list[str]:
-    """Extract the per-target symbol from ``rule:symbol`` alert ids (skip global ids)."""
-    out: list[str] = []
-    for a in alerts:
-        prefix = f"{a.rule}:"
-        if a.id.startswith(prefix):
-            out.append(a.id[len(prefix):])
-    return out
+    """The symbol subjects of the drift alerts (a portfolio-wide one has none).
+
+    I-16: read off the alert's STRUCTURE (``scope`` + ``subject``, DEF-037), never off the
+    id's ``rule:`` suffix — which is a ticker only by the rule's convention."""
+    return [a.subject for a in alerts if a.scope == "symbol" and a.subject]
 
 
 def _alert_review_week(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, Any]]:
@@ -506,7 +588,7 @@ def _alert_review_week(conn: sqlite3.Connection, *, now: datetime) -> list[dict[
     out: list[dict[str, Any]] = []
     for r in rows:
         rid = str(r["rule_id"])
-        label, sev = _RULE_META.get(rid, (rid, "info"))
+        label, sev = _rule_label_sev(rid)
         out.append({"rule_id": rid, "label": label, "severity": sev, "count": int(r["n"])})
     return out
 
@@ -544,16 +626,21 @@ def _chores(conn: sqlite3.Connection, data: DashboardData, *, now: datetime) -> 
         pr = get_latest_price(conn, h.symbol, now=now)
         if pr is None or (now.date() - pr.as_of).days > _STALE_AGE_DAYS:
             stale.append(h.symbol)
-    failed = conn.execute(
+    failed = conn.execute(  # partial counts too — same ruling as _data_health (M10-02)
         "SELECT COUNT(*) AS n FROM job_runs "
-        "WHERE status = 'error' AND substr(started_at,1,10) >= ?",
+        "WHERE status IN ('error', 'partial') AND substr(started_at,1,10) >= ?",
         ((now.date() - timedelta(days=_WEEK_DAYS)).isoformat(),),
     ).fetchone()["n"]
     return {"stale": stale, "failed_jobs": int(failed)}
 
 
 def _weekly_items(
-    conn: sqlite3.Connection, data: DashboardData, *, now: datetime, reporting: Currency
+    conn: sqlite3.Connection,
+    data: DashboardData,
+    *,
+    now: datetime,
+    reporting: Currency,
+    blocks: _BlockRun | None = None,
 ) -> list[dict[str, Any]]:
     """The computed weekly action items (each block skips itself when it has no data)."""
     # Imported here (not at module top) to keep the import graph shallow + avoid any cycle
@@ -561,8 +648,9 @@ def _weekly_items(
     from portfolio_dash.api.alert_inputs import compute_alerts_full
 
     items: list[dict[str, Any]] = []
+    run = blocks if blocks is not None else _BlockRun()
 
-    drift: list[Alert] = _try(
+    drift: list[Alert] = run(
         lambda: [
             a
             for a in compute_alerts_full(conn, now=now, reporting=reporting)
@@ -578,7 +666,7 @@ def _weekly_items(
             "href": "index.html", "target": ".rb-open-btn",
         })
 
-    review: list[dict[str, Any]] = _try(lambda: _alert_review_week(conn, now=now), [])
+    review: list[dict[str, Any]] = run(lambda: _alert_review_week(conn, now=now), [])
     if review:
         total = sum(int(g["count"]) for g in review)
         top = max(review, key=lambda g: int(g["count"]))
@@ -588,7 +676,7 @@ def _weekly_items(
             "href": "settings.html#alerts", "target": "#alert-rules-wrap",
         })
 
-    sig: list[str] = _try(lambda: _signal_week(conn, now=now), [])
+    sig: list[str] = run(lambda: _signal_week(conn, now=now), [])
     if sig:
         items.append({
             "id": "signals", "icon": "\U0001f4c8", "title": "本週訊號轉折",
@@ -596,7 +684,7 @@ def _weekly_items(
             "href": "instruments.html", "target": 'section[data-screen-label="標的清單"]',
         })
 
-    exdiv: list[str] = _try(lambda: _upcoming_exdiv(data.ex_dividend_calendar, now=now), [])
+    exdiv: list[str] = run(lambda: _upcoming_exdiv(data.ex_dividend_calendar, now=now), [])
     if exdiv:
         items.append({
             "id": "exdiv", "icon": "\U0001f4b0", "title": "即將除息",
@@ -604,7 +692,7 @@ def _weekly_items(
             "href": "trades.html", "target": None,
         })
 
-    chores: dict[str, Any] = _try(
+    chores: dict[str, Any] = run(
         lambda: _chores(conn, data, now=now), {"stale": [], "failed_jobs": 0}
     )
     if chores["stale"] or chores["failed_jobs"]:
@@ -623,14 +711,26 @@ def run_digest_weekly(
     reporting: Currency = Currency.TWD,
     sender: notify.Sender = notify.dispatch,
 ) -> str:
-    """Assemble → store → push the weekly action list. Returns a ``job_runs`` summary.
+    """Assemble → store → push the weekly action list. Returns the ``job_runs`` summary."""
+    return _weekly(conn, now=now, reporting=reporting, sender=sender).detail
+
+
+def _weekly(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    reporting: Currency = Currency.TWD,
+    sender: notify.Sender = notify.dispatch,
+) -> JobOutcome:
+    """The weekly action-list run and its verdict (DEF-067, as :func:`_daily`).
 
     An empty week still generates + stores a digest (``items: []``) so the card shows the
     friendly empty copy rather than a stale prior week.
     """
+    blocks = _BlockRun()
     data = build_dashboard(conn, now=now, reporting=reporting)
-    items: list[dict[str, Any]] = _try(
-        lambda: _weekly_items(conn, data, now=now, reporting=reporting), []
+    items: list[dict[str, Any]] = blocks(
+        lambda: _weekly_items(conn, data, now=now, reporting=reporting, blocks=blocks), []
     )
     payload: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
@@ -647,10 +747,12 @@ def run_digest_weekly(
         generated_at=str(payload["generated_at"]),
     )
     push = _push(conn, "weekly", payload, now=now, sender=sender)
-    return f"weekly digest {payload['digest_date']}: {len(items)} 項; {push}"
+    return _outcome(
+        f"每週行動清單 {payload['digest_date']}：{len(items)} 項；{push.text}", push, blocks
+    )
 
 
-def run_digest(conn: sqlite3.Connection, kind: str, *, now: datetime) -> str:
+def run_digest(conn: sqlite3.Connection, kind: str, *, now: datetime) -> JobOutcome:
     """The registered runner seam: dispatch by *kind* (``daily`` / ``weekly``).
 
     Registered via ``scheduler.jobs.register_digest_runner`` at app startup, so the
@@ -658,8 +760,8 @@ def run_digest(conn: sqlite3.Connection, kind: str, *, now: datetime) -> str:
     the two static JobSpecs — only ever passes a valid kind).
     """
     if kind == "weekly":
-        return run_digest_weekly(conn, now=now)
-    return run_digest_daily(conn, now=now)
+        return _weekly(conn, now=now)
+    return _daily(conn, now=now)
 
 
 __all__ = ["push_text", "run_digest", "run_digest_daily", "run_digest_weekly"]

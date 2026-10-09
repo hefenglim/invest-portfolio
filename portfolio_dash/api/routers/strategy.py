@@ -14,8 +14,10 @@ from portfolio_dash.api import alert_inputs, insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.api.serialize import to_wire
-from portfolio_dash.data_ingestion.holdings import current_shares
-from portfolio_dash.data_ingestion.store import list_accounts, list_instruments
+from portfolio_dash.api.wire import alerts_wire
+from portfolio_dash.data_ingestion.holdings import held_among
+from portfolio_dash.data_ingestion.store import list_instruments
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.wire import decimal_str
@@ -33,12 +35,18 @@ router = APIRouter()
 
 
 def _rules_wire(rules: Any) -> list[dict[str, Any]]:
+    """Every registered rule, in registry order, with its zh ``name`` (DEF-062).
+
+    ``name`` comes from the ONE name table (``shared.alert_rule_names``). The wizard's
+    監聽規則 checkboxes and the settings › 預警規則 editor both render this field — neither
+    keeps a table of its own any more, which is how the wizard came to show 8 raw ids.
+    """
     out: list[dict[str, Any]] = []
     for rid in RULE_IDS:
         rule = getattr(rules, rid)
         _dv, unit, mn, mx = RULE_META[rid]
         out.append({
-            "id": rid, "enabled": rule.enabled,
+            "id": rid, "name": rule_name(rid), "enabled": rule.enabled,
             "value": None if rule.value is None else decimal_str(rule.value),
             "unit": unit, "min": mn, "max": mx,
         })
@@ -59,7 +67,7 @@ def get_alerts(conn: sqlite3.Connection = Depends(get_conn),
     # compute_alerts_full assembles the SAME P3 market-risk inputs as the dashboard embed.
     calib = insight_service.calibration_gap(conn)
     alerts = alert_inputs.compute_alerts_full(conn, now=now, reporting=reporting, calib_gap=calib)
-    return {"as_of": now.isoformat(), "alerts": to_wire([a.model_dump() for a in alerts])}
+    return {"as_of": now.isoformat(), "alerts": alerts_wire(alerts)}
 
 
 class RuleInput(BaseModel):
@@ -80,22 +88,26 @@ def put_rules(body: AlertRulesBody,
     current = get_alert_rules(conn)
     for item in body.rules:
         if item.id not in RULE_META:
+            # The one message that keeps the id: an unregistered id has no name to show, and
+            # the id is the only thing that identifies what the client sent (DEF-062 whitelist).
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error", f"未知規則 {item.id}", field="id"))
         _dv, _unit, mn, mx = RULE_META[item.id]
+        # DEF-062: these three reach the settings page as a toast — name the rule, not its id.
+        label = rule_name(item.id)
         value: Decimal | None = None
         if item.value is not None:
             try:
                 value = Decimal(item.value)
             except InvalidOperation:
                 return JSONResponse(status_code=400, content=error_body(
-                    "validation_error", f"{item.id} 數值無效", field="value"))
+                    "validation_error", f"「{label}」數值無效", field="value"))
             if mn is not None and value < Decimal(mn):
                 return JSONResponse(status_code=400, content=error_body(
-                    "validation_error", f"{item.id} 低於下限", field="value"))
+                    "validation_error", f"「{label}」低於下限", field="value"))
             if mx is not None and value > Decimal(mx):
                 return JSONResponse(status_code=400, content=error_body(
-                    "validation_error", f"{item.id} 高於上限", field="value"))
+                    "validation_error", f"「{label}」高於上限", field="value"))
         rule = getattr(current, item.id)
         rule.enabled = item.enabled
         # toggle-only rules (value meta = None) ignore any submitted value
@@ -107,7 +119,7 @@ def put_rules(body: AlertRulesBody,
     calib = insight_service.calibration_gap(conn)
     alerts = alert_inputs.compute_alerts_full(conn, now=now, reporting=reporting, calib_gap=calib)
     return {"rules": _rules_wire(current),
-            "alerts": to_wire([a.model_dump() for a in alerts])}
+            "alerts": alerts_wire(alerts)}
 
 
 class WhatIfBody(BaseModel):
@@ -133,8 +145,11 @@ def post_whatif(body: WhatIfBody,
                                 side=side, shares=body.shares, price=body.price,
                                 account_id=body.account_id)
     except WhatIfError as exc:
+        # `field` and `issues` come FROM the exception (F-02). Hard-coding "account_id" here
+        # marked an input the user had got right whenever the blocker was an oversell in some
+        # other account, and threw away an identity the raiser had already resolved.
         return JSONResponse(status_code=400, content=error_body(
-            "validation_error", str(exc), field="account_id"))
+            "validation_error", str(exc), field=exc.field, issues=exc.issues))
     return result
 
 
@@ -161,24 +176,22 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
 
-def _held_set(conn: sqlite3.Connection) -> set[str]:
-    """Symbols carrying a live position in any account (cheap net-shares check)."""
-    account_ids = [a.account_id for a in list_accounts(conn)]
-    return {
-        inst.symbol
-        for inst in list_instruments(conn)
-        if any(current_shares(conn, aid, inst.symbol) > _ZERO for aid in account_ids)
-    }
+def _target_weights_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any]:
+    """The GET/PUT response: one row per REGISTERED symbol + held/watch flag + Σ.
 
-
-def _target_weights_view(conn: sqlite3.Connection) -> dict[str, Any]:
-    """The GET/PUT response: one row per REGISTERED symbol + held/watch flag + Σ."""
+    ``held`` is the registry's 「持有」 — ``holdings.held_among`` (``holds_position``: a
+    position today or on any later ledger date), the predicate behind the watchlist badge
+    and its 封存 / 移除 doors (DEF-075, owner ruling ② B). It was ``current_shares > 0``, so a
+    position closed only by a FUTURE-dated sale and a declared short read 「觀察」 here while
+    the watchlist read 「持有」.
+    """
     tw.ensure_target_weights_seeded(conn)
     stored = tw.load_target_weights(conn)
-    held = _held_set(conn)
+    instruments = sorted(list_instruments(conn), key=lambda i: i.symbol)
+    held = held_among(conn, [i.symbol for i in instruments], today=now.date())
     total = _ZERO
     rows: list[dict[str, Any]] = []
-    for inst in sorted(list_instruments(conn), key=lambda i: i.symbol):
+    for inst in instruments:
         w = stored.get(inst.symbol)
         if w is not None:
             total += w
@@ -191,8 +204,9 @@ def _target_weights_view(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 @router.get("/target-weights")
-def get_target_weights(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-    return _target_weights_view(conn)
+def get_target_weights(conn: sqlite3.Connection = Depends(get_conn),
+                       now: datetime = Depends(get_now)) -> dict[str, Any]:
+    return _target_weights_view(conn, now=now)
 
 
 class TargetWeightsBody(BaseModel):
@@ -226,4 +240,4 @@ def put_target_weights(body: TargetWeightsBody,
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "目標權重合計不可超過 100%", field="weights"))
     tw.save_target_weights(conn, weights, now=now)
-    return _target_weights_view(conn)
+    return _target_weights_view(conn, now=now)

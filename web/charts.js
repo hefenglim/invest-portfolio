@@ -52,6 +52,7 @@
   function initTrend() {
     buildPalette();
     const host = document.getElementById('trend-chart');
+    host.classList.remove('is-loading');  // M1-01: the answer is in — before any branch
     const t = D.trend;
     const nwEl = document.getElementById('trend-networth');
     if (!t || !t.available) {
@@ -113,7 +114,9 @@
             html += '<div>總淨值（含現金）&nbsp;&nbsp;<b style="color:' + C.netWorth + '">' +
                     f.money(pt.net_worth, 'TWD') + '</b></div>';
           }
-          html += '<div>浮動損益&nbsp;&nbsp;<b style="color:' + spreadColor + '">' +
+          /* AI-D41: this spread converts every flow at its own trade-date rate, so it is
+             the FX-COMPLETE lifetime result — NOT the 浮動損益 it was labelled. */
+          html += '<div>累計總損益（含匯兌）&nbsp;&nbsp;<b style="color:' + spreadColor + '">' +
                   f.signed(spread, 'TWD') + '</b></div>';
           if (pt.incomplete) {
             html += '<div style="color:' + C.amber + ';font-size:11px">部分標的當日無價格</div>';
@@ -216,6 +219,7 @@
   function initSector() {
     buildPalette();
     const host = document.getElementById('sector-chart');
+    host.classList.remove('is-loading');  // M1-01: the answer is in — before any branch
     const a = D.allocation;
     if (!a) {
       host.replaceChildren(window.emptyState('匯率資料不足，無法合併計價'));
@@ -326,6 +330,10 @@
   async function loadTwr() {
     const host = document.getElementById('twr-chart');
     const seq = ++twrSeq;
+    /* M1-01: say 載入中… BEFORE the await (applyMode has just shown this host as an empty
+       360px box). Only the request that settles clears it — a superseded one returns
+       early below and leaves the class for the newer request to clear. */
+    host.classList.add('is-loading');
     try {
       const payload = await window.pdApi.get(
         '/api/performance/twr', { benchmark: twrBenchmark, window: twrWindow });
@@ -335,6 +343,7 @@
     } catch (e) {
       if (seq !== twrSeq) return;
       twrData = null;
+      host.classList.remove('is-loading');  // M1-01: failed IS settled — never both texts
       if (twrChart) { twrChart.dispose(); twrChart = null; }
       host.replaceChildren(window.emptyState('績效比較載入失敗'));
       host.style.height = 'auto';
@@ -344,9 +353,20 @@
   }
 
   function renderTwr(payload) {
-    buildPalette();
     const host = document.getElementById('twr-chart');
     const cap = document.getElementById('twr-caption');
+    host.classList.remove('is-loading');  // M1-01: every render below is a terminal state
+    /* Reachable with ECharts absent: initAll's degraded branch wires the mode buttons, so a
+       click still runs applyMode -> loadTwr -> here. Name the real problem — letting
+       echarts.init throw into loadTwr's catch would render 「績效比較載入失敗」, which blames
+       the fetch that actually succeeded. */
+    if (!window.echarts) {
+      host.replaceChildren(window.emptyState('圖表元件未載入'));
+      host.style.height = 'auto';
+      if (cap) cap.textContent = '';
+      return;
+    }
+    buildPalette();
     if (twrChart) { twrChart.dispose(); twrChart = null; }
     if (!payload || !payload.available || !payload.points || payload.points.length === 0) {
       host.replaceChildren(window.emptyState((payload && payload.reason) || '尚無績效比較資料'));
@@ -375,12 +395,21 @@
           let html = '<div style="font-size:11px;color:' + C.faint + '">' +
                      params[0].axisValue + '</div>';
           params.forEach((s) => {
-            const v = Number(s.value);            // rebased index string → display only
-            const delta = v - 100;
+            /* The index itself is rendered from the WIRE STRING via fmt, never via a float
+               round trip: fmt rounds on the digit string (_round/_inc/_x100), and toFixed
+               disagreed with it on boundary values — 100.005 gave '100.00' where fmt.num
+               gives '100.01' — so the same number read differently depending on which
+               surface you looked at. fmt also suppresses a rounded-away '-0.00', which the
+               hand-rolled `(delta >= 0 ? '+' : '−')` could not: a delta of -0.001 printed
+               '−0.00%', a minus sign in front of zero.
+               `delta` stays a float: it is a tooltip-only index delta, not money, and the
+               two are formatted by the same helper so the rounding rule is shared. */
+            const delta = Number(s.value) - 100;
             const col = delta > 0 ? C.up : delta < 0 ? C.down : C.text;
-            html += '<div>' + s.marker + s.seriesName + '&nbsp;&nbsp;<b>' + v.toFixed(2) +
+            html += '<div>' + s.marker + s.seriesName + '&nbsp;&nbsp;<b>' +
+                    f.num(s.value, 2) +
                     '</b>&nbsp;<span style="color:' + col + '">(' +
-                    (delta >= 0 ? '+' : '−') + Math.abs(delta).toFixed(2) + '%)</span></div>';
+                    f.signedNum(delta, 2) + '%)</span></div>';
           });
           return html;
         }
@@ -421,7 +450,32 @@
     applyMode(currentMode, false);  // re-apply visibility (and re-render TWR from cache)
   }
 
+  /* The three chart hosts on this page, as one list so the degraded path below cannot drift
+     from what initTrend / initSector / renderTwr actually build into. */
+  const CHART_HOSTS = ['trend-chart', 'twr-chart', 'sector-chart'];
+
   function initAll() {
+    /* ECharts absent — the vendored web/echarts.min.js failed to load (blocked, or a deploy
+       that shipped the HTML without the asset). Degrade LEGIBLY: name the problem in each
+       chart host and STILL wire the controls.
+
+       Before 2026-08-12 this function threw at the first echarts.init(), which aborted it
+       before wireModeOnce() ever ran — so #trend-mode, #twr-windows and #value-ranges
+       rendered normally and carried NO click listeners at all, and every later theme toggle
+       raised an uncaught error. Controls that look alive and silently do nothing are a worse
+       failure than a blank chart, which at least explains itself. The buttons staying alive
+       is the assertion in tests/e2e/test_echarts_selfhosted.py. */
+    if (!window.echarts) {
+      CHART_HOSTS.forEach((id) => {
+        const host = document.getElementById(id);
+        if (!host) return;
+        host.classList.remove('is-loading');  // M1-01: this notice is the terminal state
+        host.replaceChildren(window.emptyState('圖表元件未載入'));
+        host.style.height = 'auto';   // the hosts carry a fixed 360px; shrink to the notice
+      });
+      wireModeOnce();
+      return;
+    }
     buildPalette();
     initTrend();
     initSector();
@@ -437,6 +491,12 @@
     try {
       D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
     } catch (e) {
+      /* M1-01: a failure IS an answer — the chart hosts stop saying 載入中… so app.js's
+         #dash-load-error stands alone; the hosts themselves stay empty, as before. */
+      CHART_HOSTS.forEach((id) => {
+        const host = document.getElementById(id);
+        if (host) host.classList.remove('is-loading');
+      });
       return;  // app.js's boot surfaces the load-failure UI; charts stay empty.
     }
     initAll();
@@ -449,7 +509,11 @@
     if (twrChart) twrChart.resize();
   });
   window.addEventListener('pd-theme-change', () => {
-    if (!D) return;  // nothing built yet
+    /* `!D` = the payload has not resolved, so nothing is built. `!window.echarts` = nothing
+       CAN be built: D is assigned but every chart is an empty state, and dispose()/init()
+       below would throw on each toggle (the pre-2026-08-12 behaviour — the `!D` guard alone
+       let this through because D was already set by the time initAll failed). */
+    if (!D || !window.echarts) return;
     charts.forEach((c) => c.dispose());
     charts.length = 0;
     if (twrChart) { twrChart.dispose(); twrChart = null; }

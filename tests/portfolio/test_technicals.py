@@ -204,7 +204,7 @@ def test_technical_signals_accepts_none_padded_volumes() -> None:
 def test_technical_signals_bundles_and_omits_volume_by_default() -> None:
     closes = _dec_series([100.0 + i for i in range(1, 80)])
     out = T.technical_signals(closes)
-    assert set(out) == {"rsi14", "ma_cross", "week52", "trend"}  # no volume without data
+    assert set(out) == {"rsi14", "ma_cross_short", "week52", "trend"}  # no volume without data
     assert T.technical_signals([]) == {"unavailable": True}
     with_vol = T.technical_signals(closes, _dec_series([100.0] * 79))
     assert "volume" in with_vol  # fed volumes -> section present

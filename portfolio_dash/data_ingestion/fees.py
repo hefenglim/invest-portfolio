@@ -4,11 +4,15 @@ Translates the owner's broker schedules (``docs/reference/broker-fee-schedules-2
 into a single pure function ``compute_fees``. Money is ``Decimal`` end to end; rates come
 from the account's :class:`FeeRuleSet` (config, never hard-coded).
 
-Rounding (per rule set):
-  * TW (``rounding="floor"``): ROUND_DOWN to integer NT$ for fee AND tax; the min-NT$20
-    floor is applied AFTER the floor (財政部 FE-D3; 群益 example 142.5 → 142).
-  * US / MY (``rounding="half_up"``): each fee COMPONENT quantized to the 2-dp minor unit
-    ROUND_HALF_UP, then summed (documented assumption pending statement verification).
+Rounding is a property of the MARKET, hard-coded per branch — it is NOT dispatched on
+``FeeRuleSet.rounding``, which this module never reads (QA-07):
+  * TW: ROUND_DOWN to integer NT$ for fee AND tax; the min-NT$20 floor is applied AFTER
+    the floor (財政部 FE-D3, owner sign-off 2026-07-15; 群益 example 142.5 → 142).
+  * US / MY: each fee COMPONENT quantized to the 2-dp minor unit ROUND_HALF_UP, then
+    summed (documented assumption pending statement verification).
+Each branch therefore stamps its OWN regime into the snapshot (see ``_REGIME_*``): a
+``fee_rule_snapshot`` is PROVENANCE (``data-and-pricing.md``) — "which regime produced
+those two numbers" — so it may only ever name the code path that actually ran.
 
 FE-D2 (MY stamp on US trades): the stamp is computed in MYR from the USD notional and the
 trade-date USD/MYR rate, then converted back to USD for booking. ``compute_fees`` stays
@@ -16,17 +20,32 @@ PURE — the caller seam resolves the rate and passes it as ``stamp_fx``; when i
 the stamp is 0 and the seam surfaces the soft issue 「無 USD/MYR 匯率,印花稅未計」.
 """
 
+from collections.abc import Mapping
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Market
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.money import settled_notional
+
+if TYPE_CHECKING:  # annotation only — fees.py stays a pure calculation module
+    from portfolio_dash.shared.models.assets import Instrument
 
 _ZERO = Decimal("0")
+_ONE = Decimal("1")
 _CENT = Decimal("0.01")
 _INT = Decimal("1")
+
+#: The quantization regime each branch IMPLEMENTS, stamped into ``fee_rule_snapshot``.
+#: Read the value off the CODE PATH, never off ``rules.rounding``: the field is not an input
+#: to any arithmetic here, so copying it could only ever record a regime that did not run —
+#: a provenance lie, written permanently into the ledger (QA-07, 2026-08-29). Each constant
+#: names exactly one quantizer below, so the stamp and the rounding cannot drift.
+_REGIME_FLOOR = "floor"      # _floor_int: ROUND_DOWN to integer NT$ (TW, FE-D3)
+_REGIME_HALF_UP = "half_up"  # _cent: ROUND_HALF_UP to the 2-dp minor unit (US / MY)
 
 
 class FeeComputationError(ValueError):
@@ -45,6 +64,76 @@ class FeeResult(BaseModel):
     snapshot: dict[str, str]
 
 
+def resolve_etf_flag(
+    instrument: "Instrument | None", input_flag: bool
+) -> tuple[bool, bool]:
+    """``(is_etf, unknown)`` for a fee computation — ONE definition, both entry seams.
+
+    The registry is authoritative when a row exists (stress-audit finding 2026-07-15: the
+    input flag was letting an ETF sell be taxed at the 現股 rate). AI-D40 adds the third
+    state on top: a registry row can now say "nobody has answered", and an UNREGISTERED
+    symbol is unanswered by construction — ``TxnInput.is_etf`` defaults to False, and a
+    default is not an answer.
+
+    ``is_etf`` is still a plain bool because ``compute_fees`` must produce a number either
+    way. What changes is that ``unknown`` travels with it, so the caller can DISCLOSE the
+    assumption instead of burying it in ``fee_rule_snapshot`` as though it were a fact.
+    """
+    if instrument is not None:
+        return instrument.is_etf, instrument.etf_flag_unknown
+    return input_flag, True
+
+
+#: The ``etf_flag_unknown`` finding's sentence — ONE spelling for every door that computes a
+#: fee: the manual door, the CSV door and the ledger 更正 door (CR-08). A third copy is how
+#: one door's wording drifts from the others while the condition stays identical.
+ETF_FLAG_UNKNOWN_MESSAGE = ("無法判定是否為 ETF，賣出稅率待確認"
+                            "（暫以現股稅率試算，請至標的管理設定）")
+
+
+def etf_flag_issue_applies(rules: FeeRuleSet, side: Side, unknown: bool) -> bool:
+    """Is the unresolved ETF flag actually CHANGING the tax on this trade?
+
+    Only then is it worth stopping the user. A buy carries no TW transaction tax, and a rule
+    set whose ETF and ordinary rates coincide gives the same answer either way — raising
+    there would be noise, and noise is how a real warning gets clicked through.
+    """
+    return unknown and side is Side.SELL and rules.tax_etf != rules.tax_normal
+
+def supplied_snapshot(
+    fee: Decimal, tax: Decimal, *, carried: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Provenance for a row whose fee AND tax both came from the caller, not this engine.
+
+    ``fee_rule_snapshot`` is PROVENANCE, not the replay's input — 重算 reads ``ev.fees`` /
+    ``ev.tax`` straight off the row (``portfolio/cost_basis.py``), so an empty snapshot costs
+    no arithmetic. What it costs is the answer to *"where did these two numbers come from?"*,
+    and a broker statement supplies **both** (the fee verbatim, the tax a literal ``"0"``), so
+    the auto-fill branch never fires and every broker-imported row carried ``{}`` —
+    indistinguishable from "no rule was applied at all" (review 2026-08-24).
+
+    Nothing is recomputed here on purpose: ``data_ingestion/broker/convert.py`` refuses to
+    recompute because a defensible number that does not match the money that actually left
+    the account is the wrong kind of correct. This only records that refusal.
+
+    Both entry seams (``manual.py``, ``csv_import.py``) call this ONE helper so the two
+    cannot drift, which is the same reason the ETF-flag resolution is stated identically
+    in both.
+
+    ``carried`` (DEF-026, 2026-09-23): the row's OWN snapshot, when the numbers arrive with
+    their provenance attached — a ledger export pasted back into the CSV door. It is
+    returned VERBATIM (``{}`` included), because it already answers *"where did these two
+    numbers come from?"* for exactly these two numbers, and answering "they were typed in"
+    instead is the round-trip loss the defect measured: every re-imported row's
+    ``{"brokerage": "0.001425", …}`` became ``{"engine": "supplied", …}``. The caller passes
+    it only when fee AND tax are both supplied; when the engine computes either, the engine's
+    own snapshot is the provenance and the carried one is discarded (``csv_import``).
+    """
+    if carried is not None:
+        return dict(carried)
+    return {"engine": "supplied", "fee": str(fee), "tax": str(tax)}
+
+
 def _cent(value: Decimal) -> Decimal:
     """Quantize a US/MY component to the 2-dp minor unit, ROUND_HALF_UP.
 
@@ -54,7 +143,7 @@ def _cent(value: Decimal) -> Decimal:
     try:
         return value.quantize(_CENT, rounding=ROUND_HALF_UP)
     except InvalidOperation as exc:
-        raise FeeComputationError("數值過大,無法計算費用/稅") from exc
+        raise FeeComputationError("數值過大，無法計算費用/稅") from exc
 
 
 def _floor_int(value: Decimal) -> Decimal:
@@ -62,7 +151,7 @@ def _floor_int(value: Decimal) -> Decimal:
     try:
         return value.quantize(_INT, rounding=ROUND_DOWN)
     except InvalidOperation as exc:
-        raise FeeComputationError("數值過大,無法計算費用/稅") from exc
+        raise FeeComputationError("數值過大，無法計算費用/稅") from exc
 
 
 def _tw(
@@ -71,7 +160,7 @@ def _tw(
 ) -> FeeResult:
     """TW: floor(notional×brokerage×discount) then max(·, min_fee); sell tax floored."""
     snap["engine"] = "v2"
-    snap["rounding"] = rules.rounding
+    snap["rounding"] = _REGIME_FLOOR  # this branch floors, whatever rules.rounding claims
     snap["brokerage"] = str(rules.brokerage)
     snap["discount"] = str(rules.discount)
     snap["min_fee"] = str(rules.min_fee)
@@ -122,7 +211,7 @@ def _us(
 ) -> FeeResult:
     """US (Schwab + Moomoo): sum per-component (each cent-quantized) + MY stamp as tax."""
     snap["engine"] = "v2"
-    snap["rounding"] = rules.rounding
+    snap["rounding"] = _REGIME_HALF_UP  # every component goes through _cent
     if notional <= _ZERO:
         return FeeResult(fee=_ZERO, tax=_ZERO, snapshot=snap)
 
@@ -171,7 +260,7 @@ def _my(
 ) -> FeeResult:
     """MY (Moomoo MY market): commission + platform + clearing + SST; stamp step as tax."""
     snap["engine"] = "v2"
-    snap["rounding"] = rules.rounding
+    snap["rounding"] = _REGIME_HALF_UP  # every component goes through _cent
     if notional <= _ZERO:
         return FeeResult(fee=_ZERO, tax=_ZERO, snapshot=snap)
 
@@ -230,7 +319,12 @@ def compute_fees(
     Returns:
         FeeResult with fee, tax (both Decimal) and the rate/component snapshot (``engine="v2"``).
     """
-    notional = quantity * price
+    # The fee base is the settled 價金 (owner 2026-09-30): brokers charge on the amount they
+    # settle, and the cash pool books the same figure (shared.money.settled_notional).
+    try:
+        notional = settled_notional(quantity, price, MARKET_QUOTE_CCY[rules.market])
+    except InvalidOperation as exc:  # overflow-sized input: the same M4 degradation as below
+        raise FeeComputationError("數值過大，無法計算費用/稅") from exc
     snap: dict[str, str] = {}
 
     if rules.market is Market.TW:
@@ -242,12 +336,53 @@ def compute_fees(
     return _my(rules, notional, is_etf, snap)
 
 
-def forecast_tw_rebate(fee: Decimal, rebate_rate: Decimal) -> Decimal:
+def rebate_applies(discount: Decimal) -> bool:
+    """Can a trade CHARGED under *discount* earn a charge-first refund at all? (DEF-010)
+
+    ``discount`` and ``rebate_rate`` are two ways to record ONE broker benefit — charge less
+    now, or charge full and refund later (``markets-and-fees.md``). A fee computed with
+    ``discount < 1`` has already had the benefit taken off at settlement; forecasting a
+    ``rebate_rate`` refund on top of it counts the same benefit twice. Measured on demo
+    2026-09-24: ten TW trades snapshotted ``discount 0.23`` + ``rebate_rate 0.77`` and eight
+    of them were forecast a 77 % refund (e.g. fee 199 → expected 153) in /api/rebates.
+    """
+    return discount >= _ONE
+
+
+def booked_discount(snapshot: Mapping[str, str], *, fallback: Decimal) -> Decimal:
+    """The ``discount`` a stored trade was CHARGED under, read off its fee snapshot.
+
+    ``fee_rule_snapshot`` is provenance — which regime produced the fee of record — so it is
+    the authority for "was this fee already discounted?", not today's rule set (a rule edited
+    since would re-label history). A snapshot without a parseable ``discount`` (a supplied
+    fee from a broker statement, an empty legacy ``{}``) says nothing about it, and the
+    account's CURRENT rule set answers instead (*fallback*): never guessed, never ``1`` by
+    decree.
+    """
+    raw = snapshot.get("discount")
+    if raw is None:
+        return fallback
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return fallback
+    return value if value.is_finite() else fallback
+
+
+def forecast_tw_rebate(fee: Decimal, rebate_rate: Decimal, *, discount: Decimal) -> Decimal:
     """FORECAST-ONLY: the expected TW monthly rebate for one trade = floor(fee × rebate_rate).
 
     NEVER money of record and NEVER used by ``compute_fees`` (FE-D1): the 群益 2.3折 model
     charges the full 0.1425% at settlement and refunds 77% next month, confirmed off-ledger.
     Wave B surfaces this as a preview hint and a pending-confirmation inbox item. Floored per
     the 券商 convention (遇小數點無條件捨去): floor(142×0.77)=109, floor(156×0.77)=120.
+
+    ``discount`` is REQUIRED, with no default, on purpose (DEF-010): every forecaster must
+    say which settlement regime the fee was charged under, and a fee already discounted at
+    settlement (``discount < 1``) forecasts ``0`` — see :func:`rebate_applies`. A default of
+    ``1`` is exactly how the three forecasters (inbox, draft hint, rebalance) went on
+    counting the benefit twice; a missing argument is now a mypy error and a ``TypeError``.
     """
+    if not rebate_applies(discount):
+        return _ZERO
     return (fee * rebate_rate).quantize(_INT, rounding=ROUND_DOWN)

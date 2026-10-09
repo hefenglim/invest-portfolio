@@ -65,7 +65,7 @@ def test_recompute_oversell_422(
                        fees=Decimal("0"), tax=Decimal("0"), trade_date=date(2026, 2, 1))
     r = api_client.post("/api/actions/recompute", json={})
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "oversell"
+    assert r.json()["error"]["code"] == "oversold_position"
 
 
 def test_recompute_unregistered_symbol_422(

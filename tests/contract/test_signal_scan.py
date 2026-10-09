@@ -85,7 +85,7 @@ def test_first_scan_seeds_zero_events(golden_db: sqlite3.Connection) -> None:
     # Golden one-price → all-None evaluation → hold columns seeded NULL (silent seed).
     assert all(s.hold == ss.HoldState(None, None) for s in states)
     assert _events(golden_db) == []  # NO event storm on first deploy
-    assert "2 seeded" in detail
+    assert "首次建立狀態 2 檔" in detail
 
 
 def test_rescan_same_day_idempotent(golden_db: sqlite3.Connection) -> None:
@@ -124,7 +124,7 @@ def test_same_day_second_transition_locked_and_counted_once(
     _seed_series(golden_db, "2330", Market.TW, ascending=True)  # live up + positive
     _manufacture(golden_db, "2330", ss.HoldState("down", "positive"))
     detail1 = scan_signals(golden_db, now=GOLDEN_NOW)
-    assert "1 transition event(s)" in detail1          # signal_trend inserted
+    assert "訊號轉折事件 1 筆" in detail1          # signal_trend inserted (DEF-073: zh)
     assert _count(golden_db, ss.EVENT_TREND, "2330") == 1
 
     # Flip live 2330 to a confirmed DOWNtrend + negative momentum (same day). Trend re-fires
@@ -132,7 +132,7 @@ def test_same_day_second_transition_locked_and_counted_once(
     # negative is a NEW (rule, symbol) today → inserts. Detected 2, inserted 1.
     _seed_series(golden_db, "2330", Market.TW, ascending=False)  # overwrite window
     detail2 = scan_signals(golden_db, now=GOLDEN_NOW)
-    assert "1 transition event(s)" in detail2                    # inserted-only, NOT 2
+    assert "訊號轉折事件 1 筆" in detail2                    # inserted-only, NOT 2
     assert _count(golden_db, ss.EVENT_TREND, "2330") == 1        # locked: no duplicate row
     assert _count(golden_db, ss.EVENT_MOMENTUM, "2330") == 1     # the genuinely-new insert
 
@@ -173,7 +173,7 @@ def test_scan_seeds_watchlist_symbol_silently(golden_db: sqlite3.Connection) -> 
     _register_watch(golden_db, "MSFT")
     detail = scan_signals(golden_db, now=GOLDEN_NOW)
     assert {s.symbol for s in ss.all_states(golden_db)} == {"2330", "AAPL", "MSFT"}
-    assert "3 seeded" in detail                 # the watch symbol is scanned + seeded
+    assert "首次建立狀態 3 檔" in detail                 # the watch symbol is scanned + seeded
     assert _events(golden_db) == []             # silent seed, no event storm
 
 

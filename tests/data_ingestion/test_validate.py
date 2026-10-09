@@ -117,3 +117,47 @@ def test_shares_on_counts_strictly_before_date(conn: sqlite3.Connection) -> None
     assert shares_on(conn, "tw_broker", "2330", before=_date(2026, 2, 1)) == Decimal("1500")
     # cutoff 2026-04-01: after the sell
     assert shares_on(conn, "tw_broker", "2330", before=_date(2026, 4, 1)) == Decimal("1300")
+
+
+# --- whole shares only on TW / MY (L12, demo audit 2026-09-16) -------------------------
+
+
+def _register(conn: sqlite3.Connection, symbol: str, market: str, ccy: str) -> None:
+    from portfolio_dash.data_ingestion.store import upsert_instrument
+    from portfolio_dash.shared.enums import Currency, Market
+    from portfolio_dash.shared.models.assets import Instrument
+
+    board = {"TW": "TWSE", "MY": "MAIN", "US": "NASDAQ"}[market]
+    upsert_instrument(conn, Instrument(symbol=symbol, market=Market(market),
+                                       quote_ccy=Currency(ccy), sector="Test", name=symbol,
+                                       board=board))
+
+
+def _kinds_of(conn: sqlite3.Connection, inp: TxnInput) -> set[str]:
+    return {i.kind for i in validate_transaction(conn, inp)}
+
+
+def test_tw_fractional_shares_are_rejected(conn: sqlite3.Connection) -> None:
+    """A TW sell of 0.5 股 previewed cleanly on the demo (min fee 20, tax floored) for a
+    position no broker can hold: 零股 trade in units of ONE share."""
+    _register(conn, "2330", "TW", "TWD")
+    _raw_tx(conn, "tw_broker", "2330", Side.BUY, "10")
+    issues = validate_transaction(conn, _inp("tw_broker", "2330", Side.SELL, "0.5"))
+    hit = next((i for i in issues if i.kind == "shares_not_integer"), None)
+    assert hit is not None and not hit.needs_confirm  # HARD, never ack-able
+    assert "整數" in hit.message and "0.5" in hit.message
+
+
+def test_my_fractional_shares_are_rejected(conn: sqlite3.Connection) -> None:
+    _register(conn, "1155", "MY", "MYR")
+    assert "shares_not_integer" in _kinds_of(conn, _inp("moomoo_my", "1155", Side.BUY, "100.5"))
+
+
+def test_whole_shares_and_us_fractions_pass(conn: sqlite3.Connection) -> None:
+    """Whole shares are fine everywhere; US fractions stay allowed (deferred, not forbidden —
+    DRIP already books them), so the check must not reach a US row."""
+    _register(conn, "2330", "TW", "TWD")
+    _register(conn, "AAPL", "US", "USD")
+    assert "shares_not_integer" not in _kinds_of(conn, _inp("tw_broker", "2330", Side.BUY, "1"))
+    assert "shares_not_integer" not in _kinds_of(conn, _inp("tw_broker", "2330", Side.BUY, "1.0"))
+    assert "shares_not_integer" not in _kinds_of(conn, _inp("schwab", "AAPL", Side.BUY, "0.25"))

@@ -23,13 +23,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.technicals import annualized_volatility, week52_position
 from portfolio_dash.pricing import consensus_source, snapshots_store
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.strategy import target_weights as tw
 from portfolio_dash.strategy.alerts import (
@@ -37,7 +41,6 @@ from portfolio_dash.strategy.alerts import (
     ConsensusDelta,
     SymbolMetric,
     TargetLevels,
-    account_display_names,
     compute_alerts_from,
 )
 from portfolio_dash.strategy.rules_config import get_alert_rules
@@ -118,22 +121,59 @@ def assemble(
 
     Reuses the already-built ``data`` for the held set + current weights (no second dashboard
     build). Held = symbols carrying a live position; every REGISTERED symbol (held + watch)
-    gets 52-week drawdown + consensus; vol is fed only for held symbols (vol_spike is
-    held-only). ``target_cross`` (FU-D28) is fed the latest stored price + the instrument's
-    configured target band, but ONLY for symbols that actually carry a target (no target set →
-    the symbol is omitted, so the rule reads nothing to cross).
+    gets 52-week drawdown + consensus — minus the archived ones and the un-held source
+    tickers of an EXCHANGE (M1-05, see the comment at the filter); vol is fed only for held
+    symbols (vol_spike is held-only). ``target_cross`` (FU-D28) is fed the latest stored
+    price + the instrument's configured target band, but ONLY for symbols that actually carry
+    a target (no target set → the symbol is omitted, so the rule reads nothing to cross).
     """
-    instruments = sorted(list_instruments(conn), key=lambda i: i.symbol)
-    registered = [i.symbol for i in instruments]
     held = {h.symbol for h in data.holdings if h.shares > 0}
     end = now.date()
     start = end - timedelta(days=_HISTORY_DAYS)
+    # §5.1(d) / W6c: ONE ActionIndex for the whole assemble, built before the loop and never
+    # inside it (trap #21) — a per-symbol index would re-read the action ledger once per
+    # registered instrument. Every metric below compares closes ACROSS dates (52-week
+    # high/low, 30d/90d vol), so a split inside the 400-day window puts the pre-split points
+    # in a different denomination: a 7-for-1 makes them read 7x higher and the drawdown rule
+    # fires a 52-week-low breach that never happened. `series_in` short-circuits structurally
+    # on "no SPLIT for this symbol", so an action-free ledger reads byte-identically.
+    actions = load_action_index(conn)
+    # M1-05 (owner ruling 2026-09-06): two kinds of registered symbol are OUT of the universe.
+    # (1) `archived` — 封存 already means "off every fetch scope" to the price refresh and the
+    #     signal scan (`scheduler/jobs.py::build_worklist`); this seam gave the same flag a
+    #     second meaning by feeding every registered row. An archived symbol is never fetched
+    #     again, so its drawdown froze at the last stored close and kept firing for as long as
+    #     the 400-day window still held those closes (~13 months, measured on MRCA).
+    # (2) the SOURCE of an EXCHANGE that holds no position — the old ticker of a rename /
+    #     merger (MRCA→NVSA). Its stored history is a dead series for a name that no longer
+    #     trades; the destination is the live position and is fed on its own row.
+    #     「AND no position」 is load-bearing: a source ticker bought again is held again.
+    # Un-held watch-list symbols are NOT excluded — drawdown ① and consensus ④ fire for them
+    # by design (`strategy/alerts.py`, `web/settings-alerts.js`).
+    exchange_sources = {
+        a.from_symbol for a in actions.all if a.kind is CorporateActionKind.EXCHANGE
+    }
+    tracked = set(tracked_symbols(conn))  # (1): the ONE shared predicate (DEF-064)
+    instruments = sorted(
+        (
+            i for i in list_instruments(conn)
+            if i.symbol in tracked
+            and not (i.symbol in exchange_sources and i.symbol not in held)
+        ),
+        key=lambda i: i.symbol,
+    )
+    registered = [i.symbol for i in instruments]
 
     metrics: dict[str, SymbolMetric] = {}
     levels: dict[str, TargetLevels] = {}
     for inst in instruments:
         sym = inst.symbol
-        closes = [p.value for p in get_price_history(conn, sym, start, end)]
+        closes = [
+            p.value
+            for p in series_in(
+                actions, sym, get_price_history(conn, sym, start, end), valued_on=end
+            )
+        ]
         w52 = week52_position(closes)
         is_held = sym in held
         metrics[sym] = SymbolMetric(
@@ -148,8 +188,18 @@ def assemble(
         # crosses honestly; None only when NO price exists at all → silent).
         if inst.target_low is not None or inst.target_high is not None:
             latest = get_latest_price(conn, sym, now=now)
+            # Re-expressed into the SAME day as the series above (W6c): mixing a corrected
+            # series with a raw latest price is the trap this package exists to avoid — and
+            # a stale pre-split close compared against a post-split band crosses it by the
+            # whole ratio. ⚠ The BAND itself (`target_low`/`target_high`) is owner-entered
+            # and is NOT re-expressed: it is a configured intent, not a stored quote, so
+            # after a split the owner must re-enter it. Same for a stored alert threshold.
             levels[sym] = TargetLevels(
-                price=latest.value if latest is not None else None,
+                price=(
+                    price_in(actions, sym, latest.value,
+                             priced_on=latest.as_of, valued_on=end)
+                    if latest is not None else None
+                ),
                 target_low=inst.target_low,
                 target_high=inst.target_high,
             )
@@ -180,7 +230,6 @@ def compute_alerts_full(
         quota_threshold=get_alert_threshold(conn),
         ai_active=ai_active(conn),
         calib_gap=calib_gap,
-        account_names=account_display_names(conn),
         symbol_metrics=inputs.symbol_metrics,
         target_weights=inputs.target_weights,
         consensus_deltas=inputs.consensus_deltas,

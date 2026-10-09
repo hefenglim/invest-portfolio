@@ -11,6 +11,9 @@ import sqlite3
 from fastapi.testclient import TestClient
 
 from portfolio_dash.api.routers.db_stats import _PORTFOLIO_REGISTRY
+from portfolio_dash.shared.llm_fail_log import (
+    ensure_table as ensure_llm_fail_log_table,
+)
 
 
 def _get(api_client: TestClient) -> dict[str, object]:
@@ -127,6 +130,9 @@ def _build_full_portfolio_schema(conn: sqlite3.Connection) -> None:
     from portfolio_dash.shared.ui_prefs import ensure_ui_prefs_seeded
     from portfolio_dash.shared.whatsnew import ensure_whatsnew_seeded
     from portfolio_dash.strategy.rules_config import ensure_alert_rules_seeded
+    from portfolio_dash.strategy.signal_history import (
+        ensure_table as ensure_signal_history_table,
+    )
     from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_states_table
     from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 
@@ -137,6 +143,7 @@ def _build_full_portfolio_schema(conn: sqlite3.Connection) -> None:
     datasources_store.ensure_seeded(conn)  # data_sources* (+ settings_meta)
     ensure_alert_rules_seeded(conn)  # alert_rules_config
     ensure_signal_states_table(conn)  # signal_states
+    ensure_signal_history_table(conn)  # signal_history (W6)
     ensure_target_weights_seeded(conn)  # target_weights_config
     ensure_composer_seeded(conn)  # strategy_prompts / insight_types / ... / evolution_config
     ensure_insights_tables(conn)  # insights
@@ -155,6 +162,7 @@ def _build_full_portfolio_schema(conn: sqlite3.Connection) -> None:
     ensure_rebate_tables(conn)  # rebate_skips
     ensure_fee_tables(conn)  # fee_rule_overrides
     ensure_snapshots_table(conn)  # portfolio_snapshots
+    ensure_llm_fail_log_table(conn)  # llm_fail_log (AI-D64)
 
 
 def test_every_portfolio_table_is_registered() -> None:

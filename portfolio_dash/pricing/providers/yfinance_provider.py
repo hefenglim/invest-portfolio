@@ -37,6 +37,17 @@ def _volume(value: object) -> Decimal | None:
 
 
 def yf_symbol(ref: InstrumentRef) -> str:
+    # A `^`-prefixed ticker is a Yahoo INDEX, and Yahoo indices carry no exchange suffix in
+    # ANY market — ^GSPC, ^KLSE, ^TWII. Checked FIRST, because the suffix would otherwise
+    # route a non-US index to a ticker that does not exist (^KLSE with Market.MY becomes
+    # ^KLSE.KL), which is the documented reason MY had no benchmark for so long.
+    #
+    # This is not an assumption about ^KLSE: `pricing/index_source.py` has fetched exactly
+    # these three raw tickers for the sentiment variable all along, bypassing this function
+    # entirely. The rule was already true of the codebase; only this function did not know
+    # it, and ^GSPC never exposed the gap because the US suffix is empty anyway.
+    if ref.symbol.startswith("^"):
+        return ref.symbol
     if ref.market is Market.TW and ref.board == "TPEx":
         return f"{ref.symbol}.TWO"
     return f"{ref.symbol}{_SUFFIX[ref.market]}"
@@ -46,8 +57,13 @@ class YFinanceProvider(ProviderBase):
     name = "yfinance"
 
     def supports(self, data_type: DataType, market: Market | None) -> bool:
+        # FUNDAMENTALS declared for all three markets (AI-D13): yfinance needs no key,
+        # and coverage thinness (e.g. sub-RM1 MY counters) degrades per symbol at the
+        # fetch seam rather than here. The fetch/parse itself lives in
+        # pricing/fundamentals_source.py (never Ticker.info — the consensus discipline).
         return data_type in {
             DataType.QUOTE_LATEST, DataType.QUOTE_HISTORY, DataType.FX, DataType.DIVIDEND,
+            DataType.FUNDAMENTALS,
         }
 
     def _parse_history_json(

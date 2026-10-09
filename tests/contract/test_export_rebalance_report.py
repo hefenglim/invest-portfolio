@@ -84,6 +84,9 @@ def test_export_rebalance_report_dual_account(
     )
     assert r.status_code == 200
     doc = r.content.decode("utf-8")
-    assert "Charles Schwab" in doc and "TW Broker" in doc
-    assert "Moomoo MY" in doc  # AAPL's second constituent (merged account name)
+    # I-10: accounts are TOKENS in the served file (pdApi.download resolves them to the
+    # display names before the file is saved); the English accounts.name never appears.
+    assert "{account:schwab}" in doc and "{account:tw_broker}" in doc
+    assert "{account:moomoo_my}" in doc  # AAPL's second constituent (merged account)
+    assert "Charles Schwab" not in doc and "TW Broker" not in doc
     assert "小計" in doc  # per-account subtotal

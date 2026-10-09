@@ -13,34 +13,62 @@ priced into a rule set, so it raises ``WhatIfError`` (the router maps it to a 40
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
-from portfolio_dash.data_ingestion.store import (
-    list_dividends,
-    list_instruments,
-    list_opening,
-    list_transactions,
+from portfolio_dash.data_ingestion.store import load_ledger_bundle
+from portfolio_dash.portfolio.cost_basis import (
+    OversellError,
+    UnbookableLedgerError,
+    build_book,
 )
-from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
 from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
-from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
 from portfolio_dash.shared.fx import convert
-from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import Dividend, OpeningInventory, Transaction
+from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 _ZERO = Decimal("0")
 
 
 class WhatIfError(ValueError):
-    """Raised when the request cannot be simulated (e.g. unheld symbol, no account)."""
+    """Raised when the request cannot be simulated (e.g. unheld symbol, no account).
+
+    Carries the wire detail the router needs (``field``, ``issues``) rather than a bare
+    sentence. The router used to stamp EVERY case with ``field="account_id"`` — right for
+    "cannot infer account", actively misleading for a blocking oversell that lives in some
+    other account entirely and needs no change to the account_id the user sent (F-02).
+    """
+
+    def __init__(self, message: str, *, field: str | None = None,
+                 issues: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+        self.issues = issues
 
 
 def _holding_for(holdings: list[Holding], account_id: str, symbol: str) -> Holding | None:
-    """The (account, symbol) holding with shares > 0, or None if unheld."""
+    """The (account, symbol) holding, SIGNED, or None if nothing is held.
+
+    ``!= _ZERO``, not ``> _ZERO`` (QA-04, 2026-08-29). An OPEN DECLARED SHORT is reported by
+    ``build_book`` as a real position with a NEGATIVE share count and the received proceeds as
+    its negative basis — it is not "unheld". The old filter dropped it, so the BUY arm read the
+    position as absent and projected a FRESH LONG at this trade's own price on the very
+    position the drawer renders two rows above as ``shares: "-10", short_open: true``: measured
+    ``new_shares "6"`` / ``new_original_avg "150"`` where the ledger books ``-4`` at ``199.995``
+    plus a ``+299.970`` short_cover. ``/api/input/manual/preview`` already answered that same
+    trade correctly, so one app gave two answers for one trade.
+
+    ``build_book`` never emits ``shares == 0`` (it drops flat positions), so the comparison is
+    "is there a position at all". A NEGATIVE count here is always a declared short: an
+    undeclared oversell raises ``OversellError`` out of the strict replay above, and the caller
+    degrades to a 400 rather than quoting off a book whose basis was discarded.
+    """
     for h in holdings:
-        if h.account_id == account_id and h.symbol == symbol and h.shares > _ZERO:
+        if h.account_id == account_id and h.symbol == symbol and h.shares != _ZERO:
             return h
     return None
 
@@ -74,15 +102,22 @@ def _fee_rule_set_name(
         return None
 
 
+def _pct(value: str) -> str:
+    """A rate as a trimmed percentage, e.g. ``"0.001425"`` -> ``"0.1425"``.
+
+    Module-level so the 費稅規則 summary and the 當沖 disclosure below it read the SAME
+    grammar. They did not: the summary said 「證交稅 0.3%」 while the sentence after it said
+    「賣出稅率為 0.0015」 — one rate, two notations, one line apart (G-02, 2026-09-02).
+    """
+    return f"{(Decimal(value) * 100).normalize():f}"
+
+
 def _fee_rule_desc(snapshot: dict[str, str], side: Side) -> str:
     """A short human-readable fee summary, best-effort from the fee-engine v2 snapshot.
 
     e.g. TW buy -> "0.1425%・最低 20"; TW sell adds "・證交稅 0.3%"; US/MY compose from the
     commission / platform / SEC-TAF / stamp components recorded in the snapshot.
     """
-    def _pct(value: str) -> str:  # rate -> trimmed percentage, e.g. "0.001425" -> "0.1425"
-        return f"{(Decimal(value) * 100).normalize():f}"
-
     parts: list[str] = []
     brokerage = snapshot.get("brokerage")  # TW commission rate
     if brokerage is not None and Decimal(brokerage) > _ZERO:
@@ -123,43 +158,67 @@ def compute_whatif(
     Raises:
         WhatIfError: symbol is unheld and no *account_id* was given (cannot infer account).
     """
-    from portfolio_dash.data_ingestion.fees import compute_fees  # local: avoid cycle risk
+    from portfolio_dash.data_ingestion.fees import (  # local: avoid cycle risk
+        compute_fees,
+        etf_flag_issue_applies,
+        resolve_etf_flag,
+    )
     from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 
-    # 1. Ledgers (Stored* rows -> ledger models) — same mapping as build_dashboard step 1.
-    txs = [
-        Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
-                    quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                    trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in list_transactions(conn)
-    ]
-    divs = [
-        Dividend(account_id=s.account_id, symbol=s.symbol, date=s.date,
-                 type=DividendType(s.type), gross=s.gross, withholding=s.withholding,
-                 net=s.net, reinvest_shares=s.reinvest_shares,
-                 reinvest_price=s.reinvest_price)
-        for s in list_dividends(conn)
-    ]
-    opening = [
-        OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
-                         original_cost_total=s.original_cost_total,
-                         build_date=s.build_date)
-        for s in list_opening(conn)
-    ]
-    instruments = {i.symbol: i for i in list_instruments(conn)}
+    # 1. Ledgers — the same bundle build_dashboard step 1 loads, cut the same way: every row
+    # counts from its own date (DEF-016 / DEF-056), so the 試算's 「原」 position is the
+    # drawer's own row and a future-dated buy is not part of it yet.
+    bundle = load_ledger_bundle(conn).valued_as_of(now.date())
+    instruments = bundle.instruments
     try:
-        book = build_book(txs, divs, opening, instruments)
-    except UnbookableLedgerError as exc:
+        book = build_book(bundle)
+    # ``InvalidOperation`` used to be the third member of this tuple, for the never-500 rule:
+    # a decimal fault on ledger data is a user-fixable data problem like the other two, but it
+    # is an ``ArithmeticError`` — NOT a ``ValueError`` — so it slipped past every degradation
+    # site that catches ``(ValueError, KeyError)``. It was also ONE LEAF of that class:
+    # ``decimal.Overflow`` and ``decimal.DivisionByZero`` are its siblings, so a
+    # ``quantity='1E+999999'`` row still 500'd this door (measured, 2026-08-29). ``build_book``
+    # now re-types the whole class into ``UnbookableLedgerError`` at the ONE place it is
+    # raised, so the leaf is gone from here rather than widened: the arm below already
+    # produces the envelope, and four call sites each remembering the same widening is how
+    # three of them came to be missing it.
+    except (UnbookableLedgerError, OversellError) as exc:
         # An un-bookable ledger is a user-fixable data problem, not a server fault.
+        #
+        # ⚠ `OversellError` is a SEPARATE hierarchy (`Exception`, not `ValueError`), so the
+        # original one-class catch let it escape as a 500 — and the drawer posts 試算 on
+        # open, so ONE oversold position anywhere in the ledger 500'd EVERY symbol's drawer,
+        # including symbols in other accounts and other markets (found by W5, 2026-08-11,
+        # and reproducible with no corporate action present — this is older than this
+        # feature). `build_book` here is deliberately strict (`allow_oversell` defaults
+        # False) because a 試算 must not quote a price off a book whose basis was discarded;
+        # the fix is to degrade with the reason, not to relax the strictness.
+        if isinstance(exc, OversellError):
+            # The other half of this seam's OWN recorded fix. The comment above says the
+            # 2026-08-11 repair was "to degrade with the reason"; only the 500-to-400 half
+            # shipped, and the reason — already computed, right here — was dropped on the
+            # floor by the router and then again by the drawer. The KPI band's XIRR, reading
+            # the same book, has been naming it out loud the whole time.
+            raise WhatIfError(
+                oversold_position_message(exc, "無法試算"),
+                issues=oversold_position_issues(exc, str(exc)),
+            ) from exc
         raise WhatIfError(str(exc)) from exc
 
     # 2. Resolve account (explicit wins; else most-shares; else cannot infer -> 400).
     resolved = account_id or _most_shares_account(book.holdings, symbol)
     if resolved is None:
         raise WhatIfError(
-            f"無法推斷帳戶：{symbol} 未持有且未指定 account_id")
+            f"無法推斷帳戶：{symbol} 未持有且未指定 account_id", field="account_id")
     inst = instruments.get(symbol)
+    # Whole shares only on TW / MY (L12, demo audit 2026-09-16) — the same rule the write
+    # door enforces (`validate.py::shares_not_integer`), so the drawer's 試算 can never
+    # price a 0.5-股 TW sell the ledger would refuse. US fractions stay allowed (deferred,
+    # not forbidden; DRIP books them).
+    if inst is not None and inst.market.value in ("TW", "MY") \
+            and shares != shares.to_integral_value():
+        raise WhatIfError(
+            f"台股／馬股股數必須是整數（零股以 1 股為單位），目前是 {shares}", field="shares")
     # Market-aware fee rule (Batch B): pass the resolved instrument's market so a dual-market
     # account picks the market-appropriate rule set. An unregistered symbol (inst None) has no
     # market, so the helper keeps reading the account scalar exactly as before.
@@ -173,9 +232,10 @@ def compute_whatif(
     held_shares = held.shares if held is not None else _ZERO
     held_orig_total = held.original_cost_total if held is not None else _ZERO
     held_adj_total = held.adjusted_cost_total if held is not None else _ZERO
-    held_adj_avg = (held_adj_total / held_shares) if held_shares > _ZERO else _ZERO
 
-    is_etf = inst.is_etf if inst is not None else False
+    # AI-D40: the same resolver both write doors use, so the drawer cannot quote a rate the
+    # ledger would flag. ``inst`` is the registry row; an unregistered symbol is unanswered.
+    is_etf, etf_unknown = resolve_etf_flag(inst, False)
 
     # 3. Fee/tax via the REAL engine — never re-implement the math. FE-D2 estimate path:
     # resolve the current USD/MYR rate for a Moomoo US MY stamp (silent omit if unavailable).
@@ -183,7 +243,10 @@ def compute_whatif(
     fr = compute_fees(rules, side, shares, price, is_etf=is_etf, stamp_fx=stamp_fx)
     fee = fr.fee
     tax = fr.tax
-    amount = shares * price
+    # The settled 價金, as the replay books it (owner 2026-09-30) — a preview mirrors the
+    # replay. An unregistered symbol settles in its fee rule's market currency.
+    ccy = inst.quote_ccy if inst is not None else MARKET_QUOTE_CCY[rules.market]
+    amount = settled_notional(shares, price, ccy)
     fee_rule_desc = _fee_rule_desc(fr.snapshot, side)
 
     out: dict[str, str | bool | None] = {
@@ -197,7 +260,12 @@ def compute_whatif(
     # OLD-vs-NEW pre-trade triple (R7 A4, C5): the held position as it stands, so the drawer
     # renders 持股/原始均價/調整均價 old→new. Null when nothing is held (held_shares == 0);
     # averages computed from totals on read (domain-ledger.md), never a stored rounded average.
-    if held_shares > _ZERO:
+    #
+    # `!= _ZERO` (QA-04): an open short is SIGNED, so it reports `-10` and an average of
+    # `-1999.950 / -10 = 199.995` — the average SALE price, which is what a negative basis over
+    # a negative share count means. Printing 「—」 for it contradicted the position row the same
+    # drawer had already rendered.
+    if held_shares != _ZERO:
         out["old_shares"] = str(held_shares)
         out["old_original_avg"] = str(held_orig_total / held_shares)
         out["old_adjusted_avg"] = str(held_adj_total / held_shares)
@@ -206,30 +274,122 @@ def compute_whatif(
         out["old_original_avg"] = None
         out["old_adjusted_avg"] = None
 
+    # Declared once for BOTH arms: the BUY arm always has an average to give, the SELL arm
+    # may not (a full exit leaves no position; an oversell forks into two different bases and
+    # this surface has no declaration to read). One name, one meaning across the branch.
+    new_original_avg: Decimal | None
+    new_adjusted_avg: Decimal | None
     if side is Side.BUY:
         total_cost = amount + fee + tax
         new_shares = held_shares + shares
-        new_original_avg = (held_orig_total + total_cost) / new_shares
-        new_adjusted_avg = (held_adj_total + total_cost) / new_shares
-        out.update(
-            total_cost=str(total_cost),
-            new_shares=str(new_shares),
-            new_original_avg=str(new_original_avg),
-            new_adjusted_avg=str(new_adjusted_avg),
-        )
+        if held_shares < _ZERO:
+            # A buy against an OPEN SHORT covers it first (cost_basis.py, owner rule
+            # 2026-07-31); it does not average into a long lot. Same operands, same order and
+            # the same names as `api/routers/input_center.py::_position_preview`'s buy arm, so
+            # the drawer and the trade form cannot give two answers for one trade (QA-04).
+            short_shares = -held_shares
+            short_avg = held_orig_total / held_shares    # neg/neg — the average sale price
+            cover = min(shares, short_shares)
+            per_share = total_cost / shares
+            to_long = shares - cover
+            realized_cover = (short_avg - per_share) * cover
+            if to_long > _ZERO:
+                # Short fully covered; the leftover starts its long life at THIS buy's cost.
+                new_original = new_adjusted = per_share * to_long
+            else:
+                # Still short: the remaining proceeds, reduced pro rata by what was covered.
+                new_original = held_orig_total + short_avg * cover
+                new_adjusted = held_adj_total + short_avg * cover
+            # Totals moved, THEN divided on read (domain-ledger.md). An exact cover leaves NO
+            # position — the replay drops `shares == 0` — so it has no average at all, the same
+            # null the SELL arm's full exit already returns.
+            new_original_avg = None if new_shares == _ZERO else new_original / new_shares
+            new_adjusted_avg = None if new_shares == _ZERO else new_adjusted / new_shares
+            out.update(
+                total_cost=str(total_cost),
+                new_shares=str(new_shares),
+                new_original_avg=(None if new_original_avg is None
+                                  else str(new_original_avg)),
+                new_adjusted_avg=(None if new_adjusted_avg is None
+                                  else str(new_adjusted_avg)),
+                covered_shares=str(cover),
+                realized=str(realized_cover),
+                realized_note="回補空單：以本次每股成本結算，剩餘股數以本次成本為起點",
+            )
+        else:
+            new_original_avg = (held_orig_total + total_cost) / new_shares
+            new_adjusted_avg = (held_adj_total + total_cost) / new_shares
+            # The three cover fields are emitted as NULLs rather than omitted: the SELL arm
+            # always sends `realized` / `realized_note`, and one BUY reply shaped differently
+            # from another is how a renderer learns to test for a missing key instead of a
+            # stated absence.
+            out.update(
+                total_cost=str(total_cost),
+                new_shares=str(new_shares),
+                new_original_avg=str(new_original_avg),
+                new_adjusted_avg=str(new_adjusted_avg),
+                covered_shares=None,
+                realized=None,
+                realized_note=None,
+            )
         result_shares = new_shares
     else:  # SELL
         oversell = shares > held_shares
         proceeds_net = amount - fee - tax
-        adjusted_cost_removed = held_adj_avg * shares
-        realized = proceeds_net - adjusted_cost_removed
+        # SIGNED, and that is the point (QA-04): selling into an OPEN SHORT of 10 leaves −15,
+        # not −5. `held_shares` used to be 0 for a short because `_holding_for` dropped it, so
+        # the drawer printed the trade quantity as if the position started from flat. The share
+        # count is the ONE figure both readings of an over-sell agree on — a declared short
+        # extends the short lot to −15, an undeclared oversell nets `pos.shares` to −5 against
+        # an untouched 10-share short lot, which `build_book` reports as −15 too — so it is
+        # stated even where the basis and the realized amount are withheld below.
         remaining_shares = held_shares - shares
+        realized_note: str | None = None
+        if oversell:
+            # The drawer has no 放空 declaration to read, and the two possible readings book
+            # DIFFERENT realized amounts: a declared short realizes only the long portion and
+            # opens a short lot for the rest, while an undeclared oversell discards the cost
+            # basis entirely and books NOTHING (待釐清). Guessing either one prints a number
+            # the ledger will not produce — this drawer showed the full proceeds as profit,
+            # because held_adj_avg is 0 whenever held_shares <= 0 (review 2026-08-24, where
+            # the same trade got +3,000 here and +500 on the manual form: one app, two
+            # answers). So: state the fork, give no figure.
+            adjusted_cost_removed = realized = None
+            # The same fork, applied to the averages (sweep F-01, 2026-08-27): a declared
+            # short would leave a SHORT lot averaged at the sale price, an undeclared oversell
+            # DISCARDS the basis. Two branches, two different averages, and this surface has
+            # no declaration to read — so it states the fork and gives no figure here either,
+            # exactly as it does for the realized amount.
+            new_original_avg = new_adjusted_avg = None
+            realized_note = (
+                "賣出股數超過持股：若為宣告放空，僅持有的部分結算已實現，其餘開立空單不產生"
+                "已實現；若為賣超，成本基礎無法認定，帳本不會產生已實現損益（待釐清）。"
+                "請用交易登錄頁勾選放空後檢視實際結果。")
+        else:
+            # Totals × frac, in build_book's own operand order — NOT avg × shares, which
+            # re-divides and can differ from the booked row in the last digit.
+            adjusted_cost_removed = held_adj_total * (shares / held_shares)
+            realized = proceeds_net - adjusted_cost_removed
+            # Totals moved, THEN divided on read (domain-ledger.md) — same operands and order
+            # as build_book, so a partial exit's projected average is the pre-trade one to the
+            # last digit rather than a second re-division of it. A FULL exit leaves no
+            # position (the replay drops `shares == 0`), so it has no average at all.
+            new_original_total = held_orig_total - held_orig_total * (shares / held_shares)
+            new_adjusted_total = held_adj_total - adjusted_cost_removed
+            new_original_avg = (None if remaining_shares == _ZERO
+                                else new_original_total / remaining_shares)
+            new_adjusted_avg = (None if remaining_shares == _ZERO
+                                else new_adjusted_total / remaining_shares)
         out.update(
             proceeds_net=str(proceeds_net),
-            adjusted_cost_removed=str(adjusted_cost_removed),
-            realized=str(realized),
+            adjusted_cost_removed=(None if adjusted_cost_removed is None
+                                   else str(adjusted_cost_removed)),
+            realized=None if realized is None else str(realized),
+            realized_note=realized_note,
             remaining_shares=str(remaining_shares),
             oversell=oversell,
+            new_original_avg=(None if new_original_avg is None else str(new_original_avg)),
+            new_adjusted_avg=(None if new_adjusted_avg is None else str(new_adjusted_avg)),
         )
         result_shares = remaining_shares
 
@@ -238,6 +398,29 @@ def compute_whatif(
     new_weight, old_weight, current_price = _new_weight(
         conn, now=now, reporting=reporting, symbol=symbol, inst=inst,
         held=held, result_shares=result_shares)
+    if etf_flag_issue_applies(rules, side, etf_unknown):
+        out["etf_flag_note"] = ("無法判定是否為 ETF，此試算暫以現股稅率計算，"
+                                "實際稅率待你在標的管理確認")
+    else:
+        out["etf_flag_note"] = None
+    # QA-19 (owner ruling 2026-09-01). The drawer has no 當沖 checkbox to read — `compute_fees`
+    # is called without `daytrade`, so this estimate is always the NON-daytrade rate, while the
+    # manual form honours its checkbox and books the daytrade rate. One trade, two screens, two
+    # answers. The ruling settled the PRECEDENCE (daytrade wins over ETF, which is what
+    # `fees._tw` already does); it did not give this surface an input, and
+    # `domain-ledger.md` is explicit that a surface which cannot know which branch applies must
+    # SAY so rather than pick one silently. So: disclose, exactly as the ETF flag above does,
+    # and only when it would actually change the number — a buy carries no TW tax, and a rule
+    # set whose daytrade and applied rates coincide would make this pure noise.
+    applied_rate = fr.snapshot.get("tax_rate")
+    if (side is Side.SELL and applied_rate is not None
+            and str(rules.tax_daytrade) != applied_rate):
+        # Full-width punctuation and a PERCENTAGE, both borrowed from the 費稅規則 summary this
+        # sentence is appended to (`_pct`) — the owner reads one line, not two dialects.
+        out["daytrade_note"] = ("此試算以非當沖稅率計算；若為當沖，賣出稅率為 "
+                                f"{_pct(str(rules.tax_daytrade))}%（當沖優先於 ETF 稅率）")
+    else:
+        out["daytrade_note"] = None
     out["new_weight"] = new_weight
     out["old_weight"] = old_weight
     if side is Side.SELL:
@@ -272,6 +455,15 @@ def _new_weight(
 
     Honest degradation: any missing current price or FX rate -> None for the affected field(s),
     never fabricated.
+
+    ⚠ The dashboard scan below keeps its ``shares > 0`` filter, so a position whose ONLY
+    holding of *symbol* is an open SHORT yields no ``current_price`` and every field here
+    degrades to None (QA-04 fix, deliberate scope). ``domain-ledger.md`` records that
+    allocation weights over a net-short portfolio "can exceed 100% or sign-flip" — an honest
+    reading of a degenerate input, but one this card has no room to explain, and 「—」 says
+    less than a signed percentage that needs a paragraph. The MONEY fields (shares, both
+    averages, realized, covered) are computed for the short in every branch above; only the
+    weight/剩餘市值 pair abstains, and it abstained before this fix too.
     """
     if inst is None:
         return None, None, None

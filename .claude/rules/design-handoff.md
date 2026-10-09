@@ -40,7 +40,15 @@ integrating any `web_ui/` template that originates from a Claude Design export.
 ## Guardrail — do not let the stack drift
 
 - Design output being plain HTML/JS is **not** a license to introduce **React / Next /
-  any SPA framework** or a build step. Keep the locked **Jinja2 + HTMX + Alpine + ECharts
-  (CDN)** stack (`stack.md`).
+  any SPA framework** or a build step. Keep the locked stack (`stack.md`): a **FastAPI JSON
+  API + static vanilla JS + ECharts**, with **no framework, no bundler, no build step**.
+  (This line named "Jinja2 + HTMX + Alpine + ECharts (CDN)" until 2026-08-12 — stale twice
+  over: decision (B) of 2026-06-13 superseded Jinja2/HTMX/Alpine, and ECharts is now
+  **self-hosted** at `web/echarts.min.js`, not loaded from a CDN.)
+- **Never add a remote asset.** A Design export arrives full of CDN `<script>` / `<link>` tags;
+  every functional one must be vendored into `web/` before the export is integrated.
+  `tests/contract/test_vendored_assets.py` fails the build on a remote `<script src>` in any
+  page and on any JS seam that injects one. The **webfont** is the single deliberate exception
+  (presentational, full fallback chains). See `docs/reference/vendored-assets.md`.
 - Treat the Design export as a **starting template, not final code** (it is a research
   preview with known quirks). Refactor it to fit the stack, rules, and real data.

@@ -4,12 +4,21 @@ import base64
 import json
 import logging
 import sqlite3
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any, NamedTuple
 
 import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litellm
+from litellm import exceptions as litellm_errors
 from pydantic import BaseModel, ValidationError
 
+from portfolio_dash.shared import llm_fail_log as fail_log
 from portfolio_dash.shared.clock import app_now
+from portfolio_dash.shared.image_types import PNG, sniff_image_mime
 from portfolio_dash.shared.llm_config import (
     AINotActivated,
     LLMBudgetExceeded,
@@ -23,6 +32,8 @@ from portfolio_dash.shared.llm_config import (
     select_models,
     select_role_models,
 )
+from portfolio_dash.shared.llm_schema import portable_schema
+from portfolio_dash.shared.money import to_db
 
 logger = logging.getLogger(__name__)
 
@@ -73,18 +84,26 @@ def _select_for(
 
 __all__ = [
     "AINotActivated",
+    "CandidateFailure",
     "LLMBudgetExceeded",
     "LLMError",
     "LLMRole",
     "LLMUnavailable",
+    "MeteredUsage",
     "ModelPricing",
     "StructuredCompletion",
     "TextCompletion",
+    "UsageTally",
     "complete_structured",
     "complete_structured_meta",
     "complete_text",
     "cost_of",
+    "estimate_tokens",
+    "is_transient",
     "log_usage",
+    "metered_usage",
+    "provider_failure_zh",
+    "usage_tally",
 ]
 
 
@@ -123,6 +142,100 @@ def cached_tokens_of(usage: object) -> int:
         return 0
 
 
+class MeteredUsage(NamedTuple):
+    """The token counts a call is billed on, and whether the provider reported them."""
+
+    tokens_in: int
+    tokens_out: int
+    cache_tokens: int
+    estimated: bool
+
+
+def _reported_tokens(usage: object, name: str) -> int:
+    try:
+        return int(getattr(usage, name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def estimate_tokens(text: str) -> int:
+    """A LOCAL token count of *text* — LiteLLM's default tokenizer, which ships with it.
+
+    Deliberately not the model's own tokenizer: for some model families LiteLLM fetches one
+    from the network at call time, and an estimate must never make a request of its own.
+    Anything unexpected falls back to one token per character (an upper bound for the CJK
+    text these prompts are mostly made of); an estimate must never break the call it is for.
+    """
+    if not text:
+        return 0
+    try:
+        return int(litellm.token_counter(text=text))
+    except Exception:  # noqa: BLE001 — see the docstring
+        return len(text)
+
+
+def metered_usage(prompt_text: str, content: str, usage: object) -> MeteredUsage:
+    """What a reply cost in tokens — the provider's numbers, or an estimate when it sent none.
+
+    Owner ruling 2026-09-30 (the verifier's R10 observation ④): gemini-2.5-flash-lite via
+    OpenRouter returns a reply cut off mid-string (as short as 12 characters) with NO usage
+    block; LiteLLM fills in zeros and every one of those calls was booked 0 tokens / $0 —
+    20 of 1,113 demo rows, 18 of them a failed parse — so the quota, the per-agent totals
+    and the run costs counted a paid call as free. A call always has prompt tokens, so both
+    counts at zero means "not reported", never "free": the prompt and the reply are counted
+    locally (:func:`estimate_tokens`) and the row is marked ``usage_estimated``.
+    """
+    tokens_in = _reported_tokens(usage, "prompt_tokens")
+    tokens_out = _reported_tokens(usage, "completion_tokens")
+    if tokens_in > 0 or tokens_out > 0:
+        return MeteredUsage(tokens_in, tokens_out, cached_tokens_of(usage), estimated=False)
+    return MeteredUsage(
+        estimate_tokens(prompt_text), estimate_tokens(content), 0, estimated=True
+    )
+
+
+@dataclass
+class UsageTally:
+    """Every ``llm_usage`` row written while this tally was the active one.
+
+    Owner ruling 2026-09-30 (the verifier's R10 observation ③): a run's recorded cost must be
+    what the run spent. ``evaluate_insights`` #212 spent $0.0021532 and its ``job_runs`` row
+    said nothing — static jobs' spend was only ever re-derived at read time, by an agent +
+    time-window guess, for one popover — and an insight run added up the cards it PRODUCED,
+    so a retry after a broken reply, or a primary model that failed before the fallback
+    answered, was paid for and left out. A tally is opened around a run's work
+    (:func:`usage_tally`) and :func:`log_usage` — the one writer of ``llm_usage`` — adds
+    every row to it, so the run's total is by construction the sum of its usage rows.
+    """
+
+    calls: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost: Decimal = field(default_factory=lambda: Decimal("0"))
+    estimated: int = 0  # calls among ``calls`` whose usage the provider did not report
+
+
+_ACTIVE_TALLY: ContextVar[UsageTally | None] = ContextVar("llm_usage_tally", default=None)
+
+
+@contextmanager
+def usage_tally() -> Iterator[UsageTally]:
+    """Count this block's LLM usage. The innermost open tally is the one that counts.
+
+    Innermost only, on purpose: an insight run started from inside another job (``alert_scan``
+    dispatching its on_alert task) writes its own ``job_runs`` row with its own total, and
+    counting it again on the job that started it would book one spend on two rows. A context
+    variable, not a global: the scheduler, a manual door's worker thread and a request can
+    each be inside a run at once, and a new thread starts with no tally at all.
+    """
+    tally = UsageTally()
+    token = _ACTIVE_TALLY.set(tally)
+    try:
+        yield tally
+    finally:
+        _ACTIVE_TALLY.reset(token)
+
+
 def log_usage(
     conn: sqlite3.Connection,
     *,
@@ -132,15 +245,33 @@ def log_usage(
     output_tokens: int,
     cost: Decimal,
     cache_tokens: int = 0,
-) -> None:
-    """Append one row to the ``llm_usage`` table and commit."""
-    conn.execute(
+    estimated: bool = False,
+) -> int:
+    """Append one row to the ``llm_usage`` table, commit, and return its row id.
+
+    The id is returned so a failure capture (:mod:`shared.llm_fail_log`) can point at the
+    call it was billed for: a failed structured call is logged HERE before it is parsed,
+    so every captured failure has a usage row and the two reconcile. Callers that do not
+    need the link ignore the value. ``estimated`` marks counts the provider did not report
+    (:func:`metered_usage`); the row is also added to the active :class:`UsageTally`.
+    """
+    cur = conn.execute(
         "INSERT INTO llm_usage (ts, model, agent, input_tokens, output_tokens, cost, "
-        "cache_tokens) VALUES (?,?,?,?,?,?,?)",
-        (app_now().isoformat(), model, agent, input_tokens, output_tokens, str(cost),
-         cache_tokens),
+        "cache_tokens, usage_estimated) VALUES (?,?,?,?,?,?,?,?)",
+        # to_db, never str(): a cost under $0.000001 (a 1-token estimate) is ``5E-7`` in
+        # str()'s form, and the usage CSV passed the stored text through (owner 2026-09-30).
+        (app_now().isoformat(), model, agent, input_tokens, output_tokens, to_db(cost),
+         cache_tokens, 1 if estimated else 0),
     )
     conn.commit()
+    usage_id = int(cur.lastrowid or 0)
+    tally = _ACTIVE_TALLY.get()
+    if tally is not None:
+        tally.calls += 1
+        tally.tokens_in += input_tokens
+        tally.tokens_out += output_tokens
+        tally.cost += cost
+        tally.estimated += 1 if estimated else 0
     # Structured log of the LLM call (spec 19.4): one point covers both call paths
     # (complete_structured + complete_text) — same values written to the DB row, cost as
     # its canonical string. Logging only; no LLM behaviour or numbers change.
@@ -152,21 +283,27 @@ def log_usage(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost": str(cost),
+            "usage_estimated": estimated,
         },
     )
+    return usage_id
 
 
 def _response_format_for(schema: type[BaseModel]) -> dict[str, object]:
     """Build an OpenAI-style ``json_schema`` response_format from a Pydantic model.
 
     Used to FORCE structured output on providers that support it (spec 04.10). The schema
-    name is the model's class name; the JSON schema is its ``model_json_schema()``.
+    name is the model's class name; the JSON schema is the PORTABLE subset of its
+    ``model_json_schema()`` (:func:`shared.llm_schema.portable_schema`, DEF-083). It was the
+    raw pydantic schema until 2026-09-29, and the raw schema carries a lookahead ``pattern``
+    on every Decimal and ``oneOf`` on the AI door's union — Anthropic and Bedrock answered 400
+    to both, so every call that fell to the haiku fallback was refused unread.
     """
     return {
         "type": "json_schema",
         "json_schema": {
             "name": schema.__name__,
-            "schema": schema.model_json_schema(),
+            "schema": portable_schema(schema),
         },
     }
 
@@ -187,10 +324,18 @@ def _supports_response_format(model: ModelConfig) -> bool:
 def _json_instruction(schema: type[BaseModel]) -> str:
     """The provider-agnostic structured-output contract appended to every structured call.
 
-    ``response_format`` is only sent when LiteLLM's capability map says the model supports
-    it — which is ``False`` for every ``openrouter/*`` id — so the prompt itself must always
-    carry the JSON-only contract (llm-insight.md: "return JSON only, no fences"). Redundant
-    when response_format IS honoured; decisive when it is not.
+    ``response_format`` is only sent when LiteLLM's capability map says the model supports it,
+    so the prompt itself must always carry the JSON-only contract (llm-insight.md: "return
+    JSON only, no fences"). Redundant when response_format IS honoured; decisive when it is
+    not. (This docstring said the map answers ``False`` for every ``openrouter/*`` id; the
+    installed LiteLLM answers ``True`` for ``openrouter/anthropic/*`` and
+    ``openrouter/google/*`` — which is how the raw schema reached Anthropic at all, DEF-083.)
+
+    The text carries the FULL pydantic schema on purpose, not the portable one sent as
+    ``response_format``: it is read by the model, not compiled by the provider, so the
+    constraints the provider cannot enforce (a Decimal's numeric form, ``confidence`` 0–100,
+    ``horizon_days > 0``) still reach the model — and the reply is validated against the full
+    model either way.
     """
     return (
         "\n\n<output_format>\n"
@@ -224,16 +369,168 @@ def _extract_json(content: str) -> str:
 
 
 def _build_messages(prompt: str, images: list[bytes] | None) -> list[dict[str, object]]:
-    """Assemble the chat messages; multimodal content when images are present."""
+    """Assemble the chat messages; multimodal content when images are present.
+
+    The data-URI's MIME comes from the bytes (:mod:`shared.image_types`), not from a constant.
+    It was hardcoded ``image/png`` while the intake door had already sniffed the real format —
+    so a pasted JPEG went out labelled as a PNG. Lenient providers sniff and shrug; a strict
+    one rejects it, and the failure then surfaces as a vision/parse error nowhere near the
+    mislabel. An unrecognised payload keeps PNG as the last resort: the door rejects non-images
+    before they get here, so reaching this branch means a direct caller skipped that check, and
+    a wrong label is still better than no message at all.
+    """
     if not images:
         return [{"role": "user", "content": prompt}]
     content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
     for img in images:
         b64 = base64.b64encode(img).decode("ascii")
+        mime = sniff_image_mime(img) or PNG
         content.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
         )
     return [{"role": "user", "content": content}]
+
+
+# --- the ONE provider call + the owned retry (DEF-066, 2026-09-26) ---------------------
+# litellm's own retry is OFF (``num_retries=0`` on every call). With ``num_retries > 0`` its
+# wrapper sends ANY ``openai.APIError`` — a 401 and a 400 included — to
+# ``litellm.completion_with_retries``, which imports ``tenacity`` at run time: a package this
+# project never installed (and litellm does not require). The provider's real error was then
+# replaced by 「tenacity import failed」, nothing was retried, and the fallback model failed
+# the same way. The wrapper also rewrites the PROCESS-WIDE ``litellm.num_retries = None`` on
+# that path. Rejected: adding ``tenacity`` as a dependency (``stack.md``: default answer no —
+# and it would keep retrying requests that can never succeed). ⚠ ``0`` is falsy and litellm
+# reads ``num_retries or litellm.num_retries``, so nothing may set that global either
+# (``tests/shared/test_def066_llm_retry.py`` guards both).
+
+#: Status codes worth a second try; every other 4xx is a request that will fail again.
+_TRANSIENT_STATUS = frozenset({408, 425, 429})
+_RETRY_BASE_DELAY_S = 0.5
+_RETRY_MAX_DELAY_S = 4.0
+#: The backoff sleeper — a module attribute so a test zeroes the wait (never real time).
+_sleep: Callable[[float], None] = time.sleep
+
+
+def _status_of(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def is_transient(exc: BaseException) -> bool:
+    """True for a failure a retry can fix: timeout, connection error, 408/425/429, 5xx."""
+    if isinstance(exc, litellm_errors.Timeout | litellm_errors.APIConnectionError):
+        return True
+    status = _status_of(exc)
+    return status is not None and (status in _TRANSIENT_STATUS or 500 <= status <= 599)
+
+
+def provider_failure_zh(exc: BaseException) -> tuple[str, str | None]:
+    """The owner-facing name of one provider failure — ``(name, code)`` — in Chinese.
+
+    Never the provider's own text: it is English, and an auth error is free to echo the key
+    it was sent. That text goes to the redacting fail log (:mod:`shared.llm_fail_log`)."""
+    if isinstance(exc, litellm_errors.Timeout):
+        return "回應逾時", None
+    if isinstance(exc, litellm_errors.APIConnectionError):
+        return "無法連線到供應商", None
+    if isinstance(exc, litellm_errors.ContextWindowExceededError):
+        return "輸入超過模型可處理的長度", "HTTP 400"
+    status = _status_of(exc)
+    if status is None:
+        return "呼叫失敗", type(exc).__name__
+    names = {
+        400: "請求內容被拒", 401: "金鑰無效或未授權", 402: "供應商帳戶餘額不足",
+        403: "沒有使用權限", 404: "找不到模型或端點", 408: "回應逾時",
+        422: "請求內容被拒", 429: "請求過於頻繁",
+    }
+    name = names.get(status) or ("供應商服務異常" if status >= 500 else "供應商錯誤")
+    return name, f"HTTP {status}"
+
+
+class _ProviderCallFailed(Exception):
+    """Every attempt of one model's provider call failed; carries each exception in order."""
+
+    def __init__(self, errors: list[Exception]) -> None:
+        super().__init__(repr(errors[-1]))
+        self.errors = errors
+
+    @property
+    def last(self) -> Exception:
+        return self.errors[-1]
+
+    def reason_zh(self) -> str:
+        """「供應商服務異常（HTTP 503，已重試 2 次）」 — the name, its code, the retries."""
+        name, code = provider_failure_zh(self.last)
+        parts = [p for p in (code,) if p]
+        if len(self.errors) > 1:
+            parts.append(f"已重試 {len(self.errors) - 1} 次")
+        return f"{name}（{'，'.join(parts)}）" if parts else name
+
+    def log_text(self) -> str:
+        """Every attempt's ``repr`` for the fail log (redacted there), oldest first."""
+        return " | ".join(repr(e) for e in self.errors)
+
+
+def _call_provider(
+    model: ModelConfig, messages: list[dict[str, object]], extra: dict[str, object]
+) -> Any:
+    """Call the provider once, retrying ONLY a transient failure, at most ``max_retries``.
+
+    Backoff 0.5 s, 1 s, 2 s … capped at 4 s. Raises :class:`_ProviderCallFailed` with every
+    attempt's exception when the last one fails (or the first non-transient one does).
+    """
+    retries = max(0, model.max_retries or 0)
+    errors: list[Exception] = []
+    for n in range(retries + 1):
+        try:
+            return litellm.completion(
+                model=litellm_model_string(model),
+                api_base=model.api_base or None,
+                api_key=model.api_key or None,
+                messages=messages,
+                timeout=model.timeout_seconds,
+                num_retries=0,  # DEF-066: the retry is owned here, never by litellm
+                max_tokens=model.max_output_tokens,
+                **extra,
+            )
+        except Exception as exc:  # noqa: BLE001 — classified below, never swallowed
+            errors.append(exc)
+            if n == retries or not is_transient(exc):
+                raise _ProviderCallFailed(errors) from exc
+            _sleep(min(_RETRY_BASE_DELAY_S * (2**n), _RETRY_MAX_DELAY_S))
+    raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
+
+
+#: ``_parse_outcome`` -> the owner-facing name of a reply that could not be used.
+_PARSE_ZH = {"invalid_json": "回應不是完整 JSON", "schema_mismatch": "回應欄位不符格式"}
+
+
+def _parse_failures_zh(outcomes: list[str]) -> str:
+    """「回應不是完整 JSON（2 次）」 — each parse-failure kind once, with its count."""
+    counts: dict[str, int] = {}
+    for o in outcomes:
+        counts[o] = counts.get(o, 0) + 1
+    return "、".join(f"{_PARSE_ZH.get(k, '回應無法解析')}（{n} 次）" for k, n in counts.items())
+
+
+def _chain_failure_zh(failures: list[tuple[str, str]]) -> str:
+    """「主模型 a：…；備援 b：…」 — every candidate tried, in order, with its own reason.
+
+    Failover used to keep only the LAST exception, so the sentence named the fallback's
+    failure and never the primary's — usually the one worth reading (DEF-066)."""
+    many = len(failures) > 2
+    parts = []
+    for i, (alias, reason) in enumerate(failures):
+        role = "主模型" if i == 0 else (f"備援 {i}" if many else "備援")
+        parts.append(f"{role} {alias}：{reason}")
+    return "；".join(parts)
+
+
+class CandidateFailure(BaseModel):
+    """One candidate model that failed before the chain found one that answered."""
+
+    alias: str
+    reason: str  # the owner-facing zh reason (the same text ``_chain_failure_zh`` joins)
 
 
 class StructuredCompletion[T: BaseModel](BaseModel):
@@ -242,6 +539,13 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     ``model`` is the model ALIAS (the user-facing registry name, e.g. ``claude-sonnet``),
     the value callers persist as the record's model column (spec 04 fix: the insights row's
     ``model`` is the model used, never a card field). ``cost`` is this single call's USD cost.
+
+    ``model_name`` (the provider id, the value ``llm_usage.model`` and the fail log carry) and
+    ``usage_id`` (the ``llm_usage`` row this reply was billed on) let a caller that records
+    something ABOUT the reply attribute it (DEF-084: the AI door's ``unparsed_rows`` capture
+    had neither). ``failed_before`` names every candidate that failed first, in chain order —
+    a failover is otherwise invisible to the caller, and an owner who picked a model by hand
+    was shown another model's name with no word about why (DEF-083, #520).
     """
 
     model_config = {"protected_namespaces": (), "arbitrary_types_allowed": True}
@@ -251,6 +555,27 @@ class StructuredCompletion[T: BaseModel](BaseModel):
     cost: Decimal
     tokens_in: int = 0
     tokens_out: int = 0
+    model_name: str = ""
+    usage_id: int | None = None
+    failed_before: list[CandidateFailure] = []
+    usage_estimated: bool = False  # the provider sent no usage; tokens are a local count
+
+
+def _parse_outcome(exc: Exception) -> str:
+    """Tell "not JSON at all" from "JSON with the wrong fields".
+
+    Do NOT switch on the exception class here. Pydantic v2 raises ``ValidationError`` for
+    BOTH shapes — a malformed document arrives as an error whose ``type`` is
+    ``json_invalid``, never as a bare ``json.JSONDecodeError`` (measured 2026-08-28, after
+    the obvious ``isinstance`` version was written and would have labelled every bad reply
+    a schema mismatch). The two are different defects and different training signals, so
+    the classification reads the error's own type.
+    """
+    if isinstance(exc, ValidationError):
+        if any(d.get("type") == "json_invalid" for d in exc.errors()):
+            return "invalid_json"
+        return "schema_mismatch"
+    return "invalid_json"
 
 
 def _complete_with_meta[T: BaseModel](
@@ -276,53 +601,95 @@ def _complete_with_meta[T: BaseModel](
         extra["response_format"] = _response_format_for(schema)
     if temperature is not None:
         extra["temperature"] = temperature
-    for _attempt in range(2):
+    # Captured once per attempt (:mod:`shared.llm_fail_log`). Recorded HERE, at the
+    # per-model layer, not at the chain layer above: failover keeps only the LAST
+    # exception, so a chain-level capture would lose the primary model's failure
+    # entirely — which is usually the one worth reading.
+    prompt_text, image_count = fail_log.prompt_text_of(messages)
+    # DEF-066: what went wrong on THIS model, in the owner's words, attempt by attempt —
+    # the chain joins it with the other candidates' reasons into one sentence.
+    parse_failures: list[str] = []
+    for attempt in range(1, 3):
         try:
-            resp = litellm.completion(
-                model=litellm_model_string(model),
-                api_base=model.api_base or None,
-                api_key=model.api_key or None,
-                messages=messages,
-                timeout=model.timeout_seconds,
-                num_retries=model.max_retries or 0,
-                max_tokens=model.max_output_tokens,
-                **extra,
+            resp = _call_provider(model, messages, extra)
+        except _ProviderCallFailed as failed:
+            fail_log.record(
+                conn, agent=agent, outcome="provider_error", model=model.model_name,
+                attempt=attempt, prompt=prompt_text, error_reason=failed.log_text(),
+                image_count=image_count,
             )
-        except Exception as exc:  # noqa: BLE001
-            raise LLMUnavailable(f"provider error ({model.id}): {exc}") from exc
+            reasons = [r for r in (_parse_failures_zh(parse_failures),) if r]
+            reasons.append(failed.reason_zh())
+            raise LLMUnavailable("、".join(reasons)) from failed.last
 
-        content = resp.choices[0].message.content or ""
-        usage = resp.usage
+        # `choices` / `usage` are read INSIDE the try deliberately. They used to sit
+        # outside it, so a malformed provider envelope raised a bare AttributeError /
+        # IndexError that never became LLMUnavailable: it escaped to the global catch-all
+        # as an HTTP 500 instead of the intended 503 degrade (found 2026-08-28).
+        try:
+            content = resp.choices[0].message.content or ""
+        except (AttributeError, IndexError, KeyError, TypeError) as exc:
+            fail_log.record(
+                conn, agent=agent, outcome="provider_error", model=model.model_name,
+                attempt=attempt, prompt=prompt_text,
+                error_reason=f"malformed response envelope: {exc!r}",
+                image_count=image_count,
+            )
+            raise LLMUnavailable("供應商回應格式異常") from exc
+
+        # A reply with no usage block is a reply the provider did not meter, not a free one.
+        metered = metered_usage(prompt_text, content, getattr(resp, "usage", None))
+        tokens_in, tokens_out = metered.tokens_in, metered.tokens_out
         cost = cost_of(
             ModelPricing(
                 model=model.model_name,
                 input_price_per_mtok=model.input_price_per_mtok,
                 output_price_per_mtok=model.output_price_per_mtok,
             ),
-            usage.prompt_tokens,
-            usage.completion_tokens,
+            tokens_in,
+            tokens_out,
         )
-        log_usage(
+        usage_id = log_usage(
             conn,
             model=model.model_name,
             agent=agent,
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
             cost=cost,
-            cache_tokens=cached_tokens_of(usage),
+            cache_tokens=metered.cache_tokens,
+            estimated=metered.estimated,
         )
         try:
             parsed = schema.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError, ValueError):
             try:
                 parsed = schema.model_validate_json(_extract_json(content))
-            except (ValidationError, json.JSONDecodeError, ValueError):
+            except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+                # The two shapes are recorded SEPARATELY (see `_parse_outcome`): the one
+                # generic message they used to share could not tell a prompt author
+                # whether the model had emitted garbage or the wrong fields.
+                outcome = _parse_outcome(exc)
+                parse_failures.append(outcome)
+                fail_log.record(
+                    conn, agent=agent, model=model.model_name, attempt=attempt,
+                    outcome=outcome,
+                    prompt=prompt_text, raw_output=content, error_reason=repr(exc),
+                    image_count=image_count, usage_id=usage_id,
+                )
                 continue
+        if fail_log.capture_all():
+            fail_log.record(
+                conn, agent=agent, outcome="ok", model=model.model_name,
+                attempt=attempt, prompt=prompt_text, raw_output=content,
+                image_count=image_count, usage_id=usage_id,
+            )
         return StructuredCompletion(
             value=parsed, model=model.model_alias, cost=cost,
-            tokens_in=usage.prompt_tokens, tokens_out=usage.completion_tokens,
+            tokens_in=tokens_in, tokens_out=tokens_out,
+            model_name=model.model_name, usage_id=usage_id,
+            usage_estimated=metered.estimated,
         )
-    raise LLMUnavailable(f"invalid structured output from {model.id}")
+    raise LLMUnavailable(_parse_failures_zh(parse_failures))
 
 
 def _complete_with[T: BaseModel](
@@ -359,20 +726,37 @@ def complete_structured_meta[T: BaseModel](
     *temperature* (e.g. ``0`` for a deterministic classify/resolve call) is forwarded to the
     provider on every candidate; ``None`` leaves the provider default.
     """
-    check_budget(conn)
-    candidates = _select_for(
-        conn, role=role, vision=bool(images), model_override=model_override
-    )
+    # The pre-call gates are captured here rather than per-model: they refuse before any
+    # candidate is chosen, so there is no model to attribute them to.
+    try:
+        check_budget(conn)
+        candidates = _select_for(
+            conn, role=role, vision=bool(images), model_override=model_override
+        )
+    except (LLMBudgetExceeded, AINotActivated) as exc:
+        fail_log.record(
+            conn, agent=agent, outcome=exc.kind, prompt=prompt,
+            error_reason=repr(exc), image_count=len(images or ()),
+        )
+        raise
     messages = _build_messages(prompt + _json_instruction(schema), images)
+    failures: list[tuple[str, str]] = []
     last: LLMUnavailable | None = None
     for model in candidates:
         try:
-            return _complete_with_meta(
+            done = _complete_with_meta(
                 model, messages, schema, agent=agent, conn=conn, temperature=temperature
             )
         except LLMUnavailable as exc:
             last = exc
-    raise last or LLMUnavailable("no model produced valid output")
+            failures.append((model.model_alias, str(exc)))
+            continue
+        done.failed_before = [CandidateFailure(alias=a, reason=r) for a, r in failures]
+        return done
+    if last is None:
+        raise LLMUnavailable("沒有可用的模型")
+    # Every candidate's reason, not only the last one's (DEF-066); ``kind`` is unchanged.
+    raise LLMUnavailable(_chain_failure_zh(failures)) from last
 
 
 def complete_structured[T: BaseModel](
@@ -419,6 +803,7 @@ class TextCompletion(BaseModel):
     tokens_in: int
     tokens_out: int
     cost: Decimal
+    usage_estimated: bool = False  # the provider sent no usage; tokens are a local count
 
 
 def _text_with(
@@ -433,45 +818,55 @@ def _text_with(
     Mirrors :func:`_complete_with` minus the JSON parse / retry (there is no schema to
     validate). Raises :exc:`LLMUnavailable` on a provider error.
     """
+    prompt_text, image_count = fail_log.prompt_text_of(messages)
     try:
-        resp = litellm.completion(
-            model=litellm_model_string(model),
-            api_base=model.api_base or None,
-            api_key=model.api_key or None,
-            messages=messages,
-            timeout=model.timeout_seconds,
-            num_retries=model.max_retries or 0,
-            max_tokens=model.max_output_tokens,
+        resp = _call_provider(model, messages, {})
+    except _ProviderCallFailed as failed:
+        fail_log.record(
+            conn, agent=agent, outcome="provider_error", model=model.model_name,
+            prompt=prompt_text, error_reason=failed.log_text(), image_count=image_count,
         )
-    except Exception as exc:  # noqa: BLE001
-        raise LLMUnavailable(f"provider error ({model.id}): {exc}") from exc
+        raise LLMUnavailable(failed.reason_zh()) from failed.last
 
-    content = resp.choices[0].message.content or ""
-    usage = resp.usage
+    # Inside the try for the same reason as the structured path: a malformed envelope
+    # must degrade as 503, not escape as a 500.
+    try:
+        content = resp.choices[0].message.content or ""
+    except (AttributeError, IndexError, KeyError, TypeError) as exc:
+        fail_log.record(
+            conn, agent=agent, outcome="provider_error", model=model.model_name,
+            prompt=prompt_text, error_reason=f"malformed response envelope: {exc!r}",
+            image_count=image_count,
+        )
+        raise LLMUnavailable("供應商回應格式異常") from exc
+
+    metered = metered_usage(prompt_text, content, getattr(resp, "usage", None))
     cost = cost_of(
         ModelPricing(
             model=model.model_name,
             input_price_per_mtok=model.input_price_per_mtok,
             output_price_per_mtok=model.output_price_per_mtok,
         ),
-        usage.prompt_tokens,
-        usage.completion_tokens,
+        metered.tokens_in,
+        metered.tokens_out,
     )
     log_usage(
         conn,
         model=model.model_name,
         agent=agent,
-        input_tokens=usage.prompt_tokens,
-        output_tokens=usage.completion_tokens,
+        input_tokens=metered.tokens_in,
+        output_tokens=metered.tokens_out,
         cost=cost,
-        cache_tokens=cached_tokens_of(usage),
+        cache_tokens=metered.cache_tokens,
+        estimated=metered.estimated,
     )
     return TextCompletion(
         reply=content,
         model=model.model_alias,
-        tokens_in=usage.prompt_tokens,
-        tokens_out=usage.completion_tokens,
+        tokens_in=metered.tokens_in,
+        tokens_out=metered.tokens_out,
         cost=cost,
+        usage_estimated=metered.estimated,
     )
 
 
@@ -492,16 +887,26 @@ def complete_text(
     (no model), :exc:`LLMBudgetExceeded` (cap hit), or :exc:`LLMUnavailable` (all
     candidates failed) — callers map these to 402 / 409 / 503 via the global handlers.
     """
-    check_budget(conn)
-    candidates = _select_for(conn, role=role, vision=False)
+    try:
+        check_budget(conn)
+        candidates = _select_for(conn, role=role, vision=False)
+    except (LLMBudgetExceeded, AINotActivated) as exc:
+        fail_log.record(
+            conn, agent=agent, outcome=exc.kind, prompt=prompt, error_reason=repr(exc),
+        )
+        raise
     messages: list[dict[str, object]] = []
     if system is not None:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+    failures: list[tuple[str, str]] = []
     last: LLMUnavailable | None = None
     for model in candidates:
         try:
             return _text_with(model, messages, agent=agent, conn=conn)
         except LLMUnavailable as exc:
             last = exc
-    raise last or LLMUnavailable("no model produced a reply")
+            failures.append((model.model_alias, str(exc)))
+    if last is None:
+        raise LLMUnavailable("沒有可用的模型")
+    raise LLMUnavailable(_chain_failure_zh(failures)) from last

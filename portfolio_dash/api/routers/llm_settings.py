@@ -38,6 +38,7 @@ from portfolio_dash.shared.llm_config import (
     set_role,
     upsert_model,
 )
+from portfolio_dash.shared.llm_fail_log import redact_secrets
 from portfolio_dash.shared.llm_usage_reads import (
     model_health,
     usage_by_agent,
@@ -244,6 +245,9 @@ def list_llm_requests(
             "tokens_out": r["output_tokens"],
             "cache_tokens": (r["cache_tokens"] or 0) if "cache_tokens" in keys_probe else 0,
             "cost_usd": decimal_str(Decimal(r["cost"] or "0")),
+            # The provider sent no usage; tokens and cost are a local estimate (估算).
+            "estimated": bool(r["usage_estimated"]) if "usage_estimated" in keys_probe
+            else False,
         }
         for r in rows
     ]
@@ -408,6 +412,25 @@ def put_roles(body: RolesBody, conn: sqlite3.Connection = Depends(get_conn)) -> 
 # --- 16.4 connection test / quota top-up / alert threshold --------------------
 
 
+_PING_RAW_MAX = 160
+
+
+def _ping_failure(exc: Exception) -> str:
+    """「金鑰無效或未授權（HTTP 401）；供應商原文：…」 — the connection test's failure line.
+
+    The name is ``shared.llm``'s one classifier, so the ping and a failed insight run call
+    the same failure the same thing (DEF-066/073). Unlike a run's detail, the provider's own
+    text is kept after it: the ping exists to diagnose, and nothing else records it — but
+    credential-shaped substrings are redacted and it is truncated, since this reaches a toast.
+    """
+    name, code = llm.provider_failure_zh(exc)
+    head = f"{name}（{code}）" if code else name
+    raw = redact_secrets(str(exc)).strip()
+    if len(raw) > _PING_RAW_MAX:
+        raw = raw[:_PING_RAW_MAX] + "…"
+    return f"{head}；供應商原文：{raw}" if raw else head
+
+
 @router.post("/llm/models/{alias}/test")
 def test_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
     model = get_model(conn, alias)
@@ -422,29 +445,36 @@ def test_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
             api_key=model.api_key or None,
             messages=[{"role": "user", "content": "ping"}],
             timeout=model.timeout_seconds,
+            # DEF-066: no retry here, deliberately — a connection test reports the FIRST
+            # failure (a retry would hide a flaky endpoint and triple the wait), and litellm's
+            # own retry is never armed (it needs the absent `tenacity`; see shared/llm.py).
+            num_retries=0,
             max_tokens=8,
         )
     except Exception as exc:  # noqa: BLE001 - any provider failure is reported, not raised
         latency_ms = int((time.monotonic() - started) * 1000)
-        return {"ok": False, "latency_ms": latency_ms, "error_detail": str(exc)}
+        return {"ok": False, "latency_ms": latency_ms, "error_detail": _ping_failure(exc)}
     latency_ms = int((time.monotonic() - started) * 1000)
-    content = (resp.choices[0].message.content or "")[:120]
-    usage = getattr(resp, "usage", None)
-    if usage is not None:  # honest accounting: a real test call costs tokens
-        pricing = llm.ModelPricing(
-            model=model.model_name,
-            input_price_per_mtok=model.input_price_per_mtok,
-            output_price_per_mtok=model.output_price_per_mtok,
-        )
-        llm.log_usage(
-            conn,
-            model=model.model_name,
-            agent="llm_settings_test",
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
-            cost=llm.cost_of(pricing, usage.prompt_tokens, usage.completion_tokens),
-        )
-    return {"ok": True, "latency_ms": latency_ms, "reply_snippet": content}
+    reply = resp.choices[0].message.content or ""
+    # Honest accounting: a real test call costs tokens — also when the provider sends no
+    # usage block, which ``metered_usage`` estimates instead of booking it as free.
+    metered = llm.metered_usage("ping", reply, getattr(resp, "usage", None))
+    pricing = llm.ModelPricing(
+        model=model.model_name,
+        input_price_per_mtok=model.input_price_per_mtok,
+        output_price_per_mtok=model.output_price_per_mtok,
+    )
+    llm.log_usage(
+        conn,
+        model=model.model_name,
+        agent="llm_settings_test",
+        input_tokens=metered.tokens_in,
+        output_tokens=metered.tokens_out,
+        cost=llm.cost_of(pricing, metered.tokens_in, metered.tokens_out),
+        cache_tokens=metered.cache_tokens,
+        estimated=metered.estimated,
+    )
+    return {"ok": True, "latency_ms": latency_ms, "reply_snippet": reply[:120]}
 
 
 class TopupBody(BaseModel):

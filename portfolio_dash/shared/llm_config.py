@@ -13,6 +13,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.money import usd_display
 
 
 class LLMError(Exception):
@@ -89,6 +90,15 @@ def create_llm_tables(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_usage)")}
     if "cache_tokens" not in cols:
         conn.execute("ALTER TABLE llm_usage ADD COLUMN cache_tokens INTEGER NOT NULL DEFAULT 0")
+    # 2026-09-30 (owner, the verifier's R10 observation ④): 1 = the provider sent no usage
+    # and the counts are a local estimate (shared/llm.metered_usage), never a measured 0.
+    if "usage_estimated" not in cols:
+        conn.execute(
+            "ALTER TABLE llm_usage ADD COLUMN usage_estimated INTEGER NOT NULL DEFAULT 0"
+        )
+    # DEF-065: the quota-alert threshold table is created with the rest of the LLM store (at
+    # boot, via bootstrap_db), not by the first GET /api/dashboard that reads it.
+    conn.execute(_THRESHOLD_DDL)
     conn.commit()
 
 
@@ -298,7 +308,17 @@ def check_budget(conn: sqlite3.Connection) -> None:
     """
     remaining = budget_remaining(conn)
     if remaining <= 0:
-        raise LLMBudgetExceeded(f"token budget exhausted (remaining ${remaining})")
+        # zh-TW at the RAISE SITE, because this text is what the owner reads. `api/errors.py`
+        # swaps a structural English message for a Chinese default (`_prefer_zh`) — but the AI
+        # door does not go through that handler: `data_ingestion/agents.py` catches LLMError
+        # and `api/routers/input_center.py` returns `error_body(kind, str(exc))` verbatim, so
+        # the 402 toast read "token budget exhausted (remaining $0)" directly beneath a
+        # degrade panel that already said 「AI 額度用盡」 (G-02, 2026-09-02). One raise site,
+        # one sentence, every consumer — and `_prefer_zh` forwards a Chinese text unchanged,
+        # so the remaining balance survives instead of collapsing to the generic default.
+        raise LLMBudgetExceeded(
+            f"AI 額度用盡（剩餘 {usd_display(remaining)}）— 補充額度後即可繼續使用"
+        )
 
 
 _PROVIDER_PREFIX = {

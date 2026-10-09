@@ -11,7 +11,7 @@ the ledger/input specs that surface them.
 
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -27,6 +27,23 @@ def decimal_str(value: Decimal) -> str:
     preserved (``Decimal("-0.00")`` -> ``"-0.00"``) -- a faithful render of the stored value.
     """
     return format(value, "f")
+
+
+def stored_decimal_str(text: str | None) -> str | None:
+    """A Decimal stored as TEXT, re-serialized to the canonical wire form; None stays None.
+
+    For a column a route passes straight through (``job_runs.cost_usd``): rows written with
+    ``str(Decimal)`` can hold ``9E-8``, which ``web/format.js``'s PLAIN_DECIMAL guard rejects
+    onto the float path. Value-preserving — a canonical string round-trips byte-identically.
+    Text that is not a finite number serves None rather than a 500.
+    """
+    if text is None:
+        return None
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return decimal_str(value) if value.is_finite() else None
 
 
 def to_wire(value: Any) -> Any:

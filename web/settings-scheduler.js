@@ -1,6 +1,7 @@
 /* portfolio-dash — 設定 · 排程 (wired to /api/scheduler/*, spec 15/19).
 
-   Boot: GET /api/scheduler/jobs -> { jobs:[{id,desc,cron,tz,enabled,last,next}] } and
+   Boot: GET /api/scheduler/jobs -> { jobs:[{id,desc,cron,tz,enabled,last,next}],
+   scheduler:{running,reason} } and
    GET /api/scheduler/runs -> { rows:[{id,job_id,started_at,finished_at,status,detail,
    duration_s,cost_usd}], total_count }, fetched in PARALLEL. The inline window.SCHED_DATA
    mock is RETIRED.
@@ -56,6 +57,33 @@
   let jobs = [];
   let runs = [];
   let sysRows = [];
+  /* M3: the top-level `scheduler` block from GET /api/scheduler/jobs, {running, reason}.
+     null until the first GET lands (render nothing rather than accuse a healthy instance). */
+  let schedState = null;
+
+  /* M3 — 「啟用」 is a STORED INTENT (a schedule_config row); it says nothing about whether
+     a scheduler exists in this process to honour it. Measured on the demo: all 25 jobs read
+     「啟用」 with 「下次執行」 = 「—」, which is indistinguishable from "the next fire is just
+     unknown" — and the dashboard's 今日摘要 was 56 days stale underneath a current-looking
+     title because of it. The banner names the cause once, above the table, and states the
+     one thing that still works (立即執行). Rejected: greying every 啟用 toggle (it would
+     misreport the stored setting, which IS on and IS what a restart will honour). */
+  function renderSchedBanner() {
+    const host = $('#sched-off-banner');
+    if (!host) return;
+    host.replaceChildren();
+    if (!schedState || schedState.running !== false) { host.hidden = true; return; }
+    host.hidden = false;
+    host.className = 'unreg-banner';
+    host.appendChild(el('span', null, '⚠'));
+    const text = el('div', 'unreg-text',
+      '排程器未啟動 — 本實例的所有排程工作都不會自動執行（「下次執行」因此皆為 —）；'
+      + '仍可用「立即執行」手動觸發');
+    if (schedState.reason) {
+      text.appendChild(el('span', 'sym-name cron-code', '　原因：' + schedState.reason));
+    }
+    host.appendChild(text);
+  }
 
   /* WPD (2026-07-07): the 200-dump + client-side job filter is replaced by SERVER
      job_id filter + limit/offset with the shared pdPager. Page size = the user's
@@ -82,6 +110,8 @@
     sentiment_daily: '市場情緒（VIX＋恐懼貪婪）',
     index_quotes_daily: '大盤指數收盤（台／美／馬）',
     consensus_daily: '分析師共識',
+    fundamentals_daily: '基本面快照（yfinance＋Finnhub 聯集）',
+    fundamentals_av_weekly: '基本面快照（Alpha Vantage・週六・僅持有）',
     signal_scan: '技術訊號掃描',
     news_daily: '新聞摘要',
     alert_scan: '風險警示掃描＋AI 派發',
@@ -91,7 +121,22 @@
     digest_daily: '每日收盤摘要',
     digest_weekly: '每週行動清單',
   };
-  const jobLabel = (id, desc) => JOB_ZH[id] || desc || id;
+  /* DEF-030: a dynamic row (`insight:<id>`) has no JOB_ZH entry — the server names it by
+     its TASK (`label` on GET /api/scheduler/jobs and on each /runs row). Remembered per id
+     so the run-history rows and the result modal read the same name as the job row; it
+     used to fall back to the raw id 「insight:10」 everywhere. */
+  const labelById = {};
+  const rememberLabels = (list, idKey) => (list || []).forEach((x) => {
+    if (x && x.label) labelById[x[idKey]] = x.label;
+  });
+  const jobLabel = (id, desc) => JOB_ZH[id] || labelById[id] || desc || id;
+  /* DEF-051 (2026-09-25): a toast names the job by the SAME label its row shows — never by
+     its machine id. 「✓ 已排入執行 insight:7 #180」 / 「alert_scan #185」 read the id the row
+     beside it had already translated (「AI 洞察任務「市場週報」」 / 「風險警示掃描＋AI 派發」).
+     shell.js's DIAG_CODE filter cannot catch this: it hides a sub-line that IS an error
+     code, and an id followed by 「 #180」 is not one — the fix belongs where the text is
+     built. The run number stays, in 全形 parentheses: 「…「市場週報」（#180）」. */
+  const runNo = (resp) => '（#' + ((resp && resp.run_id) || '?') + '）';
 
   /* ===== FU-D36 (需求七): per-row live run status ==============================
      renderJobs stores each row's 狀態 slot + run button by job_id; GET /api/scheduler/
@@ -107,9 +152,14 @@
   const GRACE_MS = 6000;
 
   /* Run-history status -> [pill class, zh label]. Shared by the history table so a
-     'running'/'skipped' row is not miscoloured as 失敗 (unmapped -> 失敗). */
+     'running'/'skipped' row is not miscoloured as 失敗 (unmapped -> 失敗).
+     'partial' (M10-02): a quote refresh that lost a HELD symbol, or an insight run that
+     stopped part-way — the class + label are pipeline.js's statusPill() pair, copied
+     verbatim so one run reads the same word on both pages (it used to read 失敗 here,
+     部分 there, and 完成 in the drawer). */
   const HIST_STATUS = {
     ok: ['pill-ok', '成功'],
+    partial: ['pill-warn', '部分'],
     running: ['pill-run', '執行中'],
     skipped: ['pill-off', '略過'],
   };
@@ -136,6 +186,8 @@
     sentiment_daily: 'settings.html#datasources',
     index_quotes_daily: 'settings.html#datasources',
     consensus_daily: 'settings.html#datasources',
+    fundamentals_daily: 'settings.html#datasources',
+    fundamentals_av_weekly: 'settings.html#datasources',
     alert_scan: 'settings.html#alerts',
     evaluate_insights: 'insights.html',
     generate_calibrations: 'insights.html',
@@ -182,6 +234,7 @@
     const ok = lr.ok === true || status === 'ok';
     let cls = 'pill-fail', label = '失敗';
     if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
+    else if (status === 'partial') { cls = 'pill-warn'; label = '部分'; }  /* M10-02: pipeline.js's pair; ok=false but not 失敗 */
     else if (ok) { cls = 'pill-ok'; label = '成功'; }
     const metaRow = el('div');
     metaRow.style.display = 'flex';
@@ -298,6 +351,7 @@
     const msg = lr.message || lr.detail || '';
     let cls = 'pill-fail', label = '失敗';
     if (status === 'skipped') { cls = 'pill-off'; label = '略過'; }
+    else if (status === 'partial') { cls = 'pill-warn'; label = '部分'; }  /* M10-02: pipeline.js's pair; ok=false but not 失敗 */
     else if (ok) { cls = 'pill-ok'; label = '成功'; }
     const pill = _pill(cls, label);
     pill.title = msg ? msg + '（點擊查看詳情）' : '點擊查看詳情';
@@ -388,17 +442,35 @@
       tdJob.appendChild(el('div', 'sym-name cron-code', j.id));
       tr.appendChild(tdJob);
 
+      /* DEF-030: a task paused in the AI 洞察管線 keeps its schedule row ON (`enabled` is the
+         row's stored intent) but will not execute — the server combines the two into
+         `effective_enabled` + `paused_reason`; this page only displays them. The switch
+         reads OFF and is locked with the reason, and the row says where to resume it. */
+      if (j.paused_reason) {
+        const note = el('div', 'sym-name paused-note', j.paused_reason + ' ');
+        const go = el('a', null, '前往洞察管線 →');
+        go.href = 'pipeline-hub.html';
+        note.appendChild(go);
+        tdJob.appendChild(note);
+      }
+
       /* enable toggle -> PUT /api/scheduler/jobs/{id} {enabled} */
       const tdTog = el('td');
-      const t = el('button', 'toggle' + (j.enabled ? ' on' : ''));
+      const isOn = j.effective_enabled != null ? j.effective_enabled : j.enabled;
+      const t = el('button', 'toggle' + (isOn ? ' on' : ''));
       t.type = 'button';
       t.setAttribute('role', 'switch');
+      t.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      if (j.paused_reason) {
+        t.disabled = true;
+        t.title = j.paused_reason;
+      }
       t.addEventListener('click', async () => {
         const next = !t.classList.contains('on');
         t.disabled = true;
         try {
           await api.put('/api/scheduler/jobs/' + encodeURIComponent(j.id), { enabled: next });
-          _toast('已更新', 'ok', j.id + (next ? ' 已啟用' : ' 已停用'));
+          _toast('已更新', 'ok', jobLabel(j.id, j.desc) + (next ? ' 已啟用' : ' 已停用'));
           dispatchJobsChanged();
         } catch (err) {
           _toast((err && err.message) || '更新失敗', 'fail', err && err.code);
@@ -422,7 +494,7 @@
         cronInput.classList.remove('field-error');
         try {
           await api.put('/api/scheduler/jobs/' + encodeURIComponent(j.id), { cron: cron });
-          _toast('排程已更新', 'ok', j.id + ' · ' + cron);
+          _toast('排程已更新', 'ok', jobLabel(j.id, j.desc) + ' · ' + cron);
           dispatchJobsChanged();
         } catch (err) {
           cronInput.classList.add('field-error');
@@ -449,7 +521,10 @@
         tdLast.appendChild(sp);
       } else {
         const lastWrap = el('span', 'last-run');
-        const dot = el('span', 'run-dot ' + (j.last.status === 'ok' ? 'dot-ok' : 'dot-err'));
+        /* M10-02: a partial run is amber, like its pill — .dot-warn (settings.html) carries the
+           same --amber token .pill-warn uses. */
+        const dot = el('span', 'run-dot ' + (j.last.status === 'ok' ? 'dot-ok'
+          : j.last.status === 'partial' ? 'dot-warn' : 'dot-err'));
         lastWrap.appendChild(dot);
         lastWrap.appendChild(el('span', 'num', f.datetime(j.last.at)));
         if (j.last.detail) lastWrap.title = j.last.detail;
@@ -477,7 +552,7 @@
         paintStatus(j.id);
         try {
           const resp = await api.post('/api/scheduler/jobs/' + encodeURIComponent(j.id) + '/run');
-          _toast('已排入執行', 'ok', j.id + ' #' + ((resp && resp.run_id) || '?'));
+          _toast('已排入執行', 'ok', jobLabel(j.id, j.desc) + runNo(resp));
           startPolling();  // advance 執行中 -> 成功/失敗 live, then stop when idle
         } catch (err) {
           _toast((err && err.message) || '執行失敗', 'fail', err && err.code);
@@ -577,6 +652,7 @@
     try {
       const resp = await api.get('/api/scheduler/runs', params);
       runs = (resp && resp.rows) || [];
+      rememberLabels(runs, 'job_id');
       if (runsPager) {
         runsPager.update({
           offset: runState.offset,
@@ -668,6 +744,9 @@
       return null;
     });
     jobs = (jobsResp && jobsResp.jobs) || [];
+    rememberLabels(jobs, 'id');
+    schedState = (jobsResp && jobsResp.scheduler) || null;
+    renderSchedBanner();
     renderJobs();
     initHistFilter();
     await refreshRuns();
@@ -685,6 +764,9 @@
     const jobsResp = await api.get('/api/scheduler/jobs').catch(() => null);
     if (jobsResp && jobsResp.jobs) {
       jobs = jobsResp.jobs;
+      rememberLabels(jobs, 'id');
+      schedState = jobsResp.scheduler || null;
+      renderSchedBanner();
       renderJobs();
       initHistFilter();  // job list unchanged in practice; preserves the active filter chip
       // Overlay live status onto the freshly-rendered rows; resume polling if a run is

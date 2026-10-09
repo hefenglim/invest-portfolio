@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, Query, Request
@@ -22,23 +22,24 @@ from pydantic import BaseModel
 from portfolio_dash.api import insight_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.api.routers.scheduler import get_scheduler
+from portfolio_dash.api.routers.scheduler import get_scheduler, insight_task_run_refusal
+from portfolio_dash.data_ingestion.store import list_instruments
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import evaluations_store as es
+from portfolio_dash.llm_insight import figure_check, official_templates, prompt_diff
 from portfolio_dash.llm_insight import insights_store as istore
-from portfolio_dash.llm_insight import official_templates
 from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.scheduler.jobs import (
     bind_insight_schedule,
     insight_job_id,
-    latest_run_unfinished,
     run_insight_func,
     start_insight_run,
     unbind_insight_schedule,
 )
 from portfolio_dash.scheduler.runtime import remove_job, reschedule_job
+from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.shared.wire import decimal_str, stored_decimal_str
 
 # Insight-type schedule bindings are Asia/Taipei by definition (spec 4.2 —
 # ``bind_insight_schedule``'s default); the live-trigger mount uses the same tz.
@@ -151,6 +152,10 @@ def _insight_type_wire(conn: sqlite3.Connection, it: cs.InsightType) -> dict[str
         "enabled": it.enabled,
         "horizon_days": it.horizon_days,
         "eval_prompt": it.eval_prompt,
+        # The official-pack provenance stamp (M3 fix): lets a read surface reach a preset's
+        # OWN task without matching the (renamable) name — the assistant drawer's 立即產生
+        # button keys on this, not on the string "持倉建議與提點" (W2).
+        "preset_key": it.preset_key,
         "schedule": _schedule_for(conn, it.id),
         "active_calibration_version": it.active_calibration_version,
         "calib_summary": None,  # populated by 04c
@@ -180,6 +185,27 @@ def _r1_violations(conn: sqlite3.Connection, scope: str, strategy_ids: list[int]
     return seen
 
 
+def _universe_refusal(universe: object) -> JSONResponse | None:
+    """422 for a universe that is none of the accepted shapes; None when it is one.
+
+    Owner 2026-09-30 (item 11): a list universe (``["2884"]``) used to be stored verbatim
+    and run as "follow holdings" — 13 cards for one symbol. Every door that takes a universe
+    (create / update on both prefixes, the draft preflight) answers here, before anything is
+    written or estimated. The shapes are defined once, in ``composer_store``; the message
+    names them in words and ``issues`` carries them machine-readable for an API client.
+    """
+    problem = cs.universe_shape_problem(universe)
+    if problem is None:
+        return None
+    return JSONResponse(
+        status_code=422,
+        content=error_body(
+            "validation_error", cs.universe_shape_message(problem), field="universe",
+            issues=[{"code": "universe_shape", "accepted": list(cs.UNIVERSE_SHAPES)}],
+        ),
+    )
+
+
 def _r1_error_response(tokens: list[str]) -> JSONResponse:
     issues = [{"code": "scope_violation", "token": t} for t in tokens]
     return JSONResponse(
@@ -195,10 +221,37 @@ def _r1_error_response(tokens: list[str]) -> JSONResponse:
 # --- strategy-prompts CRUD ----------------------------------------------------
 
 
+def _strategy_scope(body: str) -> str:
+    """The scope a strategy body REQUIRES: ``per_symbol`` if it uses any ``per_symbol``
+    variable, else ``portfolio``.
+
+    Derived from the SAME :func:`variables.validate_tokens` core that :func:`_r1_violations`
+    rejects with — a body this stamps ``per_symbol`` is exactly a body a non-``per_symbol``
+    insight_type is refused for, so a badge and a 422 can never disagree.
+
+    M7-04 (2026-09-03): the fact existed in TWO places and was served by neither. The
+    wizard's step-3 compatibility lock read ``t.scope`` off this list payload, which never
+    carried it — ``undefined !== 'per_symbol'`` is true for every template, so all five rows
+    rendered 「全組合」, nothing was ever locked, and an incompatible pick surfaced only as a
+    create-time 422 that names no template. Meanwhile ``web/settings-prompts.js`` re-derived
+    the same predicate in JS off its own variable registry (which is why THAT page was
+    right). Answering it here makes the server the one owner; the JS copy is a legacy second
+    site left untouched by this fix's scope lock, not a sanctioned duplicate.
+    """
+    return "per_symbol" if V.validate_tokens(body, "portfolio").scope_violations else "portfolio"
+
+
 @router.get("/strategy-prompts")
 def list_strategy_prompts(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+    """List the (non-archived) strategies, each stamped with the scope its body REQUIRES.
+
+    ``scope`` is ADDITIVE (M7-04) — every existing field keeps its name and type.
+    """
     cs.ensure_seeded(conn)
-    return [s.model_dump() for s in cs.list_strategies(conn)]
+    return [
+        {**s.model_dump(), "scope": _strategy_scope(s.body)}
+        for s in cs.list_strategies(conn)
+    ]
 
 
 @router.post("/strategy-prompts")
@@ -208,12 +261,19 @@ def create_strategy_prompt(
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     cs.ensure_seeded(conn)
-    sp = cs.create_strategy(conn, name=payload.name, body=payload.body, now=now)
+    sp = cs.create_strategy(
+        conn, name=payload.name, body=payload.body, now=now, source="create"
+    )
     return sp.model_dump()
 
 
 class FromTemplateIn(BaseModel):
     name: str  # the official template's name (official_templates.STRATEGY_TEMPLATES)
+    # W7 (AI-D37): "copy" (default) adds a fresh row; "replace" overwrites an EXISTING
+    # strategy's body with the official one so every task bound to that strategy id
+    # upgrades in place on its next run.
+    mode: Literal["copy", "replace"] = "copy"
+    strategy_id: int | None = None
 
 
 @router.post("/strategy-prompts/from-template")
@@ -226,6 +286,15 @@ def create_strategy_from_template(
 
     The copy is the user's own row (editing it never touches the library). A taken name
     gets an「（官方vX）」suffix so re-adding after customization is always possible.
+
+    ``mode="replace"`` (W7, AI-D37) instead overwrites an existing row's body in place:
+    the UI offers it as「同步官方 vX」when the row's name matches an official template and
+    its body has drifted. The name/archived gate is re-verified HERE — a replayed request
+    must not overwrite a row the owner renamed or archived. The overwrite is a VERSION
+    (DEF-033, source ``sync_official``): the body it replaces stays in the history and can be
+    restored, so 同步官方 no longer destroys the owner's edits. R1 (scope/token fit) is
+    deliberately NOT pre-validated — the run-time gate is the honest net, same seam
+    doctrine as the strategy PUT.
     """
     cs.ensure_seeded(conn)
     tpl = next(
@@ -237,6 +306,31 @@ def create_strategy_from_template(
             status_code=404,
             content=error_body("not_found", f"官方模板庫沒有：{payload.name}"),
         )
+    if payload.mode == "replace":
+        if payload.strategy_id is None:
+            return JSONResponse(
+                status_code=400,
+                content=error_body("validation_error", "replace 模式需要 strategy_id"),
+            )
+        existing = cs.get_strategy(conn, payload.strategy_id)
+        if existing is None:
+            return JSONResponse(
+                status_code=404,
+                content=error_body("not_found", f"未知策略提示詞：{payload.strategy_id}"),
+            )
+        if existing.archived or existing.name != tpl["name"]:
+            return JSONResponse(
+                status_code=409,
+                content=error_body(
+                    "conflict", "策略名稱與官方模板不符（或已封存），已拒絕覆寫"
+                ),
+            )
+        sp = cs.update_strategy(
+            conn, existing.id, name=existing.name, body=tpl["body"],
+            enabled=existing.enabled, now=now, source="sync_official",
+        )
+        assert sp is not None  # just fetched above
+        return sp.model_dump()
     taken = {s.name for s in cs.list_strategies(conn)}
     name = tpl["name"]
     if name in taken:
@@ -245,7 +339,9 @@ def create_strategy_from_template(
         while name in taken:
             name = f"{tpl['name']}（官方{tpl['version']}·{n}）"
             n += 1
-    sp = cs.create_strategy(conn, name=name, body=tpl["body"], now=now)
+    sp = cs.create_strategy(
+        conn, name=name, body=tpl["body"], now=now, source="official_copy"
+    )
     return sp.model_dump()
 
 
@@ -259,7 +355,7 @@ def update_strategy_prompt(
     cs.ensure_seeded(conn)
     sp = cs.update_strategy(
         conn, strategy_id, name=payload.name, body=payload.body,
-        enabled=payload.enabled, now=now,
+        enabled=payload.enabled, now=now, source="user_save",
     )
     if sp is None:
         return JSONResponse(
@@ -293,6 +389,158 @@ def delete_strategy_prompt(
     return {"id": strategy_id, "outcome": outcome}
 
 
+# --- strategy-prompt version history (DEF-033) -----------------------------------
+# Owner ruling 2026-09-24: every save keeps a version; the owner can read any version, see
+# what changed, and restore ANY version (a restore is itself a new version — history is
+# never rewritten). The routes live under their own ``/strategy-prompt-versions`` prefix so
+# the action log can label the one write here (restore) without the ``/strategy-prompts``
+# prefix row claiming it as 「策略模板新增」 (``api/action_log.py`` matches by prefix).
+
+
+def _version_meta(v: cs.StrategyVersion, current: int | None) -> dict[str, Any]:
+    """The list/detail view of one version (no body). ``source_label`` is zh, server-owned."""
+    return {
+        "id": v.id,
+        "strategy_id": v.strategy_id,
+        "version": v.version,
+        "name": v.name,
+        "source": v.source,
+        "source_label": cs.VERSION_SOURCE_LABELS.get(v.source, v.source),
+        "restored_from": v.restored_from,
+        "saved_at": v.saved_at,
+        "chars": len(v.body),
+        "lines": len(v.body.splitlines()),
+        "is_current": current is not None and v.version == current,
+    }
+
+
+def _unknown_version(version_id: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content=error_body("not_found", f"未知策略提示詞版本：{version_id}"),
+    )
+
+
+@router.get("/strategy-prompt-versions")
+def list_strategy_prompt_versions(
+    strategy_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """A strategy's whole version history, newest first (DEF-033)."""
+    cs.ensure_seeded(conn)
+    sp = cs.get_strategy(conn, strategy_id)
+    if sp is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知策略提示詞：{strategy_id}"),
+        )
+    return {
+        "strategy_id": sp.id,
+        "name": sp.name,
+        "archived": sp.archived,
+        "current_version": sp.current_version,
+        "versions": [
+            _version_meta(v, sp.current_version) for v in cs.list_versions(conn, sp.id)
+        ],
+    }
+
+
+@router.get("/strategy-prompt-versions/{version_id}")
+def get_strategy_prompt_version(
+    version_id: int, conn: sqlite3.Connection = Depends(get_conn)
+) -> Any:
+    """One version, with its full body (DEF-033)."""
+    cs.ensure_seeded(conn)
+    v = cs.get_version(conn, version_id)
+    if v is None:
+        return _unknown_version(version_id)
+    sp = cs.get_strategy(conn, v.strategy_id)
+    current = sp.current_version if sp is not None else None
+    return {**_version_meta(v, current), "body": v.body}
+
+
+@router.get("/strategy-prompt-versions/{version_id}/diff")
+def diff_strategy_prompt_version(
+    version_id: int,
+    against: str = "current",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """Line diff between this version and another of the SAME strategy (DEF-033).
+
+    ``against`` = ``current`` (default — the strategy's newest version), ``previous`` (the
+    version saved just before this one: what that save changed) or another version's id.
+    The diff always reads CHRONOLOGICALLY — ``from`` is the lower version number, ``to``
+    the higher — so ``del`` lines are text the later version dropped and ``add`` lines text
+    it introduced. ``previous`` of version 1 has no ``from``: every line reads as added.
+    """
+    cs.ensure_seeded(conn)
+    v = cs.get_version(conn, version_id)
+    if v is None:
+        return _unknown_version(version_id)
+    sp = cs.get_strategy(conn, v.strategy_id)
+    current = sp.current_version if sp is not None else None
+    other: cs.StrategyVersion | None
+    if against == "current":
+        other = cs.latest_version(conn, v.strategy_id)
+    elif against == "previous":
+        other = cs.get_version_by_number(conn, v.strategy_id, v.version - 1)
+    else:
+        try:
+            other_id = int(against)
+        except ValueError:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", f"against 非有效值：{against}", field="against"))
+        other = cs.get_version(conn, other_id)
+        if other is None:
+            return _unknown_version(other_id)
+        if other.strategy_id != v.strategy_id:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", "只能比對同一則策略提示詞的版本", field="against"))
+    if other is None:  # "previous" of version 1 (or a strategy with one version)
+        older, newer = None, v
+    elif other.version <= v.version:
+        older, newer = other, v
+    else:
+        older, newer = v, other
+    diff = prompt_diff.line_diff(older.body if older is not None else "", newer.body)
+    return {
+        "from": _version_meta(older, current) if older is not None else None,
+        "to": _version_meta(newer, current),
+        "identical": older is not None and diff.identical,
+        "added": diff.added,
+        "removed": diff.removed,
+        "lines": [ln.model_dump() for ln in diff.lines],
+    }
+
+
+@router.post("/strategy-prompt-versions/{version_id}/restore")
+def restore_strategy_prompt_version(
+    version_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Make an old version's body current again — as a NEW version (DEF-033).
+
+    ``changed`` is False when the chosen body already is the current one (nothing written,
+    no version added). An archived strategy is refused with 409.
+    """
+    cs.ensure_seeded(conn)
+    try:
+        outcome = cs.restore_version(conn, version_id, now=now)
+    except cs.RestoreRefusedError as exc:
+        return JSONResponse(status_code=409, content=error_body("conflict", exc.reason))
+    if outcome is None:
+        return _unknown_version(version_id)
+    sp, changed = outcome
+    chosen = cs.get_version(conn, version_id)
+    assert chosen is not None  # restore_version just read it
+    return {
+        "strategy": {**sp.model_dump(), "scope": _strategy_scope(sp.body)},
+        "changed": changed,
+        "restored_from": chosen.version,
+        "current_version": sp.current_version,
+    }
+
+
 # --- insight-types CRUD -------------------------------------------------------
 
 
@@ -309,6 +557,9 @@ def create_insight_type(
     now: datetime = Depends(get_now),
 ) -> Any:
     cs.ensure_seeded(conn)
+    refusal = _universe_refusal(payload.universe)
+    if refusal is not None:
+        return refusal
     violations = _r1_violations(conn, payload.scope, payload.strategy_ids)
     if violations:
         return _r1_error_response(violations)
@@ -340,6 +591,9 @@ def update_insight_type(
             status_code=404,
             content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
         )
+    refusal = _universe_refusal(payload.universe)
+    if refusal is not None:
+        return refusal
     violations = _r1_violations(conn, payload.scope, payload.strategy_ids)
     if violations:
         return _r1_error_response(violations)
@@ -415,17 +669,32 @@ def enable_official_pack(
         sp = strategies_by_name.get(tpl["name"])
         strategy_reused = sp is not None
         if sp is None:
-            sp = cs.create_strategy(conn, name=tpl["name"], body=tpl["body"], now=now)
+            sp = cs.create_strategy(
+                conn, name=tpl["name"], body=tpl["body"], now=now, source="official_copy"
+            )
             strategies_by_name[sp.name] = sp
         it = cs.create_insight_type(
             conn, name=preset["name"], scope=preset["scope"],
             use_system_prompt=preset["use_system_prompt"],
             self_correct=preset["self_correct"],
-            universe=None, alert_rules=None, enabled=True,
+            universe=None,
+            # Event-driven presets (scope "on_alert") carry their alert subscription; the
+            # scheduled ones carry none. AI-D12: the 提點 preset is created ENABLED like every
+            # other pack member — the deliberate override of the on_alert default-off rule,
+            # scoped to the official pack so a hand-created on_alert task still defaults off.
+            alert_rules=preset.get("alert_rules"), enabled=True,
             horizon_days=preset["horizon_days"], eval_prompt=None,
             preset_key=preset["preset_key"], now=now,
         )
         cs.set_strategies(conn, it.id, [(sp.id, 0)])
+        # An on_alert preset is event-triggered (spec 03): no cron to bind, and
+        # mount_schedule would 400 it. Only the scheduled presets take a schedule.
+        if preset["scope"] == "on_alert":
+            created.append({
+                "id": it.id, "name": it.name, "cron": None,
+                "strategy": sp.name, "strategy_reused": strategy_reused,
+            })
+            continue
         job_id = bind_insight_schedule(conn, it.id, cron=preset["suggested_cron"])
         cs.set_job_id(conn, it.id, job_id)
         # H1 fix: mount the live trigger now (was: only loaded at restart).
@@ -468,7 +737,7 @@ def mount_schedule(
         return JSONResponse(
             status_code=400,
             content=error_body(
-                "validation_error", "on_alert 洞察組合由預警事件觸發，不可排程",
+                "validation_error", "預警觸發任務由預警事件啟動，不可排程",
                 field="cron",
             ),
         )
@@ -517,7 +786,11 @@ def set_active_calibration(
 ) -> Any:
     """Manually select (or clear with null) the active calibration version.
 
-    A non-null version must exist (non-archived) for this insight_type, else 400.
+    The 校正版本鏈's 「設為生效」 / 「取消生效」 (R6 DEF-071 — the route had no caller, so a
+    lone v1, or a winning shadow with auto_promote off, could never be adopted). ``null``
+    goes back to no calibration layer. A non-null version must exist and be live for this
+    insight_type, else 400 — an archived one says so, since it is still listed under 「顯示
+    已封存」.
     """
     cs.ensure_seeded(conn)
     if cs.get_insight_type(conn, insight_type_id) is None:
@@ -526,17 +799,20 @@ def set_active_calibration(
             content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
         )
     if payload.version is not None:
-        existing = {
-            c.version for c in cs.list_calibrations(conn, insight_type_id)
+        chain = {
+            c.version: c
+            for c in cs.list_calibrations(conn, insight_type_id, include_archived=True)
         }
-        if payload.version not in existing:
+        found = chain.get(payload.version)
+        if found is None or found.archived:
+            msg = (
+                f"校正版本 v{payload.version} 已封存，不能設為生效"
+                if found is not None
+                else f"該洞察組合無校正版本 {payload.version}"
+            )
             return JSONResponse(
                 status_code=400,
-                content=error_body(
-                    "validation_error",
-                    f"該洞察組合無校正版本 {payload.version}",
-                    field="version",
-                ),
+                content=error_body("validation_error", msg, field="version"),
             )
     cs.set_active_calibration(conn, insight_type_id, payload.version)
     return {"id": insight_type_id, "active_calibration_version": payload.version}
@@ -551,9 +827,27 @@ def list_calibrations(
     include_archived: bool = False,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> list[dict[str, Any]]:
+    """The task's calibration chain, oldest first (spec 4.7), for the drawer's ④.
+
+    Each version also carries ``is_active`` and ``shadow`` — the shadow version's
+    :class:`~portfolio_dash.api.insight_service.ShadowState` wire (phase / scored of needed /
+    queue position / both versions' own records), ``null`` on every other version — so the
+    chain can mark a WINNING shadow and say 「影子排隊中」 without computing anything (R6
+    DEF-070/071). Read-only.
+    """
     cs.ensure_seeded(conn)
     rows = cs.list_calibrations(conn, insight_type, include_archived=include_archived)
-    return [c.model_dump() for c in rows]
+    it = cs.get_insight_type(conn, insight_type)
+    state = insight_service.shadow_state(conn, it) if it is not None else None
+    out: list[dict[str, Any]] = []
+    for c in rows:
+        wire = c.model_dump()
+        wire["is_active"] = it is not None and it.active_calibration_version == c.version
+        wire["shadow"] = (
+            state.wire() if state is not None and state.version == c.version else None
+        )
+        out.append(wire)
+    return out
 
 
 @router.post("/calibrations/{calibration_id}/archive")
@@ -608,13 +902,66 @@ def get_ai_score(
     kept in ``rows`` for the promotion view. Empty DB → zeroed/[] (CSV export is a frontend
     concern over this payload). WPE (2026-07-07): the previously-unbounded ``rows`` pages
     via ``limit``/``offset`` (+ ``rows_total_count``); the aggregates stay whole-set.
+
+    M7-03 (2026-09-03) — **the DISPLAY GATE ships with the aggregate, not with one page.**
+    ``by_combo`` has carried ``min_samples``/``resolved_n``/``gate_open`` since W7 (AI-D36);
+    ``totals`` never did, so the 戰績 band printed 「量化命中率 66.67%」 over THREE rows in the
+    same `#score-band` whose next card honestly read 「樣本不足 3／8」. The arithmetic was
+    right; the disclosure was absent. Fixing the band alone fixes one consumer, so the flags
+    are attached HERE, in exactly ``by_combo``'s field shape:
+
+    * ``min_samples`` / ``resolved_n`` / ``gate_open`` — below the gate a consumer must say
+      「資料不足」 and print no percentage (the same red line as "a stale price is labelled,
+      never guessed").
+    * ``quant_n`` — the DENOMINATOR. ``_ratio_str`` returns the bare string ``"0"`` when the
+      denominator is 0, which is indistinguishable from a real 0% hit rate; ``by_combo`` was
+      always readable because it carries ``quant_n`` beside the rate, and ``totals`` now is
+      too. This matters ABOVE the gate as well (8 narrative-only rows → ``quant_hit_rate``
+      ``"0"`` with ``quant_n`` 0).
+
+    Purely ADDITIVE: ``n``/``miss_rate``/``quant_hit_rate``/``avg_narrative`` keep their
+    existing names and types (Decimal strings — the wire contract), and the numbers
+    themselves come from ``evaluations_store`` unchanged.
+
+    DEF-081 (owner ruling 2026-09-26): every ``by_combo`` entry and every ``rows`` item also
+    carries ``insight_type_label`` — the task's NAME, which the 戰績 page prints instead of
+    「任務 #2」 (a number the owner cannot map to anything on the page). Additive as well.
     """
     es.ensure_tables(conn)
     cs.ensure_seeded(conn)
-    return es.ai_score(
-        conn, exclude_type_ids=cs.archived_type_ids(conn),
+    min_samples = int(cs.get_evolution_config(conn)["min_samples"])
+    payload = es.ai_score(
+        conn, min_samples=min_samples,
+        exclude_type_ids=cs.archived_type_ids(conn),
         rows_limit=limit, rows_offset=offset,
     )
+    totals = payload["totals"]
+    totals["min_samples"] = min_samples
+    totals["resolved_n"] = totals["n"]
+    totals["gate_open"] = totals["n"] >= min_samples
+    # The same expression ``ai_score`` sums its own ``total_quant_n`` from, over the same
+    # already-returned per-combo counts — a re-read of one definition, not a second one.
+    totals["quant_n"] = sum(int(c["quant_n"]) for c in payload["by_combo"])
+    tasks = {it.id: it for it in cs.list_insight_types(conn, include_archived=True)}
+    for item in [*payload["by_combo"], *payload["rows"]]:
+        item["insight_type_label"] = _task_label(int(item["insight_type_id"]), tasks)
+    return payload
+
+
+def _task_label(task_id: int, tasks: dict[int, cs.InsightType]) -> str:
+    """How the 戰績 page names a task (DEF-081): its name; a deleted task says so.
+
+    The same three cases as the 排程中心's ``insight:<id>`` rows
+    (``api/routers/scheduler.py::_insight_label``) without that page's 「AI 洞察任務」 prefix —
+    every row here is one. An archived task's rows leave the displayed aggregate but stay in
+    the table (spec 4.1), so it keeps its name; a task whose row is gone has only its id.
+    """
+    task = tasks.get(task_id)
+    if task is None:
+        return f"任務 #{task_id}（已刪除）"
+    if task.archived:
+        return f"{task.name}（已刪除）"
+    return task.name
 
 
 # --- evolution-config (spec 4.6) ----------------------------------------------
@@ -684,30 +1031,12 @@ def run_insight_now(
     dispatches the registered insight runner in a daemon thread. Mirrors spec-15 ``/run``:
     progress is polled via ``GET /api/insight-types/{id}/runs`` (running/ok/error/skipped).
     A disabled or archived task rejects with 409 (H2 fix, decision Q2a — ``get_insight_type``
-    returns archived rows, which is how an archived re-run used to slip through).
+    returns archived rows, which is how an archived re-run used to slip through). The
+    refusal is THE one the 排程中心's run-now door uses too (DEF-030).
     """
-    cs.ensure_seeded(conn)
-    it = cs.get_insight_type(conn, insight_type_id)
-    if it is None:
-        return JSONResponse(
-            status_code=404,
-            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
-        )
-    if it.archived:
-        return JSONResponse(
-            status_code=409,
-            content=error_body("task_archived", "任務已刪除，無法執行"),
-        )
-    if not it.enabled:
-        return JSONResponse(
-            status_code=409,
-            content=error_body("task_disabled", "任務已停用，請先啟用再執行"),
-        )
-    if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
-        return JSONResponse(
-            status_code=409,
-            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
-        )
+    refusal = insight_task_run_refusal(conn, insight_type_id)
+    if refusal is not None:
+        return refusal
     run_id = start_insight_run(conn, insight_type_id, now=now)
     thread = threading.Thread(
         target=run_insight_func,
@@ -729,7 +1058,7 @@ def _insight_run_row(row: sqlite3.Row) -> dict[str, Any]:
         "status": row["status"],
         "detail": row["detail"],
         "reason": row["reason"],
-        "cost_usd": row["cost_usd"],
+        "cost_usd": stored_decimal_str(row["cost_usd"]),  # canonical (a row can hold 9E-8)
     }
 
 
@@ -803,6 +1132,12 @@ def insight_task_preflight(
         # all-defaults draft (strategy_ids=[]) silently shadows the saved combo and
         # every gate reports a bogus R3 "no live templates".
         draft = None
+    if draft is not None:
+        # Owner 2026-09-30 (item 11): the wizard's dry run is a universe door too — a list
+        # universe here estimated the holdings-wide run the verifier then paid for.
+        refusal = _universe_refusal(draft.universe)
+        if refusal is not None:
+            return refusal
     payload = insight_service.build_preflight(
         conn, insight_type_id, now=now, reporting=reporting, draft=draft,
     )
@@ -845,7 +1180,104 @@ def insight_task_diagnose(
 # --- stored cards list (spec 4.10) --------------------------------------------
 
 
-def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
+class _KnownInstruments(NamedTuple):
+    """The registry as the M9 symbol check reads it: every symbol and every name."""
+
+    symbols: set[str]
+    names: set[str]
+
+
+def _known_instruments(conn: sqlite3.Connection) -> _KnownInstruments:
+    """Every registered instrument symbol and name — the M9 figure check's "is this a real
+    instrument?".
+
+    Names since DEF-082 (functional-test R8, 2026-09-27): card #209 wrote 「3008 (LARGAN)」,
+    3008's registered name, and the symbols-only check called it 「未知代碼…可能是模型幻覺」.
+    Computed ONCE per request and threaded into :func:`_card_wire` (trap #21): the list
+    endpoint serializes up to 500 cards, and re-reading ``instruments`` per card would pay
+    for the same table 500 times.
+    """
+    instruments = list_instruments(conn)
+    return _KnownInstruments(
+        symbols={i.symbol for i in instruments},
+        names={i.name for i in instruments if i.name.strip()},
+    )
+
+
+def _figure_flags(rec: istore.InsightRecord, known: _KnownInstruments) -> dict[str, Any]:
+    """The M9 read-time figure check for one card (never blocks, never hides).
+
+    Compares what the card PRINTS against the numbers it was FED. Measured on cached cards
+    (audit 2026-09-16): 「未實現獲利 429.1 萬美元」 beside a sibling card's 「未實現收益
+    4,290.80 美元」 from the same batch (×1000), and a card naming 「LRDIM (6883)」 — a code
+    held nowhere. The logic is the pure ``llm_insight.figure_check``; this router only
+    feeds it and serializes (no business logic in routers).
+
+    The population is ``prompt_figures`` (M9 re-verification 2026-09-17). ``input_snapshot``
+    is the fallback ONLY so a row whose snapshot genuinely is JSON with numbers still gets
+    checked; on every real row it is the ``"<date>|<target>"`` fingerprint tag, which the
+    check reports as ``snapshot: "none"`` — the state the audit's #37 card now shows
+    instead of a silent clean ``[]``.
+
+    The card's own stored ``prediction`` and ``confidence`` join the population (second
+    re-verification 2026-09-17): a body echoing 「target_pct: 0.05」 is quoting the
+    card's forecast, which is the one number the model legitimately originates.
+    ``stated_confidence`` is the value AS STORED (DEF-003 hides it from every display of a
+    prediction-less card, but the model still printed it — quoting it is not a fabrication).
+    """
+    pred = rec.card.prediction
+    flags = figure_check.check_figures(
+        f"{rec.card.title}\n{rec.card.summary}\n{rec.card.body_md}",
+        rec.prompt_figures if rec.prompt_figures else rec.input_snapshot,
+        known.symbols,
+        known_names=known.names,
+        own_figures=figure_check.card_own_figures(
+            target_pct=pred.target_pct if pred is not None else None,
+            horizon_days=pred.horizon_days if pred is not None else None,
+            confidence=rec.stated_confidence,
+        ),
+    )
+    return flags.model_dump()
+
+
+def _trigger_wire(trigger: istore.InsightTrigger | None) -> dict[str, Any] | None:
+    """DEF-037: what produced the card — the page renders 「由預警「<規則>」觸發」 from it.
+
+    ``rule_label`` is resolved here from the ONE rule-name table (``shared.alert_rule_names``,
+    DEF-062). An id nobody named reads 「未命名規則」, never the id itself. ``None`` for a
+    legacy card: it claims no trigger rather than a guessed one.
+    """
+    if trigger is None:
+        return None
+    wire = trigger.model_dump()
+    wire["rule_label"] = rule_name(trigger.rule) if trigger.rule is not None else None
+    return wire
+
+
+def _prompt_versions_wire(rec: istore.InsightRecord) -> list[dict[str, Any]] | None:
+    """DEF-033: the strategy-prompt version(s) the card was generated with.
+
+    ``None`` = the card predates the record (the page prints 「生成時版本未記錄」); ``[]`` = no
+    prompt was assembled (the zero-LLM anomaly card); otherwise one entry per strategy layer.
+    """
+    if rec.strategy_versions is None:
+        return None
+    return [r.model_dump() for r in rec.strategy_versions]
+
+
+def _system_prompt_wire(rec: istore.InsightRecord) -> dict[str, Any] | None:
+    """DEF-057: the system-prompt layer the card was generated with.
+
+    ``None`` = the card predates the record; ``{"used": false, "version": null}`` = no system
+    layer was assembled (the task's 套用系統提示詞 is off, or the zero-LLM anomaly card);
+    otherwise ``used`` true and the version of the body that was (null = 版本不明).
+    """
+    if rec.system_prompt_ref is None:
+        return None
+    return rec.system_prompt_ref.model_dump()
+
+
+def _card_wire(rec: istore.InsightRecord, known: _KnownInstruments) -> dict[str, Any]:
     pred = rec.card.prediction
     return {
         "id": rec.id,
@@ -870,6 +1302,14 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
             if pred is not None
             else None
         ),
+        # M7-08: the stored prediction could not be read back → prediction is None above
+        # and the page draws a 待釐清 pill instead of a confidence chip. Flagged, not hidden.
+        "unreadable": rec.unreadable,
+        # M9: the read-time figure check's two capped lists + its `snapshot` state. Always
+        # present; the page renders 「數值待核」 / 「未知代碼」 by which list is filled, and a
+        # muted 「無快照可核」 when `snapshot == "none"` (a pre-2026-09-17 card that prints
+        # figures nothing was recorded to check against).
+        "figure_flags": _figure_flags(rec, known),
         "horizon_days": rec.horizon_days,
         "due_at": rec.due_at,
         "model": rec.model,
@@ -877,6 +1317,9 @@ def _card_wire(rec: istore.InsightRecord) -> dict[str, Any]:
         "tokens_in": rec.tokens_in,
         "tokens_out": rec.tokens_out,
         "created_at": rec.created_at,
+        "trigger": _trigger_wire(rec.trigger),
+        "prompt_versions": _prompt_versions_wire(rec),
+        "system_prompt_version": _system_prompt_wire(rec),
     }
 
 
@@ -915,6 +1358,7 @@ def list_insights(
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"group 非有效值：{group}", field="group"))
     excluded = cs.archived_type_ids(conn)
+    known = _known_instruments(conn)  # once per request, not once per card
     if group == "symbol":
         groups, total_symbols = istore.list_symbol_groups(
             conn, history_limit=history_limit, limit=limit, offset=offset,
@@ -922,7 +1366,11 @@ def list_insights(
         )
         return {
             "groups": [
-                {"symbol": sym, "total": total, "cards": [_card_wire(c) for c in cards]}
+                {
+                    "symbol": sym,
+                    "total": total,
+                    "cards": [_card_wire(c, known) for c in cards],
+                }
                 for sym, total, cards in groups
             ],
             "total_count": total_symbols,
@@ -931,7 +1379,7 @@ def list_insights(
             "history_limit": history_limit,
         }
     rows = [
-        _card_wire(rec)
+        _card_wire(rec, known)
         for rec in istore.list_cards(
             conn, insight_type_id=insight_type, symbol=symbol,
             exclude_type_ids=excluded, scope=scope, limit=limit, offset=offset,

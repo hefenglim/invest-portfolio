@@ -8,24 +8,60 @@ a cache hit (zero LLM, spec 04.10). ``due_at`` is the prediction maturity date (
 calendar-day horizon from the card's prediction, overriding the task default); a
 pure-narrative card has no prediction → ``due_at`` is NULL.
 
-Pure persistence over its own table: stdlib + pydantic + ``llm_insight.cards`` only (NOT
+Pure persistence over its own table: stdlib + pydantic + ``llm_insight.cards`` /
+``llm_insight.composer_store`` (the strategy-version ref a card records, DEF-033) only (NOT
 pricing / data_ingestion / api / scheduler — ``architecture.md``). No money in float —
 ``cost_usd`` and ``target_pct`` persist as canonical Decimal strings via the wire encoder.
 """
 
 import hashlib
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from portfolio_dash.llm_insight.cards import InsightCard, Prediction
+from portfolio_dash.llm_insight.composer_store import StrategyVersionRef
+from portfolio_dash.llm_insight.system_prompt import SystemPromptRef
+from portfolio_dash.shared.money import to_db
 from portfolio_dash.shared.wire import to_wire
 
+logger = logging.getLogger(__name__)
+
 HorizonBasis = Literal["trading_days", "calendar_days"]
+
+# DEF-037 (2026-09-23): what produced a card. ``alert`` = an on_alert dispatch of one fired
+# alert event; ``schedule`` = a cron fire of the task's binding; ``manual`` = 立即執行 from the
+# task door or the 排程中心. Every generation door states it (scheduler/jobs.py::
+# _execute_insight + llm_insight/alerts_bridge.py::dispatch_alert_events_ex).
+TriggerSource = Literal["alert", "schedule", "manual"]
+
+
+class InsightTrigger(BaseModel):
+    """The provenance of one card (DEF-037) — stored as ``insights.trigger_json``.
+
+    Measured on the demo: an alert card for 2884 was titled 「RSI過熱警示」 while the alert that
+    fired was ``target_cross``, and nothing on the card or in the API said which alert it was.
+    For an ``alert`` trigger every field below is the rule engine's own record of the event —
+    ``alert_id`` is the ``alert_events`` row, ``title`` / ``detail`` are the computed text the
+    bell showed — so a card can always be traced back to the event that produced it. ``scope``
+    is what the alert is about (``symbol`` / ``portfolio`` reach a card; ``account`` /
+    ``sector`` / ``currency`` never do) and ``subject`` is its key (the symbol, for a
+    symbol alert). The non-alert sources carry ``source`` only.
+    """
+
+    source: TriggerSource
+    rule: str | None = None
+    alert_id: int | None = None
+    fired_at: str | None = None
+    scope: str | None = None
+    subject: str | None = None
+    title: str | None = None
+    detail: str | None = None
 
 
 class InsightRecord(BaseModel):
@@ -48,10 +84,51 @@ class InsightRecord(BaseModel):
     # Loop-2 scores from THIS baseline instead of the first close AFTER create (a number
     # the model never reasoned about). Decimal STRING; None for legacy/portfolio cards.
     price_at_create: str | None = None
+    # ⑫c / AI-D38 — the confidence ceiling the anchoring law computed for THIS card at
+    # generation time. Stamped here for the same reason as price_at_create: it is derived
+    # from calibration bins that keep moving, so it is unrecoverable after the fact, and
+    # an evaluation row (written a horizon later) is the wrong place for a create-time
+    # fact. None on legacy cards and whenever backtest_json was unavailable — those cards
+    # were never governed by a ceiling and must not be counted as having obeyed one.
+    ceiling_at_create: int | None = None
     # Per-card token usage (AI attribution, 2026-07-07): one LLM call = one card, so the
     # call's usage maps 1:1. Zero for legacy cards (the UI omits the token segment then).
     tokens_in: int = 0
     tokens_out: int = 0
+    # M9 re-verification (2026-09-17): the numbers the model was FED — every numeric token
+    # of the exact prompt that produced this card, as a JSON list of strings
+    # (``figure_check.prompt_figures_json``). The read-time figure check's comparison
+    # population. Empty on every card generated before the column existed, which the check
+    # reports as its own ``"none"`` state, never as clean. Stored in its OWN column on
+    # purpose: ``input_snapshot`` feeds the cache fingerprint and the Loop-2 master prompt,
+    # and was found to hold only the ``"<date>|<target>"`` fallback tag on 149/149 demo rows.
+    prompt_figures: str = ""
+    # DEF-037 (2026-09-23): what produced this card — an alert (with the event's rule, id and
+    # text), the task's schedule, or a manual run. None on every card written before the
+    # column existed: a legacy card claims no trigger rather than a guessed one.
+    trigger: InsightTrigger | None = None
+    # DEF-033 (owner ruling 2026-09-24): the strategy-prompt version of every strategy layer
+    # the card's prompt was built from (``[]`` = no prompt was used — the zero-LLM anomaly
+    # card). None on every card written before the column existed: the page reads
+    # 「生成時版本未記錄」, never a version guessed from today's history.
+    strategy_versions: list[StrategyVersionRef] | None = None
+    # DEF-057 (owner ruling 2026-09-24): the system-prompt layer the card's prompt was built
+    # with — ``used`` False when none was assembled, else the version of the body that was.
+    # None on every card written before the column existed (「生成時版本未記錄」).
+    system_prompt_ref: SystemPromptRef | None = None
+    # DEF-003 (owner ruling 2026-09-24): the confidence AS STORED, before the read-time rule
+    # that a card without a prediction carries none (``card.confidence``). Only the figure
+    # check reads it — the number is still one the model itself printed, so a body quoting it
+    # is not an unverified figure. Every display / scoring consumer reads ``card.confidence``.
+    stated_confidence: int | None = None
+    # M7-08 (owner ruling, option C, 2026-09-06): True when the stored ``prediction`` blob
+    # could not be read back through the card schema (a required field the schema grew
+    # later, a narrowed Literal, a corrupt blob, a NULLed confidence). The card is then
+    # served with ``prediction=None`` and its title/summary intact, and every consumer
+    # draws a 待釐清 pill — the same flag-never-hide posture as ``oversold`` /
+    # ``unbookable_dividend`` (``domain-ledger.md``). Before this, one such row raised out
+    # of every list read and took ``GET /api/dashboard`` down with it.
+    unreadable: bool = False
 
 
 _DDL = """
@@ -74,7 +151,8 @@ CREATE TABLE IF NOT EXISTS insights (
     model TEXT NOT NULL,
     cost_usd TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    price_at_create TEXT
+    price_at_create TEXT,
+    ceiling_at_create INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_insights_fingerprint ON insights (fingerprint);
 CREATE INDEX IF NOT EXISTS idx_insights_type_symbol ON insights (insight_type_id, symbol);
@@ -99,9 +177,27 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
     # M4 fix (decision Q1c, 2026-07-07): additive migration — the seen-at-create price.
     _add_column_if_missing(conn, "insights", "price_at_create", "TEXT")
+    # ⑫c (AI-D38, 2026-08-26): additive migration — the ceiling this card was handed.
+    # NULLABLE with no default ON PURPOSE: existing rows must read "no ceiling recorded",
+    # never "ceiling 0", which would make every historical card a violation.
+    _add_column_if_missing(conn, "insights", "ceiling_at_create", "INTEGER")
     # AI attribution (2026-07-07): per-card token usage for the unified model/token/cost line.
     _add_column_if_missing(conn, "insights", "tokens_in", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "insights", "tokens_out", "INTEGER NOT NULL DEFAULT 0")
+    # M9 re-verification (2026-09-17): additive migration — the fed numbers the figure
+    # check compares against. DEFAULT '' so every existing row reads "no population
+    # recorded" (the check's "none" state), never as an empty-but-checked population.
+    _add_column_if_missing(conn, "insights", "prompt_figures", "TEXT NOT NULL DEFAULT ''")
+    # DEF-037 (2026-09-23): additive migration — the card's trigger (InsightTrigger JSON).
+    # NULLABLE: every existing row reads "trigger not recorded", never a guessed source.
+    _add_column_if_missing(conn, "insights", "trigger_json", "TEXT")
+    # DEF-033 (2026-09-24): additive migration — the strategy versions the card was built
+    # from (JSON list of StrategyVersionRef). NULLABLE: an existing row reads "not recorded".
+    _add_column_if_missing(conn, "insights", "strategy_versions", "TEXT")
+    # DEF-057 (2026-09-25): additive migration — the system-prompt layer the card was built
+    # with (SystemPromptRef JSON). NULLABLE: an existing row reads "not recorded". NOT part of
+    # the cache fingerprint — the assembled prompt that is already in it contains the body.
+    _add_column_if_missing(conn, "insights", "system_prompt_ref", "TEXT")
     conn.commit()
 
 
@@ -185,16 +281,36 @@ def add_card(
     is_shadow: bool = False,
     horizon_basis: HorizonBasis = "trading_days",
     price_at_create: Decimal | None = None,
+    ceiling_at_create: int | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    prompt_figures: str = "",
+    trigger: InsightTrigger | None = None,
+    strategy_versions: list[StrategyVersionRef] | None = None,
+    system_prompt_ref: SystemPromptRef | None = None,
 ) -> InsightRecord:
     """Append one generated card; compute ``due_at``; return the stored record.
+
+    ``prompt_figures`` (M9, 2026-09-17) is the JSON list of numeric tokens in the prompt
+    the model was handed — ``figure_check.prompt_figures_json(prompt)`` at the LLM site.
+    Default ``""`` = no population recorded (the deterministic anomaly card, tests): the
+    figure check then reports ``snapshot="none"`` for a card that prints figures, so a
+    forgotten argument surfaces as a visible state rather than as a silent clean verdict.
 
     Append-only (spec 04 invariant): every run inserts a new row, never mutating history.
     ``cost_usd`` is stored as a canonical Decimal string. ``due_at`` is the prediction's
     maturity date (trading- or calendar-day horizon) or NULL for a narrative card.
     ``price_at_create`` (M4 fix) is the last close the model saw in its inputs — the
     Loop-2 scoring baseline; None when no close series was fed (portfolio/market card).
+    ``ceiling_at_create`` (⑫c) is the confidence ceiling the anchoring law handed this
+    card. It is RECORDED, never enforced — ``card.confidence`` is stored exactly as the
+    model stated it even when it exceeds the ceiling (AI-D33/AI-D38: a validator that
+    rewrote the model's own stated confidence would be the defect, not the fix).
+    ``trigger`` (DEF-037) is what produced the card; ``None`` stores NULL (tests, legacy).
+    ``strategy_versions`` (DEF-033) is the version of every strategy layer the prompt was
+    assembled from (``assemble.Assembly.strategy_versions``); ``None`` stores NULL.
+    ``system_prompt_ref`` (DEF-057) is the system layer of the same Assembly; ``None`` stores
+    NULL (tests, legacy).
     """
     due_at = _compute_due_at(
         card, horizon_days=horizon_days, now=now, horizon_basis=horizon_basis
@@ -203,8 +319,9 @@ def add_card(
         "INSERT INTO insights (insight_type_id, symbol, is_shadow, calibration_version, "
         "fingerprint, title, summary, body_md, tags, confidence, prediction, "
         "horizon_days, due_at, input_snapshot, model, cost_usd, created_at, "
-        "price_at_create, tokens_in, tokens_out) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "price_at_create, ceiling_at_create, tokens_in, tokens_out, prompt_figures, "
+        "trigger_json, strategy_versions, system_prompt_ref) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             insight_type_id,
             card.symbol,
@@ -221,11 +338,16 @@ def add_card(
             due_at,
             input_snapshot,
             model,
-            str(cost_usd),
+            to_db(cost_usd),  # canonical text, never str()'s 9E-8 form
             now.isoformat(),
             None if price_at_create is None else str(price_at_create),
+            ceiling_at_create,
             tokens_in,
             tokens_out,
+            prompt_figures,
+            None if trigger is None else trigger.model_dump_json(exclude_none=True),
+            _versions_json(strategy_versions),
+            None if system_prompt_ref is None else system_prompt_ref.model_dump_json(),
         ),
     )
     conn.commit()
@@ -234,24 +356,106 @@ def add_card(
     return rec
 
 
-def _card_from_row(row: sqlite3.Row) -> InsightCard:
-    prediction = (
-        Prediction.model_validate_json(row["prediction"])
-        if row["prediction"] is not None
-        else None
-    )
-    return InsightCard(
-        title=row["title"],
-        summary=row["summary"],
-        body_md=row["body_md"],
-        tags=json.loads(row["tags"]),
-        symbol=row["symbol"],
-        confidence=row["confidence"],
-        prediction=prediction,
-    )
+def _versions_json(refs: list[StrategyVersionRef] | None) -> str | None:
+    if refs is None:
+        return None
+    return json.dumps([r.model_dump() for r in refs], ensure_ascii=False)
+
+
+def _versions_from_row(row: sqlite3.Row) -> list[StrategyVersionRef] | None:
+    """The recorded strategy versions, or None (legacy / unreadable — never raises)."""
+    raw = row["strategy_versions"] if "strategy_versions" in row.keys() else None
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return [StrategyVersionRef.model_validate(x) for x in parsed]
+    except (ValueError, TypeError, ValidationError):
+        logger.warning("insight %s: stored strategy_versions is unreadable", row["id"])
+        return None
+
+
+def _system_ref_from_row(row: sqlite3.Row) -> SystemPromptRef | None:
+    """The recorded system-prompt layer, or None (legacy / unreadable — never raises)."""
+    raw = row["system_prompt_ref"] if "system_prompt_ref" in row.keys() else None
+    if raw is None:
+        return None
+    try:
+        return SystemPromptRef.model_validate_json(raw)
+    except (ValueError, TypeError, ValidationError):
+        logger.warning("insight %s: stored system_prompt_ref is unreadable", row["id"])
+        return None
+
+
+def _card_from_row(row: sqlite3.Row) -> tuple[InsightCard, bool]:
+    """Rebuild the card from its row → ``(card, unreadable)``.
+
+    The stored ``prediction`` blob is re-validated through ``Prediction`` and the
+    ``InsightCard`` validator on every read, so schema drift (the blob's shape has no
+    migration — ``ensure_tables`` only adds columns) or a corrupt blob used to raise here
+    and abort the whole list read. M7-08: such a row degrades to a narrative card with
+    ``unreadable=True`` — title/summary/confidence pass through as stored, the prediction
+    is dropped (never guessed at), and the row id is logged so the operator can find it.
+    Only the prediction blob is tolerated; the narrative columns are NOT NULL TEXT and
+    need no such guard.
+
+    DEF-003 (owner ruling 2026-09-24): ``prediction`` decides. A card stored WITHOUT a
+    prediction carries no confidence, whatever the column holds — it is a description, and a
+    confidence with nothing to be right or wrong about is not a confidence (measured on the
+    demo: 25 of 40 prediction-less cards stored one, and the page printed 「信心 0%」 for them).
+    The rule is applied HERE, on read, because cards are append-only: the stored value is
+    left as the model emitted it (``InsightRecord.stated_confidence``) and every consumer —
+    the page, the API, the scoring pass — reads the ruled value. A card whose prediction was
+    stored but cannot be read (``unreadable``) keeps its confidence: it HAD a prediction,
+    and M7-08 already renders it as 待釐清 rather than as a description.
+    """
+    narrative: dict[str, Any] = {
+        "title": row["title"],
+        "summary": row["summary"],
+        "body_md": row["body_md"],
+        "tags": json.loads(row["tags"]),
+        "symbol": row["symbol"],
+        "confidence": row["confidence"] if row["prediction"] is not None else None,
+    }
+    try:
+        prediction = (
+            Prediction.model_validate_json(row["prediction"])
+            if row["prediction"] is not None
+            else None
+        )
+        return InsightCard(**narrative, prediction=prediction), False
+    except ValidationError as exc:
+        reasons = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc']) or '<blob>'}: {e['msg']}"
+            for e in exc.errors()
+        )
+        logger.warning(
+            "insight %s: stored prediction is unreadable (%s) — served as 待釐清 "
+            "with prediction=None",
+            row["id"], reasons,
+        )
+        return InsightCard(**narrative, prediction=None), True
+
+
+def _trigger_from_row(row: sqlite3.Row) -> InsightTrigger | None:
+    """The stored trigger, or None for a legacy / unreadable value (never raises).
+
+    A malformed blob degrades to "not recorded" and is logged, the same tolerance
+    :func:`_card_from_row` gives the prediction blob: one bad row must not take a list read
+    (or the dashboard) down with it.
+    """
+    raw = row["trigger_json"] if "trigger_json" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        return InsightTrigger.model_validate_json(raw)
+    except ValidationError:
+        logger.warning("insight %s: stored trigger_json is unreadable; served as None", row["id"])
+        return None
 
 
 def _record_from_row(row: sqlite3.Row) -> InsightRecord:
+    card, unreadable = _card_from_row(row)
     return InsightRecord(
         id=row["id"],
         insight_type_id=row["insight_type_id"],
@@ -259,7 +463,8 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         is_shadow=bool(row["is_shadow"]),
         calibration_version=row["calibration_version"],
         fingerprint=row["fingerprint"],
-        card=_card_from_row(row),
+        card=card,
+        unreadable=unreadable,
         horizon_days=row["horizon_days"],
         due_at=row["due_at"],
         input_snapshot=row["input_snapshot"],
@@ -271,8 +476,18 @@ def _record_from_row(row: sqlite3.Row) -> InsightRecord:
         price_at_create=(
             row["price_at_create"] if "price_at_create" in row.keys() else None
         ),
+        ceiling_at_create=(
+            row["ceiling_at_create"] if "ceiling_at_create" in row.keys() else None
+        ),
         tokens_in=(row["tokens_in"] or 0) if "tokens_in" in row.keys() else 0,
         tokens_out=(row["tokens_out"] or 0) if "tokens_out" in row.keys() else 0,
+        prompt_figures=(
+            (row["prompt_figures"] or "") if "prompt_figures" in row.keys() else ""
+        ),
+        trigger=_trigger_from_row(row),
+        strategy_versions=_versions_from_row(row),
+        system_prompt_ref=_system_ref_from_row(row),
+        stated_confidence=row["confidence"],
     )
 
 
@@ -334,9 +549,17 @@ def _filters(
     symbol: str | None,
     exclude_type_ids: set[int] | None,
     scope: str | None = None,
+    include_shadow: bool = False,
 ) -> tuple[str, list[Any]]:
-    """Shared WHERE builder for the list/count reads (one filter definition)."""
-    clauses: list[str] = []
+    """Shared WHERE builder for the list/count reads (one filter definition).
+
+    Shadow cards (``is_shadow = 1``) are EXCLUDED unless ``include_shadow`` — R6 DEF-069:
+    spec 04 §4.6 produces them alongside a batch but never shows them, and these three reads
+    feed 洞察卡, 持倉健診 and the drawer's AI 建議. Without the clause 持倉健診 headed every
+    symbol with its shadow card. The default is the safe side: a caller that wants the
+    hidden trial lane has to say so.
+    """
+    clauses: list[str] = [] if include_shadow else ["is_shadow = 0"]
     params: list[Any] = []
     if insight_type_id is not None:
         clauses.append("insight_type_id = ?")
@@ -364,6 +587,7 @@ def list_cards(
     scope: str | None = None,
     limit: int | None = None,
     offset: int = 0,
+    include_shadow: bool = False,
 ) -> list[InsightRecord]:
     """List stored cards (newest first), optionally filtered by type and/or symbol.
 
@@ -372,10 +596,11 @@ def list_cards(
     (spec 4.1 archive semantics — never physically removed). ``scope``/``limit``/
     ``offset`` (WPE): 'portfolio' keeps portfolio + per-market cards, 'symbol' keeps
     per-symbol health cards; ``limit=None`` returns everything (legacy callers).
+    Shadow cards are hidden unless ``include_shadow`` (DEF-069 — see :func:`_filters`).
     """
     where, params = _filters(
         insight_type_id=insight_type_id, symbol=symbol,
-        exclude_type_ids=exclude_type_ids, scope=scope,
+        exclude_type_ids=exclude_type_ids, scope=scope, include_shadow=include_shadow,
     )
     page = ""
     if limit is not None:
@@ -394,11 +619,12 @@ def count_cards(
     symbol: str | None = None,
     exclude_type_ids: set[int] | None = None,
     scope: str | None = None,
+    include_shadow: bool = False,
 ) -> int:
     """COUNT over the same filter set as :func:`list_cards` (honest pager totals)."""
     where, params = _filters(
         insight_type_id=insight_type_id, symbol=symbol,
-        exclude_type_ids=exclude_type_ids, scope=scope,
+        exclude_type_ids=exclude_type_ids, scope=scope, include_shadow=include_shadow,
     )
     row = conn.execute(
         f"SELECT COUNT(*) AS n FROM insights{where}", tuple(params)
@@ -420,6 +646,8 @@ def list_symbol_groups(
     Symbols are ordered by their LATEST card (id desc) so the most recently diagnosed
     holding leads. Grouping lives server-side because pagination is over symbols —
     a client slice of a flat card feed cannot know symbol boundaries honestly.
+    Shadow cards never head, count toward or appear in a group (DEF-069): the grouping,
+    the per-symbol total and the history all read the same shown-only filter.
     """
     where, params = _filters(
         insight_type_id=None, symbol=None,
@@ -442,6 +670,26 @@ def list_symbol_groups(
         )
         groups.append((str(sr["symbol"]), int(sr["total"]), cards))
     return groups, total_symbols
+
+
+def has_shadow_cards(conn: sqlite3.Connection, insight_type_id: int, *, version: int) -> bool:
+    """Whether a task has stored any shadow card for calibration ``version`` (DEF-070).
+
+    The "has this version entered its shadow period" fact: a version starts holding one of
+    the ``max_shadows`` slots with its first shadow batch. Scoped to the VERSION — a task's
+    older versions' shadow cards stay in the table (append-only) and must never hold a slot.
+    No ``insights`` table yet → no card (a read path never creates it — DEF-065).
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='insights'"
+    ).fetchone() is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM insights WHERE insight_type_id = ? AND is_shadow = 1 "
+        "AND calibration_version = ? LIMIT 1",
+        (insight_type_id, version),
+    ).fetchone()
+    return row is not None
 
 
 def latest_cards(

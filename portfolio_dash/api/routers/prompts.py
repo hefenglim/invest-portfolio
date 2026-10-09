@@ -16,8 +16,9 @@ Two paths share one validation core (``validate_tokens``):
 
 import math
 import sqlite3
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -28,20 +29,45 @@ from pydantic import BaseModel
 from portfolio_dash.api import signals_service
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
-from portfolio_dash.data_ingestion.store import list_dividends
-from portfolio_dash.llm_insight import official_templates
+from portfolio_dash.data_ingestion.holdings import load_action_index
+from portfolio_dash.data_ingestion.store import list_dividends, load_ledger_bundle
+from portfolio_dash.llm_insight import official_templates, prompt_diff
+from portfolio_dash.llm_insight import system_prompt as system_prompt_store
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.llm_insight.evaluations_store import (
+    calibration_bins,
+    gap_quantized,
+    gap_wire,
+    rolling_calibration_gap,
+    scored_confidence_hits,
+)
+from portfolio_dash.llm_insight.scoring import confidence_ceiling
 from portfolio_dash.llm_insight.system_prompt import get_system_prompt, set_system_prompt
 from portfolio_dash.news import organizer_prompt as news_organizer_prompt
 from portfolio_dash.news import store as news_store
 from portfolio_dash.portfolio import external_signals as ES
+from portfolio_dash.portfolio.backtest import (
+    FORWARD_WINDOWS,
+    EventStudy,
+    HistoryPoint,
+    WindowStats,
+    event_study,
+)
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.price_basis import series_in
+from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.pricing import datasources_store, finmind_datasets, snapshots_store
 from portfolio_dash.pricing.store import get_fx, get_price_history
 from portfolio_dash.shared import llm
+from portfolio_dash.shared import prompt_versions as pv
+from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import budget_remaining
 from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.strategy import signal_history
+from portfolio_dash.strategy.rules.composite import BAND_HIGH, BAND_LOW
+from portfolio_dash.strategy.rules.params import PARAMS_VERSION
 
 router = APIRouter()
 
@@ -90,6 +116,17 @@ class SystemPromptIn(BaseModel):
     body: str
 
 
+def _blank_prompt_422(code: str, what: str) -> JSONResponse:
+    """A prompt body that is empty or whitespace is refused (spec 2026-09-10, owner D2(b)).
+
+    Measured before the guard: ``PUT {"body": ""}`` returned 200 and the next pipeline
+    run would have sent the model no system prompt at all. Restoring the default is the
+    reset route's job, and the sentence says so; the UI keeps the user's text on 422.
+    """
+    return JSONResponse(status_code=422, content=error_body(
+        code, f"{what}不可為空白；要恢復預設請按「重置回官方版」", field="body"))
+
+
 class PromptBody(BaseModel):
     body: str
     scope: str  # "portfolio" | "per_symbol" | "per_market"
@@ -135,7 +172,7 @@ def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, 
 
 
 @router.get("/system-prompt")
-def read_system_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, str]:
+def read_system_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     return get_system_prompt(conn)
 
 
@@ -144,7 +181,9 @@ def write_system_prompt(
     payload: SystemPromptIn,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
+) -> Any:
+    if not payload.body.strip():
+        return _blank_prompt_422("system_prompt_empty", "系統提示詞")
     return set_system_prompt(conn, payload.body, now=now)
 
 
@@ -165,18 +204,22 @@ def read_prompt_templates() -> dict[str, Any]:
 def reset_system_prompt(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
-    """Restore the global system prompt to the official library version."""
-    return set_system_prompt(conn, official_templates.SYSTEM_PROMPT_BODY, now=now)
+) -> dict[str, Any]:
+    """Restore the global system prompt to the official library version.
+
+    DEF-057: 還原官方 is itself a version (source ``reset_official``) when it changes the body.
+    """
+    return system_prompt_store.reset_system_prompt(conn, now=now)
 
 
 # --- news-organizer prompt (batch ④; user-viewable + editable, with reset) -----
 
 
 @router.get("/news-prompt")
-def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, str]:
-    """The editable news-organizer system prompt (default-seeded from the official library)."""
-    return news_organizer_prompt.get_news_prompt(conn)
+def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """The editable news-organizer system prompt (default-seeded from the official library),
+    with ``official_version`` + ``is_official`` for the settings page's badge (D1(a))."""
+    return dict(news_organizer_prompt.get_news_prompt(conn))
 
 
 @router.put("/news-prompt")
@@ -184,18 +227,180 @@ def write_news_prompt(
     payload: SystemPromptIn,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
-    """Overwrite the news-organizer prompt (applies to the next nightly news run)."""
-    return news_organizer_prompt.set_news_prompt(conn, payload.body, now=now)
+) -> Any:
+    """Overwrite the news-organizer prompt (applies to the next nightly news run).
+
+    Blank is refused with 422 ``news_prompt_empty`` — measured before the guard, an empty
+    body was stored verbatim and the next pipeline run would have organised every
+    article with no system prompt.
+    """
+    if not payload.body.strip():
+        return _blank_prompt_422("news_prompt_empty", "新聞整理提示詞")
+    return dict(news_organizer_prompt.set_news_prompt(conn, payload.body, now=now))
 
 
 @router.post("/news-prompt/reset")
 def reset_news_prompt(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, str]:
-    """Restore the news-organizer prompt to the official library version."""
-    return news_organizer_prompt.reset_news_prompt(conn, now=now)
+) -> dict[str, Any]:
+    """Restore the news-organizer prompt to the official library version (a version too)."""
+    return dict(news_organizer_prompt.reset_news_prompt(conn, now=now))
+
+
+# --- version history of the two global prompts (DEF-057) -----------------------
+# Owner ruling 2026-09-24: the system prompt and the news-organizer prompt keep versions
+# exactly as the strategy prompts do (DEF-033) — list, read one, server-side line diff
+# against the previous / the current version, and restore (a NEW version; history is never
+# rewritten). ONE set of handlers, registered once per prompt by ``_version_routes``: the
+# kind is part of the PATH (``/system-prompt/versions``, ``/news-prompt/versions``), so the
+# action log labels each prompt's restore on its own (``api/action_log.py``) and a version
+# id of the other prompt is a 404 here, never a cross-prompt restore.
+
+_RestoreFn = Callable[
+    [sqlite3.Connection, int, datetime], "tuple[Mapping[str, Any], bool, int] | None"
+]
+_ReadFn = Callable[[sqlite3.Connection], Mapping[str, Any]]
+
+
+def _pv_meta(v: pv.PromptVersion, current: int | None) -> dict[str, Any]:
+    """The list/detail view of one version (no body) — DEF-033's shape, ``kind`` for its
+    ``strategy_id``. ``source_label`` is zh and server-owned."""
+    return {
+        "id": v.id,
+        "kind": v.kind,
+        "version": v.version,
+        "source": v.source,
+        "source_label": pv.SOURCE_LABELS.get(v.source, v.source),
+        "restored_from": v.restored_from,
+        "saved_at": v.saved_at,
+        "chars": len(v.body),
+        "lines": len(v.body.splitlines()),
+        "is_current": current is not None and v.version == current,
+    }
+
+
+def _version_routes(kind: pv.Kind, base: str, read: _ReadFn, restore: _RestoreFn) -> None:
+    """Register list / get / diff / restore for one global prompt under ``{base}/versions``."""
+    label = pv.KIND_LABELS[kind]
+
+    def _unknown(version_id: int) -> JSONResponse:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"未知{label}版本：{version_id}"))
+
+    def _own(conn: sqlite3.Connection, version_id: int) -> pv.PromptVersion | None:
+        read(conn)  # seeds + back-fills, so a fresh install lists its v1
+        v = pv.get_version(conn, version_id)
+        return v if v is not None and v.kind == kind else None
+
+    def list_versions(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+        """The prompt's whole version history, newest first (DEF-057)."""
+        read(conn)
+        current = pv.current_version_no(conn, kind)
+        return {
+            "kind": kind,
+            "name": label,
+            "current_version": current,
+            "versions": [_pv_meta(v, current) for v in pv.list_versions(conn, kind)],
+        }
+
+    def get_version(version_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+        """One version, with its full body (DEF-057)."""
+        v = _own(conn, version_id)
+        if v is None:
+            return _unknown(version_id)
+        return {**_pv_meta(v, pv.current_version_no(conn, kind)), "body": v.body}
+
+    def diff_version(
+        version_id: int,
+        against: str = "current",
+        conn: sqlite3.Connection = Depends(get_conn),
+    ) -> Any:
+        """Line diff between this version and another of the SAME prompt (DEF-057).
+
+        ``against`` = ``current`` (default), ``previous`` or another version's id — DEF-033's
+        grammar. Always read CHRONOLOGICALLY: ``from`` is the lower version number.
+        """
+        v = _own(conn, version_id)
+        if v is None:
+            return _unknown(version_id)
+        current = pv.current_version_no(conn, kind)
+        other: pv.PromptVersion | None
+        if against == "current":
+            other = pv.latest(conn, kind)
+        elif against == "previous":
+            other = pv.get_by_number(conn, kind, v.version - 1)
+        else:
+            try:
+                other_id = int(against)
+            except ValueError:
+                return JSONResponse(status_code=400, content=error_body(
+                    "validation_error", f"against 非有效值：{against}", field="against"))
+            other = pv.get_version(conn, other_id)
+            if other is None:
+                return _unknown(other_id)
+            if other.kind != kind:
+                return JSONResponse(status_code=400, content=error_body(
+                    "validation_error", f"只能比對同一則{label}的版本", field="against"))
+        if other is None:  # "previous" of version 1
+            older, newer = None, v
+        elif other.version <= v.version:
+            older, newer = other, v
+        else:
+            older, newer = v, other
+        diff = prompt_diff.line_diff(older.body if older is not None else "", newer.body)
+        return {
+            "from": _pv_meta(older, current) if older is not None else None,
+            "to": _pv_meta(newer, current),
+            "identical": older is not None and diff.identical,
+            "added": diff.added,
+            "removed": diff.removed,
+            "lines": [ln.model_dump() for ln in diff.lines],
+        }
+
+    def restore_version(
+        version_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+        now: datetime = Depends(get_now),
+    ) -> Any:
+        """Make an old version's body current again — as a NEW version (DEF-057).
+
+        ``changed`` is False when the chosen body already is the current one (nothing
+        written, no version added).
+        """
+        outcome = restore(conn, version_id, now)
+        if outcome is None:
+            return _unknown(version_id)
+        wire, changed, restored_from = outcome
+        return {
+            "prompt": dict(wire),
+            "changed": changed,
+            "restored_from": restored_from,
+            "current_version": pv.current_version_no(conn, kind),
+        }
+
+    router.add_api_route(f"{base}/versions", list_versions, methods=["GET"])
+    router.add_api_route(f"{base}/versions/{{version_id}}", get_version, methods=["GET"])
+    router.add_api_route(f"{base}/versions/{{version_id}}/diff", diff_version, methods=["GET"])
+    router.add_api_route(
+        f"{base}/versions/{{version_id}}/restore", restore_version, methods=["POST"]
+    )
+
+
+def _restore_system(
+    conn: sqlite3.Connection, version_id: int, now: datetime
+) -> tuple[Mapping[str, Any], bool, int] | None:
+    return system_prompt_store.restore_system_prompt_version(conn, version_id, now=now)
+
+
+def _restore_news(
+    conn: sqlite3.Connection, version_id: int, now: datetime
+) -> tuple[Mapping[str, Any], bool, int] | None:
+    return news_organizer_prompt.restore_news_prompt_version(conn, version_id, now=now)
+
+
+_version_routes("system", "/system-prompt", get_system_prompt, _restore_system)
+_version_routes("news", "/news-prompt", news_organizer_prompt.get_news_prompt, _restore_news)
 
 
 # --- shared assembly ----------------------------------------------------------
@@ -232,18 +437,33 @@ def _resolve_fx_rates(
 
 def _dividend_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Per-event dividend ledger rows with the instrument's quote currency (LLM-facing,
-    type lowercased to match the wire convention)."""
+    type lowercased to match the wire convention).
+
+    X1 (owner ruling 2026-10-05): a row the replay REFUSED (no position by its date, an open
+    declared short, a ticker an EXCHANGE vacated) is listed — it is in the ledger — but marked
+    ``"booked": false`` / ``"unbooked": "未入帳（待釐清）"`` with its ``unbooked_cause``
+    (``orphan`` / ``short`` / ``vacated``, the replay's own vocabulary), so the model is never
+    handed a refused payout as income. A booked row carries no extra key — its JSON, and every
+    prompt fingerprint built over a ledger with no refusal, is byte-identical to before. One
+    replay per call (``portfolio.returns.replay_dividend_refusals``)."""
     ccy_by_symbol = {
         r["symbol"]: r["quote_ccy"]
         for r in conn.execute("SELECT symbol, quote_ccy FROM instruments")
     }
+    stored = list_dividends(conn)
+    refusals = replay_dividend_refusals(load_ledger_bundle(conn, dividends=stored))
     rows: list[dict[str, Any]] = []
-    for d in list_dividends(conn):
-        rows.append({
+    for d in stored:
+        row: dict[str, Any] = {
             "symbol": d.symbol, "date": d.date.isoformat(), "type": d.type.lower(),
             "gross": d.gross, "withholding": d.withholding, "net": d.net,
             "reinvest_shares": d.reinvest_shares, "ccy": ccy_by_symbol.get(d.symbol),
-        })
+        }
+        why = refusals.why(d)
+        if why is not None:
+            row.update({"booked": False, "unbooked": UNBOOKED_DIVIDEND_NOTE,
+                        "unbooked_cause": why[0]})
+        rows.append(row)
     return rows
 
 
@@ -375,6 +595,62 @@ def _index_var(conn: sqlite3.Connection) -> dict[str, Any]:
 # Honest degrade reason for a symbol yfinance carries no analyst data for (P1 batch 2).
 _CONSENSUS_NO_COVERAGE = "無分析師覆蓋（yfinance 無此標的的分析師目標價／評級資料）"
 
+# Honest degrade reason when NO fundamentals source has a block for the symbol (W3).
+_FUNDAMENTALS_NO_COVERAGE = (
+    "無基本面快照（yfinance 無覆蓋，Finnhub／Alpha Vantage 未啟用或無覆蓋）"
+)
+
+#: The three union sources whose blocks are read straight from their snapshots (W3,
+#: AI-D14 — one block per source, no merge). TW symbols additionally get a ``finmind``
+#: block mapped from the existing valuation snapshot (AI-D15, no double fetching).
+_FUNDAMENTALS_SOURCES = ("yfinance", "finnhub", "alphavantage")
+
+
+def _fundamentals_var(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
+    """Assemble fundamentals_json: one block per source under ``sources`` (W3, AI-D14).
+
+    Each block is the provider's snapshot payload verbatim (canonical field names +
+    currency + as_of, already final at the fetch seam — this layer computes nothing).
+    TW symbols also get a ``finmind`` block mapped from the existing FinMind valuation
+    snapshot (per→pe_ratio, pbr→pb_ratio, dividend_yield→dividend_yield_pct) so all
+    three markets are same-shaped and comparable; per_percentile stays FinMind-specific
+    and remains only in valuation_json. No blocks at all → the unavailable shape, with
+    the reason fed via ``_external_reasons``.
+    """
+    blocks: dict[str, Any] = {}
+    for source in _FUNDAMENTALS_SOURCES:
+        snap = snapshots_store.latest_snapshot(
+            conn, source=source, dataset="fundamentals", symbol=symbol
+        )
+        if snap is not None:
+            blocks[source] = snap.payload
+    row = conn.execute(
+        "SELECT market FROM instruments WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    if row is not None and row["market"] == "TW":
+        finmind = _finmind_var(conn, symbol, dataset="valuation", build=ES.build_valuation)
+        if finmind.get("unavailable") is not True:
+            block: dict[str, Any] = {
+                "as_of": finmind.get("last_as_of"),
+                "currency": "TWD",
+            }
+            for src_key, canon in (
+                ("per", "pe_ratio"), ("pbr", "pb_ratio"),
+                ("dividend_yield", "dividend_yield_pct"),
+            ):
+                if finmind.get(src_key) is not None:
+                    block[canon] = finmind[src_key]
+            if len(block) > 2:
+                blocks["finmind"] = block
+    if not blocks:
+        return {"unavailable": True, "last_as_of": None}
+    as_ofs = [b.get("as_of") for b in blocks.values() if b.get("as_of")]
+    return {
+        "symbol": symbol,
+        "last_as_of": max(as_ofs) if as_ofs else None,
+        "sources": blocks,
+    }
+
 
 def _consensus_var(conn: sqlite3.Connection, symbol: str) -> dict[str, Any]:
     """Assemble consensus_json from the latest yfinance consensus snapshot (P1 batch 2).
@@ -406,9 +682,11 @@ def _rule_signals_var(
     degrades to the unavailable shape (every rule None AND no composite → cannot judge),
     which the var renders as ``{"unavailable": true, "reason": …}`` via _external_reasons.
     """
-    signals = signals_service.evaluate_symbol(conn, symbol, now=now)
+    signals, price_as_of = signals_service.evaluate_symbol(conn, symbol, now=now)
     wire = signals_service.to_wire(
-        symbol, signals, now=now, held=signals_service.is_held(conn, symbol)
+        symbol, signals, now=now,
+        held=signals_service.is_held(conn, symbol, today=now.date()),
+        price_as_of=price_as_of,
     )
     rules = wire.get("rules")
     rules_all_none = isinstance(rules, dict) and all(v is None for v in rules.values())
@@ -417,8 +695,189 @@ def _rule_signals_var(
     return wire
 
 
+# --- W6 variables (AI-D31): the two AI-self calibration stubs lit as DECLARED, plus the
+# event study on its own per-symbol token. All numbers computed locally; the LLM narrates.
+
+_Q3 = Decimal("0.001")
+_Q4 = Decimal("0.0001")
+
+
+def _ratio(value: Decimal, exp: Decimal) -> str:
+    return decimal_str(value.quantize(exp, rounding=ROUND_HALF_UP))
+
+
+def _backtest_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """``backtest_json``: the GLOBAL calibration bins + overall hit rate, from scored
+    evaluations (the declared spec-04 meaning — confidence anchoring for prompts).
+
+    Degrades to the unavailable shape when nothing has been scored yet — an empty bins
+    list would anchor confidence on a population of zero without saying so.
+    """
+    pairs = scored_confidence_hits(conn)
+    if not pairs:
+        return {"unavailable": True, "last_as_of": None}
+    hits = sum(1 for _, hit in pairs if hit)
+    bins = calibration_bins(conn)  # already the wire shape (Decimal strings)
+    # W7.1 — the anchoring law's ARITHMETIC, done here. The first live run had 0 of 13 cards
+    # obey a rule that asked the model to walk a bins table mid-generation; the rule is
+    # unchanged and still lives in the prompt, the model is just handed one integer now.
+    # Nothing clamps the model's answer afterwards (AI-D33 stands).
+    #
+    # AI-D39 (2026-08-25): the rolling gap NO LONGER participates — a bucket's cap is already
+    # the calibration correction, so deducting the gap charged the same over-confidence twice
+    # (demo: bins 39, gap −47, answer 0). `rolling_calibration_gap` is still read by
+    # `_calibration_gap_var`, which is where that number belongs: as a REPORTED diagnostic,
+    # not as a second penalty.
+    overall = Decimal(hits) / len(pairs)
+    return {
+        "bins": bins,
+        "overall_hit_rate": _ratio(overall, _Q3),
+        # ⚠ The helper takes a PERCENTAGE, the wire field carries a FRACTION. Converted here,
+        # visibly and once — mixing the two silently is the exact defect W7.1 shipped.
+        "confidence_ceiling": confidence_ceiling(bins, overall_hit_pct=overall * 100),
+        "confidence_ceiling_note": (
+            "本系統依你的戰績算好的信心上限（0-100 整數）：所屬區間實際命中率＋5；"
+            "該區間樣本不足或從未計分過時，改用你的整體命中率＋5（而非固定值），"
+            "所以沒有戰績的區間不會比量測過的區間更寬鬆。"
+        ),
+    }
+
+
+def _calibration_gap_var(conn: sqlite3.Connection) -> dict[str, Any]:
+    """``calibration_gap_json``: the ROLLING signed calibration gap — ``actual − claimed``
+    (positive = the model is UNDER-confident). The computation lives in
+    ``evaluations_store.rolling_calibration_gap`` (W7, AI-D36: ONE definition shared with
+    the ai-score API); below the gate it degrades honestly.
+    """
+    result = rolling_calibration_gap(conn)
+    if result.gap is None:
+        return {"unavailable": True, "last_as_of": None}
+    # W7.1 — a PRE-WORDED reading rides with the number. The weekly card of 2026-08-23 read
+    # gap −0.466 as 「低估自身表現」 (the opposite) even though the template states the sign
+    # convention in the same section: a signed fraction is one negation away from asserting
+    # the reverse of the truth, so the direction ships as text the model can copy.
+    # Derived from the QUANTIZED gap, so the words and the number cannot disagree.
+    pp = _ratio(abs(gap_quantized(result.gap)) * 100, Decimal("0.1"))
+    return {
+        "gap": gap_wire(result.gap),
+        "window_n": result.window_n,
+        "reading": (
+            f"最近 {result.window_n} 筆平均高估自己 {pp} 個百分點"
+            if result.gap < 0
+            else f"最近 {result.window_n} 筆平均低估自己 {pp} 個百分點"
+        ),
+    }
+
+
+def _window_stats_wire(stats: WindowStats) -> dict[str, Any]:
+    """The study's full-precision Decimals are quantized HERE (display boundary — the
+    module stays exact), 4 dp like the ratio-like evidence keys."""
+    return {
+        "n": stats.n,
+        "mean": _ratio(stats.mean, _Q4),
+        "median": _ratio(stats.median, _Q4),
+        "pct_positive": _ratio(stats.pct_positive, _Q4),
+    }
+
+
+def _signal_backtest_wire(
+    symbol: str, rows: list[signal_history.SignalHistoryRow], study: EventStudy
+) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = []
+    for group in study.groups:
+        per_window: dict[str, Any] = {}
+        for outcome in group.outcomes:
+            cell: dict[str, Any] = (
+                _window_stats_wire(outcome.stats)
+                if outcome.stats is not None
+                # 不足以判斷 — the count is shown, the numbers are withheld (AI-D30).
+                else {"n": outcome.n, "insufficient": True}
+            )
+            cell["n_overlapping"] = outcome.n_overlapping
+            cell["n_censored"] = outcome.n_censored
+            per_window[str(outcome.window)] = cell
+        groups.append({
+            "kind": group.kind,
+            "direction": group.direction,
+            "events": group.events,
+            "per_window": per_window,
+        })
+    baseline = {
+        str(w): (_window_stats_wire(s) if s is not None else None)
+        for w, s in zip(FORWARD_WINDOWS, study.baselines, strict=True)
+    }
+    return {
+        "symbol": symbol,
+        # W7.1 — the unit rides WITH the numbers. Every mean/median/pct_positive is a
+        # FRACTION, and that fact previously existed only in the variable registry's `desc`
+        # (UI documentation the model never sees): the first live run printed 0.1336 as
+        # 「+0.1336%」 — the true value 100× smaller — alongside a bare fraction and a USD
+        # amount, three renderings of one quantity in one batch of cards.
+        "units": {
+            "mean": "fraction — 0.1336 means +13.36%",
+            "median": "fraction — same scale as mean",
+            "pct_positive": "fraction — 0.8182 means 81.82% of events",
+        },
+        "history": {
+            "first": rows[0].as_of.isoformat(),
+            "last": rows[-1].as_of.isoformat(),
+            "rows": len(rows),
+            "params_version": PARAMS_VERSION,
+        },
+        "windows": list(FORWARD_WINDOWS),
+        "groups": groups,
+        "baseline": baseline,
+        "events_without_price": study.events_without_price,
+    }
+
+
+def _signal_backtest_var(
+    conn: sqlite3.Connection, symbol: str, *, actions: ActionIndex, now: datetime
+) -> dict[str, Any]:
+    """``signal_backtest_json``: the per-symbol event study over ``signal_history``.
+
+    The close series spans the FULL history (first stored signal date → today), NOT the
+    583-day evaluation window — forward returns must survive every event, and the
+    +120-session tail of an old event predates any recent window. Re-expressed into
+    today's share terms via ``series_in`` (valued_on=end) so a return across a split is
+    honest (AI-D30/W6c); local currency (AI-D23). Only the CURRENT params vintage is
+    studied. No history rows → the unavailable shape (the full-coverage floor means young
+    symbols honestly have none). ``actions`` is the request's ONE action index, built by
+    the caller (trap #21 — this producer runs once per symbol per generation run).
+    """
+    rows = signal_history.list_rows(conn, symbol, params_version=PARAMS_VERSION)
+    if not rows:
+        return {"unavailable": True, "last_as_of": None}
+    end = now.date()
+    history = series_in(
+        actions, symbol,
+        get_price_history(conn, symbol, rows[0].as_of, end),
+        valued_on=end,
+    )
+    closes = [(p.as_of, p.value) for p in history]
+    points = [
+        HistoryPoint(
+            as_of=r.as_of,
+            scores={
+                "trend_filter": r.trend_score,
+                "ma_cross": r.cross_score,
+                "momentum_12_1": r.momentum_score,
+                "rsi_regime": r.rsi_score,
+            },
+            tech_score=r.tech_score,
+        )
+        for r in rows
+    ]
+    study = event_study(points, closes, band_high=BAND_HIGH, band_low=BAND_LOW)
+    return _signal_backtest_wire(symbol, rows, study)
+
+
 def _external_vars(
-    conn: sqlite3.Connection, symbol: str | None, *, now: datetime | None = None
+    conn: sqlite3.Connection,
+    symbol: str | None,
+    *,
+    now: datetime | None = None,
+    actions: ActionIndex | None,
 ) -> dict[str, Any]:
     """Assemble the chips/sentiment/index/news variable values from external snapshots.
 
@@ -426,11 +885,18 @@ def _external_vars(
     not in ``llm_insight`` (layering, spec 20.3). Portfolio-scope sentiment/index are
     always assembled; the per-symbol chips need a symbol. Missing snapshots degrade to
     the assembler's ``{"unavailable": ...}`` shape, which the var renders as such.
+
+    ``actions`` is a REQUIRED keyword (the injection rule: forgetting it is a TypeError,
+    not a silent loss) — ``None`` is the explicit portfolio-scope value; a per-symbol
+    assembly always carries the request's ONE action index (trap #21).
     """
     out: dict[str, Any] = {
         "market_sentiment_json": _sentiment_var(conn),
         "fear_greed_json": _fear_greed_var(conn),
         "index_quotes_json": _index_var(conn),
+        # W6 (AI-D31): the two AI-self calibration vars — portfolio scope, always on.
+        "backtest_json": _backtest_var(conn),
+        "calibration_gap_json": _calibration_gap_var(conn),
     }
     if symbol:
         out["institutional_json"] = _finmind_var(
@@ -449,9 +915,16 @@ def _external_vars(
             conn, symbol, dataset="financials", build=ES.build_financials
         )
         out["consensus_json"] = _consensus_var(conn, symbol)
+        out["fundamentals_json"] = _fundamentals_var(conn, symbol)
         out["symbol_news_json"] = _news_var(symbol, now=now or datetime.now(_TAIPEI))
         out["rule_signals_json"] = _rule_signals_var(
             conn, symbol, now=now or datetime.now(_TAIPEI)
+        )
+        # Programmer-error guard: a per-symbol assembly always carries the request's
+        # action index (mypy cannot narrow the symbol/actions correlation for us).
+        assert actions is not None
+        out["signal_backtest_json"] = _signal_backtest_var(
+            conn, symbol, actions=actions, now=now or datetime.now(_TAIPEI)
         )
     return out
 
@@ -480,6 +953,9 @@ def _external_reasons(conn: sqlite3.Connection, external_vars: dict[str, Any]) -
     consensus = external_vars.get("consensus_json")
     if isinstance(consensus, dict) and consensus.get("unavailable") is True:
         reasons["consensus_json"] = _CONSENSUS_NO_COVERAGE
+    fundamentals = external_vars.get("fundamentals_json")
+    if isinstance(fundamentals, dict) and fundamentals.get("unavailable") is True:
+        reasons["fundamentals_json"] = _FUNDAMENTALS_NO_COVERAGE
     rule_signals = external_vars.get("rule_signals_json")
     if isinstance(rule_signals, dict) and rule_signals.get("unavailable") is True:
         reasons["rule_signals_json"] = _RULE_SIGNALS_THIN
@@ -497,7 +973,11 @@ def _build_context(
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     symbol = payload.symbol if payload.scope == "per_symbol" else None
-    external_vars = _external_vars(conn, symbol, now=now)  # SR: thread now → news window
+    # ONE action index per request (trap #21): shared by the external vars
+    # (signal_backtest's re-expression) and the long-history read below. Portfolio
+    # previews deliberately pay zero ledger reads.
+    actions = load_action_index(conn) if symbol else None
+    external_vars = _external_vars(conn, symbol, now=now, actions=actions)
     ctx = V.VarContext(
         data=data,
         now=now,  # spec 04.10 {{now}} renders ISO-8601 +08:00 in preview/test
@@ -505,6 +985,8 @@ def _build_context(
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
+        # ⑬ — derived from the payloads just built; no extra read.
+        external_as_of=V.external_as_of_map(external_vars),
     )
     if payload.scope == "per_market" and payload.market:
         ctx.market = payload.market  # market-sliced preview (2026-07-05 spec)
@@ -513,8 +995,18 @@ def _build_context(
         # L3 fix: same split as the run path (insight_service._per_symbol_ctx) —
         # ctx.closes gets the LONG series (honest 52w/MA120 technical signals);
         # price_points keeps only the recent window (token-bounded).
-        long_hist = get_price_history(
-            conn, payload.symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+        # §5.1(d) / W6c: re-expressed into `as_of` exactly as the run path does, so the
+        # preview a prompt is authored against is the series the run will render. The ONE
+        # request index built above (trap #21). ⚠ volume keeps the provider's basis
+        # (D39b).
+        assert actions is not None  # per-symbol preview always carries it (built above)
+        long_hist = series_in(
+            actions, payload.symbol,
+            get_price_history(
+                conn, payload.symbol,
+                as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of,
+            ),
+            valued_on=as_of,
         )
         ctx.symbol = payload.symbol
         ctx.closes = [p.value for p in long_hist]

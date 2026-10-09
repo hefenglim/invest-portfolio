@@ -25,10 +25,20 @@ def _stub_pricing(
 
     A successful stub ALSO upserts a real price row so the response element's
     ``last`` reflects what the UI would see after a live fetch.
+
+    **On ``**_: Any`` in the two doubles below (W6a, 2026-08-10).** These stubs were strict
+    on purpose — a strict double catches a caller that starts passing something the double
+    does not understand, which is a genuine early warning. They now tolerate *injected
+    optional keywords* because the production seam grew one: ``refresh_quotes`` /
+    ``refresh_history`` take ``factor_of`` (the split-adjustment callable), and a caller may
+    add successors. The trade-off is real and accepted: a future keyword slips through
+    silently here. What the doubles still enforce is the part that actually constitutes the
+    contract — the POSITIONAL argument list and the keyword-only ``now`` — so a change to
+    the shape of the call still fails loudly.
     """
 
     def fake_quotes(conn: Any, registry: Any, instruments: list[Any],
-                    fx_pairs: Any, *, now: datetime) -> RefreshSummary:
+                    fx_pairs: Any, *, now: datetime, **_: Any) -> RefreshSummary:
         syms = [r.symbol for r in instruments]
         if record is not None:
             record.extend(syms)
@@ -40,7 +50,7 @@ def _stub_pricing(
         return RefreshSummary(ok={s: "stub" for s in syms}, failed=[], fetched_at=now)
 
     def fake_history(conn: Any, registry: Any, instruments: list[Any],
-                     start: date, *, now: datetime) -> RefreshSummary:
+                     start: date, *, now: datetime, **_: Any) -> RefreshSummary:
         return RefreshSummary(ok={r.symbol: "stub" for r in instruments}, failed=[],
                               fetched_at=now)
 

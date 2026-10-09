@@ -22,7 +22,10 @@
   var f = window.fmt;
 
   /* fetched state (filled by boot()) */
-  var STATE = { tasks: [], health: null };
+  /* `loaded` (M7-01) = /api/insight-tasks/status has answered at least once. Distinguishes
+     「no data yet / the fetch failed」 from「the data says zero」, which the health row must
+     never conflate — see renderHealth. */
+  var STATE = { tasks: [], health: null, loaded: false };
 
   var $ = function (s) { return document.querySelector(s); };
   var el = function (tag, cls, text) {
@@ -45,10 +48,15 @@
     enable_task: { label: '啟用任務', run: function (t) { setEnabled(t, true); } },
     create_schedule: { label: '啟動排程', run: function (t) { window.ppScheduleModal(t); } },
     enable_schedule: { label: '啟動排程', run: function (t) { window.ppScheduleModal(t); } },
-    edit_universe: { label: '編輯標的', run: function (t) { openDrawer(t, 'input'); } },
-    enable_template: { label: '啟用模板', run: function () { go('settings.html#prompts'); } },
+    /* DEF-031: straight into the universe dialog (it used to open the drawer, whose 編輯標的
+       button was itself a toast — a two-click dead end from the preflight's R2/R4 row). */
+    edit_universe: { label: '編輯標的', run: function (t) { window.ppUniverseModal(t); } },
+    enable_template: { label: '啟用模板', run: function () { go('settings.html#prompts/templates'); } },
     edit_templates: { label: '增減模板', run: function (t) { openDrawer(t, 'assemble'); } },
-    set_active_calibration: { label: '前往校正版本鏈', run: function (t) { openDrawer(t, 'calib'); } },
+    /* DEF-071: lands ON the recommended 「設為生效」 (the winning shadow, else the shadow, else
+       the latest) — it used to open a chain with nothing to press. */
+    set_active_calibration: { label: '前往設為生效',
+      run: function (t) { openDrawer(t, 'calib', { focusAdopt: true }); } },
     fund_quota: { label: '前往額度設定', run: function () { go('settings.html#llm'); } },
     activate_role: { label: '前往 AI 大師設定', run: function () { go('settings.html#llm'); } }
   };
@@ -56,13 +64,13 @@
 
   /* I2 — recent_skips reason enum (04b gating) -> human zh label. */
   var SKIP_REASONS = {
-    R1_scope_mismatch: '範圍不相容（模板含 per_symbol 變數，任務非單一標的）',
+    R1_scope_mismatch: '範圍不相容（模板含「單一標的」變數，任務非單一標的）',   // DEF-053
     R2_universe_empty: '標的宇宙為空（清單已出清）',
     R2_symbols_removed: '部分標的已自動移除',
     R3_no_live_templates: '模板全部停用 — 組裝段為空',
     R4_missing_price: '缺價 — 該檔產確定性「資料異常」卡',
     R5_var_unavailable: '外部變數暫時無法取得',
-    R6_quota: 'LLM 額度耗盡',
+    R6_quota: 'AI 額度耗盡',
     R7_rule_not_matched: '預警規則未命中 / 防抖期內',
     master_missing: '未設定 AI 大師模型 — 校正暫停',
     unknown_insight_type: '未知的洞察任務',
@@ -71,14 +79,41 @@
        them were mapped — the fallback below prints the raw code, so the owner saw
        'budget_exhausted_mid_run' on screen. tests/contract/test_skip_reason_coverage.py
        now fails if the backend gains a code that is missing here. */
-    budget_exhausted_mid_run: 'LLM 額度用罄 — 已產出的卡片保留，其餘中止',
-    llm_unavailable_mid_run: 'LLM 供應商異常或回覆無法解析 — 已產出的卡片保留',
+    budget_exhausted_mid_run: 'AI 額度用罄 — 已產出的卡片保留，其餘中止',
+    llm_unavailable_mid_run: 'AI 供應商異常或回覆無法解析 — 已產出的卡片保留',
     ai_not_activated_mid_run: 'AI 未啟用（該角色沒有可用模型）— 已產出的卡片保留',
-    llm_error_mid_run: 'LLM 呼叫失敗 — 已產出的卡片保留，其餘中止'
+    llm_error_mid_run: 'AI 呼叫失敗 — 已產出的卡片保留，其餘中止'
   };
   window.ppSkipReason = function (code) { return SKIP_REASONS[code] || code || '未知原因'; };
 
   function go(href) { window.location.href = href; }
+
+  /* ONE definition of "resend the full row with a few fields changed" — the enable toggle
+     and the universe dialog (DEF-031) both write through it, so neither can drop a field the
+     other one forgot. `full` is a GET /api/insight-tasks row; `patch` overrides by key. */
+  function taskBody(full, patch) {
+    var body = {
+      name: full.name,
+      scope: full.scope,
+      strategy_ids: (full.strategies || []).map(function (s) { return s.id; }),
+      use_system_prompt: full.use_system_prompt !== false,
+      self_correct: !!full.self_correct,
+      universe: full.universe != null ? full.universe : null,
+      alert_rules: full.alert_rules != null ? full.alert_rules : null,
+      enabled: full.enabled !== false,
+      horizon_days: full.horizon_days != null ? full.horizon_days : 5,
+      eval_prompt: full.eval_prompt != null ? full.eval_prompt : null
+    };
+    Object.keys(patch || {}).forEach(function (k) { body[k] = patch[k]; });
+    return body;
+  }
+  function fetchFullTask(id) {
+    return pdApi.get('/api/insight-tasks').then(function (list) {
+      var full = (Array.isArray(list) ? list : []).find(function (x) { return x.id === id; });
+      if (!full) throw new Error('未找到洞察任務 ' + id);
+      return full;
+    });
+  }
 
   /* Toggle a task's enabled flag through the composer update endpoint (PUT mirrors
      InsightTypeIn), then refresh. The status payload (build_status) does NOT carry the
@@ -88,21 +123,8 @@
      would silently RESET those fields. */
   function setEnabled(t, enabled) {
     if (!pdApi) return;
-    pdApi.get('/api/insight-tasks').then(function (list) {
-      var full = (Array.isArray(list) ? list : []).find(function (x) { return x.id === t.id; });
-      if (!full) throw new Error('未找到洞察任務 ' + t.id);
-      return pdApi.put('/api/insight-tasks/' + t.id, {
-        name: full.name,
-        scope: full.scope,
-        strategy_ids: (full.strategies || []).map(function (s) { return s.id; }),
-        use_system_prompt: full.use_system_prompt !== false,
-        self_correct: !!full.self_correct,
-        universe: full.universe != null ? full.universe : null,
-        alert_rules: full.alert_rules != null ? full.alert_rules : null,
-        enabled: enabled,
-        horizon_days: full.horizon_days != null ? full.horizon_days : 5,
-        eval_prompt: full.eval_prompt != null ? full.eval_prompt : null
-      });
+    fetchFullTask(t.id).then(function (full) {
+      return pdApi.put('/api/insight-tasks/' + t.id, taskBody(full, { enabled: enabled }));
     }).then(function () {
       window.toast(enabled ? '任務已啟用' : '任務已暫停', 'ok',
         t.name + (enabled ? '：恢復依觸發條件執行' : '：排程保留、不再執行'));
@@ -113,6 +135,243 @@
   }
   window.ppSetEnabled = setEnabled;
 
+  /* ================= 標的宇宙（DEF-031 / DEF-032：單一定義） =================
+     The per_symbol universe is a SET OF SYMBOLS. The dashboard's holdings are keyed by
+     (帳戶, 標的), so a symbol held in two accounts arrives as two rows — the create wizard
+     used to count and list those rows (AAPL twice; 「全部持倉 14 檔」 for 13 symbols). Every
+     surface that lists or counts a universe goes through these two functions, and they
+     mirror the backend resolver (api/insight_service.py::_resolve_universe):
+       mode:all            -> sorted DISTINCT held symbols
+       mode:all_registered -> sorted DISTINCT held ∪ ACTIVE registered symbols — an
+                              archived (停止追蹤) instrument is out (DEF-059, owner ruling
+                              2026-09-24), exactly as the backend's _all_registered_symbols
+       mode:custom         -> the listed symbols, de-duplicated, first occurrence kept
+     `dash` is a /api/dashboard payload, `instruments` a /api/instruments payload. */
+  function universeSource(dash, instruments) {
+    var bySym = {};
+    var order = [];
+    var put = function (sym) {
+      if (!bySym[sym]) {
+        bySym[sym] = { symbol: sym, name: null, held: false, accounts: [],
+          registered: false, archived: false };
+        order.push(sym);
+      }
+      return bySym[sym];
+    };
+    ((dash && dash.holdings) || []).forEach(function (h) {
+      if (!h || !h.symbol) return;
+      var r = put(h.symbol);
+      r.held = true;
+      if (!r.name && h.name) r.name = h.name;
+      if (h.account_id && r.accounts.indexOf(h.account_id) < 0) r.accounts.push(h.account_id);
+    });
+    ((instruments && instruments.list) || []).forEach(function (i) {
+      if (!i || !i.symbol) return;
+      var r = put(i.symbol);
+      r.registered = true;
+      r.archived = !!i.archived;
+      if (!r.name && i.name) r.name = i.name;
+    });
+    var rows = order.map(function (sym) { return bySym[sym]; });
+    return {
+      rows: rows,
+      held: rows.filter(function (r) { return r.held; })
+        .map(function (r) { return r.symbol; }).sort(),
+      registered: rows.filter(function (r) { return r.held || (r.registered && !r.archived); })
+        .map(function (r) { return r.symbol; }).sort()
+    };
+  }
+  function universeSymbols(universe, src) {
+    var mode = universe && universe.mode;
+    if (mode === 'custom') {
+      var seen = {};
+      return (Array.isArray(universe.symbols) ? universe.symbols : []).filter(function (s) {
+        if (seen[s]) return false;
+        seen[s] = true;
+        return true;
+      });
+    }
+    if (mode === 'all_registered') return src.registered.slice();
+    return src.held.slice();   /* mode:all and a task with no stored universe */
+  }
+  window.ppUniverseSource = universeSource;
+  window.ppUniverseSymbols = universeSymbols;
+  /* The same fetches the wizard makes: the shared window.pdDashboard promise (M7-07) and
+     the instrument registry. Never rejects — a failed read yields an empty source. */
+  window.ppLoadUniverse = function () {
+    if (!pdApi) return Promise.resolve(universeSource(null, null));
+    return Promise.all([
+      (window.pdDashboard || (window.pdDashboard = pdApi.get('/api/dashboard')))
+        .catch(function () { return { holdings: [] }; }),
+      pdApi.get('/api/instruments').catch(function () { return { list: [] }; })
+    ]).then(function (res) { return universeSource(res[0], res[1]); });
+  };
+
+  function acctShort(id) {
+    return window.pdNames && window.pdNames.accountShort
+      ? window.pdNames.accountShort(id) : String(id == null ? '' : id);
+  }
+
+  /* The symbol checklist, shared by the wizard's 自選標的 step and the 編輯標的 dialog: one
+     checkbox per SYMBOL, a chip per holding account (pdNames), 觀察 for a watch-only symbol.
+     Archived watch-only symbols are listed only when already selected (so they can be
+     unticked); a selected symbol missing from both sources gets 不在清單. `selected` is the
+     current symbol list; `onChange(symbols)` receives the new de-duplicated list. */
+  window.ppUniversePicker = function (src, selected, onChange) {
+    var pick = {};
+    (selected || []).forEach(function (s) { pick[s] = true; });
+    var rows = src.rows.filter(function (r) {
+      return r.held || (r.registered && !r.archived) || pick[r.symbol];
+    });
+    (selected || []).forEach(function (s) {
+      if (!rows.some(function (r) { return r.symbol === s; })) {
+        rows.push({ symbol: s, name: null, held: false, accounts: [], registered: false,
+          archived: false, orphan: true });
+      }
+    });
+    var box = el('div', 'pp-uni-picker');
+    var bar = el('div', 'pp-uni-bar');
+    var grid = el('div', 'pv-symgrid');
+    var boxes = [];
+    var emit = function () {
+      onChange(boxes.filter(function (b) { return b.cb.checked; })
+        .map(function (b) { return b.row.symbol; }));
+    };
+    var setAll = function (pred) {
+      boxes.forEach(function (b) { b.cb.checked = pred(b.row); });
+      emit();
+    };
+    [['全選', function () { setAll(function () { return true; }); }],
+     ['全部持倉', function () { setAll(function (r) { return r.held; }); }],
+     ['清除', function () { setAll(function () { return false; }); }]].forEach(function (pair) {
+      var b = el('button', 'btn btn-sm', pair[0]);
+      b.type = 'button';
+      b.addEventListener('click', pair[1]);
+      bar.appendChild(b);
+    });
+    if (!rows.length) grid.appendChild(el('div', 'wz-note', '目前沒有持倉或觀察標的可選。'));
+    rows.forEach(function (r) {
+      var lb = el('label', 'pv-check');
+      var cb = el('input');
+      cb.type = 'checkbox';
+      cb.value = r.symbol;
+      cb.checked = !!pick[r.symbol];
+      cb.addEventListener('change', emit);
+      lb.appendChild(cb);
+      lb.appendChild(el('span', 'pp-uni-sym', r.symbol));
+      if (r.name && r.name !== r.symbol) lb.appendChild(el('span', 'pp-uni-name', r.name));
+      if (r.held) {
+        r.accounts.forEach(function (a) { lb.appendChild(el('span', 'pv-symtag', acctShort(a))); });
+      } else if (r.orphan) {
+        lb.appendChild(el('span', 'pv-symtag watch', '不在清單'));
+      } else if (r.archived) {
+        lb.appendChild(el('span', 'pv-symtag watch', '已封存'));
+      } else {
+        lb.appendChild(el('span', 'pv-symtag watch', '觀察'));
+      }
+      grid.appendChild(lb);
+      boxes.push({ row: r, cb: cb });
+    });
+    box.appendChild(bar);
+    box.appendChild(grid);
+    return box;
+  };
+
+  /* 編輯標的 dialog (DEF-031): read the FULL task row + the universe source, let the user pick
+     全部持倉 / 含觀察標的 / 自選, then PUT the row back through taskBody() with only
+     `universe` changed. On success the card list refreshes (the backend recomputes the ②
+     輸入 node's 「N 檔標的」) and an open drawer is re-opened on the refreshed task. A task
+     that is not per_symbol has no universe of its own, so the fix action falls back to the
+     drawer's 輸入 section, which says what that scope reads. */
+  window.ppUniverseModal = function (t, onSaved) {
+    if (t.scope !== 'per_symbol') { openDrawer(t, 'input'); return; }
+    window.ppModal('編輯標的 — ' + t.name, function (body, close) {
+      var slot = el('div', 'pp-uni-body');
+      slot.appendChild(el('div', 'wz-note', '載入標的清單…'));
+      body.appendChild(slot);
+      if (!pdApi) { slot.replaceChildren(el('div', 'wz-note', '標的清單不可用。')); return; }
+      Promise.all([fetchFullTask(t.id), window.ppLoadUniverse()]).then(function (res) {
+        if (!slot.isConnected) return;           /* dismissed while loading */
+        var full = res[0];
+        var src = res[1];
+        var u = full.universe && typeof full.universe === 'object' && !Array.isArray(full.universe)
+          ? full.universe : { mode: 'all' };
+        var mode = u.mode === 'custom' || u.mode === 'all_registered' ? u.mode : 'all';
+        /* entering 自選 starts from what the task analyses TODAY, so a switch never silently
+           narrows the list to nothing */
+        var picked = mode === 'custom' ? universeSymbols(u, src) : universeSymbols({ mode: mode }, src);
+        var countOf = function () {
+          return mode === 'custom' ? picked.length : universeSymbols({ mode: mode }, src).length;
+        };
+        var render = function () {
+          slot.replaceChildren();
+          slot.appendChild(el('div', 'pv-note',
+            '出清或移出觀察清單的標的會在執行時自動移除；清單為空時任務會停用並發出預警。每檔一張卡、各自計費。'));
+          var opts = el('div', 'wz-opts');
+          var opt = function (key, title, sub) {
+            var b = el('button', 'wz-opt' + (mode === key ? ' sel' : ''));
+            b.type = 'button';
+            b.dataset.mode = key;
+            b.appendChild(el('b', null, title));
+            b.appendChild(el('span', null, sub));
+            b.addEventListener('click', function () { mode = key; render(); });
+            return b;
+          };
+          opts.appendChild(opt('all', '全部持倉', src.held.length + ' 檔・自動跟隨持倉變動'));
+          opts.appendChild(opt('all_registered', '含觀察標的',
+            src.registered.length + ' 檔・持倉＋觀察清單'));
+          opts.appendChild(opt('custom', '自選標的', '勾選持倉或觀察標的'));
+          slot.appendChild(opts);
+          var count = el('div', 'wz-note pp-uni-count');
+          var paintCount = function () {
+            count.textContent = '將分析 ' + countOf() + ' 檔標的・每次 ' + countOf() + ' 張洞察卡';
+          };
+          if (mode === 'custom') {
+            slot.appendChild(window.ppUniversePicker(src, picked, function (syms) {
+              picked = syms;
+              paintCount();
+            }));
+          }
+          paintCount();
+          slot.appendChild(count);
+          var acts = el('div', 'cal-actions');
+          var ok = el('button', 'btn btn-primary', '儲存標的');
+          ok.type = 'button';
+          ok.addEventListener('click', function () {
+            if (mode === 'custom' && !picked.length) {
+              window.toast('至少選一檔', 'fail', '自選模式需勾選至少一個標的');
+              return;
+            }
+            var universe = mode === 'custom' ? { mode: 'custom', symbols: picked.slice() }
+              : { mode: mode };
+            var n = countOf();
+            ok.disabled = true;
+            pdApi.put('/api/insight-tasks/' + t.id, taskBody(full, { universe: universe }))
+              .then(function () {
+                close();
+                window.toast('已更新標的', 'ok', t.name + '：' + n + ' 檔標的');
+                var drawerOpen = !!document.querySelector('.pp-drawer');
+                return refresh().then(function () {
+                  var fresh = STATE.tasks.find(function (x) { return x.id === t.id; });
+                  if (drawerOpen && fresh) openDrawer(fresh, 'input');
+                  if (onSaved) onSaved(fresh || t);
+                });
+              }).catch(function (err) {
+                ok.disabled = false;
+                window.toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
+              });
+          });
+          acts.appendChild(ok);
+          slot.appendChild(acts);
+        };
+        render();
+      }).catch(function (err) {
+        slot.replaceChildren(el('div', 'wz-note', '標的清單載入失敗。'));
+        window.toast((err && err.message) || '標的清單載入失敗', 'fail', err && err.code);
+      });
+    });
+  };
+
   /* 共用 modal（沿用 settings.css pv- 樣式） */
   window.ppModal = function (title, buildBody, wide) {
     var back = el('div', 'pv-backdrop');
@@ -121,14 +380,25 @@
     head.appendChild(el('span', 'pv-title', title));
     var x = el('button', 'sd-close', '✕');
     x.type = 'button';
-    x.addEventListener('click', function () { back.remove(); });
+    /* F-14: ONE dismissal path, so ESC, ✕ and the backdrop cannot drift apart — and so the
+       document listener is always removed with the layer that installed it. Every OTHER
+       overlay in the app took ESC (the symbol drawer, the search layer, the corporate-action
+       form); the insight wizard, which is the largest of them, was the only one that did not.
+       Capture phase, mirroring corp-action-form.js:588. */
+    var dismiss = function () {
+      document.removeEventListener('keydown', onKey, true);
+      back.remove();
+    };
+    function onKey(e) { if (e.key === 'Escape') dismiss(); }
+    document.addEventListener('keydown', onKey, true);
+    x.addEventListener('click', dismiss);
     head.appendChild(x);
     box.appendChild(head);
     var body = el('div', 'pv-body');
     box.appendChild(body);
-    buildBody(body, function () { back.remove(); });
+    buildBody(body, dismiss);
     back.appendChild(box);
-    back.addEventListener('click', function (e) { if (e.target === back) back.remove(); });
+    back.addEventListener('click', function (e) { if (e.target === back) dismiss(); });
     document.body.appendChild(back);
     return back;
   };
@@ -161,13 +431,29 @@
       c.appendChild(el('div', 'pp-h-sub', sub));
       return c;
     };
+    /* M7-01: NO DATA IS NOT A VERDICT. init() paints this row once with an empty STATE
+       while /api/insight-tasks/status is in flight (~10s on a warm ledger), and refresh()'s
+       catch leaves STATE.health null after a failure. Every card below reads a field off
+       that empty object, and the quota card's `quota != null && Number(quota) < 1` is FALSE
+       for undefined — so the empty shell asserted 「額度充足」 on a GREEN dot, and 「0 個洞察
+       任務」, both contrary to fact, for as long as the fetch took. Saying nothing is worse
+       than nothing only when it is silent; saying the opposite is worse than both. Until the
+       status endpoint has answered, every card reports 「狀態未取得」 on the neutral dot —
+       true both before the first answer and after a failed one. The fetch LATENCY itself is
+       a separate, backlogged issue and is deliberately untouched here. */
+    if (!STATE.loaded) {
+      ['AI 大師模型', 'AI 額度', '最近批次', '任務狀態'].forEach(function (label) {
+        wrap.appendChild(card(label, '—', '狀態未取得', 'idle'));
+      });
+      return;
+    }
     /* master role status */
     wrap.appendChild(card('AI 大師模型', h.master_ok ? '已設定' : '未設定',
       h.master_ok ? '回測評分・校正生成正常' : '回測評分與校正生成暫停', h.master_ok ? 'ok' : 'warn'));
     /* quota — Decimal STRING via f.num (never bare .toFixed). */
     var quota = h.quota_remaining;
     var quotaLow = quota != null && Number(quota) < 1;  /* presentation flag only */
-    wrap.appendChild(card('LLM 額度', '$' + f.num(quota, 2),
+    wrap.appendChild(card('AI 額度', '$' + f.num(quota, 2),
       quotaLow ? '低於 $1.00 預警門檻' : '額度充足', quotaLow ? 'warn' : 'ok'));
     /* last batch */
     var lb = h.last_batch;
@@ -248,7 +534,13 @@
     var s = normLv(status);  /* I2: 'off' -> 'idle' */
     var map = {
       ok: ['pill-ok', '成功'], partial: ['pill-warn', '部分'], warn: ['pill-warn', '注意'],
-      skipped: ['pill-fail', '跳過'], error: ['pill-fail', '失敗'], idle: ['pill-off', '閒置']
+      skipped: ['pill-fail', '跳過'], error: ['pill-fail', '失敗'],
+      /* F-12: this pill answers "what happened on the LAST RUN"; the filter chip and the
+         summary count answer "what is this task's pipeline LEVEL". Both used to say 「閒置」,
+         so five cards stamped 「閒置」 sat behind a 「閒置」 filter that matched none of them
+         (they were all 需注意). Two judgements, two vocabularies. The disabled case gets its
+         own word too — it is not waiting for anything. */
+      idle: ['pill-off', '待執行'], disabled: ['pill-off', '已停用']
     };
     var pair = map[s] || ['pill-off', s];
     var p = el('span', 'pill ' + pair[0]);
@@ -270,7 +562,7 @@
       head.appendChild(el('span', 'pp-scope ' + sm.cls, sm.label));
       var st = el('span', 'pp-statusline');
       var lastRun = t.last_run;
-      st.appendChild(statusPill(t.enabled ? (lastRun ? lastRun.status : 'idle') : 'idle'));
+      st.appendChild(statusPill(!t.enabled ? 'disabled' : (lastRun ? lastRun.status : 'idle')));
       st.appendChild(el('span', null, lastRun ? f.datetime(lastRun.at) : '尚未執行'));
       head.appendChild(st);
       head.appendChild(el('span', 'spacer'));
@@ -285,7 +577,7 @@
       }
       var pf = el('button', 'btn btn-sm', '乾跑預檢');
       pf.type = 'button';
-      pf.title = '不呼叫 LLM：跑完整守門檢查（R1–R8）＋組裝提示詞預覽＋成本估算';
+      pf.title = '不呼叫 AI：跑完整守門檢查（R1–R8）＋組裝提示詞預覽＋成本估算';
       pf.addEventListener('click', function (e) { e.stopPropagation(); window.ppPreflight(t); });
       head.appendChild(pf);
 
@@ -317,7 +609,7 @@
     return r;
   }
 
-  function openDrawer(t, focusKey) {
+  function openDrawer(t, focusKey, opts) {
     document.querySelectorAll('.pp-drawer-backdrop, .pp-drawer').forEach(function (n) { n.remove(); });
     var back = el('div', 'pp-drawer-backdrop');
     var dr = el('aside', 'pp-drawer');
@@ -424,7 +716,7 @@
       var ed = el('div', 'pp-d-actions');
       var be = el('button', 'btn btn-sm', '編輯標的');
       be.type = 'button';
-      be.addEventListener('click', function () { window.toast('編輯標的', 'ok', '沿用既有標的選擇器（持倉＋觀察清單）'); });
+      be.addEventListener('click', function () { window.ppUniverseModal(t); });
       ed.appendChild(be);
       cIn.appendChild(ed);
     }
@@ -440,7 +732,7 @@
     var asmActs = el('div', 'pp-d-actions');
     asmActs.style.marginTop = '8px';
     var bLib = el('a', 'btn btn-sm', '前往分析模板庫 →');
-    bLib.href = 'settings.html#prompts';
+    bLib.href = 'settings.html#prompts/templates';   /* DEF-038: land ON the 策略提示詞 panel */
     asmActs.appendChild(bLib);
     sAsm.appendChild(asmActs);
 
@@ -449,7 +741,7 @@
     var calBox = el('div', 'pp-d-card');
     calBox.appendChild(el('div', null, '載入校正版本…'));
     sCal.appendChild(calBox);
-    loadCalibrations(t, sCal, calBox);
+    loadCalibrations(t, sCal, calBox, opts);
 
     /* -- 運行記錄（async: GET /api/insight-tasks/{id}/runs）-- */
     var sRun = sec('runs', '⑤ 運行記錄 — 本任務');
@@ -474,10 +766,44 @@
   }
   window.ppOpenDrawer = openDrawer;
 
-  /* 校正版本鏈 — rendered from GET /api/calibrations?insight_type={id}. The status payload
-     (build_status) does NOT carry active_calibration_version / self_correct, so we read the
-     FULL insight-type row (GET /api/insight-tasks) in parallel to flag the active version. */
-  function loadCalibrations(t, sCal, placeholder) {
+  /* 校正版本鏈 — rendered from GET /api/calibrations?insight_type={id}. Each version carries
+     is_active + shadow (the shadow version's phase / scored of needed / queue position / both
+     versions' own records — R6 DEF-070/071); the FULL insight-type row (GET
+     /api/insight-tasks) is still read in parallel for self_correct.
+     R6 DEF-071: every live non-active version has 「設為生效」 and the active one 「取消生效」
+     (PUT /api/insight-tasks/{id}/active-calibration, confirmDialog first — later cards use the
+     version, cards already produced keep theirs). Before this the chain offered only 「封存」,
+     so a lone v1 — and a winning shadow while auto_promote is off, the default — could never
+     be adopted from the page. opts.focusAdopt (G7's fix) lands on the recommended button. */
+  var SHADOW_PILL = {
+    running: function (s) { return ['pill pill-warn', '影子評估中 ' + s.scored + '／' + s.needed]; },
+    waiting: function () { return ['pill pill-warn', '影子：下一批開始評估']; },
+    queued: function (s) {
+      return ['pill pill-off', '影子排隊中（目前 ' + s.slots_used + '／上限 ' + s.max_shadows + '）'];
+    },
+    won: function () { return ['pill pill-ok', '影子勝出・可設為生效']; },
+    lost: function () { return ['pill pill-off', '影子未勝出']; }
+  };
+
+  function shadowStats(v) {
+    var s = v.shadow;
+    var act = s.active_version == null ? '生效中（未附加校正）' : '生效中 v' + s.active_version;
+    return '本版評分 ' + s.shadow_record.n + ' 筆・失誤 ' + s.shadow_record.miss_count
+      + ' 筆｜' + act + ' 評分 ' + s.active_record.n + ' 筆・失誤 '
+      + s.active_record.miss_count + ' 筆（需 ' + s.needed + ' 筆才判定）';
+  }
+
+  function putActive(t, version, okTitle) {
+    return pdApi.put('/api/insight-tasks/' + t.id + '/active-calibration', { version: version })
+      .then(function () {
+        window.toast(okTitle, 'ok', version == null ? '之後的卡片不附加校正層' : 'v' + version);
+        openDrawer(t, 'calib');
+      }).catch(function (err) {
+        window.toast((err && err.message) || '設定失敗', 'fail', err && err.code);
+      });
+  }
+
+  function loadCalibrations(t, sCal, placeholder, opts) {
     if (!pdApi) { placeholder.replaceChildren(el('div', null, '校正版本不可用。')); return; }
     Promise.all([
       pdApi.get('/api/calibrations', { insight_type: t.id }),
@@ -485,7 +811,6 @@
     ]).then(function (res) {
       var vers = res[0];
       var full = (Array.isArray(res[1]) ? res[1] : []).find(function (x) { return x.id === t.id; });
-      var activeVer = full ? full.active_calibration_version : null;
       var selfCorrect = full ? full.self_correct : !!t.self_correct;
       sCal.querySelectorAll('.pp-d-card, .pp-vers, .wz-note').forEach(function (n) { n.remove(); });
       var list = Array.isArray(vers) ? vers : [];
@@ -497,18 +822,56 @@
         sCal.appendChild(c);
         return;
       }
+      var hasActive = list.some(function (v) { return v.is_active; });
+      if (!selfCorrect) {
+        sCal.appendChild(el('div', 'wz-note',
+          '此任務未開啟自我校正 — 生效版不會附加到提示詞，開啟後才生效。'));
+      } else if (!hasActive) {
+        sCal.appendChild(el('div', 'wz-note',
+          '目前未設生效版 — 卡片不附加校正層；按「設為生效」採用某一版。'));
+      }
       var wrap = el('div', 'pp-vers');
       var latest = list[list.length - 1];
+      var focusBtn = null;
+      var focusRank = 0;   /* won shadow 3 > other shadow 2 > latest 1 */
       list.slice().reverse().forEach(function (v) {
-        var isActive = activeVer === v.version;
-        var row = el('div', 'pp-ver' + (v.archived ? ' archived' : '') + (isActive ? ' is-active' : ''));
+        var sh = v.shadow;
+        var row = el('div', 'pp-ver' + (v.archived ? ' archived' : '')
+          + (v.is_active ? ' is-active' : '') + (sh ? ' is-shadow' : ''));
+        row.dataset.version = String(v.version);
         var top = el('div', 'pp-ver-top');
         top.appendChild(el('span', 'vid', 'v' + v.version));
         top.appendChild(el('span', 'date', f.date(v.created_at)));
-        if (isActive) top.appendChild(el('span', 'pill pill-ok', '生效中'));
+        if (v.is_active) top.appendChild(el('span', 'pill pill-ok', '生效中'));
         else if (v.archived) top.appendChild(el('span', 'pill pill-off', '已封存'));
-        else if (v.version === latest.version) top.appendChild(el('span', 'pill pill-warn', '最新版'));
+        else if (sh && SHADOW_PILL[sh.phase]) {
+          var sp = SHADOW_PILL[sh.phase](sh);
+          top.appendChild(el('span', sp[0] + ' pp-ver-shadow', sp[1]));
+        } else if (v.version === latest.version) top.appendChild(el('span', 'pill pill-warn', '最新版'));
         top.appendChild(el('span', 'spacer'));
+        if (!v.archived && v.is_active) {
+          var bc = el('button', 'btn btn-sm pp-ver-cancel', '取消生效');
+          bc.type = 'button';
+          bc.addEventListener('click', function () { window.confirmDialog({
+            title: '取消生效 v' + v.version + ' — ' + t.name,
+            body: '之後產生的卡片不再附加校正層；已產生的卡片不變。版本保留，可再設為生效。',
+            confirmLabel: '取消生效',
+            onConfirm: function () { putActive(t, null, '已取消生效'); }
+          }); });
+          top.appendChild(bc);
+        } else if (!v.archived) {
+          var bs = el('button', 'btn btn-sm btn-primary pp-ver-adopt', '設為生效');
+          bs.type = 'button';
+          bs.addEventListener('click', function () { window.confirmDialog({
+            title: '設為生效 v' + v.version + ' — ' + t.name,
+            body: '之後產生的卡片改用校正 v' + v.version + '；已產生的卡片不變（保留當時的版本）。',
+            confirmLabel: '設為生效',
+            onConfirm: function () { putActive(t, v.version, '已設為生效'); }
+          }); });
+          top.appendChild(bs);
+          var rank = sh && sh.phase === 'won' ? 3 : sh ? 2 : v.version === latest.version ? 1 : 0;
+          if (rank > focusRank) { focusRank = rank; focusBtn = bs; }
+        }
         if (!v.archived) {
           var ba = el('button', 'btn btn-sm', '封存');
           ba.type = 'button';
@@ -528,6 +891,7 @@
           top.appendChild(ba);
         }
         row.appendChild(top);
+        if (sh) row.appendChild(el('div', 'pp-ver-stats', shadowStats(v)));
         if (v.cause) row.appendChild(el('div', 'pp-ver-cause', '產生原因：' + v.cause));
         var det = document.createElement('details');
         det.appendChild(el('summary', null, '查看校正內文'));
@@ -536,6 +900,11 @@
         wrap.appendChild(row);
       });
       sCal.appendChild(wrap);
+      if (opts && opts.focusAdopt && focusBtn) {
+        focusBtn.classList.add('pp-focus');
+        focusBtn.scrollIntoView({ block: 'center' });
+        focusBtn.focus();
+      }
     }).catch(function () {
       placeholder.replaceChildren(el('div', null, '校正版本載入失敗。'));
     });
@@ -568,7 +937,11 @@
         tb.appendChild(tr2);
       }
       tbl.appendChild(tb);
-      runBox.replaceChildren(tbl);
+      /* DEF-002 class sweep: every table scrolls inside its own `.table-wrap`, never the
+         drawer (the 原因/說明 column carries whole backend sentences). */
+      var tblWrap = el('div', 'table-wrap');
+      tblWrap.appendChild(tbl);
+      runBox.replaceChildren(tblWrap);
     }).catch(function () {
       runBox.replaceChildren(el('div', 'wz-note', '運行記錄載入失敗。'));
     });
@@ -615,18 +988,22 @@
   /* ================= boot / refresh ================= */
   function refresh() {
     if (!pdApi) {
-      STATE = { tasks: [], health: null };
+      STATE = { tasks: [], health: null, loaded: false };
       renderHealth(); renderFilterBar(); renderCards();
       return;
     }
     return pdApi.get('/api/insight-tasks/status').then(function (resp) {
       STATE.tasks = (resp && resp.tasks) || [];
       STATE.health = (resp && resp.health) || null;
+      /* M7-01: the ONLY place this flips true — an answer arrived. Both failure paths
+         above/below rebuild STATE without it, so a failed refresh drops back to 狀態未取得
+         rather than keeping the last render's assertions. */
+      STATE.loaded = true;
       renderHealth();
       renderFilterBar();
       renderCards();
     }).catch(function () {
-      STATE = { tasks: [], health: null };
+      STATE = { tasks: [], health: null, loaded: false };
       renderHealth(); renderFilterBar(); renderCards();
       if (window.toast) window.toast('任務狀態載入失敗', 'fail', '已顯示空狀態');
     });

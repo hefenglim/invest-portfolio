@@ -1,4 +1,9 @@
-"""Ledger exports (spec 02): the four-ledger zip + single-ledger CSV.
+"""Ledger exports (spec 02): the all-ledgers zip + single-ledger CSV.
+
+The zip's composition is whatever ``EXPORT_KINDS`` says it is. This line carried a spelled-out
+count until 2026-08-16, by which point the count had been wrong for a week — corporate actions
+joined the zip and no prose followed. Counts written into sentences go stale on a schedule; the
+declaration does not, which is why nothing here states one.
 
 Both dump the raw ledger tables (``SELECT *`` — DB columns verbatim, values byte-identical
 to what is stored) so a reconciliation reproduces history exactly. The single-ledger CSV
@@ -15,19 +20,21 @@ from datetime import datetime
 
 from portfolio_dash.data_ingestion.config_seed import get_effective_fee_rules
 from portfolio_dash.export.artifact import ExportArtifact, csv_artifact, csv_blob, zip_artifact
+from portfolio_dash.shared.ledger_registry import EXPORT_KINDS
 from portfolio_dash.shared.wire import to_wire
 
-_LEDGER_TABLES = ["transactions", "dividends", "fx_conversions", "opening_inventory"]
 _SCHEMA_VERSION = 1
+
+# Both of these are DERIVED from shared/ledger_registry.py — a new ledger is declared
+# there once, and the zip + the per-tab CSV pick it up together. Hand-maintaining them
+# here was one of the four enumerations a new ledger had to be remembered in.
+_LEDGER_TABLES = [t.table for t in EXPORT_KINDS.values()]
 
 # Single-ledger CSV: the page's tab `kind` -> (table, ISO-date column for from/to
 # filtering). Date columns match the ledgers list router's per-endpoint filter column
 # (trade_date / date / build_date). `kind` is validated by the router against this map.
 LEDGER_KINDS: dict[str, tuple[str, str]] = {
-    "transactions": ("transactions", "trade_date"),
-    "dividends": ("dividends", "date"),
-    "fx": ("fx_conversions", "date"),
-    "opening": ("opening_inventory", "build_date"),
+    kind: (t.table, t.date_col) for kind, t in EXPORT_KINDS.items()
 }
 
 

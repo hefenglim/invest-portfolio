@@ -21,10 +21,13 @@
     } catch (e) { /* cache is best-effort */ }
   }
 
-  /* boot: reflect the persisted value (fresh GET — the source of truth) */
+  /* boot: reflect the persisted value (fresh GET — the source of truth). I-12: through the
+     shared late-write guard — a selection the owner made while the GET was in flight has
+     already been PUT by the change handler, and the stale answer must not revert it. */
+  const bootSel = sel.value;
   window.pdApi.get('/api/ui-prefs').then(function (p) {
-    if (p && p.page_size != null) {
-      sel.value = String(p.page_size);
+    if (p && p.page_size != null
+        && window.pdField.writeIfUntouched(sel, bootSel, String(p.page_size))) {
       applyLocal(p.page_size);
     }
   }).catch(function () { /* leave the default option selected */ });
@@ -32,16 +35,21 @@
   sel.addEventListener('change', function () {
     const value = Number(sel.value);
     sel.disabled = true;
+    const sent = String(value);
     window.pdApi.put('/api/ui-prefs', { page_size: value }).then(function (p) {
       const saved = (p && p.page_size != null) ? p.page_size : value;
-      sel.value = String(saved);
+      window.pdField.writeIfUntouched(sel, sent, String(saved));
       applyLocal(saved);
       _toast('已儲存', 'ok', '每頁筆數 ' + saved + ' 筆（重新整理頁面後生效）');
     }).catch(function (err) {
       _toast((err && err.message) || '儲存失敗', 'fail', err && err.code);
       /* re-sync to the server's last-good value */
+      /* Not awaited by the chain below, so the select is re-enabled before this lands —
+         the owner may pick again meanwhile, and that pick wins (I-12). */
       window.pdApi.get('/api/ui-prefs').then(function (p) {
-        if (p && p.page_size != null) sel.value = String(p.page_size);
+        if (p && p.page_size != null) {
+          window.pdField.writeIfUntouched(sel, sent, String(p.page_size));
+        }
       }).catch(function () { /* keep current */ });
     }).then(function () { sel.disabled = false; });
   });

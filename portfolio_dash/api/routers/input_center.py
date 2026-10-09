@@ -4,18 +4,27 @@ import base64
 import binascii
 import re
 import sqlite3
+from collections.abc import Callable, Collection
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from portfolio_dash.api.action_log import DETAIL_ATTR
 from portfolio_dash.api.deps import get_conn, get_now
-from portfolio_dash.api.errors import error_body
+from portfolio_dash.api.errors import error_body, llm_refusal_message
 from portfolio_dash.api.instrument_service import QuickRegisterError, quick_register
-from portfolio_dash.api.routers.ledgers import _to_models
+from portfolio_dash.api.replay_guard import BatchUndoVerdict, batch_undo_guard
+from portfolio_dash.api.routers.cash import cash_pool_fn, load_cash_ledgers, pool_balances
+from portfolio_dash.api.routers.ledgers import (
+    _delete_actions,
+    _to_models,
+    reconcile_split_prices,
+)
 from portfolio_dash.api.wire import (
     account_markets_wire,
     div_model_wire,
@@ -23,8 +32,24 @@ from portfolio_dash.api.wire import (
     issue_wire,
     parse_side,
 )
-from portfolio_dash.data_ingestion.agents import ai_agents_input
+from portfolio_dash.data_ingestion.agents import (
+    AiDraftList,
+    AiInputResult,
+    TradeContext,
+    ai_agents_input,
+    cash_kind_vocabulary,
+    revalidate_ai_drafts,
+)
+from portfolio_dash.data_ingestion.cash_import import (
+    build_cash_movement_preview,
+    write_cash_movement_row,
+)
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
+from portfolio_dash.data_ingestion.corporate_action_import import (
+    build_corporate_action_preview,
+    corporate_action_writer,
+    parse_action_batch,
+)
 from portfolio_dash.data_ingestion.csv_import import (
     DateAmbiguity,
     build_transaction_preview,
@@ -36,9 +61,17 @@ from portfolio_dash.data_ingestion.dividend_import import (
     build_dividend_preview,
     write_dividend_row,
 )
-from portfolio_dash.data_ingestion.fees import forecast_tw_rebate
+from portfolio_dash.data_ingestion.fees import (
+    booked_discount,
+    forecast_tw_rebate,
+    rebate_applies,
+)
 from portfolio_dash.data_ingestion.fx_import import build_fx_preview, write_fx_row
-from portfolio_dash.data_ingestion.holdings import current_shares
+from portfolio_dash.data_ingestion.holdings import (
+    current_shares,
+    load_action_index,
+    shares_through,
+)
 from portfolio_dash.data_ingestion.import_templates import (
     DATE_COLUMN_BY_KIND,
     TEMPLATE_KINDS,
@@ -51,25 +84,51 @@ from portfolio_dash.data_ingestion.opening_import import (
     build_opening_preview,
     write_opening_row,
 )
-from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, commit_preview
+from portfolio_dash.data_ingestion.preview import (
+    BatchContext,
+    ImportPreview,
+    PreviewRow,
+    Writer,
+    commit_preview,
+)
+from portfolio_dash.data_ingestion.provenance import (
+    BatchRows,
+    delete_batch,
+    existing_hashes,
+    is_undoable,
+    list_batches,
+    open_batch,
+    row_hashes,
+)
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
 from portfolio_dash.data_ingestion.store import (
+    MovedWeight,
+    StoredCorporateAction,
+    StoredTransaction,
+    get_transaction,
     list_accounts,
-    list_cash_movements,
-    list_dividends,
-    list_fx_conversions,
+    list_corporate_actions,
     list_instruments,
-    list_transactions,
 )
-from portfolio_dash.data_ingestion.validate import Issue, TxnInput
+from portfolio_dash.data_ingestion.validate import (
+    Issue,
+    TxnInput,
+    unknown_account_issue,
+    unknown_account_message,
+)
 from portfolio_dash.export.artifact import content_disposition
-from portfolio_dash.portfolio.cash import cash_balances
 from portfolio_dash.portfolio.cost_basis import build_book
-from portfolio_dash.portfolio.results import Holding
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.portfolio.results import Book, Holding
+from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
+from portfolio_dash.shared.image_types import is_supported_image
+from portfolio_dash.shared.ledger_events import EventPriority
 from portfolio_dash.shared.llm_config import get_model
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
+from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.strategy.target_weights import move_target_weight
 
 router = APIRouter()
 
@@ -118,6 +177,7 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "market": i.market.value,
             "ccy": i.quote_ccy.value,
             "etf": i.is_etf,
+            "etf_unknown": i.etf_flag_unknown,
             "archived": i.archived,
         }
         for i in insts
@@ -139,7 +199,91 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     }
 
 
-def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding] | None:
+def _unclear(h: Holding) -> bool:
+    """True when a position's own numbers are 待釐清 and no what-if may be quoted on them.
+
+    ONE predicate, two questions, because they must never diverge: "may I use this Holding?"
+    and "is this key missing because it is withheld, or because nothing is held?" A second
+    hand-maintained copy of the flag list is how ``unbookable_action`` reached four consumers
+    and was wired into one.
+
+    * ``oversold`` — negative shares, and the cost basis was deliberately discarded.
+    * ``unbookable_action`` — a corporate action was skipped, so ``shares`` is still in
+      PRE-action terms while ``adjusted_cost_total`` is post-action money. Every figure on
+      this path is ``total / shares`` or ``qty / shares``, so the mismatch lands inside the
+      answer and it is wrong by the action's whole ratio.
+
+    NOT ``unbookable_dividend`` (shares and the share-derived math are right; only the cost
+    is short one payout) and NOT ``short_open`` (a real position with a signed quantity) —
+    the same call ``pnl.py`` documents, made against the same question.
+
+    K3 (2026-10-05) re-asked it for a FLAT carrier (``Book.unbookable_dividends``: the successor
+    of a vacated ticker sold out, a short covered to 0) and the answer stands, held or flat. The
+    flag says a payout was refused, not that the carrier's shares or totals are undefined: they
+    are exactly what the replay holds, and the projection reads them off the replay itself
+    (``before`` / ``at_date`` in :func:`_position_preview`), so it shows what the written row
+    books. Withholding would hide a correct projection, not a wrong one. Pinned by
+    ``tests/contract/test_k3_unbookable_dividend_reaches_every_reader.py``.
+    """
+    return h.oversold or h.unbookable_action
+
+
+def _withheld(book: Book, key: tuple[str, str], *, count_oversold: bool = True) -> bool:
+    """True when the replay marks *book*'s position at *key* 待釐清 — held OR flat — on either
+    of :func:`_unclear`'s two flags (R4 → S1, 2026-10-04).
+
+    ONE source: ``Book.opened_positions``, the replay's record of every position it opened with
+    its ``oversold`` / ``unbookable_action`` flags, whatever its share count. ``Book.holdings``
+    drops every flat position, so two shapes went unseen: a 賣超 a later buy netted back to 0
+    (R4), and a FLAT position a refused corporate action flagged (S1) — measured: a declared
+    short of 100 on it previewed ``remain_shares -100 / new_original_avg 597.35`` and the
+    written row came back −100 and 待釐清. The flag is sticky on the position, so a trade that
+    reopens it inherits it, which is exactly what this answers BEFORE the trade.
+
+    ``count_oversold=False`` is for the book WITH the draft: a 賣超 there that the trade-date
+    book did not have is the draft's own undeclared oversell — a branch the SELL arm projects as
+    the replay books it — while an action flag there is not the draft's doing (an unreadable
+    action row flags every position it names once the replay ends, including the one the draft
+    opens) and still withholds.
+    """
+    rec = next((p for p in book.opened_positions if (p.account_id, p.symbol) == key), None)
+    if rec is None:
+        return False
+    return rec.unbookable_action or (count_oversold and rec.oversold)
+
+
+def _book_of(bundle: LedgerBundle) -> Book | None:
+    """:func:`_book_or_none` over a bundle the caller already holds (never-500, same arms).
+
+    Split out for :func:`_position_preview`, which replays FOUR derived bundles off one
+    ledger read: re-deriving the bundle per replay would multiply the SQL, and — worse —
+    a second read could observe a different ledger, so the four books would no longer be
+    four views of one truth.
+    """
+    try:
+        return build_book(bundle, allow_oversell=True)
+    except (ValueError, KeyError, ArithmeticError):
+        return None
+
+
+def _book_or_none(conn: sqlite3.Connection, *, as_of: date) -> Book | None:
+    """The cost-basis replay over the current ledger, or ``None`` when it cannot be booked.
+
+    ``as_of`` is the valuation day (required, no default): every row counts from its own
+    date (DEF-016 / DEF-056), so the ledger is cut exactly as ``build_dashboard`` cuts it and
+    the sell hint's 均價 is the dashboard row's own figure.
+
+    Never-500 (lesson: degrade at EVERY ``build_book`` call site). Split out of
+    :func:`_holdings_or_none` so :func:`_position_preview` can tell a WITHHELD position from
+    an absent one off the SAME replay — ``Book.holdings`` is the only source that answers
+    both, and asking a second share path instead is how two answers to one question appear.
+    """
+    return _book_of(_to_models(conn).valued_as_of(as_of))
+
+
+def _holdings_or_none(
+    conn: sqlite3.Connection, *, as_of: date
+) -> dict[tuple[str, str], Holding] | None:
     """(account_id, symbol) → open Holding from the VERIFIED cost-basis replay (build_book),
     or ``None`` when the ledger is un-bookable.
 
@@ -154,28 +298,35 @@ def _holdings_or_none(conn: sqlite3.Connection) -> dict[tuple[str, str], Holding
     (e.g. a legacy orphan dividend → ValueError) returns ``None`` — callers then HIDE the
     position what-if entirely rather than mis-read an unvaluable book as an empty portfolio
     (which would show fresh-position math for an actually-held symbol). ``allow_oversell=True``
-    keeps an acked 賣超 book from crashing; oversold holdings carry no meaningful basis and
-    are EXCLUDED.
+    keeps an acked 賣超 book from crashing; 待釐清 holdings carry no usable basis and are
+    EXCLUDED — see :func:`_unclear` for which flags qualify and why ``unbookable_action`` now
+    does. This is a PER-POSITION exclusion and stays one: every other symbol's hint keeps
+    working (D38 invariant 1 containment).
+
+    ``Book.unapplied_actions`` is deliberately NOT read here; see the note on
+    :func:`_position_preview` for why the two silent refusal paths leave nothing for this
+    seam to withhold.
     """
-    t_models, d_models, o_models = _to_models(conn)
-    instruments = {i.symbol: i for i in list_instruments(conn)}
-    try:
-        book = build_book(t_models, d_models, o_models, instruments, allow_oversell=True)
-    except (ValueError, KeyError):
+    book = _book_or_none(conn, as_of=as_of)
+    if book is None:
         return None
-    return {(h.account_id, h.symbol): h for h in book.holdings if not h.oversold}
+    return {(h.account_id, h.symbol): h for h in book.holdings if not _unclear(h)}
 
 
-def _adjusted_avg_by_position(conn: sqlite3.Connection) -> dict[tuple[str, str], Decimal]:
+def _adjusted_avg_by_position(
+    conn: sqlite3.Connection, *, as_of: date
+) -> dict[tuple[str, str], Decimal]:
     """(account_id, symbol) → adjusted_avg for the FU-D44 sell hints — a thin projection of
     :func:`_holdings_or_none` (one build_book replay; un-bookable → EMPTY map so the hint
     simply hides, the same degradation as before)."""
-    return {key: h.adjusted_avg for key, h in (_holdings_or_none(conn) or {}).items()}
+    return {key: h.adjusted_avg
+            for key, h in (_holdings_or_none(conn, as_of=as_of) or {}).items()}
 
 
 @router.get("/input/holdings")
 def input_holdings(
-    account: str, conn: sqlite3.Connection = Depends(get_conn)
+    account: str, conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """Per-account held / closed symbols: 股利 picker (FU-D35) + sell-entry hints (FU-D44).
 
@@ -190,41 +341,53 @@ def input_holdings(
                  position can still pay a dividend after its ex-date (owner 假設 2).
                  Closed entries stay ``{symbol, name}`` — the extension is held-only.
 
-    Share counts reuse the pure ``current_shares`` helper (opening + buys − sells +
-    zero-cost reinvest shares — the same replay rule as ``build_book``); adjusted_avg
-    comes from the verified cost-basis replay itself (``_adjusted_avg_by_position`` →
-    ``build_book``). NO cost-basis math is duplicated here. Classification is strictly
-    per (account, symbol): the SAME symbol may be ``held`` in one account and ``closed``
-    in another. Names come from the instruments registry (fallback: the raw symbol).
-    Unknown account -> 404.
+    Share counts reuse the pure share walker (opening + buys − sells + zero-cost reinvest
+    shares — the same replay rule as ``build_book``); adjusted_avg comes from the verified
+    cost-basis replay itself (``_adjusted_avg_by_position`` → ``build_book``). NO cost-basis
+    math is duplicated here. Classification is strictly per (account, symbol): the SAME
+    symbol may be ``held`` in one account and ``closed`` in another. Names come from the
+    instruments registry (fallback: the raw symbol). Unknown account -> 404.
+
+    Both figures are TODAY's position (DEF-056, owner ruling 2026-09-24): a row dated after
+    the valuation day does not count yet, so ``shares`` is ``shares_through(on=today)`` —
+    not ``current_shares``, which nets every date and put a future buy's shares into 可賣股數
+    beside an average that (correctly) left it out — and a symbol whose only rows are still
+    ahead is neither held nor closed.
     """
     accounts = {a.account_id for a in list_accounts(conn)}
     if account not in accounts:
         return JSONResponse(status_code=404, content=error_body(
-            "not_found", f"帳戶 {account} 不存在", field="account"))
-    # Every symbol this account has ever touched, across the three share-bearing ledgers.
+            "not_found", unknown_account_message(account), field="account"))
+    today = now.date()
+    day = today.isoformat()
+    # Every symbol this account has touched BY TODAY, across the three share-bearing ledgers
+    # (the date columns the valuation cut reads; a dividend by its payment date — a 配股
+    # can only exist on a symbol the account already held, so its ex-date adds no symbol).
     symbols: set[str] = set()
     for row in conn.execute(
-        "SELECT DISTINCT symbol FROM transactions WHERE account_id=?", (account,)
+        "SELECT DISTINCT symbol FROM transactions WHERE account_id=? AND trade_date<=?",
+        (account, day),
     ):
         symbols.add(row["symbol"])
     for row in conn.execute(
-        "SELECT DISTINCT symbol FROM opening_inventory WHERE account_id=?", (account,)
+        "SELECT DISTINCT symbol FROM opening_inventory WHERE account_id=? AND build_date<=?",
+        (account, day),
     ):
         symbols.add(row["symbol"])
     for row in conn.execute(
-        "SELECT DISTINCT symbol FROM dividends WHERE account_id=?", (account,)
+        "SELECT DISTINCT symbol FROM dividends WHERE account_id=? AND date<=?", (account, day)
     ):
         symbols.add(row["symbol"])
     names = {i.symbol: i.name for i in list_instruments(conn)}
     avg_map: dict[tuple[str, str], Decimal] | None = None  # built once, on first held row
     held: list[dict[str, Any]] = []
     closed: list[dict[str, str]] = []
+    index = load_action_index(conn)   # ONE per request (trap #21)
     for sym in sorted(symbols):
-        shares = current_shares(conn, account, sym)
+        shares = shares_through(conn, account, sym, on=today, index=index)
         if shares > _ZERO:
             if avg_map is None:
-                avg_map = _adjusted_avg_by_position(conn)
+                avg_map = _adjusted_avg_by_position(conn, as_of=today)
             avg = avg_map.get((account, sym))
             held.append({
                 "symbol": sym, "name": names.get(sym) or sym,
@@ -259,6 +422,25 @@ class ManualBody(BaseModel):
     # single-market account (the one market is inferred exactly as before); a merged account
     # with a blank market + unknown symbol is a commit-time 422 (market_required).
     market: str = ""
+    #: The ETF answer for a symbol this commit is about to AUTO-REGISTER — and ONLY for that.
+    #:
+    #: ⚠ Named ``new_symbol_is_etf``, not ``is_etf``, because the difference is the whole
+    #: point. The registry is authoritative at both fee seams (stress-audit fix 2026-07-15,
+    #: reaffirmed by AI-D40); a per-trade ``is_etf`` that could beat it is the 3× overtax
+    #: defect from the other direction. This value is read at exactly one place — the
+    #: auto-register call below — and an already-registered instrument never reaches it.
+    #:
+    #: ``None`` keeps AI-D40's behaviour unchanged: the row registers with the flag UNSET and
+    #: the first TW sell discloses ``etf_flag_unknown`` rather than assuming a rate. What this
+    #: field adds is the chance to answer at the moment the user is already looking at the
+    #: symbol, instead of after a sell has already priced the guess.
+    new_symbol_is_etf: bool | None = None
+    #: PREVIEW ONLY — the ledger 更正 modal previews a REPLACEMENT for this stored row
+    #: (DEF-042, owner ruling 2026-09-24: an edit runs the same ``validate_transaction`` as a
+    #: new entry). The findings are then those of "the ledger without that row + this one",
+    #: and the new-position / cash lines — which describe an ADDED row — are withheld.
+    #: The commit door ignores it: an edit is written by ``PUT /api/ledgers/transactions``.
+    replaces_txn_id: int | None = None
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
@@ -270,6 +452,19 @@ def _txn_input(body: ManualBody) -> TxnInput:
         fee=body.fee_override, tax=body.tax_override, daytrade=body.daytrade,
         short_sale=body.short_sale, note=body.note,
     )
+
+
+def _settled_gross(
+    shares: Decimal, price: Decimal, instrument: Instrument | None, rule: FeeRuleSet | None
+) -> Decimal:
+    """The trade's settled 價金 (``shared.money.settled_notional``) in the currency it will
+    settle in: the instrument's, else the fee rule's market currency (what auto-registration
+    assigns). With neither there is no row to book; the raw product is that edge's answer."""
+    if instrument is not None:
+        return settled_notional(shares, price, instrument.quote_ccy)
+    if rule is not None:
+        return settled_notional(shares, price, MARKET_QUOTE_CCY[rule.market])
+    return shares * price
 
 
 def _rule_for(
@@ -338,17 +533,45 @@ def _issue_wire_manual(
             "text": f"未註冊標的 {symbol} — 寫入時將自動查詢並註冊（查無報價則無法寫入）",
             "field": "symbol",
         }
-    wired: dict[str, Any] = issue_wire(issue)
-    return wired
+    # The advisory severity (DEF-014) is issue_wire's own since I-13 — the wrapper that
+    # added it here is retired.
+    return issue_wire(issue)
+
+
+#: Today's pool balances, read at most ONCE per request (⑪): the snapshot is a replay as
+#: well as five reads, and the draft's overdraft warning and its 帳戶現金 line quote the same
+#: figure — so they share one :func:`~api.routers.cash.load_cash_ledgers`.
+TodayPools = Callable[[], dict[tuple[str, Currency], Decimal]]
+
+
+def _today_pools(conn: sqlite3.Connection, *, as_of: date) -> TodayPools:
+    """A lazy, memoised ``GET /api/cash`` balance read as of ``as_of`` (the request clock's
+    day): nothing is read until a caller asks, and the second ask re-uses the first."""
+    memo: list[dict[tuple[str, Currency], Decimal]] = []
+
+    def read() -> dict[tuple[str, Currency], Decimal]:
+        if not memo:
+            memo.append(pool_balances(load_cash_ledgers(conn), as_of=as_of))
+        return memo[0]
+
+    return read
 
 
 def _cash_overdraft_issue(
-    conn: sqlite3.Connection, body: ManualBody, draft_fee: Decimal, draft_tax: Decimal
+    conn: sqlite3.Connection, body: ManualBody, draft_fee: Decimal, draft_tax: Decimal,
+    *, pools: TodayPools,
 ) -> Issue | None:
     """Soft overdraft warning (audit C1b): only when the account opted into cash tracking
     (>=1 cash movement) AND this BUY would push the instrument's cash pool below zero.
 
     Never a hard block — users may not track cash at all (only fires once they do).
+
+    ``pools`` is today's balance read (:func:`_today_pools` — M5-06, X8a: as of the request
+    clock's day, the same figure the 帳戶現金 line beside this warning quotes, so a deposit
+    dated in the future is in the ledger but cannot silence a warning about a pool that is
+    negative today; ⑪: built from the cash page's own snapshot, so a payout the replay
+    refused cannot cover a buy either). Required, no default: a caller that forgets it is a
+    ``TypeError``, not a quiet return to a different read.
     """
     if parse_side(body.side) is not Side.BUY:
         return None
@@ -360,17 +583,14 @@ def _cash_overdraft_issue(
     ).fetchone()
     if tracked is None:
         return None
-    bal = cash_balances(
-        list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
-        list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
-    )
-    current = bal.get((body.account_id, inst.quote_ccy), _ZERO)
-    cost = body.shares * body.price + draft_fee + draft_tax
+    current = pools().get((body.account_id, inst.quote_ccy), _ZERO)
+    # The settled 價金, as the pool will book it (owner 2026-09-30).
+    cost = settled_notional(body.shares, body.price, inst.quote_ccy) + draft_fee + draft_tax
     if current - cost < _ZERO:
         return Issue(
             kind="cash_overdraft",
             needs_confirm=True,
-            message=f"此帳戶 {inst.quote_ccy.value} 現金將不足(可能漏登入金或換匯),確認要寫入?",
+            message=f"此帳戶 {inst.quote_ccy.value} 現金將不足（可能漏登入金或換匯），確認要寫入？",
         )
     return None
 
@@ -380,16 +600,91 @@ def _old_position_fields(held: Holding | None) -> dict[str, str | None]:
 
     ``old_shares`` / ``old_original_avg`` / ``old_adjusted_avg`` come straight from the held
     Holding (averages = total / shares, computed on read — never a stored rounded average,
-    domain-ledger.md). Null for a fresh position (held None or 0 shares), so a first-time buy
-    renders 新 values against an OLD dash.
+    domain-ledger.md). Null for a fresh position (held None, or the ``shares == 0`` the replay
+    never emits), so a first-time buy renders 新 values against an OLD dash.
+
+    ``!= _ZERO``, not ``> _ZERO`` (2026-08-29, with QA-04): an OPEN DECLARED SHORT is a real
+    position with a signed quantity and a negative basis, so ``total / shares`` is its average
+    SALE price — the same figure every other surface prints for it. Withholding it rendered
+    「— → −4」 on a buy that covers a short the page had just listed as −10, which is the
+    QA-04 shape (「the position reads as unheld」) one column to the left. An oversold position
+    cannot reach here — :func:`_unclear` withholds the whole preview first — so a negative
+    ``shares`` here is always a short, never a discarded basis.
     """
-    if held is None or held.shares <= _ZERO:
+    if held is None or held.shares == _ZERO:
         return {"old_shares": None, "old_original_avg": None, "old_adjusted_avg": None}
     return {
         "old_shares": decimal_str(held.shares),
         "old_original_avg": decimal_str(held.original_cost_total / held.shares),
         "old_adjusted_avg": decimal_str(held.adjusted_cost_total / held.shares),
     }
+
+
+def _draft_transaction(body: ManualBody, fee: Decimal, tax: Decimal) -> Transaction:
+    """The row the commit is ABOUT to write, as the replay's own event type.
+
+    Same fields, same order as ``store.load_ledger_bundle``'s conversion, so replaying this
+    object and replaying the stored row afterwards are the same replay. ``fee``/``tax`` are
+    the resolved figures from ``enter_transaction`` (the engine's, or the user's overrides) —
+    the preview must not compute a second pair.
+    """
+    return Transaction(
+        account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
+        quantity=body.shares, price=body.price, fees=fee, tax=tax,
+        trade_date=body.date, short_sale=body.short_sale,
+    )
+
+
+def _ledger_before(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
+    """Everything the replay books BEFORE *draft* — the ledger as that trade will see it.
+
+    The cut is :class:`EventPriority`'s, read from the enum rather than re-stated, because
+    that enum exists to be the ONE owner of same-day order (``OPENING 0 → CORPORATE_ACTION
+    10 → TRADE 20 → DIVIDEND 40``). A transaction's rank is TRADE whichever side it is, so:
+
+    * ``opening`` / ``actions`` — ``<= day``: both rank below a trade, so a same-day
+      opening and a same-day corporate action are already applied when the trade books
+      (the same call ``LedgerBundle.before_action_on`` makes for openings, and D3's ruling);
+    * ``transactions`` — ``<= day``: EVERY stored same-day row precedes the draft, buys and
+      sells alike, because trades of one day book in ledger-id order (DEF-012, 2026-09-23)
+      and the draft takes the highest id. Until DEF-012 a same-day BUY outranked a SELL, so
+      a drafted buy was projected AHEAD of the sells already entered that day — and then
+      booked there, re-pricing a realized row the owner had already read (B-18);
+    * ``dividends`` — ``< day`` STRICTLY. DIVIDEND (40) outranks a trade, so a payout
+      dated on the trade date books AFTER the trade. This is the half that makes the bug
+      reachable without any backfill at all: a sell entered for "yesterday" was projected
+      against a cost basis that day's dividends had already reduced.
+
+    ``effective_date``, never ``date`` (R6): a STOCK dividend with an ex-date is booked from
+    the ex-date, and three copies of that rule is how two of them drift.
+
+    NOT :meth:`LedgerBundle.through` (``<= day`` on everything — right for the trend replay,
+    wrong here: it would let the same-day dividend in) and NOT :meth:`before_action_on`
+    (``< day`` on transactions — right for an action at rank 10, wrong for a trade that
+    follows the day's earlier trades).
+    """
+    day = draft.trade_date
+    # Read from the enum so this stays true by construction: a stored same-day trade's
+    # rank is never ABOVE the draft's, because both are TRADE.
+    rank = EventPriority.TRADE
+    return replace(
+        bundle,
+        opening=[o for o in bundle.opening if o.build_date <= day],
+        actions=[a for a in bundle.actions if a.date <= day],
+        transactions=[
+            t for t in bundle.transactions
+            if t.trade_date < day
+            or (t.trade_date == day and EventPriority.TRADE <= rank)
+        ],
+        dividends=[d for d in bundle.dividends if d.effective_date < day],
+        unreadable_actions=[u for u in bundle.unreadable_actions if u.date <= day],
+    )
+
+
+def _with_draft(bundle: LedgerBundle, draft: Transaction) -> LedgerBundle:
+    """*bundle* plus the drafted row, APPENDED — its position within its own (date, rank)
+    group, and therefore the book, is the one the stored row will take (highest id)."""
+    return replace(bundle, transactions=[*bundle.transactions, draft])
 
 
 def _position_preview(
@@ -402,20 +697,84 @@ def _position_preview(
     Never-500: any degradation path → null.
 
     Every branch also carries the R7 (C5) OLD-vs-NEW pre-trade triple (``old_shares`` /
-    ``old_original_avg`` / ``old_adjusted_avg``) via :func:`_old_position_fields`; the
-    existing ``new_*`` fields are byte-identical.
+    ``old_original_avg`` / ``old_adjusted_avg``) via :func:`_old_position_fields`.
 
-    * SELL, position currently held → ``cost_removed`` = adjusted_total × (qty / held_shares),
-      ``realized_pnl`` = (gross − fee − tax) − cost_removed, ``remain_shares`` =
-      max(0, held − qty). cost_removed/realized_pnl replicate build_book's OWN sell arithmetic
-      exactly (via the position TOTALS, not a re-divided average), so the preview equals the
-      booked realized row bit-for-bit — a mirror of the ledger's sell math, NOT a second source
-      (no double counting). Oversell (qty > held) still renders honestly; remain floors at 0.
-      Not held → null.
-    * BUY → ``new_shares`` / ``new_original_avg`` / ``new_adjusted_avg`` from the held totals +
-      this trade's ALL-IN cost (gross+fee+tax); not held → fresh-position math (held = 0, both
-      averages = all-in / qty). Averages are computed from totals on read, never a stored
-      rounded average (domain-ledger.md).
+    **The projection is the REPLAY, run — not arithmetic that resembles it** (M4-01,
+    2026-09-02). Three books are built off ONE ledger read, all through the same
+    ``build_book`` every dashboard number comes from:
+
+    * ``before`` — :func:`_ledger_before`, the ledger as the drafted trade will SEE it. Its
+      holding picks the branch (long / flat / short) and its realized-row count is the
+      watermark below.
+    * ``at_date`` — ``before`` + the draft. The rows past the watermark are exactly what THIS
+      trade books: 0 rows for a short extension or an undeclared oversell, 1 otherwise. So
+      ``realized_pnl`` / ``cost_removed`` / ``covered_shares`` are READ off the booked row
+      instead of re-derived, and the three sell branches cannot drift apart again.
+    * ``after`` — the WHOLE ledger + the draft, built only for a back-dated draft and only
+      as a bookability check: a row the ledger could not replay once written gets no
+      projection at all.
+
+    **The projected columns are the TRADE-DATE position** (DEF-048, owner ruling
+    2026-09-24). ``old_*`` come from ``before``'s holding and ``remain_shares`` /
+    ``new_shares`` + both averages from ``at_date``'s — the position just before and just
+    after THIS trade on its own date, which is exactly what the replay books once the row is
+    written (it replays by date; the draft takes the highest id, so it is the last of its
+    day's trades). Until DEF-048 the ``old_*`` triple was TODAY's holding and the new columns
+    were the whole-ledger end state, so a 補登 of 2884 on 2025-01-02 — when nothing was held
+    yet — read 「持股 100 → 200、原始均價 93.20 → 61.70」 instead of 「— → 100」. The averages
+    are still ``total / shares`` computed on read (domain-ledger.md: never project an average,
+    project the totals — here they are replayed). ``as_of`` names that date on the wire and
+    ``backdated`` says whether later events exist, so the card can say which day it shows.
+
+    Until M4-01 all of it was arithmetic on ``book.holdings`` — the ledger's END state — with
+    ``body.date`` never consulted, so a row that is not the last event was projected against a
+    position the replay never shows it. Measured on the QA ledger: a sell back-dated three
+    months reported 13,881.65 realized where the book gives 9,682.45, and a sell dated
+    YESTERDAY reported 78.18 against 51.62 because that day's dividends (``EventPriority``
+    books DIVIDEND after SELL) had already reduced the cost basis the card divided. The 賣超
+    guard went date-aware on 2026-07-31 (``holdings.shares_through``); the money on the same
+    card did not, and the check strip said 「可寫入」 over all of it.
+
+    Wire shape — same keys, types and null conventions as M4-01, plus DEF-048's two:
+
+    * SELL → ``cost_removed`` / ``realized_pnl`` (null on the two branches that book no row),
+      ``realized_shares`` / ``short_opened`` / ``oversell`` / ``note`` from the branch,
+      ``remain_shares`` + both averages from the trade-date holding after the draft (averages
+      null when the replay holds no position at all, e.g. a full exit). Held neither today
+      nor on the trade date → null.
+    * BUY → ``new_shares`` + both averages from the trade-date holding after the draft;
+      against an open short it also carries ``covered_shares`` / ``realized_pnl`` / ``note``.
+    * both → ``as_of`` (the trade date the columns describe) and ``backdated`` (true when the
+      ledger holds events after the draft, i.e. today's position differs from the one shown).
+
+    ``gross`` is kept in the signature for the caller's existing contract; the replay derives
+    proceeds from the draft's own ``quantity × price``, which is that same number by
+    construction — one owner for it, and no chance of the two disagreeing.
+
+    **Why this seam gates on the FLAG and not on ``Book.unapplied_actions``** (the opposite
+    call from ``pnl.py`` / ``timeseries.py`` / the XIRR gate, so the reason is written down).
+    Those three multiply ``shares`` by a GLOBAL, already-post-action price, so any refusal
+    anywhere makes their number wrong and they must read the book-level record — which sees
+    the two refusals that leave no flagged holding. Nothing here is multiplied by a market
+    price: every figure comes from the position's OWN replayed totals, so the only question
+    is whether THIS position's totals and share count disagree. That is exactly what
+    ``unbookable_action`` marks, and ``_reject`` sets it on every refusal where a source
+    position exists. The two flagless refusals leave nothing for a book-level gate to
+    withhold: a source that never existed (E1) transferred nothing, and a source already at
+    zero shares (E2, e.g. a duplicated EXCHANGE row) would have transferred nothing either —
+    in both cases every position the preview can read is exactly what the ledger replays to.
+    Reading ``unapplied_actions`` here would therefore blank the sell hint and the draft
+    preview for EVERY symbol in EVERY account over a row that changed none of them: the
+    portfolio-wide bail-out ``pnl.py``'s containment note forbids, and which D38 reserves
+    for XIRR alone (tier 3). These are tier-1 per-symbol figures and stay contained.
+
+    Known residual, and it belongs to W4 rather than here: ``/input/holdings`` derives its
+    ``shares`` (and its 持有/已結清 classification) from ``current_shares``, which is
+    corporate-action AWARE — so it APPLIES an action this replay REFUSED. Measured: with an
+    EXCHANGE refused at E18/E22, ``current_shares`` moves the position to the destination and
+    the symbol drops off the 持有 list entirely, while ``build_book`` still holds the source's
+    1,000 pre-action shares and flags them 待釐清. The two paths disagree about whether the
+    position exists; this seam therefore asks the BOOK and never the share walker.
     """
     inst = next((i for i in list_instruments(conn) if i.symbol == body.symbol), None)
     if inst is None:
@@ -424,49 +783,199 @@ def _position_preview(
     if qty <= _ZERO or body.price <= _ZERO:
         return None
     try:
-        holdings = _holdings_or_none(conn)
-        if holdings is None:  # un-bookable ledger → no trustworthy position math
+        bundle = _to_models(conn)
+        book = _book_of(bundle)
+        if book is None:  # un-bookable ledger → no trustworthy position math
             return None
-        held = holdings.get((body.account_id, body.symbol))
+        key = (body.account_id, body.symbol)
+        held = next((h for h in book.holdings if (h.account_id, h.symbol) == key), None)
+        if _withheld(book, key):
+            # (R4 / S1, 2026-10-04: `_withheld` reads the replay's record of every position it
+            # opened, so a FLAT 待釐清 position — a 賣超 netted back to 0, or one a refused action
+            # flagged — is caught here too; this guard used to see "never held".)
+            # HELD, but 待釐清 — and this branch is why the exclusion in
+            # :func:`_holdings_or_none` is only HALF a fix. Dropping the key makes the SELL
+            # side hide (it already returns None for "not held"), but the BUY side reads a
+            # missing key as "never held" and falls straight through to fresh-position math:
+            # measured on a 1,000-share position whose corporate action was refused, the
+            # exclusion alone turned ``new_shares 1500`` into ``new_shares 500`` — one wrong
+            # number for a different wrong number, and reproducing "mis-read an unvaluable
+            # book as an empty portfolio" one position at a time. Both sides now withhold,
+            # for the one stated reason.
+            #
+            # Asked of the SAME ``Book`` the math would have come from, never of a second
+            # share path: ``current_shares`` is corporate-action AWARE (W4) while this replay
+            # REFUSED the action, so the two disagree about whether the position exists at
+            # all — the very disagreement this seam must not build a guard on.
+            return None
+        # --- the three replays (M4-01) ------------------------------------------------
+        draft = _draft_transaction(body, fee, tax)
+        prefix = _ledger_before(bundle, draft)
+        # Is the draft the ledger's LAST event? Every filter in ``_ledger_before`` keeps a
+        # SUBSET, so equal cardinality means equal lists — and then ``prefix is bundle`` for
+        # every purpose here. Reusing the books costs two replays instead of four, and makes
+        # "a trade dated after everything behaves exactly as it did before" true by
+        # construction rather than by re-derivation.
+        latest = (len(prefix.transactions) == len(bundle.transactions)
+                  and len(prefix.dividends) == len(bundle.dividends)
+                  and len(prefix.opening) == len(bundle.opening)
+                  and len(prefix.actions) == len(bundle.actions)
+                  # Every list ``_ledger_before`` filters, including the rejects — a short
+                  # circuit that skips one of them is a claim of equality that is not true.
+                  and len(prefix.unreadable_actions) == len(bundle.unreadable_actions))
+        before = book if latest else _book_of(prefix)
+        at_date = _book_of(_with_draft(prefix, draft))
+        after = at_date if latest else _book_of(_with_draft(bundle, draft))
+        if before is None or at_date is None or after is None:
+            return None
+        # Everything ahead of the draft books identically in both replays — same event
+        # prefix, and the draft sorts LAST within its own (date, rank) group — so the rows
+        # past this watermark are exactly what THIS trade books: one row, or none at all
+        # (a short extension and an undeclared oversell each book nothing, by design).
+        booked = at_date.realized.rows[len(before.realized.rows):]
+        realized_pnl = sum((r.realized for r in booked), _ZERO) if booked else None
+        cost_removed = (sum((r.adjusted_cost_removed for r in booked), _ZERO)
+                        if booked else None)
+        # The position as the DRAFT sees it (picks the branch, and is the 「原」 side) and as
+        # the replay holds it right AFTER the draft on the same date (the 「新」 side). Before
+        # M4-01 both were the end-state ``Holding``; until DEF-048 the new side still was.
+        prior = next((h for h in before.holdings if (h.account_id, h.symbol) == key), None)
+        if _withheld(before, key) or _withheld(at_date, key, count_oversold=False):
+            # The trade-date position is 待釐清 even if today's is not — same withholding, for
+            # the same reason as ``held`` above: its totals and share count disagree. And the
+            # position the replay holds right AFTER the draft, for every branch alike (S5): an
+            # action flag there was not put there by the draft (see `_withheld`), and no
+            # projected column may be quoted over a position the ledger will flag.
+            return None
+        prior_shares = prior.shares if prior is not None else _ZERO
+        final = next((h for h in at_date.holdings if (h.account_id, h.symbol) == key), None)
+        dated = {"as_of": body.date.isoformat(), "backdated": not latest}
+        # A flat position is DROPPED by the replay (``if shares == _ZERO: continue``), so
+        # there is no average to report — the null the BUY branch already returns on an
+        # exact cover, now reached through the replay's own rule instead of a copy of it.
+        new_shares = final.shares if final is not None else _ZERO
+        new_original_avg = None if final is None else decimal_str(final.original_avg)
+        new_adjusted_avg = None if final is None else decimal_str(final.adjusted_avg)
         if parse_side(body.side) is Side.SELL:
-            if held is None:
+            # QA-08 (2026-08-29): "not held" is NOT the end of the SELL arm. A DECLARED short
+            # opens a position out of NOTHING — ``build_book`` takes ``from_long = 0`` and the
+            # whole quantity becomes a short lot — and this guard ran BEFORE ``short_sale``
+            # was ever consulted, so the one shape that creates a position was the only one of
+            # eleven trade shapes with no projection at all. Nothing wrong was displayed; the
+            # card was simply blank, which reads as "the app has nothing to say about this"
+            # rather than "nobody wired this branch". The other three branches genuinely need
+            # a prior position (there is no cost to remove and no basis to discard without
+            # one), so they still bail out here.
+            #
+            # Held NEITHER today NOR on the trade date (DEF-048's class): a back-dated sell of
+            # a position that has since been closed was withheld here because only TODAY was
+            # asked, although on its own date it is an ordinary sale. Held today but not then
+            # still projects — as the oversell it will be booked as.
+            if held is None and prior is None and not body.short_sale:
                 return None
-            # frac / removed mirror build_book's ev.quantity / pos.shares and
-            # pos.adjusted_total × frac EXACTLY (same operands, same order) so the preview
-            # realized == the booked realized row (see the contract-test cross-check).
-            cost_removed = held.adjusted_cost_total * (qty / held.shares)
-            realized_pnl = (gross - fee - tax) - cost_removed
-            remain = held.shares - qty
+            # THREE branches, because ``build_book`` has three (review 2026-08-24). One
+            # formula used to be applied to all of them, which invented a realized P&L for two
+            # kinds of trade the ledger books nothing for — measured: +2,000 shown on a short
+            # extension, +9,000 on an undeclared oversell, and 9,000 shown where a declared
+            # partial books 6,000. Anything that mirrors the replay must mirror its BRANCHES,
+            # not just its happy-path formula (domain-ledger.md).
+            #
+            # The MONEY on each branch is no longer re-derived here — it is read off the row
+            # the replay booked above (M4-01), because a copy of a branch is a copy that can
+            # go stale, and this one did: it read the END-state holding, so all three branches
+            # were being chosen and computed against a position the trade never sees. What
+            # stays is the branch DECISION, which no realized row can express: the split
+            # between the long portion and the shares that open a short, and which of the two
+            # silent branches produced the absent row. Both now read ``prior_shares`` — the
+            # position AS OF the trade date — so they agree with the date-aware 賣超 guard
+            # (``holdings.shares_through``, 2026-07-31) instead of contradicting it.
+            long_shares = prior_shares if prior_shares > _ZERO else _ZERO
+            if body.short_sale:
+                # cost_basis.py: sell the long lot first, then open/extend the short with the
+                # remainder — so only the long portion realizes, and only it books a row.
+                from_long = min(qty, long_shares)
+                to_short = qty - from_long
+                oversell = False
+                note = ("放空／加空的部分不產生已實現損益，帳本以收到的價金作為空單成本基礎"
+                        if to_short > _ZERO else None)
+            elif qty > prior_shares:
+                # Undeclared oversell: the replay discards the position's cost basis and emits
+                # NO realized row (待釐清). A number here would be an invented one — and the
+                # projected averages follow the replay's own zeroing through ``final`` above,
+                # so the card no longer prints the PRE-trade average directly over its own
+                # warning that the basis is about to be permanently discarded.
+                #
+                # ``long_shares``, not ``prior_shares`` (E-2, 2026-08-29): the holding is
+                # SIGNED, so an undeclared sell landing on an OPEN SHORT put a negative share
+                # count on the wire — held −5, sell 20 reported ``realized_shares: "-5"``.
+                # Nothing realizes out of a lot that does not exist; the field is the LONG
+                # portion, which is what the declared branch above already takes.
+                from_long, to_short = long_shares, _ZERO
+                oversell = True
+                note = "賣超：成本基礎無法認定，帳本不會產生已實現損益（待釐清）"
+            else:
+                from_long, to_short = qty, _ZERO
+                oversell = False
+                note = None
             return {
                 "kind": "sell",
-                "cost_removed": decimal_str(cost_removed),
-                "realized_pnl": decimal_str(realized_pnl),
-                "remain_shares": decimal_str(remain if remain > _ZERO else _ZERO),
-                **_old_position_fields(held),
+                "cost_removed": None if cost_removed is None else decimal_str(cost_removed),
+                "realized_pnl": None if realized_pnl is None else decimal_str(realized_pnl),
+                "realized_shares": decimal_str(from_long),
+                "short_opened": decimal_str(to_short) if to_short > _ZERO else None,
+                "oversell": oversell,
+                "note": note,
+                # SIGNED, not floored at 0 (2026-08-24): a declared sell that opens a short
+                # leaves -N shares, and every other surface renders an open short that way.
+                "remain_shares": decimal_str(new_shares),
+                "new_original_avg": new_original_avg,
+                "new_adjusted_avg": new_adjusted_avg,
+                **_old_position_fields(prior),
+                **dated,
             }
-        all_in = gross + fee + tax
-        held_shares = held.shares if held is not None else _ZERO
-        held_original = held.original_cost_total if held is not None else _ZERO
-        held_adjusted = held.adjusted_cost_total if held is not None else _ZERO
-        new_shares = held_shares + qty  # qty > 0 guaranteed, so never a zero divisor
+        if prior_shares < _ZERO:
+            # A buy against an open short COVERS it first (cost_basis.py, owner rule
+            # 2026-07-31); it does not average into a long lot. The cover's realized figure
+            # and the shares it settles are the booked row's, not a second derivation of the
+            # owner's rule — and ``prior_shares`` asks the position AS OF the buy's own date,
+            # so a back-dated buy covers the short that was open THEN.
+            return {
+                "kind": "buy",
+                "new_shares": decimal_str(new_shares),
+                "new_original_avg": new_original_avg,
+                "new_adjusted_avg": new_adjusted_avg,
+                "covered_shares": decimal_str(sum((r.shares_sold for r in booked), _ZERO)),
+                "realized_pnl": decimal_str(
+                    realized_pnl if realized_pnl is not None else _ZERO),
+                "note": "回補空單：以本次每股成本結算，剩餘股數以本次成本為起點",
+                **_old_position_fields(prior),
+                **dated,
+            }
         return {
             "kind": "buy",
             "new_shares": decimal_str(new_shares),
-            "new_original_avg": decimal_str((held_original + all_in) / new_shares),
-            "new_adjusted_avg": decimal_str((held_adjusted + all_in) / new_shares),
-            **_old_position_fields(held),
+            "new_original_avg": new_original_avg,
+            "new_adjusted_avg": new_adjusted_avg,
+            **_old_position_fields(prior),
+            **dated,
         }
     except (ValueError, KeyError, ArithmeticError):
         return None
 
 
 def _account_cash(
-    conn: sqlite3.Connection, body: ManualBody
+    conn: sqlite3.Connection, body: ManualBody, *, pools: TodayPools
 ) -> tuple[dict[str, Any] | None, Decimal | None]:
     """DISPLAY-ONLY cash-pool balance for the trade's settlement (quote) currency (R6-E) —
-    the SAME ``cash_balances`` figure /api/cash serves, so the draft line and the 資金 page
-    never disagree. null when the symbol is unregistered (no quote ccy); ``balance`` null when
-    the pool has no tracked activity. Adds NO issue and NO gating (owner-signed). Never-500.
+    the SAME ``cash_balances`` figure /api/cash serves, AS OF THE SAME DAY (``as_of`` = the
+    request clock's date, M5-06), so the draft line and the 資金 page never disagree. That
+    sentence was false between X1 and X8a (2026-09-06): /api/cash had moved to today's
+    balance while this read the whole history, so the two differed by exactly any
+    future-dated row. ``pools`` (:func:`_today_pools`) is required with no default so the
+    next caller cannot silently fall back to the whole history — nor, since ⑪, to a pool
+    that still counts a payout the replay refused. null when the symbol is unregistered (no
+    quote ccy); ``balance`` null when the pool has no tracked activity. Adds NO issue and NO
+    gating (owner-signed). Never-500.
 
     Returns ``(wire_dict, balance)``: the wire dict is the byte-identical ``{ccy, balance}``
     the response embeds, and ``balance`` is the SAME raw Decimal so the caller can compute the
@@ -478,11 +987,7 @@ def _account_cash(
         return None, None
     amount: Decimal | None
     try:
-        bal = cash_balances(
-            list_cash_movements(conn), list_fx_conversions(conn), list_transactions(conn),
-            list_dividends(conn), {i.symbol: i for i in list_instruments(conn)},
-        )
-        amount = bal.get((body.account_id, inst.quote_ccy))
+        amount = pools().get((body.account_id, inst.quote_ccy))
     except (ValueError, KeyError, ArithmeticError):
         amount = None
     wire = {
@@ -492,19 +997,46 @@ def _account_cash(
     return wire, amount
 
 
+def _charged_discount(
+    rule: FeeRuleSet, replacing: StoredTransaction | None, body: ManualBody
+) -> Decimal:
+    """The settlement discount the previewed fee was CHARGED under (DEF-010 / DEF-055).
+
+    The regime belongs to the FEE, not to the account or to today's rule set:
+
+    * a NEW draft's fee — computed by the engine, or supplied (whose snapshot then records
+      no discount) — is charged under the rule set in force: ``rule.discount``, the same
+      fallback ``api/rebates.py`` reads once the row is stored;
+    * an EDIT that carries the stored fee (``fee_override`` — the 更正 modal sends the row's
+      own fee until a core field moves) previews the REPLACED row's money, charged under the
+      regime its snapshot records. The PUT keeps that snapshot (``_recompute_edit_fees``
+      only rewrites it when it recomputes the fee), so ``booked_discount`` of it is exactly
+      what ``/api/rebates`` will read after the save. Measured before DEF-055: #29 (booked
+      at ``discount 0.23``, fee 285) previewed ``rebate_estimate "219"`` (285 × 0.77) — the
+      double benefit DEF-010 removed everywhere else. That holds when the edit also MOVES the
+      row to another account: the fee is still the discounted money that left.
+    * an edit whose fee the engine RECOMPUTES (a core field moved, no override) is charged
+      under today's rule, and the PUT stores today's snapshot — ``rule.discount`` again.
+    """
+    if replacing is not None and body.fee_override is not None:
+        return booked_discount(replacing.fee_rule_snapshot, fallback=rule.discount)
+    return rule.discount
+
+
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody,
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
-) -> dict[str, Any]:
-    draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date())
-    gross = body.shares * body.price
-    total = (
-        -(gross + draft.fee + draft.tax)
-        if draft.inp.side.value == "BUY"
-        else (gross - draft.fee - draft.tax)
-    )
+) -> Any:
+    replacing: StoredTransaction | None = None
+    if body.replaces_txn_id is not None:
+        replacing = get_transaction(conn, body.replaces_txn_id)
+        if replacing is None:
+            return JSONResponse(status_code=404, content=error_body(
+                "not_found", f"交易 #{body.replaces_txn_id} 不存在"))
+    draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date(),
+                              replacing=replacing)
     # Market-aware per-trade rule (Batch B): the resolved instrument's market picks the rule
     # set; an unregistered symbol (draft.instrument None) keeps the account scalar (whatif
     # None-fallback). The preview never fails on the lookup — degrades to None.
@@ -512,23 +1044,42 @@ def manual_preview(
         conn, body.account_id,
         draft.instrument.market if draft.instrument is not None else None,
     )
+    # The settled 價金 the replay will book (owner 2026-09-30) — a preview mirrors the replay.
+    # An unregistered symbol settles in its rule's market currency, which is the currency
+    # auto-registration will give it.
+    gross = _settled_gross(body.shares, body.price, draft.instrument, rule)
+    total = (
+        -(gross + draft.fee + draft.tax)
+        if draft.inp.side.value == "BUY"
+        else (gross - draft.fee - draft.tax)
+    )
     issues = list(draft.issues)
-    overdraft = _cash_overdraft_issue(conn, body, draft.fee, draft.tax)
+    pools = _today_pools(conn, as_of=now.date())   # ⑪: one snapshot for the two cash reads
+    # The overdraft warning and the two cash lines describe an ADDED row; for an edit they
+    # would count the stored row twice, so the edit preview withholds them (DEF-042) — the
+    # edit door has no cash gate, exactly as before.
+    overdraft = (None if replacing is not None else
+                 _cash_overdraft_issue(conn, body, draft.fee, draft.tax, pools=pools))
     if overdraft is not None:
         issues.append(overdraft)
     # FE-D1 forecast HINT (informational, 不計入成本): the TW charge-first rebate on next
     # month's refund = floor(resolved fee × rebate_rate). Null when the account never rebates
-    # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies.
-    rebate_estimate = (
-        decimal_str(forecast_tw_rebate(draft.fee, rule.rebate_rate))
-        if rule is not None and rule.rebate_rate > _ZERO
-        else None
-    )
+    # (rebate_rate 0 — every non-TW rule) so the UI only shows the line where it applies —
+    # and (DEF-010) null when the fee was ALREADY discounted at settlement: a refund on top of
+    # it would count the benefit twice.
+    rebate_estimate: str | None = None
+    if rule is not None and rule.rebate_rate > _ZERO:
+        discount = _charged_discount(rule, replacing, body)
+        if rebate_applies(discount):
+            rebate_estimate = decimal_str(
+                forecast_tw_rebate(draft.fee, rule.rebate_rate, discount=discount))
     # R6-E (additive): the drawer-parity position what-if + the display-only account-cash line,
     # both SERVER-computed as Decimal strings (the frontend renders only). null on any
     # degradation / unregistered symbol / incomplete inputs — the base preview never fails.
-    position_preview = _position_preview(conn, body, draft.fee, draft.tax, gross)
-    account_cash, cash_bal = _account_cash(conn, body)
+    position_preview = (None if replacing is not None else
+                        _position_preview(conn, body, draft.fee, draft.tax, gross))
+    account_cash, cash_bal = ((None, None) if replacing is not None else
+                              _account_cash(conn, body, pools=pools))
     # R7 A3 (additive, C5): projected pool AFTER settlement = balance + the ALREADY-SIGNED total
     # (BUY total is negative, SELL positive), in the SAME quote ccy as account_cash. Emitted only
     # when the balance is known (else null) — a pure Decimal add over figures already computed,
@@ -586,12 +1137,32 @@ def manual_commit(
         else:
             market = _account_market(conn, body.account_id)
         if market is None:
+            # R-2: the sentence comes from ``unknown_account_issue``, which is the ONE owner
+            # of 「帳戶不可空白」 vs 「帳戶 {id} 不存在」 — wave 8 registered five importers on it
+            # and missed this one, because this door builds an ``error_body`` envelope rather
+            # than an :class:`Issue` and so did not look like a copy. It was: with a blank id
+            # the hand-built f-string rendered 「帳戶␣␣不存在，無法自動註冊標的」, telling the
+            # owner that an account they never typed does not exist. Only the account clause
+            # is shared; 「，無法自動註冊標的」 is this door's own reason for refusing and stays
+            # here. The 400, the ``validation_error`` code and the ``account_id`` field are
+            # unchanged, and the named-account sentence is byte-identical to before.
             return JSONResponse(status_code=400, content=error_body(
-                "validation_error", f"帳戶 {body.account_id} 不存在，無法自動註冊標的",
+                "validation_error",
+                f"{unknown_account_issue(body.account_id).message}，無法自動註冊標的",
                 field="account_id"))
         try:
             outcome = quick_register(
-                conn, symbol=body.symbol, market=market, now=now, force=False)
+                conn, symbol=body.symbol, market=market, now=now, force=False,
+                # AI-D40, stated rather than omitted: the old silent default WAS an answer
+                # — an authoritative False, because the fee seams treat the registry as
+                # authoritative. ``None`` records "unknown", which surfaces as a soft issue on
+                # the first TW sell instead of quietly charging the 現股 rate on an ETF.
+                #
+                # Since 2026-08-28 the door can also CARRY an answer (``new_symbol_is_etf``),
+                # given at the moment the user is already looking at the symbol. Still only
+                # here, on the auto-register path: a registered instrument never reaches this
+                # line, so the field cannot become a per-trade override of the registry.
+                is_etf=body.new_symbol_is_etf)
         except QuickRegisterError as exc:
             if exc.code != "duplicate_symbol":  # duplicate = registered meanwhile -> proceed
                 return JSONResponse(status_code=400, content=error_body(
@@ -618,7 +1189,7 @@ def manual_commit(
             "oversell_unacknowledged", "需確認賣超",
             issues=[issue_wire(i) for i in draft.issues]))
     written = enter_transaction(conn, inp, confirm=True, today=today)
-    gross = body.shares * body.price
+    gross = _settled_gross(body.shares, body.price, written.instrument, None)
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))
     return {"txn_id": written.transaction_id, "total": decimal_str(total),
@@ -627,20 +1198,152 @@ def manual_commit(
 
 # --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---
 
-_BUILDERS = {
+def _cash_builder(
+    conn: sqlite3.Connection, csv_text: str, *, select: Collection[int] | None = None
+) -> ImportPreview:
+    """Bind the pool arithmetic ONCE for the whole file, then build the cash preview.
+
+    The 6th kind is registered through a named wrapper rather than as a bare parser because
+    ``build_cash_movement_preview`` takes its pool probe as a REQUIRED argument. The withdraw
+    guard's two figures live in ``portfolio/cash.py``, which ``data_ingestion`` may not import
+    (``architecture.md``), so the arithmetic is INJECTED here — the layer that sits above both
+    — exactly as ``scheduler/jobs.py::split_factor_fn`` injects the split factor into
+    ``pricing/`` under D17.
+
+    Requiring the argument is the whole design: a registration that forgot to bind it would
+    ship the bulk door with a weaker guard than the single-row form, and this way that is a
+    mypy error rather than a silent overdraft. Binding it HERE (not per row) is D17's other
+    rule — the probe closes over one ledger snapshot, so an N-row file reads the ledgers once.
+    """
+    return build_cash_movement_preview(conn, csv_text, pool=cash_pool_fn(conn), select=select)
+
+
+def _fx_builder(
+    conn: sqlite3.Connection, csv_text: str, *, select: Collection[int] | None = None
+) -> ImportPreview:
+    """The same binding for the 換匯 kind (QA-09).
+
+    ``build_fx_preview`` gained the identical REQUIRED probe, for the identical reason: it had
+    no balance guard and no currency check at all, while ``POST /api/cash/fx`` enforces both —
+    and a conversion is the one movement that may never overdraft (FU-D34: no ack, no
+    financing). Registered through a named wrapper for the same reason the cash one is: the
+    argument has no default, so this wrapper cannot silently go missing.
+    """
+    return build_fx_preview(conn, csv_text, pool=cash_pool_fn(conn), select=select)
+
+
+#: Every kind's preview builder has ONE shape, which is what lets the two import endpoints
+#: stay kind-agnostic. :func:`_resolve_builder` substitutes a widened transactions builder
+#: behind this same signature rather than special-casing the kind at the call sites.
+Builder = Callable[[sqlite3.Connection, str], ImportPreview]
+
+
+class SelectAwareBuilder(Protocol):
+    """A builder whose row-level guard reasons about a row's SIBLINGS in the same file.
+
+    Only these three kinds have one, so only these three need to know which rows will
+    actually be written; every other kind validates a row against the stored ledger alone
+    and is unaffected by a selection.
+    """
+
+    def __call__(
+        self,
+        conn: sqlite3.Connection,
+        csv_text: str,
+        *,
+        select: Collection[int] | None = None,
+    ) -> ImportPreview: ...
+
+
+def _txn_builder(
+    conn: sqlite3.Connection, csv_text: str, *, select: Collection[int] | None = None
+) -> ImportPreview:
+    """The transactions kind under QA-01's select narrowing (FIX-A1, 2026-08-29).
+
+    ``build_transaction_preview`` is sibling-aware (the oversell guard counts the whole
+    file's batch), so it has the same select hole the cash door had: the preview's clean
+    verdict on a sell was derived WITH its covering buy in the batch, and deselecting that
+    buy on commit left the verdict standing. Measured (Master probe T2): buy 100 + sell 60
+    in one file, commit ``select=[sell]`` → 200, ``written: 1``, holdings ``shares: "-60"``
+    — a silently written oversold state whose 賣超 confirmation was never shown, while the
+    manual door answers the identical sell with the sticky needs_confirm. A named wrapper
+    for the same reason as ``_cash_builder``: the registration cannot silently lose the
+    argument.
+    """
+    return build_transaction_preview(conn, csv_text, select=select)
+
+
+#: Kinds whose guard validates a row against its SIBLINGS in the same file, and which
+#: therefore must be re-derived over the rows the commit will actually WRITE (QA-01). A
+#: deselected deposit funding a withdrawal that is then written alone was a 200 with the pool
+#: at −60,000; the manual door answers 422 for the identical movement. ``transactions``
+#: joined 2026-08-29 (FIX-A1): the share-side twin — a deselected covering buy funding the
+#: sell that is written alone — answered 200 / ``written: 1`` / shares −60.
+_BATCH_GUARDED: dict[str, SelectAwareBuilder] = {
+    "cash": _cash_builder, "fx": _fx_builder, "transactions": _txn_builder}
+
+_BUILDERS: dict[str, Builder] = {
     "transactions": build_transaction_preview, "dividends": build_dividend_preview,
-    "fx": build_fx_preview, "openings": build_opening_preview,
+    "fx": _fx_builder, "openings": build_opening_preview,
+    "corporate_actions": build_corporate_action_preview,
+    "cash": _cash_builder,
 }
-_WRITERS = {
-    "transactions": write_transaction_row, "dividends": write_dividend_row,
-    "fx": write_fx_row, "openings": write_opening_row,
+#: kind -> the writer ``commit_preview`` calls, BOUND per request (I-2). Five kinds need
+#: nothing bound; ``corporate_actions`` needs the target-weight mover, which lives in
+#: ``strategy/`` and is therefore injected from here — the layer above both — once per import
+#: (``architecture.md``'s injection convention). A binder rather than a writer so that seam is
+#: a required argument at the one place it can be supplied, not a module-level default.
+WriterBinder = Callable[[sqlite3.Connection, datetime], Writer]
+
+
+def _unbound(writer: Writer) -> WriterBinder:
+    def bind(_conn: sqlite3.Connection, _now: datetime) -> Writer:
+        return writer
+
+    return bind
+
+
+def _bind_corporate_action_writer(conn: sqlite3.Connection, now: datetime) -> Writer:
+    """The corporate-action writer with its weight mover bound to this request (I-2).
+
+    The mover runs INSIDE ``commit_preview``'s transaction (``commit=False``) and its result
+    is recorded on the EXCHANGE row (``weight_move_json``) — the manual door's F-3 contract,
+    now at the bulk door too. It used to run after the commit, in this router: a failure there
+    left the EXCHANGE standing with the weight on the dead ticker, and nothing was recorded, so
+    deleting the imported row could never move the weight back.
+    """
+
+    def move_weight(from_symbol: str, to_symbol: str) -> MovedWeight | None:
+        weight = move_target_weight(conn, from_symbol=from_symbol, to_symbol=to_symbol,
+                                    now=now, commit=False)
+        if weight is None:
+            return None
+        return MovedWeight(from_symbol=from_symbol, to_symbol=to_symbol, weight=weight)
+
+    return corporate_action_writer(move_weight=move_weight)
+
+
+_WRITERS: dict[str, WriterBinder] = {
+    "transactions": _unbound(write_transaction_row),
+    "dividends": _unbound(write_dividend_row),
+    "fx": _unbound(write_fx_row), "openings": _unbound(write_opening_row),
+    "corporate_actions": _bind_corporate_action_writer,
+    "cash": _unbound(write_cash_movement_row),
 }
+# Kinds whose commit moves the stored price basis and must therefore run the §5.1(c)
+# reconcile afterwards. A SPLIT restates every close of its symbol; leaving it out would
+# leave share counts corrected and prices not (or the reverse on a delete), which is the
+# state the drawer footer cannot see. Passing a non-SPLIT symbol is a provable no-op
+# (``split_factor`` is SPLIT-scoped), so the whole batch's symbols go in.
+_RECONCILING_KINDS = frozenset({"corporate_actions"})
 
 
 def _row_status(row: PreviewRow) -> str:
+    """``error`` / ``warn`` / ``ok`` — an ADVISORY-only row is ``ok`` (DEF-014): it is shown,
+    it is never a reason to withhold the tick or to demand ``ack_warnings``."""
     if row.has_hard_issue:
         return "error"
-    return "warn" if row.issues else "ok"
+    return "warn" if any(not i.info for i in row.issues) else "ok"
 
 
 def _row_data(row: PreviewRow) -> dict[str, Any]:
@@ -669,10 +1372,25 @@ def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
     for r in preview.rows:
         st = _row_status(r)
         counts[st] += 1
-        rows.append({"n": r.index, "status": st,
-                     "reason": r.issues[0].message if r.issues else None,
-                     "code": _row_code(r),
-                     "data": _row_data(r)})
+        # The gating finding leads; an advisory is the reason only when nothing else is
+        # (so it is visible today in the row's message cell without a frontend change),
+        # and the full advisory list rides as ``info`` — ADDITIVE, only when non-empty.
+        gating = [i for i in r.issues if not i.info]
+        advisory = [i for i in r.issues if i.info]
+        wire: dict[str, Any] = {
+            "n": r.index, "status": st,
+            "reason": (gating[0].message if gating
+                       else advisory[0].message if advisory else None),
+            "code": _row_code(r),
+            # I-13: every finding's KIND, in issue order — a stable machine code per row, so
+            # a page that needs to recognise one (the broker door's 賣超 consequence line)
+            # reads the kind instead of pattern-matching the server's sentence. ADDITIVE.
+            "kinds": [i.kind for i in r.issues],
+            "data": _row_data(r),
+        }
+        if advisory:
+            wire["info"] = [i.message for i in advisory]
+        rows.append(wire)
     return {"rows": rows, "summary": {"total": len(preview.rows), **counts}}
 
 
@@ -696,20 +1414,67 @@ def _bad_date_format(date_format: str | None) -> JSONResponse | None:
     return None
 
 
+def _resolve_builder(
+    kind: str,
+    conn: sqlite3.Connection,
+    pending_actions_csv: str | None,
+    *,
+    select: Collection[int] | None = None,
+) -> Builder:
+    """The kind's builder, widened when trades arrive WITH the actions that legalise them.
+
+    *select* narrows the SIBLING batch of the three kinds that have one (see
+    :data:`_BATCH_GUARDED`) to the rows the commit will actually write, so a row that is not
+    going into the ledger cannot fund one that is. It is ignored by every other kind, and by
+    the preview door, which has no selection to speak of.
+
+    The ``pending_actions_csv`` widening applies to ``transactions`` only, and only when the
+    caller supplies the accompanying action file — which today means the broker one-click
+    import, where the converter emits trades and corporate actions from the same statement
+    in one run. It COMPOSES with the QA-01 narrowing (the dedicated branch below): the index
+    widens which corporate actions the guard can see, *select* narrows which sibling TRADES
+    fund each other, and the two answer different questions about the same file.
+
+    **Why the widening exists at all.** The commit order is trades-then-actions and cannot
+    be reversed: a corporate action's own guards need the position to exist, so actions-first
+    rejects them. But a sell that is only legal AFTER a split then meets a share count taken
+    before it, and raises 賣超 — the ONE confirmation in this system whose acknowledgement
+    permanently discards a cost basis (the STICKY rule). The ledger ends up correct either
+    way, because the actions land moments later and every report rebuilds from the ledgers;
+    what is NOT acceptable is teaching the owner to click that particular dialog through a
+    wall of false positives.
+
+    It widens what the guard can SEE, never what it permits: an action that is not really
+    coming simply is not in the file, and a malformed one excludes itself
+    (``load_action_index``).
+    """
+    if kind == "transactions" and pending_actions_csv:
+        index = load_action_index(conn, pending=parse_action_batch(pending_actions_csv))
+        return lambda c, text: build_transaction_preview(
+            c, text, pending_actions=index, select=select)
+    sibling_aware = _BATCH_GUARDED.get(kind)
+    if sibling_aware is not None:
+        return lambda c, text: sibling_aware(c, text, select=select)
+    return _BUILDERS[kind]
+
+
 class ImportPreviewBody(BaseModel):
     kind: str
     csv_text: str
     date_format: str | None = None  # FU-D19: pin the date parse (from the ambiguity chooser)
+    #: The corporate-action CSV being imported in the SAME run (broker one-click). See
+    #: :func:`_resolve_builder`; ignored for every kind but ``transactions``.
+    pending_actions_csv: str | None = None
 
 
 @router.post("/import/preview")
 def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
-    builder = _BUILDERS.get(body.kind)
-    if builder is None:
+    if body.kind not in _BUILDERS:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
     if (bad := _bad_date_format(body.date_format)) is not None:
         return bad
+    builder = _resolve_builder(body.kind, conn, body.pending_actions_csv)
     # FU-D19: canonicalize headers + resolve the date column to ISO before the ISO-only builder.
     norm = normalize_import_csv(
         body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
@@ -724,17 +1489,90 @@ class ImportCommitBody(BaseModel):
     csv_text: str
     ack_warnings: bool = False
     date_format: str | None = None  # FU-D19: the chosen format carried through from preview
+    # Provenance (2026-08-13). Optional and purely descriptive: the batch's IDENTITY is the
+    # digest of csv_text, so a caller that omits the name still gets a traceable, reversible
+    # batch — it just cannot be shown which file it came from.
+    source_name: str | None = None
+    broker: str | None = None
+    #: See :class:`ImportPreviewBody`. Carried through from the preview so the commit
+    #: re-derives the SAME verdict — the preview's answer is advisory, this one writes.
+    pending_actions_csv: str | None = None
+    #: The rows the caller actually ticked, as ``PreviewRow.index`` values. ``None`` means
+    #: "all of them" — every other caller (the AI door, which commits a CSV it has already
+    #: filtered, and undo) sends nothing and means exactly that, so the omission stays
+    #: byte-compatible. Sent as INDICES, not as a re-rendered CSV: ``csv.DictReader`` row *n*
+    #: is not text line *n+1* once a quoted field contains a newline, and the frontend must
+    #: not re-parse what the server has already parsed correctly (F-03, 2026-08-27 — the
+    #: button was labelled 「確認寫入勾選列」 and wrote the whole paste).
+    select: list[int] | None = None
+    #: DEF-025 (owner ruling 2026-09-24): the 賣超 rows the owner acknowledged ONE BY ONE, as
+    #: ``PreviewRow.index`` values. ``ack_warnings`` releases the file-level gate for the
+    #: ordinary warnings; it does NOT cover a 賣超 row, whose acknowledgement permanently
+    #: discards a cost basis (the STICKY rule) — that row is written only when its own index
+    #: is listed here, exactly as the manual door writes one only under its own
+    #: ``ack_oversell``. See :data:`_OVERSELL_KIND` in :func:`import_commit`.
+    ack_rows: list[int] | None = None
+
+
+#: The one finding whose acknowledgement discards a cost basis (``domain-ledger.md``: 賣超 is
+#: STICKY). Every bulk door commits through :func:`import_commit`, so this is where the
+#: per-row acknowledgement is enforced for all of them — the CSV paste, the broker
+#: statement, the AI door — and not in any one page.
+_OVERSELL_KIND = "sell_exceeds_holdings"
+
+
+def _unacknowledged_oversells(
+    preview: ImportPreview, *, accept: set[int], acked: set[int], already: set[str],
+    hashes: dict[int, str],
+) -> list[PreviewRow]:
+    """The 賣超 rows this commit would WRITE without their own acknowledgement.
+
+    Only rows that would actually be written count: a deselected row, a refused row, and a
+    row already in the ledger (a re-import — ``commit_preview`` skips it as a duplicate) are
+    not being acknowledged by anyone, so they are not asked about.
+    """
+    return [
+        r for r in preview.rows
+        if r.index in accept and not r.has_hard_issue
+        and hashes.get(r.index) not in already
+        and r.index not in acked
+        and any(i.kind == _OVERSELL_KIND for i in r.issues)
+    ]
+
+
+def _oversell_rows_response(rows: list[PreviewRow]) -> JSONResponse:
+    """422 ``oversell_rows_unacknowledged`` — names every row, and the consequence."""
+    names = "、".join(
+        f"第 {r.index + 1} 列" + (f" {r.raw.get('symbol', '')}" if r.raw.get("symbol") else "")
+        for r in rows)
+    issues = [
+        {"sev": "warn", "code": _OVERSELL_KIND, "field": "shares", "row": r.index + 1,
+         "n": r.index,
+         "text": f"第 {r.index + 1} 列 {r.raw.get('symbol', '')}："
+                 + next(i.message for i in r.issues if i.kind == _OVERSELL_KIND)}
+        for r in rows
+    ]
+    return JSONResponse(status_code=422, content=error_body(
+        "oversell_rows_unacknowledged",
+        f"{names} 是賣超，需逐列勾選確認後才寫入：確認後這個部位的成本基礎會被永久捨棄"
+        "（待釐清），之後再買回也不會還原",
+        issues=issues))
 
 
 @router.post("/import/commit")
-def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
-    builder = _BUILDERS.get(body.kind)
-    writer = _WRITERS.get(body.kind)
-    if builder is None or writer is None:
+def import_commit(
+    body: ImportCommitBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    bind_writer = _WRITERS.get(body.kind)
+    if body.kind not in _BUILDERS or bind_writer is None:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
+    writer = bind_writer(conn, now)
     if (bad := _bad_date_format(body.date_format)) is not None:
         return bad
+    builder = _resolve_builder(body.kind, conn, body.pending_actions_csv)
     norm = normalize_import_csv(
         body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
     if norm.ambiguity is not None:
@@ -745,13 +1583,316 @@ def import_commit(body: ImportCommitBody, conn: sqlite3.Connection = Depends(get
         content["date_ambiguity"] = _date_ambiguity_wire(norm.ambiguity)
         return JSONResponse(status_code=422, content=content)
     preview = builder(conn, norm.text)  # re-derive (re-validate vs current ledger)
-    has_warn = any((not r.has_hard_issue) and r.issues for r in preview.rows)
+    # An ADVISORY (``info``) is not a warning to acknowledge (DEF-014).
+    has_warn = any(
+        (not r.has_hard_issue) and any(not i.info for i in r.issues) for r in preview.rows)
     if has_warn and not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
             "warnings_unacknowledged", "有警告列需確認後才寫入"))
     accept = {r.index for r in preview.rows if not r.has_hard_issue}
-    summary = commit_preview(conn, preview, accept=accept, writer=writer)
-    return {"written": len(summary.written), "skipped": len(summary.skipped)}
+    # WHY a row was skipped, per row (DEF-024, 2026-09-23). ``skipped`` used to be one
+    # number covering two different events — a row the caller left unticked, and a row the
+    # narrowed re-derivation below dropped because a finding surfaced that the owner never
+    # saw — so a commit that wrote nothing announced 「寫入成功 成功 0 筆・跳過 2 筆」 and the
+    # second event was invisible. Each skipped index now maps to a (code, message) pair.
+    deselected: set[int] = set()
+    narrowed: dict[int, Issue] = {}
+    if body.select is not None:
+        deselected = accept - set(body.select)
+        # INTERSECTED, never substituted: a deselected row is skipped, and so is a row the
+        # validator rejected even if the caller ticked it. `commit_preview`'s own comment has
+        # always reasoned about "a row the caller deselected" — the seam was built for this
+        # and had no caller until now.
+        accept &= set(body.select)
+        if body.kind in _BATCH_GUARDED:
+            # ⚠ QA-01: for the kinds whose guard reads a row's SIBLINGS, the verdict above
+            # was derived against the WHOLE file — which is not what will be written. Re-derive
+            # it over ``accept``, so a deselected deposit stops funding the withdrawal that is
+            # committed alone (measured: 200 written, pool at −60,000, while the manual door
+            # answers 422 for the identical movement), and a deselected covering buy stops
+            # funding the sell that is committed alone (FIX-A1, Master probe T2: 200,
+            # written 1, holdings at −60 shares, no 賣超 confirmation ever shown).
+            #
+            # SHRINK ONLY, and that is what makes one pass sufficient rather than a fixed
+            # point: the re-derived accept is intersected with the one above, so the batch a
+            # surviving row was judged against is a SUPERSET of what gets written. The rows
+            # that superset holds and the ledger will not are all debits — a credit never
+            # fails this guard, and a structurally invalid row was already out of the batch —
+            # so every surviving verdict was reached with LESS headroom than it will have.
+            full_kinds = {r.index: {i.kind for i in r.issues} for r in preview.rows}
+            preview = _resolve_builder(
+                body.kind, conn, body.pending_actions_csv, select=accept)(conn, norm.text)
+            accept &= {r.index for r in preview.rows if not r.has_hard_issue}
+            # The shrink-only rule, adapted for SOFT issues (FIX-A1). The cash/fx guards
+            # reject HARD, so the intersection above already drops what they refuse; the
+            # transactions guard raises ``needs_confirm`` findings (賣超 above all), which
+            # ride the blanket ``ack_warnings`` — an ack given against the FULL-file
+            # preview, where the narrowed finding was never shown. A row whose narrowed
+            # verdict surfaces an issue KIND absent from its full-file verdict is therefore
+            # dropped into ``skipped`` rather than written under a confirmation the owner
+            # never saw. Kind-level on purpose: a row whose kinds are unchanged (e.g. a
+            # genuinely-oversold sell the user acked) still writes — that ack was informed,
+            # and only the message's numbers can differ under a smaller batch. Dropping is
+            # still shrink-only, and the drops are all SELLS (only the oversell guard reads
+            # the batch), so surviving siblings were judged with LESS shares than they get.
+            for r in preview.rows:
+                new_kinds = {i.kind for i in r.issues} - full_kinds.get(r.index, set())
+                if not new_kinds:
+                    continue
+                if r.index in accept:
+                    # The finding the owner never saw — the reason this row is skipped.
+                    narrowed[r.index] = next(i for i in r.issues if i.kind in new_kinds)
+                accept.discard(r.index)
+    # Provenance. The hashes are derived from the rows' own content, so re-uploading the
+    # same export matches and skips rather than doubling the ledger, and the batch id makes
+    # the whole import removable in one step. The batch INSERT sits inside commit_preview's
+    # transaction, so a rollback takes it with it.
+    hashes = dict(
+        zip(
+            (r.index for r in preview.rows),
+            row_hashes(body.kind, [r.raw for r in preview.rows]),
+            strict=True,
+        )
+    )
+    already = existing_hashes(conn, body.kind, hashes.values())
+    # DEF-025 (owner ruling 2026-09-24): a 賣超 row is written only under ITS OWN
+    # acknowledgement. Checked AFTER the QA-01 narrowing, on the rows that will really be
+    # written: a row whose 賣超 only appeared under the narrowed batch was already dropped
+    # into ``skipped`` above, so every row asked about here was on the owner's screen.
+    # Before this the CSV door pre-ticked a 賣超 row and one generic 「部分列有警告（如賣超）」
+    # dialog wrote it through the blanket ``ack_warnings`` (measured, R1 I-06).
+    unacked = _unacknowledged_oversells(
+        preview, accept=accept, acked=set(body.ack_rows or ()), already=already,
+        hashes=hashes)
+    if unacked:
+        return _oversell_rows_response(unacked)
+    # The batch record is created ONLY if this commit will write something. A refused or
+    # fully-duplicate import leaving an empty batch behind would fill the history with rows
+    # that claim an import happened and own no data — and the list exists to be read.
+    will_write = any(
+        r.index in accept
+        and not r.has_hard_issue
+        and hashes.get(r.index) not in already
+        for r in preview.rows
+    )
+    # ⚠ The context itself is ALWAYS built, even when nothing will be written: it carries
+    # the duplicate detection, so dropping it on a full re-import would write every row a
+    # second time — the exact defect provenance exists to prevent, reintroduced by the
+    # optimisation that skips the batch record. Only the batch ROW is conditional.
+    provenance = BatchContext(
+        kind=body.kind,
+        batch_id=(
+            open_batch(
+                conn, kind=body.kind, csv_text=norm.text,
+                source_name=body.source_name, broker=body.broker,
+            )
+            if will_write
+            else None
+        ),
+        hashes=hashes,
+        already_present=already,
+    )
+    summary = commit_preview(
+        conn, preview, accept=accept, writer=writer, provenance=provenance)
+    out: dict[str, Any] = {
+        "written": len(summary.written), "skipped": len(summary.skipped)}
+    if summary.skipped:
+        # ADDITIVE and only when non-zero, like ``rejected_rows`` below. ``row`` is 1-based
+        # to match it; ``symbol`` is the row's own cell (blank for a kind without one).
+        by_index = {r.index: r for r in preview.rows}
+
+        def _why(idx: int) -> tuple[str, str]:
+            if idx in narrowed:
+                return narrowed[idx].kind, narrowed[idx].message
+            if idx in deselected:
+                return "deselected", "未勾選"
+            return "skipped", "未寫入"
+
+        out["skipped_rows"] = [
+            {"row": idx + 1,
+             "symbol": by_index[idx].raw.get("symbol", "") if idx in by_index else "",
+             "code": _why(idx)[0], "message": _why(idx)[1]}
+            for idx in summary.skipped
+        ]
+    if summary.rejected:
+        # ⚠ ADDITIVE and only when non-zero (the ``duplicates`` convention below), so the
+        # four kinds that never reject keep a byte-identical payload.
+        #
+        # This exists because 「跳過」 was doing two jobs. A row the caller deselected and a
+        # row the importer REFUSED both landed in ``skipped``, so an import that dropped 3
+        # of 5 corporate actions announced 「成功 2 筆・跳過 3 筆」 — true, and read by
+        # everyone as "I didn't tick three of them". The ledger was then wrong by a split
+        # ratio with nothing on any screen saying so. The rows carry their reason, because
+        # a count alone tells the owner something went wrong and not what to do about it.
+        out["rejected"] = len(summary.rejected)
+        out["rejected_rows"] = [
+            {"row": r.index + 1, "kind": r.kind, "message": r.message}
+            for r in summary.rejected
+        ]
+    # ⚠ CONTRACT CHANGE, deliberate and for EVERY kind (2026-08-13): a commit that wrote
+    # anything now also returns its ``import_batch_id``. It is the handle to the undo, and
+    # an undo whose id can only be recovered by listing batches afterwards is one nobody
+    # reaches for at the moment they need it — right after an import that looks wrong.
+    if provenance.batch_id is not None:
+        out["import_batch_id"] = provenance.batch_id
+    if summary.duplicates:
+        # Only when non-empty. A re-import is the case that needs the word: "written 0,
+        # skipped 0" alone reads like nothing happened rather than like the ledger already
+        # held every row.
+        out["duplicates"] = len(summary.duplicates)
+    if body.kind in _RECONCILING_KINDS:
+        # ADDITIVE, and only for the kind that needs it: the other four keep a
+        # byte-identical payload, because a response shape that grows for every caller
+        # when one kind gains a behaviour is how a contract drifts.
+        written_rows = [r for r in preview.rows
+                        if r.index in accept and not r.has_hard_issue]
+        out["prices_restated"] = reconcile_split_prices(
+            conn,
+            {r.payload.get("from_symbol", "") for r in written_rows}
+            | {r.payload.get("to_symbol", "") for r in written_rows},
+        )
+        # The owner's per-symbol config follows a re-keyed position: an EXCHANGE changes
+        # what the symbol means, and anything still filed under the old one is now filed
+        # under nothing. Both settings move INSIDE the batch's transaction now — the band in
+        # the row writer (D47), the target weight through the mover bound above (I-2) — and
+        # each EXCHANGE row records what it moved, so this report reads the RECORD rather
+        # than re-deriving it: what the response says moved is what the delete will offer
+        # to move back. One event is N rows (D13) and only the first row of a set records a
+        # move (the second finds the source already cleared), so the list is per event.
+        written_ids = set(summary.written)
+        weights_moved = [
+            {"from_symbol": a.weight_move.from_symbol, "to_symbol": a.weight_move.to_symbol,
+             "weight": decimal_str(a.weight_move.weight)}
+            for a in list_corporate_actions(conn)
+            if a.id in written_ids and a.weight_move is not None
+        ]
+        if weights_moved:
+            out["weights_moved"] = weights_moved
+    return out
+
+
+@router.get("/import/batches")
+def import_batches(
+    limit: int = 50, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """The import history, newest first — what came in, from which file, and how much of it.
+
+    Read-only and cheap. It exists so the DELETE below is reachable by a human: a batch id
+    that can only be discovered by opening the SQLite file is not an undo anyone will use.
+
+    DEF-017: ``row_count`` is LIVE (the rows that still carry the batch id) and a batch whose
+    rows were all deleted on their ledger tabs is not listed — see
+    :func:`~portfolio_dash.data_ingestion.provenance.list_batches`.
+    """
+    return {"batches": list_batches(conn, limit=max(1, min(limit, 500)))}
+
+
+#: DEF-049: what the action log says an undo was refused for (the error code, in words).
+_UNDO_REFUSED_ZH = {
+    "oversell": "賣超待確認",
+    "orphan_correction": "股利會失去對應持倉",
+    "negative_cash": "現金將為負數待確認",
+}
+
+
+@router.delete("/import/batches/{batch_id}")
+def import_batch_delete(
+    batch_id: int, request: Request,
+    ack_oversell: bool = False, ack_negative: bool = False,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+) -> Any:
+    """Undo one import: delete exactly the ledger rows that batch wrote, and the batch.
+
+    This is what makes trying an import on real data a reasonable thing to do. The
+    alternative — restoring a pre-import backup — also discards everything entered since,
+    so without this the safe move is never to attempt the import at all.
+
+    Rows entered by hand, or by a DIFFERENT batch, are untouched: the delete is keyed on
+    ``import_batch_id``, which only this batch's rows carry.
+
+    I-3: the batch's corporate actions leave through the ledger tab's own delete
+    (``ledgers._delete_actions``, bound here as ``delete_batch``'s required seam), so an
+    undone EXCHANGE gives back its band and target weight and takes its linked fee, under
+    the same conditions and with the same verdicts as 刪除 on the 公司行動 tab; and a SPLIT
+    that leaves re-expresses its symbol's stored prices (the reconcile the ledger delete has
+    always run — the bare batch DELETE left the closes in post-split terms).
+
+    DEF-049: the undo runs the SAME replay guard as every ledger-tab delete, over the ledger
+    WITHOUT the whole batch (``replay_guard.batch_undo_guard``, bound as ``delete_batch``'s
+    required ``guard`` seam): a stranded dividend → 422 ``orphan_correction`` (no ack); a new
+    or worsened 賣超 → 422 ``oversell`` naming each affected sell, until ``ack_oversell``; a
+    pool the batch's cash / FX rows funded going negative → 422 ``negative_cash``, until
+    ``ack_negative``. Every row it deletes leaves its before-image in ``ledger_audit``
+    (source 「批次復原 #id」), and the action log records the batch, the rows and any
+    acknowledgement used.
+    """
+    found = conn.execute(
+        "SELECT kind FROM import_batches WHERE id=?", (batch_id,)
+    ).fetchone()
+    if found is None:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"找不到匯入批次 {batch_id}", field="batch_id"))
+    # DEF-017: an undo that cannot find its rows says so rather than 「已復原」-ing nothing.
+    if not is_undoable(str(found["kind"])):
+        # Openings upsert on (account, symbol) and carry no batch id — there is nothing this
+        # door can remove, and deleting the record alone would claim an undo that did not
+        # happen. Refused; the record stays as history.
+        return JSONResponse(status_code=422, content=error_body(
+            "batch_not_undoable",
+            "期初庫存的匯入不帶批次標記（同一帳戶＋代號會直接覆寫），無法依批次復原；"
+            "請到「期初庫存」分頁逐筆修正或刪除"))
+    outcomes: list[dict[str, Any]] = []
+    symbols: set[str] = set()
+
+    def _delete_event(rows: list[StoredCorporateAction]) -> None:
+        symbols.update({a.from_symbol for a in rows} | {a.to_symbol for a in rows})
+        outcomes.append(_delete_actions(conn, rows, now=now, commit=False))
+
+    verdicts: list[BatchUndoVerdict] = []
+
+    def _guard(rows: BatchRows) -> bool:
+        verdict = batch_undo_guard(
+            conn, rows, ack_oversell=ack_oversell, ack_negative=ack_negative)
+        verdicts.append(verdict)
+        return verdict.refusal is None
+
+    removed = delete_batch(conn, batch_id, delete_actions=_delete_event, guard=_guard)
+    verdict = verdicts[0]
+    if removed is None:
+        code = verdict.code or ""
+        setattr(request.state, DETAIL_ATTR,
+                f"批次 #{batch_id}・未刪除：{_UNDO_REFUSED_ZH.get(code, code)}")
+        return verdict.refusal
+    acked = (["已確認賣超"] if verdict.acked_oversell else []) + (
+        ["已確認現金為負"] if verdict.acked_negative else [])
+    setattr(request.state, DETAIL_ATTR,
+            "・".join([f"批次 #{batch_id}", f"刪除 {removed} 筆", *acked]))
+    out: dict[str, Any] = {"deleted": removed, "import_batch_id": batch_id}
+    if verdict.acked_oversell:
+        # ADDITIVE and only when true (the ``duplicates`` convention): the undo the owner
+        # confirmed past the 賣超確認 dialog says so, so the page can name the consequence.
+        out["oversell_acknowledged"] = True
+    if verdict.acked_negative:
+        out["negative_cash_acknowledged"] = True
+    if outcomes:
+        # ADDITIVE, and only when the batch held corporate actions — the other kinds keep a
+        # byte-identical payload. The same wire fields the ledger delete returns, one entry
+        # per event, so the undo can say what came back and what did not (and why).
+        out["prices_restated"] = reconcile_split_prices(conn, symbols)
+        out["fee_deleted"] = [f for o in outcomes for f in o["fee_deleted"]]
+        out["band_restore"] = [o["band_restore"] for o in outcomes
+                               if o["band_restore"] is not None]
+        out["weight_restore"] = [o["weight_restore"] for o in outcomes
+                                 if o["weight_restore"] is not None]
+        # DEF-040: a SPINOFF's seed price, reported like the band and the weight.
+        out["child_price_restore"] = [o["child_price_restore"] for o in outcomes
+                                      if o["child_price_restore"] is not None]
+    if removed == 0:
+        # Every row was already deleted on its ledger tab (a stale page's 復原 button). The
+        # empty record is cleared above; the answer names why nothing was deleted.
+        out["message"] = "此批次的列已在帳本中刪除"
+    return out
 
 
 @router.get("/import/template")
@@ -782,19 +1923,12 @@ _LLM_HTTP = {"budget_exceeded": 402, "ai_not_activated": 409,
 # FU-D20 screenshot intake bounds. The server is the authority for these limits — the
 # frontend caps to 4 as a courtesy, but every rule below is re-checked here so a direct
 # API caller cannot bypass them. Magic-byte sniffing rejects a non-image payload before it
-# ever reaches the vision model (never trust the client-declared MIME).
+# ever reaches the vision model (never trust the client-declared MIME) — and it is the SAME
+# sniffer the transport uses to label the data URI (``shared.image_types``), so this door and
+# the wire can no longer disagree about what a payload is.
 _AI_MAX_IMAGES = 4
 _AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB decoded, per image
 _DATA_URI_PREFIX = re.compile(r"^data:image/[A-Za-z0-9.+-]+;base64,", re.IGNORECASE)
-
-
-def _sniff_image(data: bytes) -> bool:
-    """True when *data* opens with a PNG, JPEG, or WebP magic-byte signature."""
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return True
-    if data[:3] == b"\xff\xd8\xff":
-        return True
-    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
 
 
 def _image_error(message: str) -> JSONResponse:
@@ -819,7 +1953,7 @@ def _decode_ai_images(raw: list[str]) -> tuple[list[bytes], JSONResponse | None]
             return [], _image_error("圖片編碼無效（需為 base64 圖片）")
         if len(data) > _AI_MAX_IMAGE_BYTES:
             return [], _image_error("單張圖片不可超過 5 MB")
-        if not _sniff_image(data):
+        if not is_supported_image(data):
             return [], _image_error("僅支援 PNG／JPEG／WebP 圖片")
         out.append(data)
     return out, None
@@ -831,6 +1965,14 @@ class AiBody(BaseModel):
     images: list[str] | None = None
     # explicit per-run model alias; must name an ENABLED model (+ vision when images present).
     model_alias: str | None = None
+    # DEF-035: the draft table's EDITED drafts. Present -> re-validate them through the same
+    # post-parse pipeline with NO model call (text/images/model_alias are then ignored).
+    drafts: AiDraftList | None = None
+    # S4 / S10 (round 3): with ``drafts``, the TICKED trades of the same paste as a minimal
+    # context (account / symbol / date) — sent when only the dividends are being re-judged, so
+    # a dividend whose buy is in the paste keeps that buy as its position without the trades
+    # being re-previewed. See ``agents.TradeContext``.
+    trade_context: list[TradeContext] | None = None
 
 
 @router.post("/input/ai/preview")
@@ -839,6 +1981,11 @@ def ai_preview(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
+    if body.drafts is not None:
+        # DEF-035: an edit, not a parse — no LLM call, so no budget/activation gate applies.
+        return _ai_wire(revalidate_ai_drafts(
+            conn, body.drafts, pool=cash_pool_fn(conn), text=body.text,
+            trade_context=body.trade_context or ()))
     images, bad = _decode_ai_images(body.images or [])
     if bad is not None:
         return bad
@@ -856,18 +2003,41 @@ def ai_preview(
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error",
                 "所選模型不支援影像，請改用支援影像的模型或改用「自動」", field="model_alias"))
+    # W4 (AI-D18): the pool probe is bound HERE — the layer above both data_ingestion and
+    # portfolio — and passed as the REQUIRED argument it is (see cash_import.py's docstring).
     result = ai_agents_input(
-        conn, body.text, today=now.date(),
+        conn, body.text, pool=cash_pool_fn(conn), today=now.date(),
         images=images or None, model_alias=body.model_alias or None,
     )
-    for r in result.preview.rows:
-        for issue in r.issues:
-            if issue.kind in _LLM_HTTP:
-                return JSONResponse(status_code=_LLM_HTTP[issue.kind],
-                                    content=error_body(issue.kind, issue.message))
-    wire = _preview_wire(result.preview)
-    wire["meta"] = {"model": result.meta.model, "via": result.meta.via,
-                    "cost_usd": None if result.meta.cost_usd is None
-                    else decimal_str(result.meta.cost_usd)}
-    wire["csv_text"] = result.csv_text
+    if result.error is not None:
+        # The LLM-failure degrade path (pre-union: a single error row scanned for _LLM_HTTP
+        # kinds; W4: one explicit field — the scan could not survive three preview buckets).
+        # I-5: ``message`` is ``str(LLMError)`` — English for a log («provider error (…)»)
+        # unless the raise site wrote Chinese — so it goes through the handlers' own rule.
+        return JSONResponse(
+            status_code=_LLM_HTTP.get(result.error.kind, 503),
+            content=error_body(result.error.kind, llm_refusal_message(
+                result.error.kind, result.error.message)))
+    return _ai_wire(result)
+
+
+def _ai_wire(result: AiInputResult) -> dict[str, Any]:
+    wire: dict[str, Any] = {
+        # One preview + one commit CSV PER KIND (transactions/dividends/cash); the frontend
+        # commits each kind through the ORDINARY /api/import/commit (AI-D18).
+        "previews": {kind: _preview_wire(p) for kind, p in result.previews.items()},
+        "csv_texts": result.csv_texts,
+        # DEF-035: the editable drafts, row-aligned with each kind's preview rows, and the
+        # server-owned cash-kind vocabulary the draft table's 類型 select is built from.
+        "drafts": {kind: [d.model_dump(mode="json") for d in ds]
+                   for kind, ds in result.drafts.items()},
+        "cash_kinds": cash_kind_vocabulary(),
+        "unparsed": [u.model_dump() for u in result.unparsed],
+        "meta": {"model": result.meta.model, "via": result.meta.via,
+                 "cost_usd": None if result.meta.cost_usd is None
+                 else decimal_str(result.meta.cost_usd),
+                 # DEF-083: set when the model that answered was not the first one tried
+                 # (a picked model that failed, or the role primary) — the page says so.
+                 "fallback_note": result.meta.fallback_note},
+    }
     return wire

@@ -9,7 +9,3183 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+**Owner rulings 2026-10-05 (in chat, one by one; 24 items).** The open questions of the CR round
+were put to the owner as choices; the kept-as-built answers need no code.
+
+Kept as built (no code change): ① a bare `ack_warnings` (scripts, the stress audit) is still
+accepted — only the pages bind the acknowledgement to `acked_keys`; ③ the carried-ex-date
+question fires on a symbol change, or a 配股's type / pay-date change, only; ④ a linked 折讓款
+credit keeps its account; ⑤ any non-zero trade reopens a vacated ticker (a sell from zero is a
+flagged 賣超); ⑥ an orphan dividend withholds the portfolio XIRR; ⑦ no dashboard banner for a
+flat 賣超 or an orphan dividend; ⑧ no 試算 on a 待釐清 position, a curing back-dated buy
+included; ⑨ the drawer's 交易明細 shows a 配股 at its ex-date only; ⑩ the inbox keeps soft
+findings in the item's note; K4 the demo seed's MYR/TWD rows stay (the first FX refresh
+re-derives them); X2 an unreplayable ledger counts every payout, consistently; X3 a pool whose
+only rows are refused payouts is not listed; Y2 the remedy names no cash kind; YQ2 the
+remedy-wording alignment of the orphan sentence and the tooltips is confirmed.
+
+Changed:
+
+- **② `ex_date_after_pay_date` is a warning, not a refusal** (「改為警告、確認後可存」). Soft in the
+  one validator: the doors ask, the edit door saves with the warning in its answer, the inbox
+  shows it in the note and the item stays confirmable.
+- **⑪ / K2 — a dividend the replay refuses moves no cash figure and no flow.** No position by
+  its date, an open declared short, a ticker an EXCHANGE vacated: 總報酬, XIRR and 股利總覽 left
+  them out while the cash pool, the guards, net worth, the FX pool and B still counted them (an
+  orphan 300 raised the TWD pool, and a withdrawal of pool + 100 passed). `returns.DividendRefusals`
+  / `booked_dividends` is the one decision; `api/routers/cash.py::load_cash_ledgers` splits the
+  stored rows once per request (one replay) and every balance, the statement, the draft cash line,
+  the hard withdraw / 換匯 guards, the CSV / AI doors (through `cash_pool_fn`) and the ack-able
+  dip check read that snapshot; the batch undo and corporate-action delete judge each side with
+  its own replay's refusals. The statement lists a refused payout as 「未入帳（待釐清）」 without
+  moving the balance (CSV column `unbooked`, print marked). `build_reporting_flows` takes a
+  REQUIRED `refused_dividends`, so B, `net_invested`, TWR and the benchmark exclude it too.
+- **X1 — every listing marks a refused dividend and leaves it out of every total:** the 交易帳本
+  股利 tab, the drawer's 配息史 and its CSV, the printed 帳本報告 (out of 淨額合計), the AI-facing
+  `{{dividends_json}}` rows (`booked:false`, `unbooked_cause`) and the 現金收支明細 hover / print,
+  each with the replay's own sentence. The raw re-importable ledger CSV stays raw (DEF-026).
+- **K3 — a refused dividend's 待釐清 does not die with a flat carrier.** It flagged the short or
+  the live successor; when that position was flat the flag went with it (measured: trend complete,
+  含匯兌總損益 23,000 with no reason, both drawers silent). `Book.unbookable_dividends` records each
+  (cause, carrier, the strict sentence); the trend marks the days incomplete, B's reason names the
+  rows, the drawer names it on the dividend's symbol and on the carrier.
+- **K1 — the drawer offers the remedy of each cause** of a red 交易明細 footer, from server facts
+  (`refused_reinvest_shares`, `gap_is_refused_dividends`): no position → 補登該日（含）之前的買進或
+  期初庫存，或刪除該筆股利; open short / vacated → 改以現金收支登錄這筆配息，並刪除該筆股利; 補登公司行動
+  only for a corporate-action cause.
+- **Y1 — one wording, one owner** for the remedy: the strict sentences end with it
+  (`cost_basis.CASH_MOVEMENT_REMEDY` / `ORPHAN_DIVIDEND_REMEDY`, unified to 「並」) and the drawer
+  renders the server's copy; a test fails on any copy in `web/`. The orphan sentence and the
+  股利待釐清 tooltips follow (YQ2).
+- **Y3 — a HELD position with a refused dividend keeps its value** in the trend and net worth
+  (the day stays incomplete, B stays withheld): the trend's last point read 0 against a 530,000 KPI
+  total. A held 賣超 or unapplied action is unchanged.
+- **YQ1 / YQ3 — the stress oracle refuses all three classes** from its own reading of the rules
+  (E24 with CR-06's reopen rule; orphan as labelled legacy data, since every door now refuses it),
+  the trend family runs while a declared short is open, and new families `trend.net_worth`,
+  `ledger.div.booked`, the orphan XIRR withholding and `kpi.fx_complete_withheld`. Detection power
+  measured by breaking the app on purpose: fail = 448 / 249 / 1,572. Baseline now **ops=137
+  pass=11,406 fail=0** (was 128 / 6,025).
+- **Accounting manual v1.11** (zh authority + en mirror): new §6.6 Refused Dividends with its
+  verification anchor.
+
+Gates on `7dfff81`: ruff clean; `mypy --strict` (cold cache) 1,030 files, 0 errors; pytest non-e2e
+7,111 passed + 5 skipped = the 7,116 collected (6 batches); e2e 339 passed in 32 chunks; stress-audit
+phase 1 ops=137 pass=11,406 fail=0 (oracle independence grep clean).
+
+**Pre-merge code review fixes (CR-01..CR-14, 2026-10-04).** An xhigh code review of
+`feat/corporate-actions` before the merge into `main` found 14 issues (five reproduced by probe);
+three parallel fixers (A: data correctness, B: rules and edges, C: efficiency) fixed them, each
+with a test that fails on the code before the fix. A final review of the merged tree then found
+12 more (R1..R12, incl. one regression of the CR-07 fix), and a focused review of those fixes 11
+more (S1..S11); all were fixed in the same round, and the heavy gates ran once, at the end.
+
+- **CR-01 / CR-11 — a 賣超 that nets back to exactly zero is still a 賣超.** `build_book` dropped
+  every 0-share position together with its `ever_oversold` fact, so deleting the first buy of
+  buy 1,000 → sell 1,000 → buy 1,000 answered 200 with no question and the holding and its
+  +100,000 realized row vanished with no flag anywhere. The book now records every 賣超 position
+  before the zero-share skip (`Book.oversold_positions`, `results.OversoldPosition`), and
+  `replay_guard._oversold_shares` reads it: row delete / edit, batch undo, corporate-action
+  delete / edit all ask; the XIRR / B gate names the position (「部位已歸零」), the trend marks
+  the days incomplete, the drawer names the cause, the E22 preview sees it.
+- **CR-02 — a dividend with no position is refused at the door and never 500s the dashboard.**
+  `validate_dividend` gains a hard `dividend_without_position` (no opening, trade or
+  EXCHANGE / SPINOFF into the symbol in that account by the dividend's EFFECTIVE date;
+  `holdings.position_exists_by`) on the CSV, manual, AI (same-paste buys count), preview and edit
+  doors; an inbox item for such a position is not confirmable. A stored one raises a typed
+  `UnbookableLedgerError` on the strict path and on the dashboard path is skipped, recorded in
+  `Book.orphan_dividends` + `refused_dividends`, and named (XIRR / B withheld). A DRIP / STOCK row
+  with no share count answers 422 naming the row instead of a bare `ValueError` → 500. A payout
+  after a full close still books as realized income (H2).
+- **CR-03 — a correction door replays the order the ledger will have.** The would-be lists
+  replaced the edited row in place, so an edit that moved a row's date replayed a different
+  same-day order than the stored ledger (ids, DEF-012): a back-dated buy moved onto its sell's day
+  passed with no question and the sell then booked first (sticky 賣超, 500 shares on a 500,000
+  basis). `replay_guard._to_models` sorts every would-be list with `store.*_order_key`, each the
+  Python twin of its `list_*` ORDER BY (pinned by a test).
+- **CR-04 — editing a 期初 never rewrites its original cost.** The dialog sent the server's own
+  28-digit average and the door stored `avg × shares` (a date-only edit stored
+  99999.99999999999999999999999). The dialog now edits 原始總成本; the door takes `total` or
+  keeps the stored one and refuses `avg` (400, zh).
+- **CR-05 — every share counter dates a 配股 by its ex-date** (the holdings walker, the naive
+  sum, `_later_event_dates`), so the sell guard agrees with the replay between the ex-date and
+  the payment date.
+- **CR-06 — a reopened ticker is live again.** `vacated_to` (set by an EXCHANGE) is cleared when
+  a trade, an opening or an EXCHANGE / SPINOFF lands shares on the position, so its dividends book
+  and the 待釐清 flag follows the live position.
+- **CR-07 — a corporate-action warning acknowledgement is bound to the warnings it read.** The
+  form resets the tick whenever the warnings change, sequences its previews, disables 儲存 while
+  one is pending and sends `acked_warnings`; the server refuses `warnings_changed` when the
+  warnings it recomputes from the posted body are not all acknowledged. The ledger tab's EDIT
+  dialog lists every warning (it showed the first) and acknowledges what it showed.
+- **CR-08 — the ledger 更正 door discloses an unknown ETF flag** (`etf_flag_unknown`, snapshot
+  `etf_flag=unknown`) like the manual and CSV doors; the sentence has one spelling
+  (`fees.ETF_FLAG_UNKNOWN_MESSAGE`).
+- **CR-09 — a dividend correction owns its ex-date.** The dialog shows and edits 除息日 (blank =
+  clear); an ex-date after the payment date is refused on every door; a kept ex-date across a
+  symbol change, or a 配股's type / payment-date change, asks first (`ex_date_carried_over`).
+- **CR-10 — a linked 折讓款 credit keeps its account** (400 on an account change): moving it
+  reopened the original month in the inbox and a second confirm credited the refund twice.
+- **CR-12 — the cash and FX correction doors read the pool ledgers once per request**
+  (`load_cash_ledgers` snapshot shared by the hard and the ack-able guard): golden ledger, FX edit
+  17 → 6 full-table SELECTs (cross-account 27 → 6), movement edit 13 → 6; answers unchanged.
+- **CR-13 — one copy of the scoped dip rule** (`cash._pool_dip`, called by the batch undo and the
+  corporate-action delete).
+- **CR-14 — a derived cross-rate row is written only when it changed.** Still derived over the
+  whole history (pre-M1 provider rows and seed series sit on dates no run touches), but unchanged
+  days keep their row and `fetched_at`: a one-day refresh on 30 days writes 3 rows, not 33; a
+  repeat run writes 0. `pricing/store.stored_rate_text` owns the stored-rate TEXT.
+
+Final-review follow-ups (R1..R12, same round):
+
+- **R1 / R12 — a warning acknowledgement echoes the server's opaque key, never the text.**
+  `web/api.js` rewrites every `{account:<id>}` token into the account's name in every response,
+  so the CR-07 text binding could never match a warning that names an account (an opening on
+  the action date → `warnings_changed` forever, on the form and the edit dialog). Each issue wire
+  now carries `ack_key` (sha256 of code + raw sentence, 16 hex) and clients send `acked_keys`
+  (replacing `acked_warnings`); a bare `ack_warnings` keeps its meaning for API callers. One
+  helper builds the list for both doors (`window.pdActionAckKeys`).
+- **R2 —** the ledger edit dialog reopens 「公司行動警告確認」 when its confirmed re-send is answered
+  `warnings_changed`, instead of only toasting it.
+- **R3 —** re-validating an edited AI dividend draft also sends the paste's trade drafts, so a
+  same-paste buy still counts as its position (CR-02 had turned it into a hard
+  `dividend_without_position`); editing a trade draft re-judges the dividends.
+- **R4 —** the manual-entry preview withholds position math on a 賣超 netted back to zero
+  (`Book.oversold_positions`), exactly as on a held one.
+- **R5 / R9 —** correction doors compare stranded dividends per ROW, so a legacy orphan on the
+  same (account, symbol) no longer masks a new one; the unreplayable-ledger fallback uses the
+  replay's own rule (`LedgerBundle.position_opened_by`, the bundle twin of
+  `holdings.position_exists_by`: effective date, EXCHANGE / SPINOFF destinations count).
+- **R6 —** 股利總覽 counts only dividends the book booked; ones refused for no position, an open
+  short or an exchanged-away ticker are excluded, as from 總報酬 and XIRR.
+- **R7 —** clearing 原始總成本 in the 期初 edit dialog keeps the stored original cost (the key is
+  omitted; the door also reads a blank as not stated).
+- **R8 —** the drawer no longer calls a symbol whose only rows are refused reinvest dividends
+  「部位已結清」, and its red footer names the cause.
+- **R10 —** every replay guard reads each ledger once per call (batch undo: trades / dividends /
+  instruments 3 → 1); `get_fx_conversion` / `get_cash_movement` fetch one row by id; the
+  movement doors read the account registry once.
+- **R11 —** one helper formats the capped XIRR-reason lists (no output change).
+- **The dividend inbox confirm runs `validate_dividend`** (an event paid before its ex-date is not
+  confirmable, and says why), and **the drawer's 交易明細 lists a 配股 at its ex-date**, where the
+  replay books it.
+
+Second focused review of R1..R12 (S1..S11, same round):
+
+- **S1 / S5 — the manual-entry preview withholds on EVERY 待釐清 position, held or flat.** R4
+  read only `Book.holdings` + `Book.oversold_positions`, so a FLAT position a refused corporate
+  action had flagged (`unbookable_action`, sticky) still projected a declared short
+  (`remain_shares -100 / new_original_avg 597.35`) that the dashboard then flagged. The replay
+  now records every position it opened, flat included, with both flags
+  (`Book.opened_positions`, `results.OpenedPosition`); `_withheld` reads it on today's book, the
+  trade-date book and the book with the draft, for every branch (the BUY-only special case is
+  gone).
+- **S2 / S3 —** a corporate-action save from a tab still running pre-R1 JavaScript (it sends
+  `acked_warnings`) is refused `client_outdated` with a reload sentence instead of falling to the
+  bare-flag path; the edit dialog checks for the ack helper BEFORE closing anything and keeps the
+  owner's values when it is missing.
+- **S4 / S10 —** re-judging an edited AI dividend sends only the TICKED, well-formed trades, as a
+  minimal context (`agents.TradeContext`: account / symbol / date) the server folds into the same
+  `pending_trades`, instead of re-previewing every trade; the dividends are re-judged only when
+  that context moves.
+- **S6 —** every row correction door (trade / dividend / opening edit and delete) and the
+  corporate-action doors read each ledger once per request (corporate-action edit:
+  corporate_actions 6 → 1); `get_transaction` / `get_dividend` / `get_corporate_action` /
+  `linked_cash_movements` fetch by `WHERE`.
+- **S8 —** `holdings.position_exists_by` and `LedgerBundle.position_opened_by` count an action
+  only as the replay reads it (convertible, both symbols registered); their one stated difference
+  from the replay is a readable action the replay refuses.
+- **S9 —** the drawer says 「部位已結清」 only when a position was actually opened
+  (`position_opened`, from `Book.opened_positions`); rows that opened nothing get their own
+  sentence.
+- **S11 —** the dividend inbox asks the position question once, through `validate_dividend`, and
+  a blocked item names every reason.
+
+Gates on `a49c46d`: ruff clean; `mypy --strict` (cold cache) 1,018 files, 0 errors; pytest
+non-e2e 7,013 passed + 5 skipped = the 7,018 collected (6 batches); e2e 335 passed in 32 chunks.
+
+**Pre-prod R13 fixes (the verifier's full rerun on 830056c, 2026-10-01; owner rulings 1C /
+2B / 3A / 4A).** R13 found three defects and two specification questions; the owner ruled the
+two in chat.
+
+- **DEF-090 — a cash guard compares the pool day by day** (`shared/cash_dip.py`, new). The
+  withdraw and 換匯 guards compared the timeline's LOWEST point before and after, so a
+  back-dated withdrawal that opened a new negative stretch went through whenever an older,
+  unrelated dip was deeper. Demo: the Schwab TWD pool sat at −220,000 from 2026-01-12, and
+  348,000 out on 07-17 left 07-19 / 07-20 at −148,000 / −153,000 — written. Now the probe
+  also reports the end-of-day timeline (`portfolio/cash.py::running_eod`, `CashPool.eod`):
+  - the HARD guards refuse any day the change makes negative or more negative (`new_dip`);
+  - the import-batch undo's ack-able check asks when a day turns negative or drops below
+    the pool's old lowest point (`caused_dip`). Deepening a shortfall that was already there
+    still does not ask (audit H3: the golden tw_broker pool is short from its first buy).
+- **DEF-091 — an overdraft names the first short day and the lowest point** (owner 2B: the
+  first day is when the money must be there by, the lowest is how much is missing). Every
+  pool sentence — the two hard guards and the ack-able `negative_cash` doors — reads
+  「自 D1 起為負，最低於 D2 降至 −N」, or the old 「於 D 降至 −N」 when the days coincide. Two
+  recorded responses in `test_cash_movement_guard_contract.py` were re-recorded for it.
+- **DEF-089 — a Chinese abbreviation counts only when it points at one instrument** (owner
+  1C; any length from two characters up). `name_check` accepted any leading part of 2+
+  characters, so 「長榮 (2618)」 passed although 長榮 is 2603's alias, and 「中華 (2610)」 passed
+  although 中華電信 also starts with 中華. A leading part that is another instrument's name or
+  alias, or that another instrument's name starts with, is now a wrong pairing (asked again,
+  then not stored). 「玉山金 (2884)」 still passes. `fix_card_names.py` applies the same rule.
+- **DEF-088 — AI 辨識 of a TW name serves aliases again.** The provider's name (the exchange
+  short name, 長榮航) replaced the model's, and the model had put the full name (長榮航空) in
+  `name` and the short one in `aliases`, so the full name was dropped and the short one equalled
+  the name: every TW reply stored no alias. A Chinese model name is now the first candidate.
+- **DEF-087 — the export guard is green again.** `export/ledger_audit.py` joined the aliases
+  with a bare `str()` that `test_exports_never_print_scientific_notation` does not allow; the
+  aliases are text, so the join no longer converts.
+- **DEF-092 — a single-row cash edit / delete asks only about a dip it causes** (the
+  verifier's R14 observation; owner ruling A, 2026-10-02). The cash movement edit and delete
+  doors and the FX delete door reported ANY dip in the would-be pool as 「此筆會使…」, so
+  deleting a withdrawal — which only raises balances — quoted the Schwab TWD pool's
+  unrelated −220,000 from 2026-01-12. They now share the import-batch undo's rule
+  (`caused_dip`): a day the change turns negative, or pushes below the pool's old low. Seven
+  recorded responses in `test_cash_movement_guard_contract.py` and one M5-07 pin were
+  re-recorded; three rebate edits that cause no dip are now written.
+- **DEF-093 — editing a conversion asks about the money it takes out of the TO-pool** (the
+  verifier's R15 observation; owner ruling A, 2026-10-03). `PUT /api/ledgers/fx/{id}` ran
+  only the hard FROM-pool rule (FU-D34): a 換入金額 edited from 319,000 to 1,000 left the
+  Schwab TWD pool at −199,000 / −204,000 on 07-19 / 07-20 with no question, while deleting
+  the same row asked. `cash.fx_edit_negative_guard` now gives every pool the edit touches
+  (old and new account × both legs) the delete door's ack-able `caused_dip` question; the
+  body carries `ack_negative`, which `web/ledger.js` `putWithAckGuard` already sent. The
+  from-pool's hard refusal is unchanged, ack or not. Three of the verifier's six R16
+  mutations passed the first contract tests (checking only the new account's pools, `new_dip`
+  instead of `caused_dip`, asking on any negative day), so a test per mutation was added
+  after closure — test-only, the code is d9f1c68's.
+
+**Item 8 — a card names each registered code by one of its names (owner 2026-09-30,
+「新的名稱代號確保正確不會再錯誤」, ruled 「登錄名稱＋中文別名」).** The spec
+(`docs/spec/2026-09-30-code-name-consistency-check.md`) found 聯詠 (3008) and 陽明 (2603) on
+the demo's cards: the model paired a registered code with another company's name.
+
+- **Instruments carry aliases.** `instruments.aliases` (JSON list, additive column, default
+  `[]`) holds the other names a card may use: 大立光 for 3008 LARGAN, 微軟 for MSFT. It has one
+  writer, `store.set_instrument_aliases`; `upsert_instrument` never touches it. The rules live
+  in `shared/instrument_names.py`:
+  - an alias is not all digits, not the instrument's own code, and at most 30 characters;
+  - one name belongs to one instrument. An alias that is another instrument's code, name or
+    alias is refused, and so is a typed NAME that is another instrument's alias. Two
+    instruments may still share a registered name (GOOG / GOOGL);
+  - a rename onto one of the instrument's own aliases drops that alias from the list.
+- **Where aliases come from.**
+  - The 觀察清單 edit / register dialog has a 別名 field. Owner-typed lists are checked
+    strictly: 422 naming every conflict, and nothing is written.
+  - A new TW symbol keeps the exchange's short name from the board probe's own response (no
+    extra request). The same name becomes the NAME when no other name is found, instead of a
+    blank row.
+  - A confident, provider-verified AI 辨識 reply proposes common names (`AI_INSTRUMENT_RESOLVE_PROMPT`
+    v3). Auto-filled candidates are checked leniently: a taken or unusable one is dropped
+    silently, capped at 5.
+  - The list shows 「亦稱 …」 under the name, and search matches an alias. The ledger-audit
+    reader labels the column 別名.
+- **New cards are checked before they are stored.**
+  - `generate` appends the names of the codes its prompt mentions (`INSIGHT_NAMING_NOTE` v1).
+    The table is scoped to those codes, so the per-market isolation guard still holds.
+  - `llm_insight/name_check.py` reads the reply. It checks 「名稱 (代號)」 and 「代號 (名稱)」,
+    and flags a bare code only when it is followed by ANOTHER registered instrument's name.
+  - Accepted forms:
+    - a Chinese name or alias, or a leading part of at least 2 characters (玉山金 for 玉山金控)
+      — since DEF-089 only when no other instrument shares it (see the R13 fixes above);
+    - a Latin name by DEF-082's whole word forms;
+    - generic referents, unit words and bracket notes are not names.
+  - A mismatch asks once more with the wrong pairings named (`INSIGHT_NAMING_RETRY`). A card
+    that still misnames is not stored (寧缺勿錯), and the run reads 「N 張因名稱與代號不符未存」
+    (partial, reason `name_mismatch`).
+  - The check reads the registry by direct SQL on `instruments` (llm_insight may not import
+    data_ingestion) and degrades to "no names known" on a database without the table.
+- **Old cards: `scripts/fix_card_names.py`.** It does a dry run by default; `--apply` writes.
+  It replaces the wrong name and keeps the code, preferring a Chinese alias when the
+  registered name has none. Where it cannot bound the wrong name's extent it fixes only a
+  reviewed `--wrong-name`. A reviewed wrong name directly after a bare code (「2603 萬海」) is
+  replaced too (`830056c`), since the checker reads a bare code only when a registered name
+  follows it. The rest was already right, so nothing else is rewritten.
+- Library tag `official-v27 (2026-10-01)`: the naming note v1 + AI instrument-resolve v3.
+
+Mutations: 48 (41 in the first pass, 5 on the two gaps closed at integration, 2 on the
+bare-form fix), all caught.
+
+Gates: ruff clean · mypy --strict 983 files 0 (fresh cache) · pytest 6,834 (6,832 passed, 2
+skipped; the two failures the first pass found — the late-write guard's list and the audit
+reader's column labels — fixed and their files re-run) · e2e 96 files 322/322, server-side 5xx
+0 (the aliases flow run three times) · stress-audit phase 1 ops 128, 6,025 pass / 0 fail.
+
+Live on the demo (`e8bcf53` → `830056c`, DB backed up before each step, verify_live ALL PASS on
+both):
+- 22 of the 26 instruments carry aliases, written through the edit API so every list passed the
+  server's checks. The other four (中環, 黑松, 興泰, IHH Healthcare) need none.
+- `fix_card_names.py --apply` corrected 29 pairings on 11 of 248 cards, reviewed first in a dry
+  run. Card #231 (2026-09-28, 「萬海（2603）」) was newer than the measured corpus. A dry run
+  without any `--wrong-name` afterwards finds 0.
+- The browser shows 「亦稱 大立光、大立光電」 under LARGAN, the search finds 3008 by 大立光, and
+  the edit dialog carries the list.
+- Left as found: two news headlines quoting 「長榮航運」 (an article's own words, no code).
+- Card #82's summary 「LRDIM (6883)」 (the same holding its body names as 3008; 6883 is not
+  registered, so neither the rule nor the script reaches it) was corrected by hand to
+  「大立光 (3008)」 with the owner's approval in chat on 2026-10-01, after a backup. No card now
+  contains LRDIM or 6883.
+
+**Functional-test manual closed; the owner's 18 rulings on its open items (2026-09-30).** The
+manual closed on `d2e5e08` (PASS 119 / N/A 1, 86 defects closed or not-a-defect); the verifier
+fills the owner's sign-off per ruling 3 and black-box checks the news popup's prompt version
+(ruling 18). The improvements below were ruled to follow the normal development flow after
+closure, outside the manual. Rulings 9 and 17 keep the current behaviour.
+
+- **A trade moves its settled 價金 (ruling 15).** Every site that turned a trade into money
+  used the raw quantity × price, so 0.5 AAPL at 191.23 took 95.615 USD from the pool.
+  `shared/money.settled_notional`: TWD 元以下捨去 (TWSE odd-lot 交割價金, 2024-04-01), USD / MYR
+  cent / sen half up; an exact product is returned as is, so whole-lot ledgers are
+  byte-identical (demo: 0 of 56 trades change; prod's ledger is empty). **Class scan:** 29
+  quantity × price products — 22 settlements now read the helper (cash pool, cost basis,
+  realized proceeds, XIRR, net invested, FX pool, fee base, drawer 試算, manual preview /
+  commit / overdraft, ledger list, symbol drawer, ledger report), 7 listed with reasons
+  (valuations, a rebalance projection, tolerance checks). The stress oracle transcribes the
+  rule on its own.
+- **No export prints scientific notation (ruling 4).** The three AI-cost writers stored
+  `str(cost)` (`5E-7` for a 1-token estimate) and the usage CSV passed it through; the tax
+  package printed every amount with `str()`. Writers store `to_db`, exports use `decimal_str` /
+  `stored_decimal_str`; a test builds every export over legacy scientific rows and lists every
+  bare `str()` left in `export/` (6 sites, each non-Decimal).
+- **alert_scan says what the 24h debounce skipped (ruling 5):** 「派發 AI 預警卡 0 張；另有 3 條 24
+  小時內已派發，略過」.
+- **Three snapshot jobs tell a failed fetch from no coverage (ruling 12).** `pricing/ingest.py`
+  returns `SnapshotSweep(written, empty, failed, unproven)`; `consensus_daily`,
+  `fundamentals_daily` and `fundamentals_av_weekly` are judged by `sweep_outcome` and say all
+  three counts. Finnhub and Alpha Vantage requests now raise on failure (an Alpha Vantage quota
+  body is a lost fetch, reversing the pinned "throttle = no data" test); a yfinance empty counts
+  as no coverage only when yfinance wrote something in the same run (the DEF-067 ④ rule).
+- **資料中心 › 帳本操作稽核 (ruling 10).** `ledger_audit` had a writer and no reader. A read-only,
+  paged list (`GET /api/ledger-audit`: time, ledger, row, 編輯／刪除, the before-image as
+  labelled fields, accounts by display name) and a CSV in the export centre.
+- **Account names, not ids, in zh sentences (ruling 13).** The multi-account corporate-action
+  delete / edit refusal named the other account as 「schwab」; a deeper scan found the dashboard
+  FX note and the holdings report's filter line printing ids too — all three now tokens.
+- **An insight task's universe must be a known shape (ruling 11).** A plain list was stored and
+  run as "follow holdings" (R10: 13 cards instead of 1). Five doors now answer 422 naming the
+  accepted shapes; stored rows still load (demo: one archived test task holds a list).
+- **Prompt preview and AI-eval gaps (ruling 14).** The preview's 代入標的 picker reads the real
+  held + watchlist symbols instead of seven hard-coded ones; `scripts/ai_extraction_eval.py`
+  scores `stated_amount`.
+- **A Chinese name never waits for a quote lookup (ruling 16).** CJK input skips the provider
+  lookup in the quick-add page and in both backend seams (25–30 s before 「查無報價」).
+- **R9's four figure-check boundaries are pinned (ruling 7):** archived names, two-letter words,
+  letter + digit words, whole-name match.
+- **Diagnosed, not changed (ruling 6):** the demo's slow first `/api/dashboard` (8–24 s after
+  idle, 0.6–0.9 s warm on-host) is memory pressure on the 1 GB VM — 660 MB of swap in use, the
+  two app processes 172 MB (demo) and 197 MB (prod) swapped out.
+- **Spec for the owner (ruling 8):** `docs/spec/2026-09-30-code-name-consistency-check.md` —
+  on 224 demo cards, 5 「name (code)」 pairs name another registered instrument; a flag-every-
+  mismatch rule would raise ~110 false alarms.
+
+Mutations: 46 (the old forms put back, three of them whole files) all caught.
+
+Gates: ruff clean · mypy --strict 977 files 0 (fresh cache) · pytest 6,762 (6,760 passed, 2
+skipped) · e2e 95 files 320/320, server-side 5xx 0 · stress-audit phase 1 ops 128, 6,025 pass /
+0 fail · demo on `2fe60ce`, verify_live ALL PASS. Live on the demo: 帳本操作稽核 lists 432 rows
+by ledger and account name (no raw id on the page); a Chinese-name lookup answers in 0.19 s; a
+list-shaped universe gets 422; the llm-usage, job-runs and ledger-audit CSVs hold no scientific
+cell.
+
+**Functional-test manual R11 → R12 — three follow-ups ruled after the sign-offs (2026-09-30).**
+The verifier closed R11 on `91ec1b0` (PASS 119 / N/A 1) and noted three things without opening
+tickets; the owner ruled all three into a new round and removed the six pre-DEF-084 fail-log
+rows from the demo. Because the code changed after the sign-offs, the manual's §10 applies: the
+J group is re-run and 輪次彙總 gets row R12.
+
+- **A reply the provider did not meter is booked as an estimate, never as free (R10
+  observation ④).** gemini-2.5-flash-lite via OpenRouter returns a reply cut off mid-string (as
+  short as 12 characters) with no usage block; LiteLLM fills in zeros and every seam read them as
+  measured — 20 of 1,113 demo `llm_usage` rows at 0 tokens / $0, 18 of them a failed parse. The
+  three seams that book a call (`shared/llm.py` structured and free text, the settings
+  connection test — which skipped the row entirely when `usage` was None) now go through
+  `llm.metered_usage`: both counts at zero means "not reported", so the prompt and the reply are
+  counted with LiteLLM's bundled tokenizer (never a network fetch) and the row is marked
+  `usage_estimated` (new column). The request ledger shows 「估算」 and the llm-usage CSV gains a
+  trailing `usage_estimated` column. **Class scan:** direct reads of `prompt_tokens` /
+  `completion_tokens` 12 → 0; `log_usage` calls 3, all with the flag. Per-call attributions (card,
+  news item, AI-door cost, prompt test run) carry the same numbers, no longer 0; the mark lives on
+  the ledger row (0 of 245 demo cards and 0 of 65 news items came from such a reply). The 20
+  historical rows are not rewritten.
+- **A run's recorded cost is the sum of the usage rows it wrote (R10 observation ③).**
+  `evaluate_insights` #212 spent $0.0021532 on a `job_runs` row that said nothing: static jobs
+  never wrote their spend (`scheduler/jobs.py`'s two closers, the manual news worker) — it was
+  re-derived at read time for one popover by an agent + time-window sum while the run history
+  printed — for the same run — and an insight run summed the cards it produced, leaving out a
+  retry after a broken reply and a primary model that failed before the fallback answered (the
+  mid-run budget check shared that sum). `llm.usage_tally()` is opened around every run's work;
+  `log_usage`, the one writer of `llm_usage`, adds each row to the innermost open tally, so an
+  insight run dispatched by `alert_scan` is booked once, on its own row. The row records
+  `cost_usd` beside new `llm_calls` / `tokens_in` / `tokens_out` (NULL = no AI call); the status
+  block reads it and the window sum is gone (rows written before this serve no block, as the
+  history already showed them). Both run lists serve the canonical Decimal form (a stored
+  `9E-8` went out raw), and the job_runs CSV gains the four spend columns. **Class scan:** 7 run
+  closers — 4 carry the spend, 3 are no-work or code-defect exits (listed with reasons); 6 SQL
+  statements finish a run row, 5 write `cost_usd`; 5 surfaces print a run's cost.
+- **One USD formatter.** `strategy/alerts.py`'s local `_usd` (half-even, no thousands
+  separator, 「$-0.00」) printed the 「AI 額度偏低」 alert detail; it is now `usd_display`, like
+  the dry-run gate, the pipeline node and the budget refusal. R11's check pinned those three
+  surfaces by name, which is how the fourth was missed; `tests/contract/test_one_usd_formatter.py`
+  reads every f-string and fails on a `$` in front of any other value (5 sites: this one fixed,
+  the password hash's separators 2, a NT$ fee floor 1, `usd_display` itself 1).
+
+Guards: `tests/shared/test_unreported_usage_is_estimated.py`, `tests/scheduler/
+test_run_records_its_spend.py`, `tests/contract/test_one_usd_formatter.py`, `tests/e2e/
+test_run_spend_and_estimate_flow.py`; 20 mutations (the old forms put back, three of them the
+whole `91ec1b0` file) all caught, baseline 0/103 after restore.
+
+Gates: ruff clean · mypy --strict 965 files 0 (fresh cache) · pytest 6,585 (6,583 passed, 2
+skipped) · e2e 92 files 312/312, server-side 5xx 0 · demo on `d2e5e08`, verify_live ALL PASS.
+Live on the demo: a manual news run for 2884 (#244) recorded $0.0016277, 5 calls, 11,861 / 1,104
+tokens — digit for digit the sum of `llm_usage` #1114–#1118, in the history, the status popover
+and the job_runs CSV. The six pre-DEF-084 fail-log rows (#499–#518) were deleted after a backup,
+re-identified by content (32 → 26 rows).
+
+**Functional-test manual R10 → R11 — three findings of the full re-run (M, L, L)
+(2026-09-29).** On the owner's instruction the verifier re-ran all 120 cases on `3a35454`:
+PASS 116, FAIL 2 (F-08, G-09), OBSERVE 1 (H-05), N/A 1 (G-10); the R9 sign-off was withdrawn.
+The owner ruled all three into this round, DEF-085 as option A.
+
+- **A structured call sends only the schema every provider compiles (DEF-083).** The fallback of
+  all three roles (haiku-4.5 via OpenRouter) was refused on every structured request:
+  `shared/llm.py` sent `model_json_schema()` verbatim as `response_format`, pydantic writes a
+  lookahead `pattern` on every `Decimal` (Anthropic: 「Invalid regex in pattern field」) and the
+  AI door's union as `oneOf` (Bedrock: 「Schema type 'oneOf' is not supported」). A primary that
+  failed could never be rescued (G-09, run #221), and a model picked by hand on the AI door was
+  skipped in silence (#520). New `shared/llm_schema.py`: `portable_schema` reduces a schema to
+  Anthropic's documented subset — the strictest route — (no pattern / numeric / length
+  constraints, no `oneOf` / `not` / `maxItems` / type arrays, `additionalProperties: false`
+  everywhere, references inlined; `oneOf` → `anyOf` with the discriminator tag required per
+  branch); `schema_violations` is that subset as a checker. The prompt still carries the full
+  schema and the reply is still validated against the full model. The failover itself is now
+  visible: `StructuredCompletion` carries `model_name`, `usage_id` and `failed_before`, and the
+  AI door shows 「指定模型 X 失敗：<reason>。本次改由 Y 產出。」 above the drafts with a warning
+  toast. **Class scan:** 7 structured call sites (AST scan) → 7 schemas, all through the one
+  `response_format` exit; 151 constructs outside the subset before the fix — pattern 11
+  (card 1, drafts 10), `oneOf` + `discriminator` 1 each, numeric constraints 3, objects without
+  `additionalProperties: false` 9 (all 7 schemas), plus 80 `title` / 36 `default` / 10
+  reference keywords — 0 after. One user-picked-model surface (the AI door) → reported.
+- **A confession row names its model and usage row (DEF-084).** The AI door's `unparsed_rows`
+  capture passed neither `model` nor `usage_id` (demo #499–#518: 6 rows with model ""); it now
+  takes both from the completion. **Class scan:** 9 fail-log captures — 3 describe a billed
+  reply (1 missing both → fixed), 4 a provider failure (model set; no usage row exists), 2 a
+  pre-call refusal (no model chosen). The 6 old demo rows are history and are not rewritten.
+- **The dry run's red and amber rows say what to do (DEF-085, owner ruling A).** R6
+  (「額度耗盡」) had no fix by design, R1 by omission, and G7's master-unset warning sent
+  `fix: None` — while `web/pipeline.js` held 「前往額度設定」 (`fund_quota`) and 「前往 AI 大師
+  設定」 (`activate_role`) that no backend path ever sent. R6 → `fund_quota` (設定 › AI 與額度),
+  R1 → `edit_templates`, G7 → `activate_role`; both dialogs (乾跑預檢, 為什麼沒跑？) get the
+  button. The balance is printed one way: `shared/money.usd_display` (the twin of the
+  frontend's `'$' + fmt.num(v, 2)`, half-up) serves the R6 message, the AI door's budget refusal
+  and the pipeline node — 「剩餘 $-0.01000」 beside 「餘 $-0.01」 before. **Class scan:** 11
+  non-passing gate states, 3 without a fix → 0; frontend fix kinds 9, emitted 6 → 8 (the
+  `enable_schedule` alias stays frontend-only, listed with its reason); server sentences with a
+  quota amount 5 → one formatter.
+
+Guards: `tests/shared/test_def083_portable_schema.py`, `tests/data_ingestion/
+test_def084_confessions_name_their_model.py`, `tests/contract/
+test_def085_preflight_fix_guidance.py`, `tests/e2e/test_def083_ai_failover_note_flow.py`,
+`tests/e2e/test_def085_preflight_quota_fix_flow.py`; 14 mutations (the old forms put back) all
+caught. One mutation exposed a blind judge: the checker's keyword list had been derived from the
+transform's own constant, so copying `pattern` through blinded both — the list is now spelled
+out on its own.
+
+Gates: ruff clean · mypy --strict 961 files 0 (fresh cache) · pytest 6,555 (6,553 passed, 2
+skipped) · e2e 91 files 311/311, server-side 5xx 0 · demo on `91ec1b0`, verify_live ALL PASS.
+Live on the demo (real providers, parse only): haiku-4.5 picked on the AI door with #520's text
+answered itself, no fail-log row; the other six schemas each answered by haiku-4.5 with nothing
+failed first; a confession row (#521) carries its model and usage row. Probe spend $0.0154.
+
+**Functional-test manual R8 → R9 — one finding of the full re-run (L) (2026-09-27).** On the
+owner's instruction the verifier re-ran, on the final `a16210a`, the 73 cases not black-box
+executed since R1: 71 PASS, G-10 N/A, G-04 FAIL. The R7 verifier sign-off was withdrawn. The owner
+ruled DEF-082 a fix, and in chat how far a name match reaches.
+
+- **A registered name in parentheses is not an unknown code (DEF-082).** Card #209 wrote
+  「3008 (LARGAN)」 and wore 「未知代碼」 with the tooltip 「…可能是模型幻覺」: LARGAN is 3008's
+  registered name, and the M9 symbol check (`llm_insight/figure_check.py`) compared a
+  parenthesised ticker-shaped token against registered SYMBOLS only. The router now passes the
+  registered names too, and a token is cleared by a name in any case, whole or word by word
+  (owner 2026-09-27: 「5225 (IHH)」 for `IHH Healthcare`). All digits and one letter are never a
+  name form, whole or word, so #82's 「LRDIM (6883)」 stays flagged. Not a regression: the rule
+  is unchanged since `755c88a`; R1 had no card of this shape.
+  **Class scan** (demo, 208 visible cards, 26 registered instruments): 5,491 parenthesised
+  segments; 746 ticker-shaped (44 distinct) — 17 registered codes, 25 abbreviations /
+  indicators / currencies, 2 unknown: 6883 (true) and LARGAN (this defect). Registered names
+  written in parentheses: 7 forms / 9 occurrences, and only the all-capitals single word
+  (LARGAN ×1) has the ticker shape; mixed case (Maybank ×3, Tesla ×1), a multi-word name
+  (IHH Healthcare ×1), a list (2) and a Chinese name (元大高股息 ×1) do not. In the registry,
+  15 of 26 names are Chinese and never ticker-shaped; of the 11 Latin names, 2 are
+  ticker-shaped as stored (LARGAN, NVIDIA), 2 once upper-cased (APPLE, TESLA), 3 are too long
+  (≥ 7 letters), and 4 multi-word names hold 6 ticker-shaped words (IHH, YANG, MING, SPACE,
+  MICRO, INC) — 10 forms in all, each now known. Re-run of the fixed check over the 208 cards:
+  unknown codes 1 (#82 6883). Tests: 3 unit (the demo registry's 26 names) + 3 contract through
+  the real route (flat and grouped lists); mutations — name comparison dropped, router not
+  passing names, case-sensitive, whole name only, one-letter forms, all-digit forms — 6/6 caught.
+
+Gates: ruff clean · mypy --strict 954 files 0 (fresh cache) · pytest 6,500 (6,498 passed, 2
+skipped) · e2e 89 files 309/309, server-side 5xx 0 · stress-audit ops=128 pass=6,025 fail=0 ·
+demo on `3a35454`, verify_live ALL PASS.
+
+**Functional-test manual R6 → R7 — one re-verification failure (L) + one owner ruling (L)
+(2026-09-26).** The verifier closed 14 of R6's 15 items on `696934e`; DEF-077 passed on its
+verdict and failed on its colour (`docs/audit/2026-09-26-r6-dev-specs.md` §1). The owner ruled
+the verifier's long-open observation on the AI 戰績 task ids into this round (DEF-081) and, from
+the class scan, the 「推導」 tag's colour.
+
+- **The FX-triangle note is amber only when the guard fires (DEF-077, R7).** `.fresh-note` is
+  amber by DEFAULT (`web/styles.css`); R6 set `n.style.color = amber` on `ok === false` and
+  nothing on `true` / `null`, so 「（一致）」 and 「無法比較」 sat in the same amber box as
+  「排程器未啟動」 (demo, computed `rgb(217, 161, 63)`). The state is now a class,
+  `.fresh-note-info` (neutral text on the panel colour) for `true` / `null`; `false` keeps the
+  default. R6's e2e read `n.style.color` — the inline value — and asserted it empty, which the
+  CSS default never touches; it now reads `getComputedStyle` colour AND background against the
+  page's own `--amber` / `--amber-soft`, and covers the amber case too.
+  **Class scan** (inline colour deciding a state): 71 inline style assignments in 13 files
+  (vendored ECharts excluded); 12 named a state colour; on a warning-default container: 1 (this
+  one). One more was live: the AI 與額度 status chip set amber INLINE on 額度偏低 and only 啟用中
+  cleared it, so a save that re-rendered it as 已關閉 kept the amber and 額度歸零's red was
+  painted over — now `.pill-warn`. The remaining 8 are reviewed sites (an element built for one
+  state, or every branch assigns). M10-02 stated "a warn face is a class" but guarded two
+  functions by name; `tests/contract/test_def077_state_colour_is_a_class.py` holds the rule over
+  every file, with the reviewed sites and their reasons.
+- **「推導」 is provenance, not staleness (owner 2026-09-26).** The derived-rate tag in 資料新鮮度
+  used `.badge-stale-mini` — the 過期 badge's amber, one column over. Now the neutral
+  `.badge-info-mini`.
+- **The AI 戰績 tab names tasks (DEF-081, owner 2026-09-26).** 「各洞察任務命中率」 and 預測明細
+  printed 「任務 #2」. `GET /api/ai-score` adds `insight_type_label` to every `by_combo` entry and
+  `rows` item (additive) — the name; 「名稱（已刪除）」 archived; 「任務 #N（已刪除）」 when the row is
+  gone, the 排程中心's three cases — and the id moves to the tooltip. Scan: 2 frontend sites
+  printed a task by id, both fixed; the 2 backend 「任務 #N」 strings speak only of a task that
+  no longer exists; the reconciliation CSV `ai_predictions` keeps `insight_type_id` as its key.
+
+Gates: ruff clean · mypy --strict 953 files 0 (fresh cache) · pytest 6,494 (6,492 passed, 2
+skipped) · e2e 89 files 309/309, server-side 5xx 0 · stress-audit ops=128 pass=6,025 fail=0.
+
+**Functional-test manual R5 → R6 — 13 items (5 M, 8 L) + 2 found on the way (1 M, 1 L) (2026-09-26).**
+The verifier closed all five R5 items on `3be67db`, ran the eight previously BLOCKED cases in a
+dedicated local environment (scheduler on, a fake LLM, a frozen clock), opened DEF-066 … 073,
+and the owner's rulings of 2026-09-26 on the eight decision items opened DEF-074 … 078
+(`docs/audit/2026-09-25-r5-dev-specs.md`). Two more (DEF-079 / 080) were found while fixing
+DEF-070 and ruled into this round by the owner in chat, as were several readings where the
+spec left a choice. All fifteen are fixed under the manual's §4 contract.
+
+*The LLM layer*
+
+- **Retries and the fallback model work again (DEF-066).** Every `litellm.completion` call
+  passed `num_retries=model.max_retries`; on any provider error LiteLLM's wrapper handed the
+  call to `completion_with_retries`, which imports `tenacity` at that moment — not a
+  dependency — so it raised 「tenacity import failed」, the provider's real error was lost,
+  and the fallback model failed the same way (demo, alert_scan #195 → insight runs #196…202).
+  Retries are now owned by `shared/llm.py::_call_provider` (LiteLLM always gets
+  `num_retries=0`): transient failures only (timeout, connection, 408/425/429, 5xx), at most
+  `max_retries`, capped backoff; a 401/400 is never retried. When every candidate fails the
+  message names each one in Chinese (「主模型 X：回應不是完整 JSON（2 次）；備援 Y：供應商服務異常
+  （HTTP 500，已重試 2 次）」); the provider's raw text goes only to the redacting fail log
+  (owner, 2026-09-26). Every earlier LLM test replaced `litellm.completion` wholesale, so a
+  dependency missing on a path that only runs on error could not be seen: the new guard drives
+  the REAL LiteLLM wrapper through its exception path with `mock_response=<Exception>`.
+  Rejected: adding `tenacity` (stack rule "default answer no"; it would also retry 4xx).
+
+*Self-correction (spec 04 §4.6)*
+
+- **Shadow cards no longer reach user-facing lists (DEF-069).** `insights_store._filters`
+  had no `is_shadow = 0`, so 持倉健診 headed each symbol with its shadow card and the drawer's
+  AI 建議 could get one. It now excludes shadows unless a caller asks; the battle record keeps
+  them, labelled 影子.
+- **`max_shadows` caps tasks in their shadow period (DEF-070, owner ruling ⑧ A).** It counted
+  every shadow card the task had ever stored: the first per_symbol batch of 9 ignored the cap
+  of 2 and no later version was ever shadowed again. A task holds one slot from its first
+  shadow batch until its shadow version is decided (won / lost), promoted, archived or caught
+  up; a full cap queues with 「影子排隊中（目前 N／上限 M）」. Promotion now compares each
+  version's OWN record — pooled history let v3 be promoted on v2's shadow evidence.
+- **「設為生效」 / 「取消生效」 exist (DEF-071).** The task drawer's ④ 校正版本鏈 had only 封存,
+  the active-calibration route had no caller, and the settings text promised the button. The
+  route-caller guard's allowlist had excused it with a reason that was never true
+  (「the newest live one is active by default」) — removed. G7's fix lands on the recommended
+  version; the winning shadow is marked.
+- **Calibration versions are written from the right evidence (DEF-079, DEF-080 — found while
+  fixing DEF-070).** With no active version the cards and evaluations carry
+  `calibration_version` NULL, but Loop 3 sampled misses under v1, so the first version was
+  written from 0 samples; later versions were based on the newest body instead of the active
+  one; and the trigger read the whole history, so the same misses produced a new version
+  every week. The trigger window is now the active version's own evaluations scored after
+  the newest version (archived included) was written, those exact misses are the master
+  model's input, and no version is written while the newest is still being shadow-evaluated
+  or has won and awaits 設為生效 (owner, 2026-09-26).
+
+*The scheduler*
+
+- **A run that lost work does not say 成功 (DEF-067).** `_outcome_of` records a bare string
+  as `ok`, so `dividends_daily` wrote 「成功　0 檔事件已更新，10 檔失敗」. Nine jobs now return a
+  `JobOutcome` through `sweep_outcome` (all lost → 失敗, some → 部分): dividend and inbox
+  sweeps, history, sentiment and index ingests, the news budget stop, a crashed alert push, a
+  degraded or undelivered digest. Owner, 2026-09-26: the quote jobs record 失敗 when a
+  market loses every instrument (was 部分), and the history sweep counts only a provider
+  failure — a window with no bars (a holiday closure, a delisted symbol) is not a loss. An
+  empty answer is trusted only when the same run proves the market's provider answered,
+  because yfinance reports a network failure as an empty frame, not an exception.
+- **Every run detail is Chinese (DEF-073).** 「18 alert(s) […], 7 dispatched」,
+  「daily digest …」, 「news pass complete」, 「backup ok -> …」, 「notify：…」, 「manual:
+  organized …」, 「evaluate pass complete」 and 「calibration pass complete」 — the last two
+  identical whether 0 versions were made, the validator refused one, or one was written. The
+  evaluate / calibrate runners now return summaries (「評分 N 張、延後 M 張；晉升：…」,
+  「產生 1 版（個股健檢 v1・失誤樣本 8 筆）；略過 …」). The full-width punctuation guard had
+  certified 「3 alert(s) [a, b], 2 dispatched」 as clean — an all-English sentence has no
+  Chinese for a half-width mark to touch; a new guard runs every job on both branches and
+  scans what it wrote.
+- **The 更新報價 toast says what happened (DEF-068).** It always ended 「其餘已更新」 and never
+  named failed FX pairs. `/api/actions/refresh-quotes` gains an additive `summary`
+  (updated / not updated / failed / FX failed / all failed); the toast only formats it.
+
+*The ledger surfaces*
+
+- **One 「持有」 for the registry (DEF-075, owner ruling ② B).** The watchlist badge and 永久移除
+  used `current_shares > 0` (all dates netted, long only) while 封存 / 移除 used
+  `holds_position`, so a position closed only by a future-dated sale read 觀察 and then
+  refused removal. The same predicate now answers the badge, the four removal doors, the
+  target-weights badge, the signal `held` flag, the quote jobs' 部分 threshold and the Alpha
+  Vantage universe (`holdings.held_among`); the valuation-day readers (alert and insight
+  producers, the digest) keep the book cut at today, which already counts a future-sold
+  position as held.
+- **The dividend-inbox scan skips archived symbols (DEF-074, ruling ① B)** — the same shared
+  predicate its fallback path already used.
+- **Door 2 prefills the account whose reconciliation is red (DEF-072).** It passed an empty
+  string and the form fell on the first account; several red accounts now ask 「請選擇帳戶」.
+  The ledger tab's 新增 prefills the active account chip.
+- **Future-row guards assert visibility (DEF-056 follow-up, verifier's note).** A hidden cut
+  line or badge passed `to_have_text`; the statement test and the sweep now require them to
+  be seen (measured: the old tests pass 4/4 with both hidden by CSS, the new ones fail 3).
+
+*Wording, FX, secrets*
+
+- **「AI 額度偏低」 (DEF-076, ruling ⑤ b)** — the alert title now uses its rule's name, and every
+  other user-visible 「LLM」 says 「AI」 (owner, 2026-09-26; 「LiteLLM」 is a product name).
+  Alert titles are tied to rule names by a guard derived from the code.
+- **The FX triangle is judged on the legs' latest common date (DEF-077, ruling ⑥ A).**
+  Latest-row-against-latest-row read a day's market move as a data error (J-01: −0.0938%,
+  ok:false, no bad row). Different dates now read 「日期不同」 with the common date; no common
+  date within 30 days is 「無法比較」 (`ok: null`). Wire: additive `compared_on`,
+  `dates_differ`, `leg_dates`, `reason`.
+- **Secret inputs are password fields (DEF-078, ruling ⑦).** The model key, data-source key,
+  ntfy token and Telegram bot token echoed what was typed. Every stored secret keeps the
+  first-3 + last-3 mask (owner, 2026-09-26 — the verifier's 6 + 6 reading is superseded),
+  shown as text beside the field.
+
+Gates (run one at a time, in the foreground): ruff clean · mypy --strict 950 files 0 issues · pytest 6,488 (6,486 passed, 2 skipped, 0 failed) · e2e 88 files 304/304, server-side 5xx 0 · stress-audit ops=128 pass=6,025 fail=0.
+
+**Functional-test manual R4 → R5 — 1 re-verification failure + 4 new items, all L (2026-09-25).**
+The verifier's R4 pass on `1ee7771` closed 13 of 14, bounced DEF-056 (the cash page's on-screen
+現金收支明細 did not flag future rows while its header's 目前餘額 left them out), and opened
+DEF-062 … 065 with the owner's rulings of 2026-09-25 on the eight R4 decision items and a spec
+file (`docs/audit/2026-09-25-r4-dev-specs.md`). All five are fixed under the manual's §4 contract.
+
+*The bounce*
+
+- **Every surface that lists a future ledger row badges it (DEF-056, re-verification).** The
+  statement API already sent `future: true`; `web/cash.js` rendered the date alone, and the
+  newest-first order put the future rows directly under a header whose balance they are not
+  part of. The statement now draws the printed report's cut line verbatim, badges each date
+  「未來日期：YYYY-MM-DD 起計入」 and marks each projected balance 投影; its rows carry
+  `counts_from` and the envelope `future_count` (the header adds 「截至 …，不含 N 筆未來日期」, as
+  the printed section title does). The class scan went by SURFACE: the drawer's 配息史 listed a
+  dividend paying next month with no flag (owner ruling ③ covered the 交易明細, not this list),
+  and the two reconciliation CSVs that mirror those tables gain a trailing `counts_from` column.
+  R4's guard was a hand-picked list of seven tables; the new one is a sweep that seeds a future
+  row of every kind and fails on ANY visible row printing that date without the badge. Twelve
+  hand-written copies of the date cut (FX pools, realized FX, cash pool, trend, the future-date
+  warning, the statement) now call `counts_by`, behaviour unchanged.
+
+*New items*
+
+- **A GET never writes (DEF-065).** The verifier's intermittent `500 GET /api/ui-prefs` is
+  `IntegrityError: UNIQUE constraint failed: settings_meta.category`:
+  `config_store.ensure_seeded` decided seed-once with a plain read before its INSERT,
+  `get_ui_prefs` seeded on every GET, `ui_prefs` was never seeded at boot, and `settings.html`
+  fires three of them at once. Seed-once is now decided under the write lock (claim first, then
+  seed); `get_ui_prefs` is read-only. Scanned by entry point — the real lifespan on a fresh
+  database, every GET route called twice with every SQL statement traced — 22 of 81 GET routes
+  wrote or created a table on their first call and 15 took the write lock on EVERY call
+  (`/api/dashboard` among them, through the R3 strategy-prompt version backfill). Every table a
+  read touches is now created at boot (ui_prefs, whatsnew, dividend-inbox skips, rebate skips,
+  snapshots, action_log, the news DB, the quota threshold), and the two every-call writers read
+  first. After: 0 / 0. A contract test boots a fresh database and calls every GET with other
+  connections holding the write lock on both database files; the rule is recorded in
+  `architecture.md`.
+- **One name per alert rule (DEF-062).** The 新增洞察任務 wizard showed 8 of its 15 監聽規則
+  as raw ids — it kept a 7-entry table of its own, the settings page a second, `ops/notify.py`
+  a third, with different wording. `shared/alert_rule_names.py` is now the only one; the rules
+  API carries `name` and every renderer reads it (wizard, settings, push text, digest, card
+  chips, the R7 gate message, the alert-scan run detail). An unknown id reads 「未命名規則」,
+  never the id; `calibration_regression`, which had no name anywhere, is 「AI 成績轉差」.
+- **Fetch universes skip archived symbols; a held symbol is never archived (DEF-064, ruling ⑦).**
+  `pricing/ingest.py`'s `tw_universe` / `all_universe` read the whole `instruments` table, so the
+  five chips / valuation / fundamentals / consensus jobs spent provider quota on archived names.
+  One predicate now (`shared/instrument_scope.py`), read by all seven universes — quotes, the
+  DEF-059 insight universe, signals, news and alerts included — so there is no fourth copy.
+  Verifying the ruling's premise 「持有 ⇒ 未封存」 showed it did not hold: a declared short and a
+  position closed only by a FUTURE-dated sale could be archived (the guard read `> 0` over the
+  all-dates net), and deleting the sell of an archived symbol put 1,000 shares back on a name no
+  universe fetched. `holdings.holds_position` (held today or on any later ledger date) is now
+  both the archive guard and the test every share-moving write (`store._reactivate_if_held`)
+  re-activates on.
+- **Orphan SPINOFF seed cleanup (DEF-063, ruling ④).** `scripts/clean_orphan_seed_prices.py`:
+  dry run by default; `--apply --reason` backs up, deletes row by row with a `ledger_audit`
+  before-image and one `action_log` summary; `--backfill` re-fetches the affected history. Who
+  owns a seed is decided ONCE — `StoredCorporateAction.owned_seed_slot()`, moved out of the
+  ledgers router — so the script and the delete / undo / re-date doors cannot disagree.
+- **Gate stability, found while running the e2e suite three times for DEF-065.** `web/input.js`
+  reset the input tab to 手動交易 once `/api/input/context` arrived, taking back a tab picked
+  while the page loaded (one R4 e2e flow failed on it in a pre-run). The owner's pick now wins.
+- **Data (demo).** After a backup, the DEF-063 script's dry run and `--apply` on demo both found
+  0 orphan seed rows (every one of the 35,201 price rows is `yfinance`; no SPINOFF row) —
+  nothing was deleted and the script, by design, took no snapshot and wrote no log row.
+
+*Gates*
+
+- `ruff check portfolio_dash tests scripts` clean; `mypy --strict` 925 files, 0 issues (fresh cache).
+- pytest (e2e excluded, four foreground segments): 6,310 collected, 6,308 passed, 2 skipped, 0 failed.
+- e2e: the full suite (84 files, 295 tests) run THREE times on the final code, as DEF-065 asks —
+  295 / 295 each time; the uvicorn logs kept by `PD_E2E_NETLOG` show 0 server-side 5xx and 0
+  tracebacks in all three (≈ 640 `GET /api/ui-prefs` per run, every one 200). Two pre-runs on the
+  code before the `input.js` fix: 293 / 293, and one failure that exposed the tab race above.
+- stress-audit phase 1: ops = 128, pass = 6,025, fail = 0 (same as R4).
+
+**Functional-test manual R3 → R4 — 1 re-verification failure + 13 new items, 2 M / 12 L (2026-09-25).**
+The verifier's R3 pass on `4655845` closed 18 of 19, bounced DEF-040 (a SPINOFF seed written over an
+existing provider quote was lost for good on delete, while the API answered `restored`), and opened
+DEF-049 … 061 with the owner's rulings of 2026-09-24 and a spec file
+(`docs/audit/2026-09-24-r3-dev-specs.md`). All 14 are fixed under the manual's §4 contract. The
+manual's B-17 expectation gains the DEF-056 rule at the verifier's request (manual v3.2).
+
+*The bounce*
+
+- **A SPINOFF seed is written only into an EMPTY price slot, and each save records what it wrote
+  (DEF-040, re-verification).** R3's `write_seed_price` went through `upsert_prices`' `ON CONFLICT`,
+  so a provider quote already on the action day was replaced with no copy kept, and the delete then
+  removed the replacement. `pricing/seed.py::occupied_slot` is now the one test (preview, save and
+  re-date share it); an occupied slot is refused and reported (`child_price_skipped`, announced in
+  the form before saving). The new nullable `corporate_actions.child_seed_json` records what each
+  save wrote, so a delete takes back exactly that row and never an orphan seed with the same stamp;
+  rows saved before it keep R3's signature rule. The rule is recorded in `data-and-pricing.md`.
+- **Re-dating a SPINOFF moves its seed (DEF-060).** The PUT also silently dropped `to_symbol_price`,
+  left the seed behind when the kind or the child symbol changed; all four are handled, and a
+  non-SPINOFF with a seed price is a 400.
+
+*Owner rulings and new items*
+
+- **Every door that deletes or corrects a ledger row runs the replay guard (DEF-049, M).** Undoing
+  an import batch ran a bare `DELETE … WHERE import_batch_id=?`: a later sell became a 賣超 with
+  no question and no audit row, while deleting the same buy on its tab asked first. The guard moved
+  to `api/replay_guard.py` (one decision, `_replay_block`) and is injected into
+  `provenance.delete_batch` as a required seam (recorded in `architecture.md`); the undo deletes row
+  by row through the store, so every row writes `ledger_audit` (new nullable `source`, 「批次復原
+  #id」) and the action log names the batch. The class scan walked the ROUTE TABLE, not the SQL, and
+  found three more doors with the same gap — the 公司行動 single delete, set delete and edit — now
+  guarded too: 14 of 14 delete/edit doors, with an architecture test that fails on a new unguarded
+  one. The confirm is the ledger tab's own 賣超確認 dialog.
+- **Every ledger row counts from its own date (DEF-056, ruling option A).** DEF-016 cut dividends
+  only; a future-dated buy doubled today's holding, a future split doubled a position at the unsplit
+  price. `LedgerBundle.valued_as_of` + one predicate `counts_by` now cut trades, openings,
+  dividends, corporate actions, FX conversions and cash movements for every valuation (dashboard,
+  試算, tax package, sell hints, drawer, stress-audit oracle); validation replays keep the whole
+  ledger. Ledger lists, the cash page and the printed ledger report flag such rows 「未來日期：
+  YYYY-MM-DD 起計入」 from the server's clock. Two DEF-016 leftovers went with it (the sell hint's
+  share count and the drawer's action delta read all dates).
+- **System and news-organizer prompts keep every version (DEF-057, M).** New
+  `shared/prompt_versions.py` (one table, `kind` system / news); each store's single `_write`
+  appends a version, 重置回官方版 and restore included; existing bodies are back-filled as v1; the
+  settings page reuses DEF-033's history dialog; cards record the system-prompt version
+  (`insights.system_prompt_ref`), organized news the organizer version. `strategy_prompt_versions`
+  is untouched. Cache fingerprint unchanged.
+- **The dividend correction runs the entry doors' validator (DEF-061).** `validate_dividend(…,
+  replacing=)` is shared by the four entry doors and the edit, which also stores the model-derived
+  amounts now and previews its findings in the dialog.
+- **Smaller fixes.** The editing preview forecasts no rebate for an already-discounted row
+  (DEF-055); the 公司行動 row and the printed report show the linked reorg fee (DEF-052);
+  「最近批次」 sums cards and cost over one set (DEF-058); `all_registered` tasks skip archived
+  symbols (DEF-059); panel subtitles wrap at ≤ 600 px (23 truncations on 16 pages → 0, DEF-050);
+  scheduler toasts name the job (DEF-051); scope identifiers never reach user text (DEF-053).
+- **Data (demo).** Insight card #97 deleted (DEF-054) and rebate snapshots #33 / #44 made coherent
+  (DEF-055, `--scope all`), after a backup, with audit rows.
+
+*Gates*
+
+- ruff (`portfolio_dash tests scripts`) clean; `mypy --strict` 915 files, 0 issues (fresh cache —
+  its first run caught a redefined name in an agent-edited e2e file, fixed).
+- pytest without e2e: 6,227 passed / 5 skipped / 0 failed, in four foreground parts. The first
+  run failed one pre-existing SOURCE-STRING guard (`test_i8_…::test_the_undo_says_what_it_did…`
+  searched `undoBatch` alone after DEF-049 split the undo into `undoBatch` + `runUndo`); the guard
+  now reads both and the half was re-run clean.
+- e2e: 80 files, 288 passed, in 14 foreground chunks.
+- stress-audit phase 1: ops=128, pass=6,025, fail=0 (same as R3).
+- Every defect's new tests fail on `4655845`, and each fix was mutation-tested (details per item in
+  the workbook's 來回記錄 R4 rows).
+
+**Functional-test manual R2 → R3 — 2 re-verification failures + 17 new items, 4 M / 15 L (2026-09-24).**
+The verifier's R2 pass on `e6fd9f4` closed 27 of 29 defects, bounced DEF-023 (複驗未過) and
+DEF-017 (partial), and wrote the owner's rulings of 2026-09-24 into the register: DEF-006 / 018 are
+non-defects (manual expectations change), DEF-003 / 009 / 010 / 013 / 016 / 025 / 033 became work,
+and DEF-039 … 048 were opened (3 of them the developer's own R2 observations, ruled). All 19 are
+fixed under the manual's §4 contract, and the 12 case expectations the rulings change (A-01, A-04,
+A-09, A-11, B-10, B-16, B-17, C-02, C-04b, D-10, G-09, I-06) are synced in the manual (v3.1) and the
+workbook's 測試案例 F column at the owner's instruction.
+
+*The two bounced fixes — both had GREEN guards that only matched source strings*
+
+- **The dashboard's 「公司行動無法套用」 block now renders (DEF-023, re-verification).** R2 called
+  `renderUnappliedBanner()` from inside `renderUnregisteredBanner()` AFTER its early
+  `if (!syms.length) return;`, so the block needed an unrelated unregistered symbol to appear — never,
+  on the demo. `renderHeader()` now calls both banners independently. The R2 guard asserted the call
+  string existed inside that function and so pinned the bug; it is now a Node-executed render of
+  app.js's header against a stub DOM plus an e2e on a fully-registered ledger. A scan of every
+  render call placed after an unrelated early return found 106 sites, 1 real.
+- **「最近匯入」 follows a same-page ledger delete, and the undo dialog quotes a live count (DEF-017).**
+  The single refresh seam skipped the batch list for every external caller — which is exactly how
+  the ledger tab's edit/delete arrive — and the undo dialog quoted the list's cached `row_count`
+  (「將刪除 1 筆」, then deleted 0). The seam now reloads the list on every ledger change, and the
+  undo re-reads the batch before opening; a batch that is gone or unreadable never gets a
+  destructive confirm. Class: no confirm dialog for a destructive action may quote a cached count
+  (31 dialogs scanned).
+
+*Owner rulings implemented*
+
+- **CSV / AI oversell rows need their OWN acknowledgement, enforced by the server (DEF-025, M).**
+  `/api/import/commit` let one file-wide `ack_warnings: true` write every oversell row — R2's
+  per-row acks (DEF-027) were a broker-page convention, not a rule. The commit now takes `ack_rows`
+  and refuses (422 `oversell_rows_unacknowledged`, naming each row and 「成本基礎會被永久捨棄」,
+  writing nothing) when a row that will be written oversells without its own ack. The broker page's
+  dialog became the shared `web/import-ack.js`, used by the CSV, broker and AI doors; oversell rows
+  are never pre-ticked.
+- **Strategy prompts keep every version (DEF-033, M).** New append-only table
+  `strategy_prompt_versions`; every door that writes a body (new, official copy, save, 同步官方,
+  restore) appends a version with its source; restore writes a NEW version; existing bodies are
+  back-filled as v1. Settings gets 版本記錄 (view, line diff via stdlib difflib against the previous
+  or current version, restore); insight cards record the versions they were assembled from
+  (`insights.strategy_versions`, additive) and older cards say 「生成時版本未記錄」. The cache
+  fingerprint is unchanged — the assembled prompt already contains the body.
+- **The ledger's 編輯 correction runs the same `validate_transaction` as a new entry (DEF-042, M).**
+  `validate_transaction(replacing=)` validates "the ledger without this row + the edited row", so
+  the row is no longer its own duplicate or its own cover and only problems the EDIT introduces
+  block. The edit dialog previews on open and requires the same per-warning acknowledgements; its
+  fee/tax back-fill now goes through `pdField.autoFill`.
+- **A dividend counts from the day it is received (DEF-016).** `LedgerBundle.received_by(as_of)`
+  drops dividends whose effective date is after the valuation date; the book, 總報酬, XIRR, 已收股利,
+  B−A, drawer, tax package, sell hints and the stress-audit oracle read it. Measured: one confirmed
+  18,200 TWD dividend paying in 15 days moved XIRR 0.5677 → 0.6703 while the cash pool did not move.
+  Rule recorded in `domain-ledger.md`; future-dated trades are an open owner question.
+- **The trade draft shows the position AS OF the trade date (DEF-048).** A back-dated draft read
+  today's holdings (2884 on 2025-01-02 showed 100 → 200 where the ledger then held 0). It now replays
+  to the trade date with the draft appended last, and says so (「以交易日 … 當時的部位試算」).
+- **當沖 + 放空 together is allowed and visible (DEF-013).** Both flags were already stored; the
+  ledger rows and the printed ledger now carry 「當沖」「放空」 badges, the manual form explains the
+  combination (當沖 0.15% outranks ETF 0.1%), and the edit dialog can express it.
+- **Deleting a SPINOFF removes the child seed price it wrote, when no real quote replaced it
+  (DEF-040).** New `pricing/seed.py` (pricing stays the only writer of `prices`) identifies a seed
+  row by its own signature; single, group and CSV-batch deletes share it; the confirm and toast
+  explain when it cannot be reversed.
+- **Rebates: a trade already discounted at settlement forecasts no refund (DEF-010).**
+  `forecast_tw_rebate(..., *, discount)` — `discount` is now required, so a forgotten argument is a
+  type error — returns 0 for `discount < 1`; the inbox, the draft hint and the rebalance summary
+  follow. `scripts/clean_rebate_snapshots.py` makes the 8 ruled demo snapshots coherent
+  (`rebate_rate` → "0", original recorded, fee untouched, one `ledger_audit` row each).
+- **Confirmed rebate rows are fully editable, and every cash edit is audited (DEF-009).** The lock
+  existed because the inbox recognised a credited month from the row's own date/kind/note. The new
+  nullable `cash_movements.rebate_period` is the structural link (back-filled once on first boot),
+  so an edit can no longer re-open the month; cash updates and deletes now write `ledger_audit`.
+- **Prediction decides (DEF-003).** A card with no prediction shows 「純描述・無預測」 and never
+  enters a confidence population (calibration curve, ceiling-violation rate, calib-gap alert,
+  backtest ceiling, rolling window); stored values are ignored at read time, not rewritten.
+- **Alert-triggered 持倉提點 cards only for held symbols (DEF-041).** The single dispatch point takes a
+  REQUIRED `held_symbols` (from the computed book); watchlist alerts stay listed but produce no card,
+  and the run detail says how many were skipped.
+- **No dividend data is not a failure (DEF-047).** The registry separates `empty` (a clean answer with
+  no events) from `failed`; the inbox toast reads 「M 檔無配息紀錄」 without the warning colour.
+
+*Display and seams*
+
+- **Every page that loads `api.js` loads `names.js` first (DEF-044).** Five pages lacked it and
+  degraded `{account:id}` tokens to raw ids silently; api.js now reports a missing names.js with a
+  console error the page-smoke e2e fails on, and a contract test reads every page's script order.
+- **Export reports print the zh account name (DEF-045).** The ledger report and the cash-statement
+  report now emit account tokens resolved at the download seam; the AST guard's two blind spots
+  (a wrapped `_esc(...)` interpolation; a name flowing through a dict) are closed, and a behavioural
+  test downloads every export.
+- **Decimal wire strings are formatted before they are spoken (DEF-039).** The broker-statement hint
+  printed 28-decimal ledger shares; 12 sites of the class were fixed (23 found).
+- **An on_alert task reads as alert-triggered on the pipeline page (DEF-043).**
+- **Data (DEF-046).** `scripts/delete_insight_cards.py` removes a bad card with its evaluations and
+  an audit row per deleted row. The card is **#192** — the "#207" in the developer's R2 handoff note
+  was a wrong id (#207 is a legitimate 2884 card and refuses to be deleted by the script's guard).
+
+*Gates*
+
+- ruff (`portfolio_dash tests scripts`) clean; `mypy --strict` 890 files, 0 issues (fresh cache).
+- pytest without e2e: 6,082 passed / 5 skipped / 0 failed (the skips are the 3 key-gated probe
+  parsers and the 2 punctuation files excluded by name, as before). Run in the foreground in four
+  parts — a detached hidden-window run crawled at ~0.35 CPU-seconds per second (8× slower than
+  R2's) while the same tests took 75 s in the foreground.
+- e2e: 72 files, 272 passed, in 12 foreground chunks. One pre-existing race surfaced:
+  `test_the_rebalance_footer_total_equals_the_visible_fields` read the footer right after the
+  fields appeared, but the footer is drawn by the first preview's response; the unchanged test
+  went fail / pass / fail, `/api/rebalance/preview` measured 10–13 ms on both `e6fd9f4` and this
+  tree, and the footer held its 5 cells a moment later. The test now waits for the footer cell
+  it compares (4 / 4 passes).
+- stress-audit phase 1: ops=128, pass=6,025, fail=0 (the oracle carries the pay-date rule).
+
+**Functional-test manual R1 → R2 remediation — 29 defects, 2 H / 17 M / 10 L (2026-09-23).**
+The verifier's first black-box pass over the 120-case manual (`docs/audit/2026-09-22-functional-
+test-manual.md` + `.xlsx`) on `755c88a` ran every case (PASS 86 / FAIL 19 / OBSERVE 6 / BLOCKED 8 /
+N/A 1) and opened DEF-001 … DEF-038. The 9 `待裁定` items (DEF-003 / 006 / 009 / 010 / 013 / 016 /
+018 / 025 / 033) are owner rulings and are untouched here. The other 29 are fixed under the manual's
+§4 contract: root cause to a line, class-scan numbers, a test that fails on the old code with the
+mutation recorded, and the defence that should have caught it repaired. The developer half of the
+workbook (缺陷登記 H/I, 來回記錄 R2 rows, 交接紀錄) records each one.
+
+*Money of record*
+
+- **Same-day trades replay in WRITE order — the ledger id — never buys-before-sells (DEF-012, H;
+  B-18).** `EventPriority` ranked `BUY=20 < SELL=30`, so a sell entered between two same-day buys was
+  replayed after both: 2884 held 100 @ 9,320, then buy 200@44 → sell 100@45 → buy 100@46 previewed the
+  sell at realized −1,579.67 and booked −1,223.00 once the third row landed (cost 17,070 where the
+  entry order gives 16,713.33). `shared/ledger_events.py` now has ONE `TRADE` priority (`BUY`/`SELL`
+  are aliases) and `build_book` sorts `(date, priority, id order)`; OPENING and CORPORATE_ACTION
+  still precede the day's trades and DIVIDEND still follows. The manual preview appends its draft
+  last and so agrees with the replay; the CSV preview counts a same-day sibling as cover only when
+  it is listed ABOVE the sell (`validate.siblings_booked_before`); the stress-audit oracle keeps its
+  own transcription; `domain-ledger.md` records the rule. The demo ledger's one same-day pair
+  (2603, 2026-07-02) already had the buy's id below the sell's, so no stored figure moves.
+- **A broker statement listed newest-first is re-ordered chronologically WITHIN the day (DEF-027 c).**
+  Schwab exports newest-first; the converter sorted `(trade_date, line_no)`, which under the rule
+  above would have written a same-day round trip as sell-then-buy. `RawEvent.seq` + `chrono_key`
+  now rank the lower row as the earlier event; the direction is read from the posted-date trend and
+  never falls back to line order.
+- **The tax package's reconciliation line is the dashboard figure byte for byte (DEF-001; I-03).**
+  `export/tax.py` applied the filing filter (sale / short_cover only) to the 對帳用 subtotal too, so a
+  post-close dividend (2412, 5,200 TWD) made the two disagree with no explanation. The
+  reconciliation now sums every realized row in replay order, prints the split (出售／回補 vs 結清後
+  配息), and adds the multi-year lines when the ledger spans years; the filing lines are untouched.
+
+*Corporate actions*
+
+- **A reorganisation fee is written in the SAME transaction as its action and deleted with it
+  (DEF-020; D-10).** The form sent two requests and the fee stayed behind on delete (TWD pool −50).
+  `cash_movements.corporate_action_id` (additive) links the two; the action POST validates the fee
+  through the cash door's overdraft guard before writing anything, PUT syncs it, DELETE removes it in
+  one commit and names it in the confirm dialog.
+- **Deleting an EXCHANGE moves the target-price band — and the target weight — back when they were
+  not touched since (DEF-021 + F-3; D-10).** `corporate_actions.band_move_json` / `weight_move_json`
+  (additive) record what was moved; `_delete_actions` restores when the destination still carries
+  the recorded values and the source has none, and says why when it cannot (`band_restored`,
+  `weight_restored`, `band_restore.reason`). The entry hint and the delete dialog now state the rule
+  the old docstring only claimed the entry surface stated. Both moves run inside the action's
+  transaction instead of after its commit.
+- **A ratio typed as `1.5` is refused inline instead of being silently rewritten to `15` (DEF-005;
+  D-02).** `corp-action-form.js` stripped non-digits on input, turning a 1:2 split into a 5:1
+  consolidation the backend never saw. Inputs are never rewritten now (the broker-import ratio cells
+  had the same `parseInt` truncation); `tests/contract/test_web_inputs_never_silently_rewritten.py`
+  guards every web/*.js.
+- **An unapplied corporate action has a visible entry (DEF-023; D-11).** The dashboard shows a
+  banner per refused action with a deep link to its ledger row, the ledger row carries an 未套用
+  badge (`GET` rows gain `unapplied`), the transaction delete dialog warns when a later action would
+  lose its position, and the reason names the account through the token seam below rather than as
+  `tw_broker`.
+- **Business dates come from the app clock (DEF-022; D-11).** `target_set_at` was stamped
+  `datetime.now(UTC).date()`, so a band set at 04:40 Taipei was dated yesterday and a same-day split
+  falsely warned it predated the band. 11 sites across 10 files (`date.today()` in seven price
+  providers, two UTC `.date()` calls, one private `_TAIPEI` constant) now use `app_now()`;
+  `tests/architecture/test_business_dates_use_app_clock.py` forbids the patterns outside
+  `shared/clock.py`.
+
+*Entry and import doors*
+
+- **Backend sentences name an account by TOKEN, resolved once in `web/api.js` (DEF-008 / 023 / 035
+  class).** The backend has no zh account names, so every author picked a bare id or the English
+  `accounts.name`. `shared/account_ref.py::account_ref()` emits `{account:<id>}`; `api.js` resolves
+  it on every 2xx payload and every error envelope through `pdNames`; `tests/contract/
+  test_account_ref_seam.py` scans every backend f-string (with keyword and default-value forms) and
+  its pending list is now empty. 43 sites were touched across the round.
+- **Overdraft refusals name the day, the account and a settlement-precision amount, and the toast
+  no longer prints the error code (DEF-008; A-05 / A-06).** One `cash_dip_sentence` serves the
+  withdraw, FX and negative-cash guards: 「此筆出金會使 台灣券商 的 TWD 現金於 2026-09-23 降至 −1
+  （出金當日）…」. The four copies of the oversell sentence collapse into `shared/oversold.py`.
+  `window.toast` drops machine-code sub-lines into the title and `console.debug`.
+- **A trade dated before the position's opening-inventory build date needs confirmation; one
+  dated before the account's first record gets an advisory (DEF-014; B-17).** `Issue.info` adds the
+  advisory tier (never blocking); the check lives in `validate_transaction`, so the manual, CSV, AI
+  and broker doors all raise it.
+- **An error row never covers a sibling sell, and a skipped row says why (DEF-024; I-06).**
+  `pending_share_flows` excludes every row that cannot be written (the whole-share rule was
+  row-level but outside the structural set); `commit` returns `skipped_rows` with a code
+  (`deselected` vs the re-derived issue) and the page says 「未勾選 N 筆」 or 「⚠ 寫入完成（有列被擋下）」
+  with the server's sentence per row instead of 「✓ 寫入成功」.
+- **The CSV preview shows each ledger kind's own columns (DEF-004; I-04)** — amounts, currencies,
+  ratios and build dates instead of 「—」 — and **an exported ledger CSV imports back as-is
+  (DEF-026; I-13)**: `csv_import.py` accepts the export column names as aliases for all six kinds,
+  carries `fee_rule_snapshot` through verbatim when fee and tax are supplied, and names ignored
+  system columns per row instead of dropping them silently.
+- **Broker-statement import acknowledges warnings per row, lists every converted row, and refuses
+  a statement aimed at another broker's account (DEF-027 / 028 / 029, H/M/M; I-10 / I-11).**
+  `broker-import.js` hard-coded `ack_warnings: true`, so an oversell was written — cost basis
+  discarded — under 「✓ 全部寫入完成」; the commit now stops on 422 and opens a per-row dialog
+  (unticked by default, consequences stated). The conversion report is a table per kind with source
+  line numbers, per-row selection and the merged / cancelled / dropped rows with their destination.
+  The opening-inventory hint subtracts what the ledger already holds. `registry.ACCOUNT_BROKERS`
+  binds a statement format to `accounts.broker`; a mismatch is a blocking issue and the account
+  picker lists only matching accounts.
+- **AI-input drafts are editable row by row and re-validated by the server without a model call;
+  a stated amount that contradicts shares × price is flagged, never reconciled (DEF-035 / 036;
+  F-04 / F-05).** `TxnDraft.stated_amount` is copied, not computed; a > 1 % gap against shares ×
+  price (± engine fees) becomes `amount_mismatch`, unticked by default. Prompt `AI_INPUT` v8,
+  corpus 40 → 45 cases. Draft account cells render through `pdNames`.
+- **A late reference-rate reply never overwrites what the owner typed (DEF-007; A-02).**
+  `cash.js` guards every post-await field write with `writeIfUntouched` / `autoFill`, never switches
+  the 取得成本 mode, and dates the hint by the rate's own `as_of`. The same guard now covers the
+  other pages' late writes.
+- **After any ledger change the input page refreshes through ONE function (DEF-019; C-04b).**
+  `refreshAfterLedgerChange()` re-warms the holdings caches, batches, tables and sell hints, and
+  takes over `window.pdLedgerRefresh` so the broker-import undo and the corporate-action form ride it.
+- **Import batches follow the ledger (DEF-017; C-04).** `row_count` is derived live, a batch with no
+  rows left is not listed, undo of an emptied batch says so, manual forms label their batch
+  「手動輸入」, and an openings batch is marked not undoable.
+- **The dividend re-detect names each failed symbol and why (DEF-015; C-01)** —
+  「14 檔事件已更新，1 檔失敗（TSLA：yfinance 無配息資料）」 — through one formatter shared by the inbox
+  and the scheduler jobs; the registry keeps the reason it used to swallow.
+- **The rebate inbox copy matches AI-D42 (DEF-011; A-16):** a confirmed rebate 「不改變持倉成本與資產損益，
+  但會計入 XIRR 與含匯兌總損益」; the 「三種都不列入 XIRR」 what's-new line was wrong the same way.
+
+*Settings, pipeline and layout*
+
+- **The prompt variable tables scroll inside their own wrap at 390 px (DEF-002; J-05)** and the
+  overflow guard now expands every `<details>` and walks all eight settings tabs from a fresh
+  document — its three blind spots were why 11 tables 3,673 px wide passed.
+- **「編輯標的」 opens a universe dialog (DEF-031; H-04 / H-05)** shared with the wizard, which now
+  counts symbols, not holding rows (AAPL in two accounts is one symbol, one card — DEF-032); the
+  server de-duplicates a custom universe on read.
+- **The auto-AI-resolve switch binds once (DEF-034; F-03)** — `boot()` no longer re-adds the click
+  listener on every reload — and the residual 「（後端接線後生效）」 tooltip is gone while the
+  pipeline asset cards deep-link to `settings.html#prompts/<anchor>` (DEF-038; E-01). The
+  quota / calibration alerts link to their own settings tab the same way.
+
+*Scheduler and insight cards*
+
+- **「立即執行」 on an `insight:N` schedule row runs the task (DEF-030; H-04).** The manual worker
+  looked the id up in the static job table only (`KeyError('insight:10')` written verbatim as the
+  run detail); cron had dispatched by kind all along. One `_execute_insight()` now serves cron, the
+  scheduler centre and the task page; an unrunnable id is a 404 with a sentence, a failure is
+  「執行失敗：<class>：<message>」, a runner that raises can no longer leave a row stuck in `running`.
+  Rows carry `label` (the task's name), `effective_enabled` and `paused_reason`, so a paused task's
+  switch shows paused. The nine remaining English `_summarize` run lines are zh-TW with the
+  recorded failure reason per symbol.
+- **An alert knows its scope, and a card knows which alert produced it (DEF-037; G-09).**
+  `fx_drift:moomoo_my` was split on the colon and dispatched as a stock, producing a card whose
+  symbol was an account id. `Alert` carries a required `scope` (symbol / sector / account /
+  currency / portfolio) and `subject`, checked by a validator and an AST guard on every
+  constructor; only symbol-scoped alerts reach a per-symbol card and the scan detail lists what it
+  skipped. `insights.trigger_json` (additive) records source / rule / alert id / fired-at, the API
+  exposes it with the rule's label, the card footer says 「由預警「目標價穿越」觸發」, and the
+  `on_alert` prompt addendum (v2) hands the model the fired alert's own title and detail instead of
+  letting it guess 「RSI過熱」. The bell, the digest and the push text stopped treating an account
+  or sector suffix as a symbol.
+
+*Sweep of what the class scans found outside their owners' files*
+
+- CSV-imported corporate actions are all-or-nothing (`commit=` was not forwarded; an
+  architecture test now checks every `commit` parameter is forwarded), a CSV EXCHANGE records and
+  restores its weight move like the manual door, and a batch undo deletes actions through the same
+  function as the ledger page (fee, band, weight and price restatement included — the bare `DELETE`
+  had left split-adjusted closes behind).
+- All six import kinds name ignored export-only columns; an opening-inventory parse error reads in
+  Chinese instead of `'account'`; the AI door forwards a provider refusal through the zh message
+  path.
+- One `kind_label` vocabulary for corporate actions on every wire (the drawer's own table had
+  called a SPLIT 「拆併股」 and a SPINOFF 「分割」); `sev: "info"` is part of `issue_wire`; preview
+  rows carry issue `kinds` so the broker dialog no longer pattern-matches a sentence.
+- The late-write guard lives in `web/format.js` (`pdField`) and covers the 11 other sites the
+  DEF-007 scan found; the ledger page's edit / delete refresh rides the input page's seam; a
+  downloaded print report resolves account tokens at the `api.js` download seam; the account-token
+  pending list is empty; `LIBRARY_VERSION` is official-v26 and a test binds every built-in prompt
+  version to it.
+
+*Gates that were red on HEAD before this round touched them*
+
+- Three e2e files and one oracle check had pinned the behaviour the 2026-09-16 demo-audit rulings
+  replaced, and had not been run since: the empty holdings table now draws ONE 「尚無持倉」 hint
+  row (L23; `test_m1_01` asserted zero rows), a ledger pane is fetched when its tab is shown
+  (L16; `test_opening_input_flow` waited for the 期初 rows before showing the tab), a code-like
+  input of up to six characters no longer auto-fires the AI resolve (L13; the three
+  `test_quickadd_ai_resolve_flow` cases typed `UMC` / `MULTI` / `PICKME` and now press the
+  never-gated 「AI 辨識」 button), and the FX ledger quotes its implied rate the conventional way
+  (L6; the stress-audit oracle expected the old from/to figure). Each assertion was updated to
+  the ruling it post-dates, with the ruling named beside it. Gates at delivery: ruff clean ·
+  `mypy --strict` 860 files, 0 issues · pytest (non-e2e) 5,900 passed / 2 skipped · e2e 66
+  files, 260 passed · stress-audit phase 1 ops=128, pass=6,025, fail=0.
+
+**Demo black-box audit remediation — 37 findings, 1 H / 9 M / 27 L (2026-09-16).**
+A full-site click-through of the demo on `85dfafd` (real browser, three widths, every form
+submitted and reverted) found no money-of-record defect — 93 identities held, three write/undo
+paths restored byte-identically — and 37 presentation, wiring and disclosure problems. 31 are
+fixed here; the rest are recorded in the report with their evidence and the owner decision each
+one needs (`docs/audit/2026-09-16-demo-full-site-audit.md`, status appended per item).
+
+*Numbers on the wire*
+
+- **The rebalance drawer no longer reports 100.00% and 「超過 100%」 in the same footer (H1).**
+  The client kept targets as JS floats and sent `String(ratio)` — `"0.006999999999999999"` —
+  which the server summed as exact Decimals to `1.000000000000000004 > 1`. Targets are now
+  integer tenths of a percent spelled onto the wire by digit surgery, the client Σ check is
+  integer arithmetic, and the server flag carries a `0.0001` tolerance that can never hide a
+  real overshoot. Seeds are apportioned by largest remainder so the drawer opens at exactly
+  100.0% when everything is priced (L9); the backend's `cash_after` is shown, negative or not,
+  with an overdraft warning (L10); a row with no trade says why — `summary.holds` /
+  `excluded_reasons` (L11). `LESSONS_LEARNED.md` records the class.
+- **The three stored FX pairs are checked for triangular consistency (M1).** USD/MYR × MYR/TWD
+  measured 31.8570 against a direct USD/TWD of 31.8350 (+0.069%), enough for a spot
+  conversion to move the report-currency total by 40 TWD with no ledger change.
+  `freshness.fx_triangulation` carries the implied / direct / gap per closed triangle and the
+  資料新鮮度 panel discloses it. Which pair should be DERIVED is an owner decision and is not
+  made here; the rates are untouched.
+- **An FX conversion's implied rate is quoted the conventional way on every surface (L6):**
+  the more valuable currency is the unit (rate ≥ 1), whichever side was sold, so a USD→MYR row
+  and a MYR→USD row both read 「1 USD = 4.0000 MYR」 — ledger pages, the printed report, and the
+  entry form's what-if line. `implied_unit_ccy` / `implied_per_ccy` name the direction.
+- **TW / MY share counts must be whole (L12).** A 0.5-股 TW sell previewed cleanly (min fee
+  20, tax floored). `validate_transaction` now raises the hard `shares_not_integer` on every
+  door, and the drawer's 試算 refuses the same input before pricing it. US fractions stay
+  allowed (deferred, not forbidden; DRIP books them).
+
+*Insight pipeline*
+
+- **The pipeline card's 「② 輸入」 node is scope-aware in every branch (M2)** — 「全持倉」 /
+  「N 個市場」 / 「N 檔標的」 — and the affected-symbol list is deduplicated (a symbol held in two
+  accounts appeared twice).
+- **Dry-run R4 and the pipeline card read the same price-readiness helper (M8):** missing →
+  warn on both (the zero-LLM anomaly card, unchanged), stale-only → info on both, so the two
+  gatekeepers can no longer contradict each other about the same task.
+- **AI cards get a read-time figure check (M9).** `llm_insight/figure_check.py` compares every
+  number in a card against the numbers the model was fed (scale variants, 0.5% tolerance) and
+  flags parenthesised codes that are not registered instruments; the wire carries
+  `figure_flags`, and the card shows 「數值待核」 with the offending figures. Measured on the
+  cached cards: 「429.1 萬美元」 beside a sibling's 「4,290.80 美元」, and 「LRDIM (6883)」.
+  Nothing is hidden or blocked. Confidence renders as an integer percent (L21).
+  **Re-verified 2026-09-17 and redone (audit author's ❌):** the first version compared
+  against `insights.input_snapshot`, which on 149 of 149 demo cards holds the
+  `"<date>|<target>"` fingerprint fallback — `RunInputs.input_snapshots` has no caller — so the
+  figure check had never run on a real card, and 47 of its 48 「未知代碼」 hits were `MA20` /
+  `PBR` / `KLCI` / `BUY`. Now: the numbers are extracted from the exact prompt at the LLM call
+  into a new additive column `insights.prompt_figures` (`input_snapshot`, the cache
+  fingerprint and the Loop-2 master prompt are untouched); a card that prints figures with no
+  recorded population reports `snapshot: "none"` and wears a muted 「無快照可核」 instead of a
+  clean `[]`; indicators with a period match a shape rule (`^(MA|EMA|RSI|KD|…)\d+$`), the
+  not-a-ticker list is grouped and extended, 4–6-digit codes and bare registered codes are
+  never read as figures; and the pill says what was found — 數值待核 / 未知代碼 / 無快照可核.
+  The regression test now runs the real generation path and asserts on the stored row
+  (`LESSONS_LEARNED.md`).
+  **Second re-verification 2026-09-17 (audit author's ⚠️):** on 14 freshly generated cards
+  the check fired 4 times — 「總計 95.0457 股／15,916.00」 (the model's correct sum of two
+  per-account rows), 「target_pct: 0.05」 (the card's own prediction echoed in its body) and
+  「近 20 日淨買超 497.43 萬」 against a fed `497427`, a ×10 error the reviewer had marked
+  undecidable and the stored population decides. Fixes: the card's stored `prediction` /
+  `confidence` join the population (`figure_check.card_own_figures`; tied to the stored
+  fields, so an undeclared prediction printed in a body is still flagged), and the
+  per-symbol prompt's `symbol_detail_json` carries a `combined` block for a symbol held in
+  more than one account — the drawer's own cross-account aggregate, lifted from
+  `api/routers/symbol.py` into `portfolio/position_aggregate.py` so both readers share one
+  definition — so the model is handed the total instead of adding rows (llm-insight.md:
+  it narrates the numbers, it does not recompute them). Single-account prompts and the
+  drawer's wire are byte-identical. Pairwise sums in the checker were rejected: ≈20,000
+  sums over a 200-number population would accept almost anything.
+  **Third re-verification 2026-09-21 (audit author's M9-a):** 13 regenerated cards printed six
+  market caps and all six were flagged. Four were correct — 「4.51 兆 USD」 against a fed
+  `4514709672075.806` — and read as the bare 4.51 because the scale table had 千 / 萬 / 億 and
+  no 兆; two were real ×10 errors (「5,200 億」 for 5.2 兆, 「458.92 億」 for 4,589 億), the
+  same class as #172. The unit grammar is now fixed as a class, not a row: a zh magnitude is
+  a prefix (十 / 百 / 千) times a base (萬 / 億 / 兆) and 萬億 is 兆, so the demo's older
+  「3.66 百萬」 / 「1.38 千萬」 read at their real scale too; 百 alone is never a unit (百分位 /
+  百分點); a numeral in descending parts — 「1兆1,300億」 — is one figure; B / T (upper-case,
+  word- and timestamp-safe) join K / M. The card and the prompt are read by ONE scanner, so
+  the stored population cannot disagree with the card about what 「兆」 means. Measured
+  offline over all 176 demo cards: exactly the four false flags cleared, the three ×10 true
+  positives and 6883 kept, no other card changed.
+
+*Disclosure and wiring*
+
+- **A stopped scheduler is visible (M3):** `GET /api/scheduler/jobs` carries
+  `scheduler: {running, reason}`, the 排程中心 shows a banner, the dashboard freshness block
+  carries `scheduler_running`, and a digest older than its cadence (daily > 2 days, weekly > 8)
+  is marked 「已過期・N 天前產生」. The demo runs with `PD_DISABLE_SCHEDULER=1` by design; the
+  screen now says so instead of showing a July 「今日摘要」 as current.
+- **The manual-trade commit warms the account it wrote to (M4)** — it warmed the dividend
+  form's select instead, so the next entry's picker showed the pre-trade 100 股 / 93.20.
+- **Every remaining English account name is gone (M5):** cash.js, corp-action-form.js,
+  input.js (CSV preview + both selects), rebalance.js, rebate-inbox.js and inbox.js resolve
+  through `window.pdNames`; `_PENDING` in the single-source contract test is empty. Account
+  selects also name the currencies the account actually trades (L8).
+  **Re-verified 2026-09-17 as partial, then fixed as a class:** the L8 derivation lived in
+  `input.js`, so the 換匯 / 出金入金 selects on the cash page still bracketed the settlement
+  currency (「Moomoo MY（USD）」). It is now one definition, `pdNames.accountOption(a)` in
+  `names.js`; every account `<option>` calls it, a contract test says so, and an e2e pins the
+  cash-page labels. Likewise L5 (half-width punctuation in zh copy): the three quoted
+  sentences had been fixed and 25 more in eleven files had not — all are full-width now, and
+  `tests/contract/test_zh_punctuation_fullwidth.py` scans every rendered string in `web/`
+  (text nodes, visible attributes, script literals; comments excluded) and holds the count at
+  zero. The backend's zh strings carried 96 more of the same class (57 user-facing messages,
+  29 what's-new catalog entries, 10 regex / prompt text); the owner ruled the sweep in
+  batches (report §十.5). **Batch 2 followed the same day:** the what's-new catalog's 29
+  strings (`shared/whatsnew.py`, title / desc of the ✦ 新功能 panel and the 版本發佈資訊
+  browser) are full-width, converted by AST-located literal with paren pairs kept as
+  pairs and the diff reviewed line by line; `_BACKEND_PENDING` is empty and the backend
+  scan reports zero. **Batch 1 is in this change:** the 57 user-facing messages
+  (validation issues, confirm prompts, toasts, dashboard subtitles, job summaries) are
+  full-width, the six tests that pinned them byte-for-byte follow, and the same test file now
+  scans `portfolio_dash/**` by AST — string constants, docstrings excluded, f-string literal
+  parts included — with `shared/whatsnew.py` held in a stale-checked pending set for batch 2
+  and the regexes / prompt text / one fee formula allowed by name with a reason. The one
+  swept string a parser reads back is the CSV template's optional-column mark, `(選填)` →
+  `（選填）`: `canonical_header` already stripped either width, and a new test proves every
+  annotated header of every template — shipped width and the half-width an older download
+  still carries — canonicalizes to its bare column, so no numeric column can shift.
+  **Second full re-verification 2026-09-22 (audit author's M5-b, L5-b)** — both were escapes
+  of these two class fixes, and in both the GUARD had the blind spot. **M5-b:** the 券商對帳單
+  pane's 匯入到帳戶 select read 「TW Broker（tw_broker）」 (context `a.name` + raw id) and its
+  broker picker hard-coded 「Charles Schwab」. Both now come from `names.js`
+  (`pdNames.accountOption`, and a new `pdNames.broker` with one entry per adapter in
+  `BROKER_IDS`). The contract test had named cash.js / input.js by hand — its own comment
+  listed broker-import.js as a known limit "to be found by reading" — so it now DISCOVERS
+  every web/*.js that fetches `/api/input/context` or `/api/accounts` and holds each to the
+  rules; a positive control pins the five files it must find, and the pre-fix file fails
+  three tests. **L5-b:** the daily digest's run line read 「組合 +2.53%, 警示 0, 訊號 0; …」
+  beside 「14 檔事件已更新，1 檔失敗」. The detector only saw a half-width mark TOUCHING a CJK
+  character, and English typing puts a space after the mark (f-string parts split it
+  further); it now also sees a mark separated from zh text by spaces only. That widening
+  measured 16 more strings of the class: 12 are full-width now (「年化報酬（XIRR）」 KPI title,
+  「排程（cron）」, the two rounding options, TWSE / TPEx source names, the archived-row toggle,
+  a what's-new area, and the `notify：` / `already_running：` / `error：` run and test
+  lines, whose zh tails decide the mark), and 4 are allowed by name with a reason (`http(s)`
+  scheme notation ×2, a message listing the forbidden characters `/ @ :`, one calibration
+  prompt line). An English run line keeps its own marks (「3 alert(s) [a, b], 2 dispatched;」).
+- **The symbol drawer lives in the browser history (M6):** one open pushes one `#sym=` entry
+  (shareable), Back closes it, ✕ pops it, switching symbols replaces it.
+- **The FX estimate caption can no longer freeze on 「試算中…」 (M7)** — a manual buy amount
+  typed while the estimate was in flight now rewrites the caption synchronously (the audit's
+  guess was a copy defect; the cause was a race).
+- **Smaller:** 市值 sort marker (L1); keydown `.closest` guards (L2); fail/warn toasts dismiss
+  after 30 s and identical toasts dedupe (L3); 「賬」→「帳」 everywhere incl. server messages (L4);
+  full-width punctuation on three hints (L5); the FX form says when it flips the sibling
+  currency (L7); 「全部過期」 vs 「部分過期 n/m」 (L14); the ledger page fetches only the visible
+  tab (L16); job summaries quantize the digest pct (L17); fee/tax fields clear with the form and
+  an empty form is never red (L18); 當沖 hidden on 買進 (L20); the login page says when the site
+  is in guest mode (L22 — and, **L22b, second re-verification 2026-09-17**: that hint had
+  promised 「任何帳號密碼都能進入」 while `POST /api/auth/login` answers 401 with no users by
+  design; it now says no login is needed, sends the visitor to the dashboard with a link,
+  and says the form will not pass); an empty filter intersection says so (L23); 更新報價 names held
+  symbols the provider left on an older date (`lagging`, L24) and the reload keeps filters,
+  open panels and scroll position (L25).
+
+*Owner rulings on the seven open questions (2026-09-16, same day)*
+
+- **MYR/TWD is DERIVED, not fetched (M1, ruling 1(b)).** `pricing/cross.py` writes
+  `MYR/TWD = USD/TWD ÷ USD/MYR` with `source = "derived:USD"` right after every FX write —
+  the latest refresh and the history backfill alike, over the whole stored history — and the
+  providers are no longer asked for it (`fetched_pairs` filters the worklist). The triangle
+  check is now a guard that must read 0.0000; the freshness panel labels the row 「推導」
+  (`FxFreshness.source`, golden payload +6 / −3). Rule recorded in
+  `rules/data-and-pricing.md` with the rejected alternatives.
+- **Automatic AI resolve is gated on input shape and on a switch (L13, ruling 3(b)+(d)).**
+  A code-like miss (≤ 6 letters/digits, no name typed) no longer fires the paid resolver by
+  itself — the LLM has nothing to add to 「AAPLL」 except a bill — while a name-like input
+  still does (R6-B kept). 設定 → AI 與額度 gains 「代號查無時自動 AI 辨識」, persisted as
+  `auto_ai_resolve` in `/api/ui-prefs` (PUT is now a subset merge; the table gains the
+  column by additive migration).
+- **Demo data (L27, ruling 2(a)):** the duplicate stress-test rows were deleted after a
+  backup — TSLA sells 38/49/59, MSFT sells 41/52/62, dividends 2330 #4 and 5225 19/28/31 —
+  and the dashboard diff confirmed only those four holdings and the realized table moved.
+- **L15 / L19 (ruling 5(b)) reproduced on the demo with a real browser:** the realized
+  card's per-currency footer renders at 390 / 768 / 1440 (not a defect), and the 「已復原」
+  toast does appear 1.5 s after 「刪除並復原」 — then auto-dismisses at 4.2 s while the list
+  is still repainting, which is how it was missed. Recorded, not changed.
+- M3 stays as shipped (demo scheduler off, 2 / 8-day digest thresholds; ruling 4(a)); M9
+  keeps its defaults (ruling 7).
+
+*Not fixed, recorded with evidence*: L13 (automatic AI resolve is a deliberate R6-B design —
+owner call), L15 / L19 (not reproducible from the code; the footer and the toast exist —
+awaiting the owner's repro), L27 (the duplicate TSLA/MSFT sells and 2330/5225 dividends are
+accumulated stress-test writes, the 1987 dividend event is AAPL's real yfinance history —
+whether to dedupe the corpus is an owner call). The demo's `0056` sector was corrected to
+`ETF` in place after a backup (L26).
+
+**Site-wide stability convergence round — 29 items closed, 11 fixer agents, one working tree (2026-09-02 → 09-06).**
+A walk of every module as a real user, then a second wave that closed every remaining decision.
+The judgment rule throughout: a change that makes a **broken** thing work again is in scope; one
+that makes a **working** thing better goes to the backlog. 84 findings are tracked; 56 are fixed
+and regression-covered, 28 are deferred and each one records **why**. No P0 or P1 remains open.
+
+*Numbers and money*
+
+- **A balance now answers "how much do I have TODAY" on every surface that quotes it.** A cash
+  movement dated 2099 made the 資金 page read 993,579 while the dashboard's net-worth series —
+  which walks the calendar — showed no change at all: **two screens, one pool, 777,777 apart**.
+  `portfolio/cash.py::cash_balances` takes an `as_of` bound, and the overdraft guard splits into
+  the two questions it always was: *is there enough* is answered on the **withdrawal's own date**
+  (the cash-side twin of `holdings.shares_through`), while *does the timeline ever dip* still runs
+  unbounded, so a back-dated withdrawal is still caught. Four readers were then pulled onto the
+  same day — the manual-trade draft's 賬戶現金 line and its overdraft warning, the printed
+  statement's 目前餘額, and the FX card's foreign exposure. The manual's `fx.pool_equals_funds`
+  anchor (§8.3) holds again. On a ledger with no future rows every figure is **byte-identical**,
+  print output included.
+- **Amounts are bounded at `1e12` on the cash, FX-conversion and dividend doors.** Past 28
+  significant digits a `Decimal` silently loses precision (measured: a 1e30 conversion put the USD
+  pool ~4,221 USD out); past 29 the door returned a 422 that pointed at the wrong ledger. The cap
+  goes **before** the precision check — the `quantize` inside it is what was raising — and lands on
+  `dividend_model.check_amounts`, the one shared gate, so the bulk importer cannot be weaker than
+  the single-row form.
+- **D21 is implemented: a spinoff child's payback progress says whose dividends it inherited.**
+  `KEMG`'s 12.48% was byte-identical to its parent `KEMB`'s while `KEMG` had **never paid a
+  dividend** — the ratio is carved from the parent, and that identity is exactly what D21 asked to
+  be labelled. Approved 2026-08-09, it had no code at all. Holdings now carry
+  `payback_from_symbol` / `payback_carried_dividends` / `payback_own_dividends`, so the label
+  reaches all six places the figure appears — homepage chip, dividend strip, drawer, CSV export and
+  the LLM variable, which the frontend-only alternatives could not. Golden payload: +24 / −0, every
+  new key `null`. The provenance is **cleared** at four seams (full exit, short-leg exhaustion,
+  oversell, EXCHANGE-out): `build_book` drops a zero-share holding from its output but keeps the
+  `_Position` object, so a re-buy would otherwise have inherited a label for dividends it never got.
+- **A TW ETF spun off from a parent is no longer taxed at 3× in silence.**
+  `spinoff_child_draft` passed neither `is_etf` nor `etf_flag_unknown`, so the child was asserted
+  **not** an ETF — and `etf_flag_unknown=False` means *someone answered*, which nobody had. AI-D40's
+  disclosure never fired: a first sell would compute 0.3% instead of 0.1% and say nothing. The
+  child now registers as **unknown**, which is what it is. `scripts/seed_demo.py` had the same shape
+  for 0056 and is fixed with a seed-consistency test.
+- **A quote refresh that loses 18 of 24 symbols no longer reports success.** The job wrote `ok`
+  because it raised no exception, while `pricing/` deliberately does not raise on a single symbol —
+  so partial failure was structurally invisible. Runs now resolve to the `job_runs` table's existing
+  `partial` status, thresholded on *"did a HELD instrument fail?"*; the held set is **injected** from
+  `api/routers/actions.py` (the scheduler may not import `data_ingestion`), and an unregistered seam
+  counts every failure rather than hiding one. Counts come from the structured `RefreshSummary`, not
+  parsed back out of a Chinese rejection sentence, and the failure list is no longer truncated at 8.
+
+*Robustness and truth on screen*
+
+- **One unreadable `prediction` blob took the whole homepage down.** `_card_from_row` re-validated
+  the stored JSON on every read and caught nothing, so a single bad row 500'd `/api/insights` **and**
+  `/api/dashboard` with no clue which row. The real exposure is future schema drift: one new required
+  field on `Prediction` makes every historical row unreadable at once. The row now degrades to a
+  flagged 待釐清 card — narrative kept, prediction dropped, one WARNING naming the id and reason —
+  reusing the holdings table's existing badge.
+- **The ledger's correction and delete doors give feedback again.** Every `onSave` called
+  `dismiss()` before `await`, so the button was out of the DOM before the request started: no
+  spinner, no disabled control, and a second click fired a second `PUT`. Edits keep the dialog open
+  with a busy button (and keep the user's text on failure); deletes show a progress toast and gate
+  the row buttons. The ack dialog opens only after the first one closes.
+- **Rates are not money.** The print report formatted an implied FX rate through the *amount*
+  formatter — TWD at 0 dp — so `27.99998642…` printed as **`1 USD = 28 TWD`**, against
+  `data-and-pricing.md`'s explicit rule. Fixed to 4 dp there and on the three ledger surfaces that
+  showed the same figure at two different precisions.
+- Also: a `short_cover` row rendered identically to an ordinary sale (now dated, and chipped
+  「空單回補」) · archiving an instrument did not stop its drawdown alert, and a symbol replaced by an
+  EXCHANGE kept alerting from frozen prices · the watchlist showed a bare table for six different
+  kinds of "empty", two of which must not claim 「尚無標的」 · four dashboard hosts and the TWR chart
+  were empty boxes for 1.5–7 s with only a 2px top bar as a signal · the scheduler panel's 時區 label
+  had never been written by any version of the JS · 重算 warned it was slow and asked for confirmation
+  before a 17 ms read-only action.
+
+*Documents corrected against the code*
+
+- `domain-ledger.md` was the **only** artefact in the repository claiming `INTEREST` is an XIRR
+  flow (it is not — measured: adding one leaves XIRR byte-identical, while a `BROKER_FEE` control
+  moves it) and cited a `CASH_KIND_TABLE.credit` that does not exist. The manual's superseded
+  D1 = A section gained its supersession banner, a contradictory leftover in §9.1.1 was fixed, and
+  the English mirror — which contained **zero** mentions of AI-D42 — was regenerated.
+- `markets-and-fees.md` described `is_etf`'s three states as a stored `NULL`. Storage is two
+  `NOT NULL` booleans; the three states are the **input** parameter. Querying the documented way
+  returns 0 rows on every database.
+
+*Performance*
+
+- `GET /api/insight-tasks/status` rebuilt the entire dashboard unconditionally — a 124-byte
+  response costing 1,939 ms, of which 1,401 ms was `build_dashboard` and 87% of *that* was the
+  net-worth series replaying the book once per day (2,053 `build_book` calls) — while reading it
+  **zero** times when no task exists. Built on first use instead; same function, same arguments,
+  same snapshot, only the evaluation order moved. The pipeline wizard was the last caller still
+  issuing its own `/api/dashboard` request instead of the shared promise.
+
+*Deferred, with reasons recorded*
+
+The equity side has no date bound (`build_book` takes no `as_of`), so a future-dated foreign trade
+— which validation only soft-warns about — still values in today's holdings while its cash leg now
+correctly does not. A prediction with a NULL confidence is flagged 待釐清 on screen but still counted
+as a hit or miss by the scoreboard, because the scorer parses `Prediction` directly and never builds
+the card whose validator rejects it. An unreadable card now reads as a same-day cache hit, so it is
+never regenerated. The stress-audit oracle compares an unbounded pool against the now-bounded API and
+will disagree the day its corpus gains a future-dated row. Each is a policy or cross-layer decision
+rather than a defect fix, and each is written down rather than left implicit.
+
+**KPI band v3 — seven cards, one grammar, a measured breakpoint ladder (owner design review 2026-09-01/02).**
+The v2 band was not wrong, it was unreadable: `資產損益` answered **four unrelated questions** — 我賺多少 / 報酬率 / 含匯兌口徑 / 跟指數比 — in seven inline `flex-wrap` lines inside the second-narrowest of five `fr` tracks (**249px** at a 1,440px viewport, against **220px** for the card holding one number). Because the detail was one wrapping flex run, the container chose the breaks: 「其中本金匯率效果」 ended a line and its 「−13,187」 began the next **alone, in the value column**, reading as an independent KPI; a 「·」 opened a row that was really a continuation; and one bullet character carried four different grammatical roles across four lines. The band also spoke **three** data grammars at once (big-number-only / big-number-plus-inline-run / aligned key⟷value). Frontend only — **no payload field added, moved or renamed**.
+
+- **Seven cards, one grammar.** Every card is now `label → [one big value, hero cards only] → right-aligned key/value rows → [server note, verbatim] → caption pinned to the card floor`. 資產損益 keeps only its own figure and rate; `總損益口徑` (B, 本金匯率效果, 交易與融資成本) and `指數對照` become cards of their own, and `損益（ccy）` becomes `損益拆解（ccy）` whose caption states the identity it satisfies instead of reprinting the sum. A, B and B−A remain in **separate cards, side by side, never summed** — `domain-ledger.md` §AI-D41's red line, now legible rather than implied.
+- **One 12-column grid.** 12 divides by 3, 4, 2 and 6, so `grid-column: span n` is width-identical to `repeat(n, 1fr)` at the same gap and **no tier can leave an orphan card or a hole**. Each tier changes only spans — never the DOM order, never `order:` — so the visual order and the reading order cannot drift apart.
+- **The ladder is measured, not chosen.** The widest row in the band (「含匯兌總損益 ⟷ +22,075,147」) needs **172px**, and a 4-up detail row gives only 158–186px between 1024 and 1100px — hence the fold at **1100**, not 1024. A hero at `span 4` is 171px at 861px against a 168px 「33,075,341 TWD」, so the big value steps 24 → 21 → 19px on the same boundaries rather than being ellipsized. `span 6` is 154px of content at 390px, still short of that 172px row, so the two longest-key cards go full width below **480** (measured threshold 426px; the margin is for font fallback).
+- **Card order is UNCHANGED (owner ruling 順序-1).** The first cell is still 總市值. A reorder was proposed and rejected: it was a structural preference, not a constraint, and 總市值 beside 資產損益 is the more useful adjacency — two amounts, directly comparable. On phones they pair and XIRR takes the full-width row, which is where the documented 決策主指標 belongs.
+- **A key's qualifier is a sub-label, not a footnote (owner ruling 標籤-5).** 「累計報酬率（對原始投入成本）」 needs 234px inline and the tightest tier gives 171px, so shortening was **forced**; the only real choice was where the shortened words go. They go in a block under the key, in the key's own column — beside the figure they qualify rather than demoted to the card floor, with a break we choose rather than one `flex-wrap` chooses, and able to wrap without pushing the value. This is what makes the benchmark's **variable-length** index names safe: `bm.by_market` joins one to three labels, and a string of uncontrolled length can never sit in a key column.
+- **Alignment is now structural.** `align-items: stretch` (cards in a row share a height) · `.kpi-label { min-height }` and one line per label · `.kpi-cap { margin-top: auto }` (captions share a floor) · `justify-content: space-between` with `flex: none` on the value (a long key wraps **downward**; a break can never land between a label and its number).
+- ⚠ **Status badges moved OUT of the label into `.kpi-flag`, under the value.** A badge in the label wraps in a narrow card: at 900px the XIRR card's 「觀察期 N 天・短窗參考」 made its label one line taller than its neighbours' and dropped its big number **17px** below theirs — the same "these do not line up" complaint, in the fix for it. Found by the new geometry test on its first run, not by eye.
+- **Removals.** `.kpi-band.v2` and its five fixed tracks; the four superseded `.kpi-band` column overrides in the media layer (1280 / 1023 / 860 / 760) — v3 owns its ladder, and leaving a second one to fight it is how the v2 breakpoint went dead in the first place (audit M1); `.kpi-subline` and its two mobile rules, now that nothing renders one. `#kpi-band`'s CLS reservation goes 96px → 190px: v3 is two rows.
+
+Cover: `tests/e2e/test_kpi_band_tiers.py` (25 cases) asserts **geometry**, because none of the above is visible to a test that reads text — rows filled exactly at every tier, cards in a row sharing height / caption baseline / value baseline, no key/value row overflowing its card, and no value dropping below its key. It reads the tier back from `matchMedia` rather than trusting the requested viewport width (they differ by the scrollbar), and a fourth test fails if the width sweep stops reaching all four tiers. `test_no_horizontal_scroll` gains **1101 / 861 / 481** — every previous ladder gap in this repo (861–1023, 761–1435, 1024–1077) was "we sampled 900 and 390 and stepped over it", and the width just inside a tier is where a band is squeezed hardest. Design record, including the six rejected options and why: <https://claude.ai/code/artifact/c131f57d-76e4-4cae-8f7e-7185c5b54654>.
+
+**The two findings that needed a human closed, and neither answer was in the repository (owner rulings 2026-09-01).**
+QA-06 and QA-19 were left open by the 2026-08-29 audit precisely because the code could not decide them: one asks what really happened to your shares, the other what Taiwan's tax office actually does. Both are now settled and pinned.
+
+- **QA-06 — a share-adding dividend on a CLOSED position is BOOKED, and flagged (`revived_by_dividend`).** A DRIP/STOCK payout landing on a flat lot reopened the position at `$0` cost with **every flag clean**: `shares 1.4 · cost 0 · avg 0 · payback_ratio 0 · unrealized = the entire market value`. Each of those numbers is individually correct under DRIP accounting, which is exactly why it was dangerous — nothing distinguished it from an ordinary holding whose whole value happened to be profit. The owner ruled **記錄並標記** (the alternative was E24-style refusal): the shares may genuinely have been received, so they are booked, and entitlement on the ex-date with a flat position on the payment date is ordinary — the CASH branch has treated it that way since audit H2. Display mechanism **(1) only**: the shares are right and the price is global and current, so `market_value` is correct and neither valuation nor XIRR is suppressed. That answer was reasoned from the taxonomy's own question ("are the SHARES right?"), not copied from the neighbouring flag — which is how audit F-49 was created. The flag propagates through EXCHANGE and SPINOFF, or the action would launder it. UI: an amber 「配息復活」 badge, deliberately not the red 待釐清 treatment, because nothing here is unresolved.
+- **QA-19 — 當沖 outranks ETF on a TW sell, and the drawer now says which rate it used.** The engine already resolved `tax_daytrade if daytrade else tax_etf if is_etf else tax_normal`, so the ruling changed no arithmetic — but until now **no repository artefact stated the real-world answer**, which left the precedence riding on the order of a ternary that any future edit could reverse in good faith. It is written into `markets-and-fees.md` as a rule. The half that *was* broken is the preview: `strategy/whatif.py` calls `compute_fees` without `daytrade`, so the drawer always quoted 現股 0.3% while the manual form honoured its checkbox and booked 0.15% — one trade, two screens, two answers. The drawer has no 當沖 input to read, and `domain-ledger.md` is explicit that a surface which cannot know which branch applies must **say so** rather than pick one, so it now discloses the assumption and names the daytrade rate (`daytrade_note`), exactly as `etf_flag_note` already does for the ETF flag, and only on a SELL where the rate would actually differ.
+
+Both guards were proven RED before the fix (QA-06: 4 of 9 failing without the flag; QA-19: 2 of 6 failing without the disclosure). The golden payload gains one purely additive field per holding — `"revived_by_dividend": false` ×8, no existing value moved.
+
+**Multi-agent QA remediation R1 — six verified findings, four code fixes, docs + corpus re-synced; no wrong-money defect found (2026-08-30).**
+An adversarial audit (independent Decimal oracle sharing no code with the app, replayed against `/api/*` on three datasets — demo corpus, a manual scenario battery, and 1,214 rows of real Schwab history with external ground truth — plus Playwright E2E and the manual's own worked examples) recomputed cost basis, realized/unrealized P&L, cash pools, FX pools, KPI rollups and XIRR and found **every money figure exact**. What it did find, all fixed in this change set:
+
+- **The transactions door joins QA-01** (`_BATCH_GUARDED` + select re-derivation). Measured hole: a covering buy deselected on `POST /api/import/commit` left the sell's clean full-file verdict standing — 200, `written: 1`, holdings `-60`, and the one confirmation whose ack permanently discards a cost basis (賣超, §5.3) was never shown. The commit now re-derives the preview over the rows that will actually be written; a row whose narrowed verdict surfaces an issue KIND absent from its full-file verdict is dropped to `skipped` rather than written under a blanket `ack_warnings` that never showed that finding (kind-level on purpose — an informed ack still writes).
+- **Structurally-invalid rows are out of the sibling batch** (`transaction_structural_issues`, one owner, extracted from `validate_transaction`). A buy priced −50.00 was a hard `error` on its own line yet still lent its 100 shares to the batch, so the sell it "covered" previewed `ok` and a NO-select commit wrote it alone. The QA-01 comment's premise ("a structurally invalid row was already out of the batch") was true for cash/fx (`_pool_free_issues` decides membership) and false for transactions — now true for all three. Ledger-dependent hard kinds stay in the batch on the shared-key argument (documented at the helper: none of them can fund a FALSE cover).
+- **Corporate-action validation replays a batch-aware book** (completes the 2026-08-14 index widening — the two halves of one validator no longer disagree). E3/E22/E5/E18 replayed the STORED ledger only, so a chain whose prerequisite action was same-batch (the real GGR shape: EXCHANGE `PPGH→GGR`, then a reverse SPLIT of `GGR`) passed the share walk and hard-rejected `oversold_source`, curable only by an undocumented byte-identical second upload. `_book_before` now applies sibling batch actions dated strictly before the row under the same `(date, CORPORATE_ACTION)` cut the index uses; a row never justifies itself; `test_a_lone_split_onto_an_empty_position_is_still_rejected` stays green; the owner's real-history file commits in **one pass** (8/8 written).
+- **The dividend door answers vetted sentences and honours §6.3's number of record.** Blank `gross` rendered `[<class 'decimal.ConversionSyntax'>]` in the 原因 column; bad dates leaked CPython English; a typo'd optional `withholding`/`net` was silently dropped (booking amounts the owner never stated). All cells now go through typed readers with the cash/fx doors' vetted zh wording, LOUD on non-empty garbage, and a `NET` (MY single-tier) row may supply `net` alone — `gross := net` is completed at parse (gross ≡ net under single-tier; still one amounts engine, `apply_dividend_model` unchanged), while a non-zero `withholding` on `NET` is refused hard with redirection to `CASH`.
+- **The cash statement shows the day's end balance on top, as its own comment always claimed.** `flat.sort(key=(date, delta<0), reverse=True)` — a stable sort's reverse flips keys, not equal-key rows, so same-day same-sign rows stayed oldest-first inside the newest-first table. Now: ascending sort by the chronological key, then `reverse()` — the exact reverse of `running_statement`'s `_ordered`. `/api/export/cash-statement` (oldest-first) unaffected.
+- **Manual §9.3 synchronized to FU-D43a / FU-D34** (`v1.9`, both mirrors, no formula change): withdraw → hard 422 `withdraw_insufficient_balance`, fx.convert → hard 422 `fx_insufficient_balance`, no ack, no financing, batch-aware, shared pre-existing-dip rule; `negative_cash` + `ack_negative` documented as the correction-gate semantics it actually is. Before this, a §1.1 arbitration of a refused withdrawal would have concluded the app was wrong.
+- **The demo corpus is importable by its own locked procedure again** (`sample-trade-data/simulated/demo-corpus/`, git-ignored): FU-D34 post-dated the corpus, so its TWD→USD conversions hard-rejected on an unfunded TWD pool — the generator now emits derived TWD funding deposits (EXPECTED_positions.csv byte-identical, sha-asserted); `smoke_import.py` fixed to the `build_fx_preview(…, pool=…)` signature; README updated to measured reality (賣超 prompts 7 → 4 cross-file residuals, chains one-pass, F1/F4 現況 blocks).
+
+Regression cover added across `tests/contract` + `tests/data_ingestion` (select re-derivation ×6, structural-batch boundary ×3 + V6/V7 pins ×3, action-chain one-pass ×4, dividend cells zh ×16, statement ordering ×2). Full suite green; `ruff` + `mypy --strict` clean on every touched file.
+
+
+**Multi-agent QA mission 2 — 12 defects found, all closed, and the never-500 net made global (2026-08-29, afternoon).**
+A second adversarial mission (1 QA auditor spawning 3 sub-auditors, re-awakened twice for regression, plus 14 file-disjoint repair waves A–N) re-examined the tree the morning mission had left. The financial core came back sound, so none of the 12 defects was a wrong-money defect. *(Counts and coverage figures in this paragraph — fees 16/16, weighted-average 32/32, XIRR 11/11 against closed forms, 0 Critical / 5 High / 4 Medium / 3 Low, 29 rows closed / 0 regressed, and a 112-request sweep producing 0 × 5xx — are transcribed from that mission's own records. They are process measurements with no re-runnable equivalent in this repository; every behavioural claim below is pinned by a test instead.)*
+
+- **A ledger row can no longer take a route down with it.** `api/errors.py` gains a global `ArithmeticError` → **422** handler (logged with traceback, generic zh sentence), and `portfolio/cost_basis.py` + `portfolio/timeseries.py` re-type the fault so it reaches that handler instead of escaping as a 500. `UnbookableLedgerError` keeps precedence with its row-naming sentence. ⚠ Consequence worth knowing: a genuine `ZeroDivisionError` bug now surfaces as a **logged 422**, not a 5xx alarm — the log is where that class is caught from here on.
+- **A negative-quantity row is loud on BOTH replay paths.** `GET /api/dashboard` answers 422 naming the row rather than rendering a position that cannot exist. Only reachable by hand-editing the DB, which is exactly why it had never been seen.
+- **A manual SPINOFF's child price is stored with `fetched_at` = the action date**, so every reconcile window over it is empty by construction. Previously a later split restated that price and the child's market value came out **2×**.
+- **The preview's realized shares are signed**, `strategy/whatif.py` mirrors `short_cover` instead of ignoring an open short on BUY, and the tax package agrees with the dashboard on an oversold position — three more surfaces brought onto the replay's own branches (the standing rule in `domain-ledger.md`).
+- **The FX rollup says what it is.** `FXSummary.excluded_accounts` + `reporting_unavailable_reason` and `freshness.fx_unavailable_reason` are additive wire fields; a partial rollup is now labelled instead of silently partial, and an export that printed native amounts under a TWD header is fixed. ⚠ On real data `kpis.fx_unrealized` now **populates** where an INACTIVE foreign account with a missing rate used to null the whole section.
+- **Import doors: one vocabulary.** Non-finite numbers, unparseable dates, unknown accounts and bad cells answer vetted zh sentences across the cash and fx doors alike; the fx CSV door now accepts lower-case currency codes (parity with the cash door — the one acceptance change in the mission).
+
+Explicitly accepted as **not** defects, recorded so they are not re-opened: `gross_invested` excluding short capital, an oversell-into-short carrying both flags, `returns.xirr` null on the wire, the float-derived XIRR string, a cash-typed dividend on a DRIP account, and `portfolio_snapshots.by_currency` being a ccy-keyed native map.
+
+**Multi-agent QA audit — 29 findings, 24 fixed across eight waves (2026-08-29, morning).**
+One QA subagent (which spawned five domain sub-auditors) audited the branch and produced 29 findings; repair waves R1–R8 closed 24. Report: <https://claude.ai/code/artifact/2a3aa2c5-5a1a-42bc-bdf7-35411e9e5edf>.
+
+- ⚠ **Realized FX was priced at the pool's ALL-TIME average — now date-bound (QA-02).** `forex/fx_pnl.py` priced every reconversion at one rate computed over the whole ledger, so **entering a later acquisition restated an already-reported figure, and could flip its sign**. Re-measured 2026-09-01 with the scenario stated, because three records of this finding quoted three different numbers: a Jan buy at 30, a Feb reconversion reporting **+NT$10,000**, then an unrelated Mar buy at 35 repriced that same February row to **−NT$15,000**. The scenario now lives in `realized_fx_rows`' docstring so the figure is reproducible rather than remembered. Each row is now priced at the pool average **on its own date**, which is what the manual's §8.2 「回換前 avg_rate」 always said. `export/tax.py` was left on the old average by the first pass and reported **2,500 against the dashboard's 10,000** for one reconversion; wave R8 closed that and pinned the two together.
+- ⚠ **The FX pool dropped every `NET` dividend (QA-03).** `forex/pools.py` filtered on `DividendType.CASH` alone; `NET` is the MY single-tier net-received payout — real cash, in the pool's own currency — so the FX view disagreed with the funds view by the whole dividend. The filter is now `CASH_DIVIDEND_TYPES` (CASH + NET), with the reason written at the seam.
+- ⚠ **Both of the above visibly RESTATE figures on a real ledger**, and neither shape exists in any fixture or in the demo seed — so only the owner's own data will show the change. It is a correction, not a drift.
+- **Import doors reach parity, and structural validity decides batch membership** (R1): the transaction and fx doors answer like the cash door, and `data_ingestion/fx_import.py` takes its pool balance by **injection** rather than re-deriving it (`architecture.md`'s standing rule for a cross-layer calculation).
+- **Guards for inputs that should never exist** (R3): a zero-quantity transaction, a non-positive FX rate, a non-positive price, and a dividend projection over untrusted shares. `fully_recovered` (已回本) now requires dividends to exist at all.
+- **Fee provenance and report labels** (R4/R7): the fee `rounding` field became unwritable but was still rendered editable — the wire builder iterated `EDITABLE_FIELD_ORDER` and never saw it; the report's KPI label and return ratio were corrected alongside.
+- **The zh error envelope, end to end** (R5): CSV parse errors, oversell messages, the cash-kind vocabulary and `web/api.js`'s own message path.
+- **Charts hold no float rounding, the scheduler wire is canonical, and a stacked bar clamps** (R6), the last pinned by an e2e test in real Chromium.
+
+⚠ **Two findings are still open and need an owner ruling** — neither is answerable from the repository:
+- **QA-06** — a DRIP/STOCK dividend landing on an already-CLOSED position resurrects a zero-cost ghost holding (shares 1.4, cost 0, market value 98) with **every flag clean**. Refuse it the way E24 does, or book it and flag it? You may genuinely have received those shares.
+- **QA-19** — TW 當沖 × ETF tax precedence. The engine resolves daytrade first (0.15%) rather than the ETF rate (0.1%), and **no repository artefact states the real-world answer**, so any fix would be an invention. Related and unfixed: `strategy/whatif.py` never passes `daytrade`, so the drawer quotes 現股 0.3% while the manual form honours the checkbox.
+
+**An option premium is never a dividend — caught on the live demo, not in review (AI-D73).**
+Pasting an option premium through the demo's AI door made the model return
+`{"kind":"div","symbol":"TSLA","type":"CASH","gross":"300","ccy":"USD"}` — **a $300 dividend
+that does not exist**. It was stopped only because the model *also* supplied a `ccy`, which
+`DivDraft` forbids: an accidental catch with nothing to do with options. Omit that one field
+and the fake dividend passes the schema into the preview.
+
+⚠ The prompt **already said** an option row goes to `unparsed`. The prose rule failed on the
+exact case it names — the identical shape as W4's `daytrade`, and the second time this session
+that a stated rule did not hold on its own example.
+
+- The fix is **one example carrying both halves** (owner technique 2): the NVDA option goes to
+  `unparsed` **while a real PG cash dividend on the same line is booked**. A lone negative
+  example teaches "be shy about dividends"; the pair teaches 「權利金 ≠ 股利」. Values appear in
+  no corpus case, so `unparsed-option` still has to be generalised to.
+- Also stated: a dividend row has **no currency column** — the account determines it. The model
+  wanted to send one every time, which forced a guaranteed retry, i.e. a paid call wasted on
+  every dividend extraction.
+- ★ **Measured (arm C, 2026-08-29): `unparsed-option` 7/11 → 11/11**, all five dividend cases
+  11/11, case level 434/440 → **436/440 = 99.1%**. Eleven runs on the demo instance with the
+  model forced to `gemini-2.5-flash` — the same one arms A/B/B2 used, so the numbers are
+  comparable. Cost US$0.211.
+- ⚠ The demo registry did **not** actually contain a non-lite flash model (it was believed to;
+  the DB said otherwise), so the row was added by copying the key already installed on the host
+  — the credential never left the VM.
+- ⚠ **A marking I had just added turned out to be false and was removed.** `unparsed-option` was
+  labelled an accepted `known_limitation` at ~7/11 an hour before this run; it now passes 11/11.
+  Leaving it would have told the next reader that a fixed case is permanently broken — the same
+  mis-signal the marking exists to prevent, pointing the other way. `unparsed-ambiguous-cash`
+  keeps its marking (9/11 in two consecutive arms — stable, not drifting).
+
+**The confession rows now carry their prompt, and the known limitations are marked (AI-D74).**
+The live run exposed an asymmetry inside a single operation: the `schema_mismatch` row held
+13,242 characters of prompt and the `unparsed_rows` row held **zero** — one corpus with two
+completenesses, the richest records being the poorer half. A new e2e pins the panel itself
+(empty state is a sentence, not a bare `0`; both buttons disabled with nothing to download or
+clear), proven red against a deliberately broken `data-center.js`. And `unparsed-option` /
+`unparsed-ambiguous-cash` now carry a `known_limitation` field recording the measured rate and
+why it is accepted, so the next reader cannot mistake a known limitation for a fresh regression.
+
+**AI-D65's other half is now actually built: a confessed `unparsed` row is recorded too.**
+The ruling was written into the spec and the CHANGELOG and then only half implemented —
+`OUTCOMES` declared `unparsed_rows` and nothing ever wrote it. Found while preparing the live
+demo verification, where it would have mattered immediately: garbage input makes the model
+behave *correctly* (zero rows, plus a confession of the lines it could not classify), which is
+a SUCCESSFUL call. Under the shipped code that logged nothing, so the panel would have stayed
+empty and the redactor would have been examined through a door that never opened.
+
+**One row per CALL, not per confessed line.** The unit of diagnosis is "this paste, this
+prompt, this reply"; splitting it would duplicate the prompt N times while losing which
+confessions arrived together. A clean extraction still records nothing — pinned by its own
+test, because this has to stay a failure log rather than an activity log.
+
+**Provider credentials are redacted before anything is stored in the failure log.** The seam
+calls the provider with `api_key=` in its kwargs, and a provider's auth error is free to echo
+what it was sent; `error_reason` holds `repr(exc)` of that exception. So a rejected key could
+have landed in the table **and ridden out through the one-click `.jsonl` download**. Redaction
+runs inside the single `_cap` helper, so it covers every text column by construction rather
+than by remembering to call it at each site, and it runs **before** truncation so a secret
+cannot survive by sitting past the 16 KiB boundary. Ordinary diagnostic content is untouched —
+pinned by its own test, because a redactor that eats the evidence defeats the log.
+
+Found while verifying that a real key had NOT leaked (it had not: zero hits across tracked
+files, the full git history, untracked files, and all 33 eval capture dumps). The hole was
+reachable, not yet taken.
+
+**The failure log gets a front door: per-category counts, a one-click `.jsonl`, and a clear that
+cannot touch the billing record (AI-D72).** Three routes over the ring `shared/llm_fail_log.py`
+already fills, and no new table. The panel went into `data-center.html`'s reserved
+「資料保留策略」 slot — copy-only with no controls, left for exactly this.
+
+- `GET /api/llm-fail-log` — counts per `agent`, the ring's capacity, and a preview of the newest
+  rows with `prompt` / `raw_output` trimmed to 400 chars **plus a `*_len`**, so the panel stays
+  small without misreporting how much there is. `POST /api/llm-fail-log/export` ships the whole
+  thing untrimmed — that one is the fine-tuning artefact, and truncating it would defeat its
+  purpose. `DELETE /api/llm-fail-log` empties it. All three take an optional `?agent=`.
+- **Deliberately not in `export.py`**: that file's contract test treats every
+  `@router.post("/export/…")` as a dashboard report requiring a frontend caller. This is an admin
+  diagnostic, not a report.
+- ⚠ **The clear button's copy names what SURVIVES** — 「AI 請求明細與剩餘額度一筆都不會動」 —
+  because the neighbouring table is the billing record: remaining budget is
+  `Σ topups − Σ llm_usage.cost`, so a helpful "tidy up the AI records" would hand back spent money.
+  ★ **Proven, not asserted**: injecting `DELETE FROM llm_usage` into `delete_all` turned BOTH
+  guards red (the store test and the HTTP test) and restoring turned both green. A comment would
+  have made the same claim and caught nothing.
+- The panel shows `N / 300 筆` and the **oldest** record, because rows roll off silently at
+  capacity — that date creeping forward is the only cue that the tail is being lost. Native
+  dialogs are banned by `test_web_native_dialogs.py`, so the clear uses `window.confirmDialog`.
+- Empty state renders an em-dash rather than `0`: "nothing has failed yet" and "measured zero"
+  are different statements.
+
+**A share-adding dividend with no share count is refused at the DOOR, not three screens later by
+the replay (AI-D71).** The replay always refused it — `cost_basis.py` raises
+`"DRIP/STOCK dividend … requires reinvest_shares"` rather than coercing to zero, deliberately and
+with a test. The import door did not. `apply_dividend_model` passes the field straight through for
+STOCK and only *derives* it for DRIP when a `reinvest_price` is present, and the M5 conservation
+gate `check_amounts(gross, 0, 0)` passes for any non-negative gross. So the row landed with **zero
+issues** — and then every later rebuild of the whole book raised, which
+`tests/portfolio/test_cost_basis.py` records as a class that once *"crashed every rebuild that held
+a MY dividend"*.
+
+`.claude/rules/architecture.md` states that `data_ingestion` "rejects bad input loudly; never
+silently coerces". This path did not, and the AI door can produce exactly this row.
+
+- The guard's condition **mirrors the replay's own test** — `type in {DRIP, STOCK} and
+  reinvest_shares is None` — rather than restating the rule in different words, so the door and the
+  replay cannot drift apart later.
+- It is a **hard** issue, not needs-confirm: there is no "yes I meant it" reading of a share
+  dividend that adds no shares, so a confirmable warning would only move the failure downstream.
+- **DRIP that can derive its shares is untouched.** That is most of the real US ledger, and a guard
+  that rejected it would be worse than the hole it closes — pinned by its own test.
+- Found while tracing what a wrong `gross` on a stock dividend could actually cost. The answer, from
+  the new capture: for the shape this model produces (`gross:"50"` **with** `reinvest_shares:"50"`)
+  the damage is confined to one display field. Nothing prevented the other shape; now the door does.
+- Counter-evidence recorded: exactly the three guard assertions were red before the change, while
+  the three "must not break" assertions were already green — so the fixture can express both
+  directions rather than only the one being fixed.
+
+**The dividend rules are structured, the examples are contrastive, and 40/40 cases now hold at
+100% field accuracy across eleven consecutive live runs (AI-D68…AI-D70).** Prompt `v7.1` → `v7.3`,
+`LIBRARY_VERSION` → `official-v23`. Three measured arms, 33 live runs of
+`google/gemini-2.5-flash`, all in one session because the pass rate drifts with the wall clock.
+
+**Owner technique (2026-08-28): bind the field rule to the TYPE's own definition and declare the
+override explicitly, instead of leaving both facts in distant prose that contradict each other.**
+The old text contradicted itself in one line: `DRIP` named its fields
+(「填 reinvest_shares 與 reinvest_price」) while `STOCK` said only 「加股數」 and never named the
+field; meanwhile the general rule said `gross` is copied only when the statement states it, and
+`gross` is a REQUIRED column while a 配股 statement states no amount. The model was handed a
+required field, an instruction not to invent one, and no rule making a share dividend's gross
+structurally zero — so it put the only number it could see into it.
+
+| case | A (control) | B (structured prose) | **B2 (prose + contrastive pair)** |
+| --- | --- | --- | --- |
+| `div-tw-stock` | 10/11 | 11/11 | **11/11** |
+| `div-my-net` | 11/11 | **3/11** | **11/11** |
+| `english-statement-fragment` | **2/11** | 8/11 | **11/11** |
+| `my-sub-rm1-three-decimals` | 9/11 | 11/11 | **11/11** |
+| `cash-opening` | 10/11 | 8/11 | **11/11** |
+| `unparsed-ambiguous-cash` | 7/11 | 11/11 | **9/11** |
+| `unparsed-option` | 11/11 | 8/11 | **7/11** |
+| case-level | 423/440 = 96.1% | 423/440 = 96.1% | **434/440 = 98.6%** |
+
+Field hit rate under B2 was **295/295 on every one of the eleven runs**.
+
+- ★ **The spillover is caused by the CONTENT, not by the form of an example — which overturns
+  AI-D63's diagnosis.** W4 blamed the STOCK one-shot's shape ("the model over-generalised from
+  `gross:"0"`"). Arm B contains **no example at all** and reproduces the same regression: 8 of 11
+  runs wrote a real RM88.50 NET dividend as `gross:"0"` (`div-my-net` 11/11 → 3/11). Any
+  instruction saying 「for STOCK, gross is 0」 leaks across dividend types regardless of how it is
+  delivered. The "configuration D" that AI-D63 disclosed as untested is now tested, and it fails.
+- ★ **The owner's contrastive-pair rule is the countermeasure, measured.** Adding a second example
+  where `gross` carries the STATED amount (a MY net dividend) alongside the zero case repaired the
+  regression completely: `div-my-net` 3/11 → 11/11. One extreme boundary teaches the value; a pair
+  teaches that the value depends on `type`.
+- ★ **The largest win was not the target.** `english-statement-fragment` — one leading date
+  governing three items, where the model dated item 1 correctly and fell back to *today* for a
+  dividend and a broker fee, both money-of-record — went **2/11 → 11/11**. Arm B alone already
+  moved it 2 → 8 with no date rule whatsoever, which suggests carving the run-on rules paragraph
+  into a tagged block improves adherence to its NEIGHBOURING rules too. A planned date-scope rule
+  was therefore **not** added: the defect stopped reproducing, and a rule that cannot be measured
+  is complexity without evidence.
+- ⚠ **One regression, kept and disclosed rather than tuned away.** `unparsed-option` 11/11 → 7/11.
+  The model still refuses the option and still confesses it — it drops the ticker from the quoted
+  text (`"8月 call 權利金收入 300 美元"` instead of `"8/2 TSLA 8月 …"`), so the corpus's
+  `unparsed_contains: ["TSLA"]` substring check fails. **No spurious row is fabricated**; a user
+  still sees the line was not classified. Traded knowingly for +15 elsewhere including two
+  money-of-record dates.
+- ⚠ **Honest limit on two of the numbers**: the contrastive pair uses the same sentence template as
+  `div-tw-stock` and `div-my-net` with different symbols, dates and amounts, so those two cases now
+  partly measure pattern recognition. The independent evidence is the other 38 cases — above all
+  `english-statement-fragment`, which has no analogue in the prompt.
+
+**★ Two of W4's headline numbers were measuring memorisation, and a guard now prevents the class
+(AI-D68).** The `daytrade` negative one-shot added in W4 was, character for character, the input of
+corpus case `tw-sameday-roundtrip-NOT-daytrade`; the reverted STOCK one-shot was `div-tw-stock`'s
+input verbatim. So "daytrade 0/2 → 11/11" and "the STOCK one-shot fixes it 6/6" both measured the
+model recognising an answer printed in its own prompt. The failure mode is self-reinforcing — the
+obvious way to fix a failing case is to paste it in as an example, which makes it pass while
+teaching nothing — so `tests/llm_insight/test_prompt_examples_are_not_the_corpus.py` now fails the
+build on any one-shot that duplicates a corpus input, and carries a second test proving it can
+actually see a duplicate. The daytrade example was rewritten as a different instance of the same
+shape; all four dividend/daytrade examples now use symbols, dates and amounts absent from the corpus.
+
+**★ AI-D63's `div-tw-stock ≈29%` was never a valid control.** Re-measured this session it is
+**10/11 = 91%**; the 29% was pooled across the reverted one-shot experiments. Consequently the
+"6/6 fix" that regression was traded for was probably never a real effect, while the `div-my-net`
+regression it caused was large and real — reverting was right, but for a better reason than the one
+recorded. The AI-D63 wording stays on record, marked.
+
+**The containment claim from AI-D63 is now verified rather than assumed, and it holds.** The
+capture shows the failing shape is `gross:"50"` **with** `reinvest_shares:"50"` — the share count
+is correct, so the replay never raises and the damage is confined to one display field. It holds
+because of how this model happens to fail, not because anything prevents the other shape.
+
+**The LLM seam now keeps what it sent and what it got back — the blind spot that produced a
+wrong conclusion one commit earlier (AI-D64…AI-D67).** Nothing in this codebase retained a
+prompt or a raw completion. `shared/llm.py` built `messages` as a local, read `content` as a
+local, parsed it, and dropped both — on success *and* on failure; `llm_usage` stored tokens and
+cost, never text. So when an extraction came back wrong the only surviving evidence was which
+parsed field mismatched.
+
+That is not hypothetical. The W4 baseline recorded a 配股 failure as *"contained to the dividend
+ledger, the replay does not read `gross`"* — and the containment could not be checked, because
+the model's actual words were gone. Verified this round: the import door has **no guard** requiring
+`reinvest_shares` on a STOCK dividend (`dividend_import.py` passes it through, `dividend_model.py`
+does not compute it, and the conservation gate `check_amounts(gross, 0, 0)` passes for any
+non-negative gross), while the replay **raises** on one (`cost_basis.py:606-613`) — a raise that
+`test_cost_basis.py:234` records as having once *"crashed every rebuild that held a MY dividend"*.
+Whether that row was harmless or a landmine turned on a field the report never captured.
+
+- **New `shared/llm_fail_log.py`** — a bounded ring recording one row **per ATTEMPT**, not per
+  call. The seam bills *before* it parses and salvages once with a second full provider call, so
+  one logical failure is two billed attempts with two different raw outputs; a per-call row would
+  hide half of what was paid for. Each row carries the `llm_usage` id of its own attempt, so the
+  two tables reconcile. `agent` **is** the task category — every call site already passes one and
+  it already threads into `llm_usage`; a parallel taxonomy would be a second name for one thing.
+- **Bounded by construction**: 300 newest rows pruned on insert (the `action_log.py` precedent),
+  each text column capped at 16 KiB with a `truncated` flag → a hard ~14 MiB ceiling rather than a
+  hope. Base64 image payloads are **never** stored (a vision call carries up to four 5 MB images);
+  only the text and an `image_count` survive.
+- ★ **`invalid_json` and `schema_mismatch` are now different outcomes.** They shared one generic
+  `"invalid structured output"` message and were indistinguishable. "The model emitted garbage"
+  and "the model emitted the wrong fields" are different defects and different training signals.
+  ⚠ The classifier reads the error's own `type`, **not** its class: pydantic v2 raises
+  `ValidationError` for *both*, reporting a malformed document as `json_invalid` — the obvious
+  `isinstance` version was written first and would have labelled every bad reply a schema mismatch.
+- ★ **An unrelated 500 fixed on the way past.** `resp.choices[0]` / `resp.usage` were read
+  **outside** the `try`, so a provider answering 200 with an unreadable body raised a bare
+  `IndexError` that never became `LLMUnavailable` — it reached the global catch-all as HTTP **500**
+  instead of the intended 503 degrade. Both the structured and text paths now degrade. Pinned by a
+  test proven red first (`IndexError: list index out of range` at the exact line).
+- **The corpus evaluator inherits the same capture.** `scripts/ai_extraction_eval.py --dump-dir`
+  writes one `.jsonl` line per attempt carrying the full prompt, the model's verbatim reply, the
+  case id, the verdict and the field-level misses. A case that "fails" by field comparison returned
+  *parseable* JSON, so the production policy would record nothing — which is exactly the case whose
+  raw reply has to be read. An explicit `set_capture_mode()` switch, **off** in production.
+- ⚠ **Stated gap, not papered over**: the settings page's model-ping reaches the provider directly
+  and bypasses this seam entirely. Its failures do not reach the log and the module docstring says so.
+- ⚠ **Red line, pinned by a test rather than a comment**: clearing this log must never touch
+  `llm_usage`. Remaining budget is `Σ topups − Σ llm_usage.cost`, so deleting usage rows would
+  silently hand the user free budget.
+
+**AI investment-assistant programme (2026-08-16)** — spec `docs/spec/2026-08-16-ai-assistant.md`.
+An inventory pass over the whole AI surface (four closed LLM loops, 34 variables, the four-rule
+engine, 13 alert rules) concluded the machinery exists and the gaps are one missing leg,
+verification, and a surface. **W1 already shipped (below): three AI-door defects found by
+inspection, one of which was writing the wrong tax right now.** Owner rulings — named `AI-D<n>`
+so they never collide with the corporate-actions spec's `D<n>` space — **AI-D1** (pure batch
+cards, no chat), **AI-D2** (fix the double ma_cross definition, then signal history + backtest;
+no new indicators), **AI-D3** (the AI door takes transactions + dividends + cash in ONE prompt),
+**AI-D4** (fundamentals: all three of yfinance / Finnhub / Alpha Vantage as key-gated providers,
+union-merged with per-field provenance, disagreement kept as two values and never averaged —
+**recorded as the scoped exception to the fallback chain in
+`.claude/rules/data-and-pricing.md`**), **AI-D5** (the official `on_alert` advice card, in scope,
+default-enabled; push stays off), **AI-D6** (prototype on demo first, fuel and verification in
+parallel). The TW-only fundamentals gap matters because the real portfolio is US-heavy — a US
+card is today structurally weaker than a TW card. **W3 rulings (2026-08-17):** **AI-D13** (hybrid
+mount — capability + key gate via `supports()`/`capable_ids`, never the fallback chain),
+**AI-D14** (**no merge layer — one block per source**; refines AI-D4's mechanism, not its red
+line: different values are reported side by side with their sources, never averaged — enforced
+by the prompt, and the rules file was amended to match), **AI-D15** (a canonical 8-field
+intersection; TW's `finmind` block is mapped from the existing valuation snapshot, never
+double-fetched), **AI-D16** (yfinance + Finnhub daily; Alpha Vantage Saturday, held symbols
+only — its free quota cannot survive a full-universe pass). **W4 rulings (2026-08-18):**
+**AI-D17** (the union schema is a discriminated union — `rows: list[TxnDraft|DivDraft|CashDraft]`
+keyed on a `kind` literal, plus an `unparsed` list so the model confesses the rows it cannot
+classify — FX / corporate actions / options — instead of silently dropping them; silent drops
+are exactly the ledger-distortion AI-D3 exists to kill), **AI-D18** (preview and commit go
+through the three EXISTING doors — the union drafts are grouped by kind, rendered to each
+kind's canonical CSV, and built by each kind's whole-file builder, with the cash pool injected
+by the router as a required argument; no new endpoint, no new writer, undo granularity and the
+row↔line invariant unchanged), **AI-D19** (prompt v6: three explicit sections + the cash-kind
+vocabulary joined from `cash_kinds.py` at module level so it can never drift; `daytrade` finally
+teaches its semantics — only on explicit 當沖 wording, the debt W1 deliberately left; and
+`short_sale` arrives with its prompt rule — only on explicit 放空/融券/short wording — exactly as
+the column comment said it would), **AI-D20** (a synthetic text corpus under
+`tests/golden/ai_extraction/` + a manual live runner `scripts/ai_extraction_eval.py` producing
+field-level hit rates with the cash-`kind` / `daytrade` / `short_sale` mislabel rates listed
+separately — the only fields that move money silently; thresholds calibrated to the first
+baseline run; screenshot cases go through the owner's manual review, never into the repo), and
+**AI-D21** (the preview renders three sections — transactions / dividends / cash — with the cash
+rows showing the Chinese kind label + an explicit ± sign, server-sourced from `CASH_KIND_ZH`).
+**W5 rulings (2026-08-19):** **AI-D22** (benchmark = a fixed server-side market map —
+TW→`0050`, US→`sp500` — looked up from the instrument's market; MY has no benchmark and stays
+honestly unscorable; the LLM never picks the yardstick, and `^KLSE` is a noted cheap follow-up
+with a yfinance suffix-routing catch), **AI-D23** (excess return compares both legs in their
+LOCAL currencies — per market the two legs share a currency by construction; converting both to
+TWD would cancel to the same answer while adding FX-data drop points, so `convert_closes` is
+deliberately NOT used), **AI-D24** (`vol_change_pct = vol_30d(due) / vol_30d(create) − 1` —
+fixed 30-trading-day windows of the same `annualized_volatility` estimator the alert inputs use,
+over the split-re-expressed close series; a zero baseline or insufficient history degrades to an
+honest None, never a miss), **AI-D25** (volatility gets its own flat band, ±5% — the shared
+±0.5% band would make nearly every `direction=flat` volatility call an automatic miss, since a
+30-day estimator jitters by several percent on a constant series; price_change/relative keep
+±0.5%), and **AI-D26** (scope: per-symbol wiring + the scoreboard's status-rendering fix;
+portfolio-scope scoring stays an honest None for W7). **W6 rulings (2026-08-20):** **AI-D27**
+(signal history comes from REPLAY backfill + scan incremental — the rules engine is a pure,
+params-stamped function, so re-evaluating each historical date through the same `_read_series`
+assembly deterministically rebuilds the row the scan would have written that day; the scan fills
+the missing date SET (`price_dates − stored as_of`), so a later deeper price backfill, a filled
+provider gap, or an aborted first backfill all self-heal on the next scan), **AI-D28** (each
+`signal_history` row is the full daily state vector — four rule states + scores, tech_score,
+evaluation_context, params_version — keyed `(symbol, as_of)` on the PRICE-DATA date, not the scan
+date, so a holiday re-scan overwrites the same row idempotently), **AI-D29** (event-study events
+= rule score-sign changes with hold semantics + composite tech_score band crossings; the
+daily-observation conditional distribution was rejected — 200 days of one trend are 200
+autocorrelated fake samples), **AI-D30** (forward windows +20/+60/+120 TRADING days against the
+SAME symbol's unconditional distribution as baseline, local currency, split-re-expressed
+(AI-D23/W6c discipline); guards: n<8 answers 「不足以判斷」 with no numbers, overlapping events
+annotated, right-censored events excluded per window and counted, NOTHING annualized), **AI-D31**
+(the two stub variables keep their DECLARED meaning — `backtest_json`/`calibration_gap_json`
+light up as AI self-calibration from `insight_evaluations`, data that exists today (the design
+mock prompts anchor confidence caps on them); the event study rides a NEW per-symbol
+`signal_backtest_json`; official template prompts untouched), and **AI-D32** (the composite event
+thresholds are the EXISTING 65/35 state bands (`composite.py` `_BAND_HIGH/_BAND_LOW`) — one
+vocabulary; a second 70/30 vocabulary on the same prompt surface would be the AI-D2
+two-definitions defect all over). **W7 rulings (2026-08-21):** **AI-D33** (the advice template
+advances to v3 citing the three W6 variables — verbatim numbers only, an n<8 event cell is
+called sample-insufficient and cites nothing, every citation carries the sample count and the
+same-window baseline — plus the confidence-anchoring law the design mock always intended:
+confidence ≤ the matching bucket's actual hit rate + 5, capped at 70 when that bucket has
+n<8, and a negative `calibration_gap_json` lowers it by that magnitude; the checkup template
+(v2.6) cites the per-symbol event study too; the InsightCard schema is untouched and there is
+deliberately NO code-side confidence clamp — a validator silently rewriting the model's stated
+confidence is the same defect class as averaging two providers' fundamentals), **AI-D34** (the
+portfolio-scope half of "the assistant, complete" is the EXISTING weekly report, v2.1→v2.2,
+citing `backtest_json` + `calibration_gap_json` — the AI narrates its own track record weekly;
+no new template, preset, or task type), **AI-D35** (portfolio-scope `price_change` predictions
+are now SCORED — the `symbol=None` arm of `_measure_actual` measures the create→due window via
+the existing `twr_index` chain, flow-adjusted so a mid-window deposit never reads as profit,
+in TWD (the cards are narrated against the TWD dashboard) under the shared ±0.5% flat band;
+`relative`/`volatility` stay per-symbol — a blended three-market benchmark is a separate
+ruling), **AI-D36** (the scoreboard becomes a decision-quality dashboard with NO new route:
+`/api/ai-score` gains a rolling calibration gap sharing ONE definition with the prompt
+variable, per-combo sample-gate display, and a backend-computed trust tier — 樣本不足 (n<8,
+the MIN_SAMPLE anchor) / 早期 / 可參考 (success ≥ 0.6 AND calibration error ≤ 10pp, the
+`gap_alert_pp` anchor), with narrative-only combos judged on `1 − miss_rate` rather than a
+fabricated 0% quant rate — plus `calibration_bins` moves to Decimal ROUND_HALF_UP, retiring
+the float/HALF_EVEN path that shared a prompt surface with W6's ROUND_HALF_UP), and **AI-D37**
+(template upgrades finally REACH existing installs: `POST /api/strategy-prompts/from-template`
+gains an explicit replace mode — same route, no new endpoint — and the settings page shows a
+per-strategy 同步官方 button when the name matches an official template and the body differs;
+tasks bind strategies by id, so the overwrite upgrades every bound task in place; a renamed or
+archived strategy answers 409, so a replayed request cannot overwrite a row the user moved).
+**W7.1 ruling (2026-08-23), after the first live run on the demo:** **AI-D38** — the machinery
+was right and the OUTPUT was not, so the fix goes on both sides. Measured over 13 advice cards
+and 13 checkup cards: **0 of 13 obeyed the confidence-anchoring law** (40–70 against a 22.14 /
+5.00 cap); two printed a sub-gate cell's same-window BASELINE as if it were that signal's event
+return; one fabricated an event mean outright for an `insufficient` cell; and one batch rendered
+the same fraction four ways (`0.1336%`, `0.0640 USD`, a bare `0.1053`, and a correct `+9.61%`).
+Every producer was correct in every case — the sub-gate cells emitted no numbers, the baseline
+arithmetic matched an independent oracle 12/12, and the law reached the model with its real bins
+interpolated — so what moves is where the SEMANTICS live: `signal_backtest_json` now carries a
+`units` block (the unit previously existed only in the variable registry's `desc`, which the
+model never sees), the citation law states the unit, forbids substituting the baseline for a
+missing event mean, and forbids any number absent from the input, and the anchoring law hands
+over ONE precomputed integer (`backtest_json.confidence_ceiling`) instead of a three-step walk
+over a bins table. **AI-D33's red line is unchanged** — nothing clamps the model's stated
+confidence; it is simply no longer asked to derive the cap mid-generation. `calibration_gap_json`
+also gains a plain-language `reading` (an extension beyond the ruling's letter, reported as
+such): the first v2.2 weekly card read gap −0.466 as 「低估自身表現」 — the exact opposite — with
+the convention stated in the same prompt section, and a signed fraction is one negation away
+from asserting the reverse of the truth. The ceiling has **no floor by design**: on the demo's
+record it computes to 0 ("your track record supports asserting nothing"), which the prompt
+states in words rather than having this layer invent a floor the owner never ruled.
+
+**Investment-logic review → the repair programme (2026-08-24).** A four-lens review of the whole
+branch (cost/return correctness · tax filing · multi-currency · decision layer) returned 14
+findings, 13 of which I re-verified against the code line by line, correcting two of the review's
+own characterisations. **The verdict: single-currency accounting is solid, the multi-currency layer
+is not — and almost nothing is a broken formula. Nearly every finding is a correct number
+answering a different question than its label claims.** Only ONE finding is a regression this
+branch introduced (`confidence_ceiling`, W7.1); the other thirteen predate W1. Owner rulings
+**AI-D39** (the ceiling double-counts one error — delete the gap subtraction, replace the
+absent-bucket 70 with `overall_hit_rate + 5`, and record violation rates instead of clamping),
+**AI-D40** (`is_etf` becomes three-state: never guess, mark unknown, ask), **AI-D41** (total
+return is presented as A · B · B−A — asset P&L, FX-complete P&L, and the principal-FX effect
+between them — never summed), **AI-D42** (the three cash-movement kinds that are COSTS OF
+TRADING AND FINANCING — `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` — enter XIRR; capital
+movements and idle-cash interest do not), **AI-D43** (`convert_closes` IS permitted for the
+benchmark counterfactual — AI-D23 parked it for the scoring legs, where both sides are
+same-currency; here FX is the substance).
+
+⚠ **AI-D42 reverses the owner's own earlier ruling `D1 = A` (2026-08-13)**, which made "cash
+movements never enter XIRR" an explicit rule and re-confirmed it for the three kinds added
+with the broker importer. Neither the four-lens review nor my first framing of the choice
+surfaced that conflict — it turned up while writing the manual entry, and the owner ruled
+again knowing it. The second ruling also drew a sharper line than the option offered: idle-cash
+`INTEREST` is EXCLUDED, because the principal earning it was never in XIRR's denominator, so
+crediting its income to the numerator is asymmetric. `D12`'s 重組費 is booked as a `WITHDRAW`,
+so that named standing limitation is untouched. The superseded text stays in the manual,
+annotated — why a decision was once made the other way is part of the record.
+
+The programme stays on `feat/corporate-actions` — not merged, not tagged, `__version__` 0.1.28.
+### Fixed — investment-logic review, wave R1 (entry, display and export; no ledger figure moves)
+
+Five defects that all shared one shape: **the arithmetic was right and the question was wrong.**
+None of them changes a number the ledger already holds — R1 touches only what gets computed at
+the door, shown on a screen, or written into an export.
+
+- **A TW ETF's first manual trade was taxed at three times the correct rate** (AI-D40). The
+  2026-07-15 stress audit made the instrument registry authoritative for `is_etf` at both fee
+  seams and left a comment at each saying so — but nothing guarded the value that *seeds* the
+  registry. `quick_register` defaulted `is_etf=False` and the manual door's auto-registration
+  never passed the argument at all, so a symbol first seen by trading it was permanently
+  recorded as not-an-ETF: 現股 0.3% instead of ETF 0.1%, with `tax_rate: 0.003` written into
+  `fee_rule_snapshot` as though it had been established. On a NT$110,000 sell that is NT$220.
+  The fix is the third state, not a better guess — `instruments.etf_flag_unknown` (additive
+  column; existing rows migrate in as *known*, and nothing reaches back to relabel them). The
+  engine still computes with False because a number has to come out, but raises a soft
+  `etf_flag_unknown` issue **only where the answer moves money** (a TW SELL whose rule set
+  prices the two differently — a buy carries no TW transaction tax, and noise is how a real
+  warning gets clicked through). Answering the flag on the instruments form clears the marker.
+  `fees.resolve_etf_flag` is the one definition both write doors read, so the bulk door can
+  never ship a weaker guard than the single-row form. `scripts/audit_etf_flags.py` (READ-ONLY)
+  lists TW rows that may need a human answer, ranked by whether the flag has already priced a
+  real sell — it reports and stops, because a script that "corrects" a ledger by guessing is
+  the same defect wearing a repair badge.
+  ⚠ The review's proposed fix — "pass one argument" — was under-specified: the manual body has
+  no `is_etf` field to forward (`input_center.py` says so in a comment), which is why the third
+  state had to be persisted rather than plumbed.
+- **The sell preview invented a realized P&L for trades the ledger books nothing for.**
+  `_position_preview`'s docstring claimed it "replicates build_book's OWN sell arithmetic
+  exactly … bit-for-bit". True of the ORDINARY branch it was written against, and only that
+  one: `build_book` has since grown the declared short (a sell realizes only the long portion;
+  the remainder opens a short lot) and the acked oversell (basis discarded, **no** realized
+  row). Measured: **+2,000 shown on a short extension and +9,000 on an undeclared oversell,
+  where the ledger books nothing**, and 9,000 shown where a declared partial books 6,000 —
+  while the holdings column two rows above honestly printed 「—」. The drawer's 試算 gave a
+  *third* answer for the same trade (+3,000), because its `held_adj_avg` collapses to 0 on a
+  negative share count, making the whole proceeds look like profit. The preview now mirrors the
+  replay's **branches**, and a parametrised contract test replays each hypothetical through
+  `build_book` and demands agreement — so a fourth branch fails on its own. The drawer, which
+  has no 放空 declaration to read, states the fork instead of picking one.
+  The same seam's BUY side is fixed with it: a buy against an open short **covers** it (owner
+  rule 2026-07-31) rather than averaging the short's proceeds into a long lot, and an exact
+  cover now reads 「已回補」 instead of dividing by zero into a blank card. The comment claiming
+  "qty > 0 guaranteed, so never a zero divisor" was false and is gone.
+- **回本進度 could print a negative percentage on a position that had recovered 30% of its
+  cost.** `domain-ledger.md` already requires every ratio over the basis to divide by
+  `abs(cost_total)`, and `unrealized_pct` six lines away obeys it with a comment explaining
+  why; `payback_ratio` predates the declared-short work and was never revisited. An open short
+  contributes a NEGATIVE basis, so the cross-account aggregate's signed sum shrinks or flips
+  the denominator.
+- **The tax package declared the year's dividends twice** (AI-D41's sibling). Its realized
+  subtotal was the *performance* figure — proceeds minus the **adjusted** cost, which the
+  locked 2026-06-06 model has already reduced by cash dividends — printed next to a dividends
+  sheet declaring those same dividends as income. `original_cost_removed` was already a column;
+  nothing subtotalled it. The sheet now leads with `realized_original` (the filing figure) and
+  keeps `realized_adjusted` beside it, labelled, for reconciliation against the dashboard.
+  ⚠ The review's worked example for this one was wrong — the post-close-dividend row it cited
+  is explicitly filtered at `export/tax.py`. The conclusion survived the example.
+- **Every broker-imported row carried an empty `fee_rule_snapshot`.** `csv_import` only
+  snapshots a fee or tax it had to compute, and a broker statement supplies both (the fee
+  verbatim, the tax a literal `"0"`), so the auto-fill branch never fired and `{}` was
+  indistinguishable from "no rule was applied". 重算 never needed it — `cost_basis.py` reads
+  `ev.fees`/`ev.tax` off the row — which is exactly why the silence went unnoticed: nothing
+  computed wrong, the provenance just was not there. Supplied rows now record
+  `{"engine": "supplied", …}`; a partially auto-filled row names which of the two numbers came
+  from the caller. `broker/convert.py`'s refusal to recompute is deliberate and unchanged.
+  ⚠ A second review claim here did not survive: 重算 does **not** depend on the snapshot, so
+  this is a provenance gap, not a correctness one.
+### Changed — investment-logic review, wave R2 (the return figures; KPI and XIRR values move)
+
+Three defects in what the headline numbers MEAN. Unlike R1 these move figures the owner has
+already seen, so the stress-audit oracle was extended first and the accounting manual states
+each formula with its verification anchor before the code landed.
+
+- **A payment the ledger refuses was still an inflow to XIRR.** A cash dividend landing on an
+  open short is not representable here (a short seller pays the dividend in lieu and this
+  ledger has no debit row for it), so the replay skips it and flags the position. But
+  `xirr_reporting` read the raw dividend ledger, so ONE payment got THREE answers on three
+  screens: excluded from 總報酬, counted by XIRR, and the trend flagging the whole day 待釐清.
+  `Book` now reports `refused_dividends` — the ROWS, not just the existing per-position flag,
+  because a flag cannot say *which* payment and excluding by position would over-correct by
+  dropping that symbol's other, perfectly bookable dividends. Matched by value rather than
+  object identity, since the caller may re-load the bundle in between.
+- **The headline profit contained no FX on the principal** (AI-D41). `total_return` is
+  `Σ_ccy (realized + unrealized) × today's spot` — the rate reaches each currency's GAIN and
+  never its PRINCIPAL — while the trend's `total_value − net_invested` (every flow at its own
+  trade-date rate) is the FX-complete lifetime figure and was labelled 「浮動損益」. Both are
+  now presented, with the honest names: **A** 資產損益（不含本金匯率）, **B** 含匯兌總損益, and
+  **B − A** 本金匯率效果 — which is exactly the content of the 換匯損益 card.
+  ⚠ They are shown side by side and never summed: adding the 換匯損益 figure to A double-counts
+  the cross term `(MV − C)(spot − acq)`. That is the red line `domain-ledger.md` already drew
+  for XIRR, applied to the figure the rule did not cover — and manual invariant **I5 is
+  corrected accordingly**: "総報酬 already embeds FX" is true of XIRR and of the trend, and
+  false of `total_return`. `total_return`'s own definition is UNCHANGED, so every golden
+  payload, stored snapshot and export still reconciles; the golden gains two keys and no value
+  moves. B is computed in `portfolio/dashboard.py` because that is the only layer holding both
+  the `ReturnSummary` and the `TrendSeries` — neither module could see the other's figure,
+  which is precisely why the discrepancy survived this long. It degrades to null when the last
+  trend day is `incomplete` rather than falling back to an earlier day: a B measured on a
+  different date than A makes B − A a plausible-looking wrong number.
+- **77% of every TW commission reached no return metric** (AI-D42). `xirr_reporting` had no
+  `cash_movements` parameter at all, so FE-D1's charge-first rebate — 0.229% of capital per
+  round trip, and the owner's normal billing — plus every broker fee and all margin interest
+  were invisible to every return figure the app computes. The three kinds that are **costs of
+  trading and financing** (`REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE`) now enter the flow
+  series, signed by the shared `cash_kinds` table so a movement can never be a credit here and
+  a debit in the pool balance.
+  ⚠ **This reverses the owner's own ruling `D1 = A` (2026-08-13)**; see the rulings note above.
+  Idle-cash `INTEREST` is excluded — the principal earning it never entered this metric's
+  denominator, so crediting its yield to the numerator is asymmetric — and capital movements
+  stay out because admitting them would quietly redefine XIRR as an account return. D12's
+  重組費 is booked as a `WITHDRAW`, so that standing limitation is untouched.
+
+Both new parameters are **required keyword arguments with no default**, deliberately: a
+default would let a caller silently ship the pre-2026-08-24 behaviour, and both omissions are
+invisible in the output — a plausible rate, quietly missing flows. Forgetting either is now a
+mypy error and a `TypeError`.
+### Changed — investment-logic review, wave R3 (the decision layer)
+
+- **The confidence ceiling charged one error twice, and rewarded having no record** (AI-D39).
+  This is the only finding in the whole review that THIS BRANCH introduced: W7.1 implemented
+  AI-D33's three-step law faithfully and the law itself was wrong in two ways.
+  **(a)** A bucket's cap is `actual_pct + 5`, which IS the calibration correction; subtracting
+  the global rolling gap on top charged the same over-confidence a second time — measured on
+  the demo, bins said 39, the gap took 47, the answer was 0. That 0 was arithmetic, not
+  evidence. The step is gone and so is the `gap` parameter: a parameter kept after it stops
+  being read is how the next reader concludes it still matters.
+  **(b)** `CEILING_NO_DATA = 70` capped an unscored bucket at 70 while a bucket measured at
+  40% capped at 45, so a model could raise its own ceiling by claiming a confidence in a range
+  it had never been scored in — and over a 20-sample rolling window that is a limit cycle, not
+  a calibration loop. An unscored bucket now falls back to `overall_hit_rate + 5`; the constant
+  survives only for "nothing has EVER been scored", which is a genuinely different state.
+  ⚠ **AI-D33's red line is untouched** — nothing clamps the model's stated confidence. Only
+  the integer handed to the prompt changes.
+  ⚠ **Consequence worth naming:** with the gap step gone the ceiling can no longer reach 0
+  (`CEILING_HEADROOM` puts the floor at 5), so the advice template's 「confidence_ceiling 為 0
+  時…」 branch became text the model reads and can never act on. Rewritten to key on a LOW
+  ceiling, which is reachable; the test that pinned the old clause now pins its ABSENCE. Dead
+  text in a prompt is worse than dead code. `LIBRARY_VERSION` → `official-v17`.
+  ⚠ The helper takes a PERCENTAGE while the wire field carries a FRACTION — converted once at
+  the call site, with the unit in the parameter name. Mixing those silently is exactly the
+  defect W7.1 shipped (one score rendered four different ways).
+- **The R5 degradation gate had never fired in production**, and not because of a judgement
+  call: `RunInputs.unavailable_vars` was threaded end to end — `RunInputs` → `GateContext` →
+  R5 — and populated at **none** of `insight_service`'s four construction sites. A run whose
+  every external variable came back `{"unavailable": true}` was recorded as clean, so the one
+  signal saying "this batch was synthesised from absent inputs" never reached `job_runs`. The
+  fix is a READ, not a new mechanism: the producers already emit that shape and `variables.py`
+  already documents it as the contract. R5 is a per-RUN gate while unavailability is
+  per-symbol-per-token, so the reduction is a **union** — if any symbol in the batch was built
+  without its news / consensus / fundamentals, the run was degraded. An intersection would
+  report a clean run whenever a single symbol happened to have complete data.
+
+- **「持平」 was nearly unhittable, so the scoreboard was training the assistant out of saying
+  it** (review ⑩). Over a 14-day horizon at 30% annualised volatility the one-sigma move is
+  ~7%, so a fixed ±0.5% band gave `direction=flat` roughly a 6% chance of scoring a hit while
+  `up` and `down` sat near 51% each — and `price_change` is the only metric the official cards
+  emit, so that bias applied to almost every scored prediction. AI-D25 had already diagnosed
+  the identical problem for the volatility metric and widened its band; the same reasoning was
+  never carried across. The band is now `0.5 × the symbol's own one-sigma move over the actual
+  horizon`, floored at the old ±0.5% — roughly 38 / 31 / 31 instead of 6 / 51 / 51.
+  Three choices worth stating: the horizon is counted in **trading days from the price series
+  itself** (`annualized_volatility` annualises with 252, so a calendar-day horizon would be a
+  silent units error, and counting closes is exact through holidays); the baseline volatility
+  is the one **at create**, which is what the model could actually have seen; and `relative`
+  deliberately keeps the fixed band, because an excess return has a different variance from
+  the raw move and scaling it by the symbol's own vol would overstate it.
+  The band travels **with the measurement** rather than being derived inside `scoring`, so it
+  can be recorded alongside the verdict — a stored hit whose threshold is unknowable is not
+  evidence. Legacy rows and any seam that cannot compute a band fall back to the fixed one.
+  ⚠ `ActualMeasurement` also gains `extra="forbid"`: while adding the field a typo in its name
+  was silently DROPPED by Pydantic's default and three new tests went green against a
+  measurement that did not contain what they asserted. This model is the input to a scored,
+  permanently stored verdict — an unknown field must fail loudly.
+
+- **The evidence windows outran the horizon they were cited to support** (review ⑪). The
+  advice card hands the model `signal_backtest_json` to back a DIRECTIONAL claim, and that
+  claim is then graded over the card's own prediction horizon — 14 CALENDAR days on the
+  official template. The study only ever measured **+20/+60/+120 TRADING days**, so the
+  assistant cited a +20-session distribution in support of a 14-day call: two different
+  questions, one quietly substituted for the other. `FORWARD_WINDOWS` now LEADS with **+10**
+  (≈14 calendar days); the longer windows all stay, because 「and then what?」 is a real and
+  separate question. The scoring contract is untouched.
+  Worth naming: right-censoring is monotone in window length, so the aligned window is also
+  the **best-sampled** one — the question the card is graded on is the one the data can
+  answer most often, not least. Three prompt bodies described the old window set verbatim;
+  leaving them would have made the instruction and the payload disagree, which is the same
+  defect class as AI-D2's two `ma_cross` definitions. `LIBRARY_VERSION` → `official-v18`,
+  持倉建議 v3.2 / 個股健檢 v2.8. The unreleased v0.1.29 what's-new entry also still
+  advertised the gap-based auto-adjustment that AI-D39 had already removed — corrected.
+
+- **The signals said 「資料基準＝今天」 over data that was days old** (review ⑬). `signal_history`
+  had always stamped its rows with the PRICE date. `signal_states` and the `/api/signals` wire
+  did not — both used `now.date()`. So on any day a provider had not delivered, the drawer and
+  `rule_signals_json` announced today as the basis, and the prompt 守則 (「資料基準 {{as_of}} —
+  在卡首標注基準日」) faithfully copied that wrong date onto the card. **The golden fixture was
+  itself an instance:** `GOLDEN_NOW` is 2026-06-11 while its newest close is 2026-06-09, and a
+  contract test had been pinning the wall-clock answer since it was written. `as_of` is now the
+  DATA date, `null` when a symbol has no prices at all (an honest gap beats a confident wrong
+  date), and `evaluated_at` keeps the wall clock — the two fields were always two facts.
+  ⚠ This restores the third return value of `_read_series` that W7 step 0(b) removed as dead
+  code. It WAS dead then; it is load-bearing now, and the docstring says so, because otherwise
+  the next dead-code pass removes it again. It returns a named dataclass rather than a bare
+  tuple so the third element identifies itself at every call site. `to_wire`'s `price_as_of`
+  has **no default** — the injection rule: forgetting it is a mypy error and a `TypeError`,
+  never a silent fallback to the wall clock, which is the defect the parameter exists to close.
+  There is also no scan-wide `as_of` any more: each symbol is stamped with its own last close,
+  so a market that has not delivered cannot borrow a fresher market's basis date.
+- **`freshness_json` covered prices and FX while four templates told the model to check
+  everything against it** (review ⑬, second half). It now carries a `sources` block — one row
+  per fed external variable with its `last_as_of`, `age_days`, and whether it degraded —
+  derived from the payloads the router **already built** (every producer stamps `last_as_of`),
+  so it costs no extra query. `FreshnessReport` itself is untouched: it is a pure function of
+  ledger + prices + FX and has no business knowing about news or fundamentals; the extension
+  rides the router-fed `VarContext` convention that `fx_rates` established.
+  ⚠ Deliberately **no invented staleness verdict**. A price has a market calendar to be judged
+  against; a fundamentals snapshot does not, and picking a 「good for N days」 threshold would be
+  exactly the guess this project forbids everywhere else. The date is reported; the judgement
+  belongs in the prompt, and the four 守則 now say so.
+
+- **Nothing recorded whether the model obeyed its own confidence ceiling** (AI-D38 step three).
+  Steps (a) and (b) fixed the ceiling's arithmetic; the accountability half was still missing,
+  and a rule with no measurement is a suggestion — W7.1's first live run had 0 of 13 cards obey
+  a comparable one. `insights` gains `ceiling_at_create`, stamped at generation from the SAME
+  `backtest_json` payload the prompt rendered (so the recorded number and the number the model
+  saw cannot disagree), and `/api/ai-score` gains a `ceiling_violations` block rendered as a
+  sixth scoreboard card.
+  The column has to live on the CARD, not the evaluation: an `insight_evaluations` row is
+  written a horizon later, while the ceiling is derived from calibration bins that keep moving
+  — unrecoverable after the fact. `price_at_create` (M4) is the exact precedent, migration and
+  all. Population (owner ruling 2026-08-26): every non-shadow card with both a stated
+  confidence and a recorded ceiling, **scored or not** — a violation is a fact about the moment
+  of creation, and gating it on evaluation would lag the number by a full horizon and would
+  permanently exclude every card that ends `undetermined`. A card with **no** recorded ceiling
+  is outside the population rather than compliant; counting those as obedient would flatter the
+  rate with rows the rule never applied to. An empty population reports `rate: null`, because
+  0% compliance and 「no comparable card yet」 are different facts.
+  ⚠ **AI-D33's red line, restated in a test:** a violating card is stored with the confidence
+  THE MODEL STATED. Measuring obedience must not slide into enforcing it — a validator quietly
+  rewriting the model's own stated confidence would be the same class of defect as averaging
+  two providers' PE into a number neither reported.
+### Added — investment-logic review, wave R4 (benchmark counterfactual)
+
+- **「同一筆錢、同樣的日期，買指數會是多少？」** — the review named this the single
+  highest-value missing capability, and the reason is that without it every return figure in
+  the app is unanchored: XIRR 15% is excellent or dismal depending entirely on what the market
+  did over the same period, and nothing here answered that. New pure module
+  `portfolio/benchmark_counterfactual.py` spends the portfolio's own reporting-currency flow
+  stream on each market's index at each flow's own date, and values the units at the last
+  close. Landed as **added fields on `/api/dashboard`** — no new route, so the stress-audit
+  `ops` invariant is untouched.
+  **Scope: lifetime, one number** (owner ruling 2026-08-26). The windowed comparison is
+  already answered by `twr.build_overlay`; a second, differently-scoped counterfactual would
+  be two answers to one question (the AI-D2 defect class), and a windowed version additionally
+  needs a 「what is the opening capital at the window start」 convention — cost? market value?
+  they differ — that nothing else in the app requires.
+  ⚠ **The excess is measured against B, never against A.** `total_return` (A) applies FX to
+  each currency's gain and never to its principal (AI-D41); the counterfactual buys its units
+  with reporting-currency money at each flow's own trade-date rate, exactly as
+  `trend.net_invested` does. Subtracting the counterfactual from A would contrast two
+  different treatments of the principal's FX and attribute the difference to skill.
+  ⚠ **A market with no index is NAMED, not dropped.** MY has no benchmark (AI-D22), and a flow
+  can also predate an index's stored history or land on a non-positive close. All of those
+  count toward `uncovered_ratio` and, where applicable, `uncovered_markets`. Silently omitting
+  them would compare a three-market portfolio against a two-market counterfactual and call the
+  gap alpha. The KPI line degrades its own label accordingly — 「差額（部分涵蓋）」 plus a
+  plain-language note — rather than printing a bare 「超額報酬」; same discipline as
+  `covered_ratio` (F2).
+  ⚠ **Nothing computable → `available=false` with a reason, never a zero.** A zero reads as
+  「the index went nowhere」, which is the opposite of 「we cannot tell」.
+- **One definition of 「money put in」, extracted rather than duplicated.**
+  `timeseries.build_reporting_flows` is now shared by the trend's `net_invested` and by the
+  counterfactual. Two copies would let the portfolio and its counterfactual quietly disagree
+  about which flows exist, and the entire comparison rests on them being the same money on the
+  same dates. Each flow now carries its market (routing) and symbol (so a per-symbol view can
+  filter without rebuilding); the trend ignores both.
+  ⚠ **Asymmetry recorded, not silently fixed:** these flows exclude cash movements, as they
+  always have, while `xirr_reporting` has taken REBATE / INTEREST_EXPENSE / BROKER_FEE since
+  AI-D42. So XIRR and B now disagree about those three kinds, and they sit side by side on one
+  KPI band. B's definition predates AI-D42 and moving it is an owner ruling of the same weight,
+  not a refactor — flagged here rather than changed.
+- `tests/golden/dashboard_full.json` gains the block and **nothing else**: 15 insertions, 0
+  deletions. The golden fixture seeds no benchmark prices, so its snapshot records the honest
+  degradation — which means the golden file alone never exercises the happy path, hence a
+  dedicated integration file that seeds a real index series.
+  ⚠ `test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches` guards that
+  the corporate-action feature did not widen the LEDGER symbol set. Benchmark reads are not
+  ledger symbols, so the two sets are now asserted separately, with the benchmark keys
+  enumerated from the registry — widening the list wholesale would have quietly retired a
+  guard that is still doing its job.
+
+### Added — investment-logic review, wave R5 (two portfolio-level risks)
+
+- **A portfolio could fall 25% with nothing firing.** `drawdown_from_peak` is per-SYMBOL,
+  against each name's own 52-week high, so a diversified book — the normal case — can drop a
+  quarter with no single holding down far enough to trip it. New **`portfolio_drawdown`** rule
+  reads the daily total-value series the trend already builds. Same two-severity shape as its
+  per-symbol sibling (risk at the knob, warn at half), threshold in `rules_config` like every
+  other rule.
+  ⚠ **`incomplete` days are skipped.** A trend point is flagged incomplete when a held symbol
+  had no price that day, and its `total_value` collapses accordingly — counting it would turn
+  a missing quote into a 「組合回撤 100%」 risk alert. The test asserts the same series with and
+  without the flag, so the skip is proven to be what makes the difference.
+  ⚠ **Naming is substance here, not wording.** Two switches both reading 「回撤」 on the settings
+  page, the notification list and the rule comments would be the AI-D2 two-definitions defect.
+  They are 「高點回撤」 (per-symbol) and 「組合整體回撤」 (whole book), and the settings copy states
+  the difference outright.
+- **The currency axis had no rule at all.** For a three-currency investor the largest
+  undiversified bet is usually the currency mix, not any one stock; `single_weight` and
+  `sector_weight` could not see it. New **`currency_weight`** rule, defaulting looser than
+  sector (0.70 vs 0.60) because a three-currency book concentrates naturally and a threshold
+  that fires constantly is one nobody reads.
+  ⚠ `CombinedView.by_currency_value` is **native**, so ranking or summing across currencies is
+  meaningless arithmetic — 10,000 USD and 300,000 TWD are 31 : 300 natively and roughly
+  half-and-half in fact. `by_currency_reporting` is added and accumulated in the SAME loop as
+  the native leg and the blended total, so the three can never disagree.
+- Both rules guard a non-positive denominator: a net-short book can carry a non-positive total
+  value or peak, and a ratio over one flips every sign — the audit-H1 trap. Silence beats a
+  table of inverted percentages.
+- ⚠ A new strategy rule must also enter `ops/notify.RULE_CATALOG` — a drift guard asserts the
+  subset, and a rule with no subscription entry is a rule nobody can be told about.
+- The golden payload gains `by_currency_reporting` and nothing else: 5 insertions, 0 deletions.
+
+### Added — investment-logic review, wave R6 (the ex-dividend date)
+
+- **A 配股 was worth −9% for a month, once a year.** The `dividends` ledger carried ONE date.
+  For a TW stock dividend the two that matter are ~30 days apart: the share price adjusts on
+  the **ex-date**, the shares arrive on the **payment date**. With only the payment date
+  recorded the replay held the OLD share count against the ALREADY-ADJUSTED price for that
+  whole gap, so a 10% 配股 read as a ~9% loss on every TW holding that pays one.
+  `dividends.ex_date` is added **NULLABLE, no default**: every existing row migrates in as
+  「unknown」, never as a guessed date, and a row with NULL replays **byte-identically** — the
+  regression test pinning that is the load-bearing one, because this touches money of record.
+  `date` is now pinned to mean the PAYMENT date.
+  ⚠ **Only STOCK moves**, and the rule is about what you actually own on a given day.
+  **STOCK** is an entitlement that attaches on the ex-date — you own the shares from then and
+  the quote says so. **DRIP** is a PURCHASE made when the cash lands; those shares do not exist
+  earlier. **CASH / NET** keeps the payment date deliberately: the dip between ex-date and
+  payment is HONEST — the position really is worth less and you really have not been paid, and
+  unlike the stock case nothing about what you own changed.
+  ⚠ The rule lives in ONE property (`Dividend.effective_date`) because three filters must agree
+  — `build_book`'s event ordering, `LedgerBundle.through` and `before_action_on`. `through`
+  matters most: it filters `dividends` by date, so without it the event is not even IN the
+  bundle on the days between ex and payment, and the ordering change alone would do nothing.
+- **The provider door was already discarding the answer.** `dividend_inbox` computes
+  `div_date = p.pay_date or p.ex_date` — it had both dates in hand and kept one. All four
+  inserts now pass `ex_date` through, which is what makes TW 配股 work with no user action.
+  The other three doors take it too: the dividend CSV gains an optional `ex_date` column, the
+  AI door gains the field plus a prompt rule forbidding an inferred one (a guessed ex-date
+  moves shares to the wrong day, which is the error this exists to remove), and the manual form
+  shows the input **only for 配股** — offering it on a cash payout invites filling a value the
+  ledger deliberately ignores.
+  ⚠ **A defect this nearly introduced:** `broker/convert.py` writes its header from
+  `template_columns()` but built its rows by hand. Adding a column to `DIVIDEND_COLUMNS`
+  without extending the row would have emitted 10 headers over 9 values, misaligning every
+  field after the gap — silently, into the ledger. Both that writer and the AI door's
+  `_div_csv` are fixed, and the broker one now asserts its row width against the template so
+  the next column addition fails loudly instead.
+  The broker converter itself supplies **blank**: a statement's distribution line carries the
+  payment date, not the ex-date, and inventing one would break its 「supplied verbatim, never
+  recomputed」 discipline.
+
+### Added — investment-logic review, wave R7 (three owner rulings: AI-D48…D51)
+
+- **B took the three cash kinds XIRR already had** (AI-D48). AI-D42 moved `xirr_reporting`
+  onto `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` and left B (含匯兌總損益) behind — but **A
+  and B are printed side by side on one KPI band** (AI-D41) and their difference is labelled
+  「本金匯率效果」. From the moment one of them counted a 77% rebate and the other did not, that
+  label was false: the difference was 「本金匯率效果 ＋ 三類資金收支」. R4 then made it
+  consequential — the benchmark comparison's `excess` is measured against B, so a broker fee B
+  could not see was being reported as beating the index. `build_reporting_flows` now takes
+  `cash_movements` as a **required keyword argument with no default**: a default would let a
+  caller silently ship the pre-ruling figure, which is a plausible number quietly missing
+  flows. `DEPOSIT` / `WITHDRAW` / `OPENING` (capital) and `INTEREST` (idle-cash yield whose
+  principal never entered the figure) stay out, for AI-D42's reasons unchanged.
+  Sign: a fee RAISES `net_invested` exactly as a buy-side fee always has; a rebate lowers it.
+  ⚠ **The ruling immediately reproduced its own defect one field over**, and that is fixed in
+  the same change: `principal_fx_effect` was computed as `B − A` and labelled 「本金匯率效果」
+  on the KPI band, so the moment B counted a broker fee that label was carrying a cost. The
+  decomposition is now THREE terms — `B = A + principal_fx_effect + trading_financing_cost` —
+  with the cost subtracted out rather than left as a residual that quietly absorbs whatever
+  joins B next. `trading_financing_cost` carries the P&L sign (a fee is negative) and renders
+  beside the FX effect. A / B are still never summed (I5); these three are.
+- **The index leg does not pay your broker** (AI-D49). A cash-movement flow carries
+  `market=None`, and that is load-bearing rather than a missing value: `counterfactual()`
+  leaves those flows out of **both** legs, so the costs are charged to the portfolio and never
+  placed on the index — which is what 「同一筆錢、同樣的日期，買指數會是多少」 literally means.
+  They are also kept out of `uncovered_ratio`, whose meaning is 「how much of the money has no
+  index to compare against」 (MY today), not 「money that was never going to buy an index」.
+  Rejected: charging both legs (invents a cost no index investor paid — the same red line as
+  never averaging two providers' numbers) and keeping a second securities-only B′ (two nearly
+  identical 「含匯兌總損益」 on one site is the AI-D2 defect class).
+- **The stress harness gained a point-in-time family** (AI-D51). Every reconciliation compared
+  the app and the oracle **at the current state**, where anything whose effect is confined to a
+  window between two dates is invisible — R6's ex-date exactly (the position at `as_of` is
+  identical either way), which is why that run's `fail=0` was silent about it. The oracle gained
+  `facts_through` / `replay_through` / `net_invested_through` (dividends cut on their EFFECTIVE
+  date, so an oracle that cut on the payment date could not have seen R6 either), and phase 1
+  gained `trend.*`: `start` · `contiguous_days` · `net_invested` · `incomplete` ·
+  `total_value`, sampled at **every ledger event date and the day before it** — dividends
+  contributing BOTH the ex-date and the payment date — plus `ASOF` and the last point.
+  ★ **Its detection power is measured, not asserted.** With the app moved onto the three cash
+  kinds and the oracle not yet, the run came back `fail=27` — every one of them
+  `trend.net_invested`, on exactly the dates carrying a cash movement, with nothing else in the
+  run disturbed. Green again once the oracle followed: `ops=128` (unchanged — no scenario
+  change), `pass` up by ~860 assertions.
+  ⚠ **A point-in-time per-symbol SHARE COUNT is still not compared**, and that is R6's actual
+  落點. No app surface answers it (`trend.points` carries four portfolio-level numbers; the sell
+  preview's date-awareness lives in the 賣超 guard, not a report), and `total_value` cannot
+  stand in because it is portfolio-wide while the fixture seeds one close per symbol at `ASOF`.
+  Closing it needs a daily price fixture seeded BEFORE the corporate actions — see
+  `scripts/stress_audit/README.md` §6, which now states what was closed and what was not.
+- `trend`'s start date now uses `Dividend.effective_date` like the other three filters. Latent
+  rather than live — a 配股's ex-date cannot precede the position that earns it — but three
+  date filters spelling one rule three ways is how two of them drift, and this was the third.
+
+### Fixed — the KPI band pushed the dashboard sideways from 761px to 860px
+
+- **The breakpoint ladder had a gap, the third of this exact shape in `styles.css`.** The KPI
+  band drops to TWO columns at `<=860px`, but 「2-col KPIs clip, never push」
+  (`min-width: 0; overflow: hidden`) only began at `<=760px`. Between those two widths every
+  card was a grid item with `min-width: auto`, unable to shrink below its own min-content, and
+  the whole document scrolled horizontally — measured at 768px: `scrollWidth` 881 against a 768
+  viewport, a hero card 398px wide in a 250px track. The guard now starts at the same
+  breakpoint as the layout that needs it. Prior gaps of the same shape: 861–1023px (the KPI
+  band again) and 761–1435px (the 資料來源 table).
+  ⚠ **This was NOT introduced by this wave**, and finding that out was the point: the failure
+  appeared beside new work on the same card, and a `git stash push web/` bisect returned the
+  identical 881px with every web change removed. It also means the 「3834/3834」 recorded for the
+  R5/R6 commit was an over-read — counting pytest's result characters proves a run FINISHED,
+  not that it passed, because `F` and `E` are result characters too (LESSONS_LEARNED).
+- The AI-D48 cost term sits on its OWN subline rather than as a third segment of the
+  含匯兌總損益 line (which is what re-broke 768px while the gap above was still open), and a
+  ZERO is not rendered at all — an account that has never paid a rebate, margin interest or
+  broker fee has nothing to disclose there. `tests/e2e/test_kpi_trading_cost_layout.py` pins
+  both: the golden fixture books only `DEPOSIT`, so the non-zero path is exercised through a
+  canned `/api/dashboard` rather than by seeding money into the spec-17 payload.
+
+### Fixed — the export centre was congratulating the user (AI-D50)
+
+- **Five buttons that reported success and did nothing.** The 設定 → 匯出中心 rendered five
+  cards with a ⬇ glyph and a 「產生並下載」 button whose handler fired `toast('已排入產生佇列',
+  'ok')` — there is no queue — and downloaded nothing. All five endpoints (`holdings` ·
+  `ledgers` · `llm-usage` · `job-runs` · `tax-package`) had existed for months while the
+  tooltip still said 「等待 export endpoint」. Every card now goes through the same backend
+  reconciliation channel as the per-page 匯出 CSV buttons.
+  ⚠ **A button that reports success and does nothing is worse than a missing one**, and it is
+  invisible to a wiring sweep that asks only whether a control has a listener — v0.1.26 swept
+  2,287 controls and found 0 dead. `tests/contract/test_export_endpoints_have_callers.py` is
+  the guard that would have caught it: every `POST /api/export/*` route must have a real
+  frontend caller, and the 匯出中心 must call the download seam.
+  ⚠ It found a **second** orphan on its first run: `POST /api/export/ledgers`, the whole-ledger
+  zip, reachable only by curl. The first version of the test missed it because the same path
+  has a GET (「what would the zip contain?」) whose literal satisfied a substring search — GET
+  calls are now stripped before the search.
+- **年度稅務包 is reachable, and its year menu is derived.** R1 added the 申報用原始成本 column
+  (`realized_original` + its per-currency subtotal — the number that goes on a return) to a
+  package no page could ask for. A 稅務包 control now sits in the 帳本頁 export row beside the
+  ledger exports (owner ruling AI-D50; NOT the dashboard's 已實現損益 panel, which has no year
+  concept). The year options span 「最早一筆帳本」..今年 from `GET /api/db-stats` and default to
+  **去年** — a filing is filed for the year that closed, and defaulting to 今年 hands over an
+  authoritative-looking part-year package. ONE definition
+  (`web/export.js::fillTaxYearSelect`), shared with the 匯出中心, whose own copy was a
+  hard-coded `['2026','2025','2024']`.
+
+### Fixed — R2 follow-up
+
+- **The 含匯兌總損益 line vanished instead of explaining itself** (owner ruling 2026-08-25). B
+  is absent on any day a held symbol lacks a price, which is not rare, and a row that silently
+  disappears is indistinguishable from a feature that was never built. `fx_complete_return` now
+  returns an outcome (value + reason) in the same shape and for the same reason as
+  `XirrOutcome`, and the KPI band renders 「—」 plus the server's wording. The reason states two
+  things, and the second is the load-bearing one: why an earlier complete day is **not**
+  substituted — a B measured on a different date than A turns B − A into a plausible-looking
+  wrong number, which is the failure mode this decomposition exists to prevent.
+### Added
+- **AI 投資助手 — the prototype (W2).** The assistant's first surface: position-advice cards
+  that synthesize the owner's holding × technicals × the rule-signal engine × news × analyst
+  consensus into **建議與提點** — conditional evaluation scenarios with trigger conditions,
+  never a position size or an order (AI-D8).
+  - **「持倉建議與提點」** — a new `per_symbol` official preset, scheduled daily after the US
+    close and **enabled on creation** like every other pack member (AI-D12). Prediction is left
+    **free** (AI-D10): the card schema already requires a confidence whenever a prediction is
+    present, so "the data does not support a call" is a legitimate answer, not a forced number.
+  - **「持倉提點」** — the alert-triggered companion (AI-D5). When one of the six risk-alert
+    rules fires (AI-D11: 目標價 / 單一標的過重 / 匯率漂移 / 回撤 / 波動突升 / 共識下修 — the
+    data-health pair deliberately excluded, and `signal_*` transitions stay opt-in by design),
+    a card interprets what that alert means **for the position actually held**, on the ≤3
+    trading-day window. This preset is created **enabled** — the deliberate, scoped override of
+    the on_alert default-disabled convention (every hand-created on_alert task still defaults
+    off). Push (ntfy) stays off.
+  - **The drawer surface.** The symbol drawer gains an 「AI 建議」 section under 技術訊號: the
+    latest advice card for that symbol plus a 立即產生 button on the preset. It keys on
+    `preset_key`, never the (renamable) task name, and degrades to an honest note when the
+    preset is missing / disabled / the fetch fails — no dead button, no spinner that never
+    resolves. Two read fixes make it possible: `_insight_type_wire` now exposes `preset_key`
+    (it was stored but never served), and the existing fingerprint cache means a whole-task
+    re-run only pays for symbols whose inputs actually changed.
+  - **The two "moving-average cross" definitions are named apart** (AI-D2). `technicals.ma_cross`
+    (20/60) and the rules engine's 50/200 both reached the same prompt under the bare word
+    "cross"; the former is now `ma_cross_short` and both variable descriptors say their window,
+    so the assistant cannot quote one as the other.
+- **The fundamentals leg, for all three markets (W3, AI-D4 + AI-D13..D16).** The chips
+  variables were FinMind-only, so a US card was structurally weaker than a TW card. Three
+  providers now fetch fundamentals as a **union** — every enabled one writes its own
+  `external_snapshots` row (`(source, dataset, symbol, as_of)` was already the key) — and the
+  new per-symbol variable **`fundamentals_json`** assembles them as **one block per source**,
+  never merged and never averaged (AI-D14: the block key is the provenance; the prompt carries
+  the never-average red line). Capability + the key gate ride the providers' existing
+  `supports()` wiring, so a keyless Finnhub / Alpha Vantage simply writes nothing and raises
+  nothing until a key lands on the settings page (AI-D13).
+  - **Canonical 8 fields** (AI-D15): `pe_ratio` / `pb_ratio` / `eps_ttm` / `market_cap` /
+    `dividend_yield_pct` / `beta` / `roe_pct` / `revenue_growth_yoy_pct` — same names inside
+    every block; a field a provider cannot supply is absent, never fabricated. TW symbols also
+    get a `finmind` block mapped from the existing valuation snapshot (no double fetching).
+  - **yfinance leg, never `Ticker.info`** — ratios are derived at the fetch seam from the light
+    statement endpoints + `fast_info` (the `consensus_source` precedent), with the
+    honest-denominator rule (a negative-EPS PE is omitted, not stored negative). **Probe
+    verified 2026-08-18** (`scripts/probe_fundamentals.py`): 7 of 8 fields return for US, TW,
+    and MY — including a sub-RM1 MY counter; `beta` is the designed absence.
+  - **Cadence (AI-D16):** `fundamentals_daily` (09:20) runs yfinance + Finnhub over the whole
+    universe; `fundamentals_av_weekly` (Sat 09:40) runs Alpha Vantage over **held symbols
+    only** — its 25-calls/day free quota cannot survive a full-universe pass. The held set is a
+    portfolio replay result `pricing/` cannot compute, so the weekly job dispatches to a
+    registered api-side runner (the `signal_scan` / `alert_compute` pattern).
+  - The advice strategy advances to **v2**: a 基本面 section joins the card, with the
+    source-tagging and never-average rules spelled out. (Existing installs keep their v1 body
+    — the pack reuses a same-name strategy; use 重置為官方 or recreate the task to adopt v2.)
+    Variable count 34 → **35**, categories 10 → **11** (`web/vars.js` learned the new
+    category's label + order).
+- **The AI door reads a whole statement — transactions + dividends + cash in one prompt
+  (W4, AI-D3 + AI-D17..D21).** A real statement is mixed; the door used to admit only
+  transactions, so the other rows needed separate doors (four pastes, four vision calls) —
+  and "skip the awkward rows" is exactly how a ledger goes wrong. The extraction schema is
+  now a **discriminated union** (`rows: list[TxnDraft|DivDraft|CashDraft]` on a `kind`
+  literal — a dividend row missing `gross` fails at the parse boundary, with one retry,
+  instead of inside a builder) plus an **`unparsed` confession list**: FX conversions,
+  corporate actions, options, and anything the model cannot classify are surfaced in a
+  banner, never silently dropped and never forced into a kind.
+  - **Preview and commit go through the three EXISTING doors** (AI-D18): the drafts are
+    grouped by kind, rendered to each kind's canonical CSV (the same column constants the
+    templates are generated from), and previewed by each kind's whole-file builder — what
+    the preview priced and what `/api/import/commit` re-derives cannot diverge, by
+    construction. The cash door's pool probe is bound by the router and injected as the
+    **required** argument it is, so the withdraw guard runs on AI-extracted withdrawals
+    exactly as it does on the CSV and manual doors. No new endpoint, no new writer; undo
+    stays per-kind granular; the row↔line commit invariant holds inside each kind.
+  - **Prompt v6** (AI-D19): three explicit sections + one worked example per kind; the
+    cash-kind vocabulary is joined from `cash_kinds.py` at module level (the GICS-keys
+    precedent — a registry test now asserts every kind appears verbatim, so the prompt can
+    never drift from the door's allowed set). **`daytrade` finally teaches its semantics**
+    (only on explicit 當沖 wording — the debt W1 left) and **`short_sale` arrives with its
+    rule** (only on explicit 放空/融券/short wording — never inferred from an oversized
+    sell), riding the CSV to the ledger exactly as the column comment planned.
+  - **The preview renders three sections** (AI-D21): transactions / dividends / cash, each
+    with its own columns and checkboxes; a kind with zero drafts stays hidden. Cash rows
+    show the **server-owned Chinese kind label + an explicit ± sign** (＋入金 / −券商費用) —
+    the direction lives in the kind, and a mislabel reverses the pool by 2× with no error,
+    so the label is the guard. Transaction rows gain the 放空 chip beside 當沖.
+  - **Accuracy is now measurable** (AI-D20): `tests/golden/ai_extraction/cases.json` holds
+    38 synthetic cases (three kinds × three markets × the edge cases — 當沖 both legs, an
+    undeclared same-day round trip, declared shorts, DRIP, the MY net dividend, every cash
+    kind, zh kind aliases, mixed statement blocks, and four must-confess-unparsed rows),
+    guarded against rot by a deterministic structure/coverage test, and measured by
+    `scripts/ai_extraction_eval.py` — a manual live runner that reports field-level hit
+    rates with the cash-`kind` / `daytrade` / `short_sale` mislabel rates **listed
+    separately** (the only fields that move money silently). Thresholds pin to the first
+    baseline run, not before. Screenshot cases go through the owner's manual review; real
+    exports never enter the repo.
+  - The txn arm also gains **sibling awareness** (C1 extended to this door): a sell covered
+    by a buy earlier in the same paste no longer flags 賣超 against a position the same
+    batch is still building.
+  - **Senior-review hardening (two independent reviewers, five findings).** The parse
+    boundary now fails loud in BOTH directions: the drafts and `AiDraftList` are
+    `extra="forbid"`, so a mistyped optional money field (`with_hold` for `withholding`) or
+    a model regressing to the v5 `{"drafts": [...]}` shape raises at the boundary and takes
+    the one retry instead of silently dropping the statement's number — or the whole
+    extraction. (Behavior note: a model that habitually appends junk keys now degrades
+    loudly after the retry rather than being silently tolerated — deliberate.) The v6
+    prompt's cash one-shot example carried a raw newline inside a JSON string — invalid
+    JSON in the model's strongest anchor; all three example blocks are now machine-parsed
+    by a test. And the per-kind commit loop **settles before it reports**: a mid-loop hard
+    failure (a kind 500s after another kind already wrote) used to strand the written kinds
+    on screen looking uncommitted — no section retirement, no ledger refresh, and a retry
+    that re-posts them; the loop now finishes the settled kinds first, then reports the
+    failure with the remainder retry-able.
+- **The scoreboard can now score all three prediction metrics (W5, AI-D7 + AI-D22..D26).**
+  Two of the three quantitative prediction types could never be scored: `_measure_actual`
+  returned `benchmark_return_pct=None` for `relative` and `vol_change_pct=None` for
+  `volatility`, so every such card deferred five times and died `undetermined` — never a
+  hit, never a miss, and excluded from every hit-rate stat (the scoreboard looked clean
+  partly because the hard-to-score cards were invisible to it). The scorers themselves
+  were already written and tested; what was missing was the measurement seam feeding them.
+  - **`relative` replays the benchmark** (AI-D22/D23): the card's symbol maps through a
+    fixed server-side table (TW→`0050`, US→`sp500` — the series `history_daily` already
+    refreshes into `prices`) and the benchmark's create→due return is measured with the
+    same ±14-day tolerance as the symbol's own legs, both legs in their local currencies
+    (per market they share one by construction). An MY card, an unregistered symbol, or a
+    missing benchmark series degrades to `pending_data`, never a forced miss.
+  - **`volatility` compares two fixed 30-day windows** (AI-D24): realized vol over the 30
+    trading days ending at the due date vs the 30 ending at the create date, over the
+    split-re-expressed close series (`series_in`, so a split inside the window is not
+    mistaken for a vol spike), using the same `annualized_volatility` estimator the alert
+    inputs already use. A flat regime call now has a fair chance: the flat band for this
+    metric is **±5%** (AI-D25) instead of the shared ±0.5%, which a 30-day estimator
+    exceeds on noise alone. A zero baseline vol or insufficient history → honest None.
+  - **The scoreboard rows now tell unscorable from hit** (AI-D26): `renderScoreRows` never
+    read `status`, so a `pending_data` / `undetermined` row (miss=0) painted as
+    "✓ 命中" — the page reported a better record than the ledger held. Rows now render a
+    status chip (待資料 / 未定) unless the evaluation actually scored. Portfolio-scope
+    quant cards stay narrative-only (the `:421` None branch), by ruling, until W7.
+- **Signal history + the event-study backtest (W6, AI-D2 + AI-D27..D32).** The rules
+  engine had no memory: `signal_states` kept one row per symbol (latest state only), so
+  "how did TechScore get here" was unanswerable and the backtest the blueprint's D3a gates
+  indicator expansion on could never run — a deadlock (no history → no backtest → no
+  indicators). This wave builds the memory and the study, and lights the last dark prompt
+  variables (36/36 live).
+  - **`signal_history` — one row per symbol per price-data date** (AI-D27/D28): the full
+    state vector (four rule states + scores, tech_score, evaluation_context,
+    params_version), keyed `(symbol, as_of)` on the DATA date so a holiday re-scan
+    overwrites the same row idempotently. Depth comes from **replay** — the rules engine
+    is a pure, params-stamped function, so the scan re-evaluates each missing historical
+    date through the same `_read_series` assembly and rebuilds exactly the row it would
+    have written that day (years deep on the existing 5y price backfill). Forward
+    maintenance is the daily scan's missing-set fill, which also self-heals a later
+    deeper price backfill, a filled provider gap, or an aborted first backfill. The head
+    row rewrites only on real change (compare-then-skip), so a re-scan is a provable
+    no-op, `updated_at` included.
+  - **The corporate-action seam invalidates BOTH derived tables** (a pre-existing hole
+    this wave's seam would have inherited): a restated price basis makes every stored
+    evaluation wrong, and the stale `signal_states` comparison row could fire transition
+    events for a restatement that is not a market event. `reconcile_split_prices` — the
+    single wrapper all five corporate-action mutation doors call — now deletes both
+    tables' rows for the affected symbols; the next scan rebuilds the history and
+    silently reseeds the state with zero events. Instrument purge cleans
+    `signal_history` too.
+  - **The event study** (`portfolio/backtest.py`, pure Decimal, no conn): rule score-sign
+    changes with hold semantics + composite TechScore crossings of the EXISTING 65/35
+    state bands (AI-D32 — one threshold vocabulary; a second 70/30 would be the AI-D2
+    two-definitions defect), forward-return distributions at +20/+60/+120 trading days
+    vs the same symbol's unconditional distribution, local currency, over the
+    split-re-expressed full-span series. The guards are the point: a cell with n<8
+    answers 「不足以判斷」 with the count shown and the numbers withheld; overlapping and
+    right-censored events are counted and disclosed; nothing is annualized.
+  - **All 36 prompt variables are live** (AI-D31): the two spec-04 stubs keep their
+    DECLARED meaning — `backtest_json` serves the global confidence-bucket calibration
+    bins + overall hit rate, `calibration_gap_json` a rolling 20-evaluation signed gap
+    (actual − claimed, gated unavailable below 8 scored rows), both computed from
+    `insight_evaluations`; the event study rides the new per-symbol
+    `signal_backtest_json` (category `price`, external-fed like `rule_signals_json`).
+    Official template prompts are unchanged — adopting the new variables into prompts is
+    a W7 corpus-quality decision.
+- **The assistant, complete — cards cite their own evidence, and the scoreboard answers
+  "should I listen" (W7, AI-D33..D37).** W6 built the evidence (signal history, the event
+  study, the calibration variables); W7 puts it on the cards and on the scoreboard. The
+  LLM only narrates — every number is computed locally (the programme's first rule).
+  - **The advice card (v3) cites its backtest and anchors its confidence** (AI-D33):
+    `signal_backtest_json` (this symbol's event study), `backtest_json` (the model's own
+    global calibration bins), and `calibration_gap_json` (its recent signed gap) join the
+    prompt under a strict citation law — verbatim numbers, an n<8 cell is called
+    sample-insufficient and cites nothing, every citation carries the sample count and the
+    same-window baseline. The confidence-anchoring law caps a card's stated confidence at
+    the matching bucket's actual hit rate + 5 (cap 70 when the bucket has n<8) and a
+    negative rolling gap lowers it by that magnitude. The checkup card (v2.6) cites the
+    event study as well; the weekly report (v2.2) narrates the AI's own track record from
+    the two portfolio-scope calibration variables (AI-D34). No schema change, and no
+    code-side confidence clamp — the anchoring is prompt law, auditable in the body.
+  - **Portfolio-scope predictions are scored now** (AI-D35, closing AI-D26's deferred
+    question): a portfolio card's `price_change` prediction is measured by the existing
+    chain-linked TWR index over the create→due window — flow-adjusted, so a mid-window
+    deposit never reads as a gain (a disproof test watches exactly that). Thin or missing
+    trend data stays an honest `pending_data`, never a fabricated miss.
+  - **The scoreboard is a decision-quality dashboard** (AI-D36): `/api/ai-score` (same
+    route) additionally serves the rolling calibration gap (ONE definition shared with
+    the prompt variable), each task's sample-gate progress (n vs its min_samples), and a
+    backend-computed **trust tier** per task — 樣本不足 / 早期 / 可參考 — synthesizing hit
+    rate × calibration error × sample count into the page's single vocabulary. The page
+    renders the tier as a stamp and the gap as a fifth stat card; it computes nothing.
+    `calibration_bins` now quantizes ROUND_HALF_UP in pure Decimal (the float/HALF_EVEN
+    path was a pre-existing second rounding vocabulary on the same surface).
+  - **Official template upgrades reach existing installs** (AI-D37): the strategy-prompt
+    settings card shows a 「同步官方 vX」 button when the row's name matches an official
+    template and its body has drifted; confirming (an explicit danger dialog — custom
+    edits are lost) overwrites the body through the existing from-template endpoint's new
+    replace mode, and every task bound to that strategy id runs the new body on its next
+    pass. A renamed or archived row answers 409 — a replayed request cannot overwrite a
+    row the owner moved.
+- **Corporate actions — SPLIT / EXCHANGE / SPINOFF** (spec
+  `docs/spec/2026-08-06-corporate-actions.md`; W0–W10 on `feat/corporate-actions`, **not yet
+  released**). A share count that changes without a trade previously had no representation, so
+  the later sell of a split position tripped the 賣超 guard and **permanently discarded that
+  position's cost basis**. The ledger now records the event, the replay applies the ratio as two
+  positive integers (multiply first, divide last), and the drawer's reconciliation footer gains
+  a `＋公司行動` term so the correction is visible rather than merely applied. Entry lives at
+  three doors — the 賣超 confirm dialog offers 補登公司行動 **first**, the drawer offers it beside
+  a ⚠ 對帳不一致 footer, and the ledger page gains a 5th tab — all sharing one form whose
+  always-on preview states **成本不變 ✓**. Prices carry a `close_raw` / `split_basis` pair so a
+  split's re-expression is idempotent and reversible, and the accounting manual gains
+  **§4.4 公司行動** (zh authority + en mirror) with a worked example and an oracle anchor per
+  formula.
+
+  **The feature's code is complete.** §7.6's full enter-through-the-UI e2e landed with the four
+  entry-surface defects it surfaced; the e2e harness flake that stopped the suite being called
+  green was root-caused and fixed; and **D46 (2026-08-12) unblocked §10.5** — the acceptance gate
+  runs against the **simulated** corpus (D43) rather than waiting on the owner's real statements,
+  and it PASSes there while FAILing on a corpus one action row short. What that proves is stated
+  precisely rather than rounded up: the feature **accepts the shape** of the owner's ledger. It
+  does not prove the owner's *actual* cost basis reconciles — only real figures can, and that run
+  is now a post-release verification rather than a gate. Decisions: **D40 and D41 ratified**
+  2026-08-11; **D42** (W6c in scope), **D43** (simulated corpus), **D45** (D36 retired) and
+  **D46** are the owner's own rulings; **D44 was the last open one and is now RULED**, together
+  with **D47** and **D48** which the owner gave with it (2026-08-15) — see below. A single
+  prose summary here would drift from the spec within a week, which is the failure this release
+  spent an audit correcting, so the detail stays in §8's decision table and the commits.
+
+- **6th CSV import kind — cash movements (`kind=cash`).** 入金 / 出金 / 期初資金 / 折讓款, with the
+  foreign-credit acquisition cost `acq_home_amount` — the **amount**, never a rate (spec F1: a rate
+  is an average, and a rate *column* would put a rounded average into a file that gets re-read,
+  re-edited and re-imported). Omitting the column was the tempting choice and would have been the
+  wrong one: a bulk import is exactly how a foreign pool gets funded, so every bulk-imported foreign
+  credit would have been permanently basis-less, and `covered_ratio` scales the **whole** foreign
+  exposure including stocks (F3), not just the cash leg. Two soft advisories, both CSV-only because
+  the manual door has no preview seam: a re-imported duplicate (a cash movement has no natural key,
+  so a re-upload books every amount twice silently) and a foreign `WITHDRAW` that is probably an
+  unrecorded 換匯 (N1) — named, never coerced, because a genuine foreign withdrawal is legitimate
+  and the importer cannot tell them apart. The whole file is one batch, or the first import into a
+  fresh ledger would reject every withdrawal it contains.
+
+- **Broker-statement converter — Charles Schwab (P1a).** `scripts/schwab_convert.py` turns a raw
+  Schwab transaction export into this app's own import CSVs, offline. All the logic lives in
+  `portfolio_dash/data_ingestion/broker/` (`ir` · `schwab` · `grouping` · `reconcile` · `registry`)
+  so it is under `mypy --strict` and the regression suite; the script is only a command line
+  around it. The classification unit is the **`(action, description)` PAIR, never the action**:
+  one observed broker action carries **14 distinct meanings**, and its two largest sit on opposite
+  sides of the keep/drop line — 145 rows of dividend withholding tax against 126 null journals —
+  so an action-keyed importer either deletes the tax or keeps the phantoms, and no arithmetic
+  recovers either. An unmapped pair is a **hard error** (rule 7): the ground-truth build this was
+  lifted from ended its classifier with a catch-all `return OPT_ADJUST`, which would have booked
+  every future broker string as an option adjustment and dropped it out of every equity figure
+  without a word.
+
+  Four transformations exist in the shape they do because a plausible simpler version was measured
+  against a real 1,375-row export and found to destroy data. Suppression is **classification
+  first, arithmetic as a veto**, keyed on `(date, symbol)` and never across symbols — grouping by
+  date alone dropped 180 rows of which **8 were real corporate actions**, because a 1-for-1 ticker
+  exchange nets to zero in *both* cash and shares and is therefore arithmetically indistinguishable
+  from an internal journal. The zero-sum veto covers shares as well as cash, or a 3-for-1 split
+  (−85 / +255 shares, $0 / $0) passes an amount-only check and vanishes. A reinvested share count
+  is **derived from `amount / price`**, not read off the row: 125 of 227 real reinvest rows fail
+  `quantity × price == amount`, and the printed quantity is a rounded view whose error accumulates
+  in one direction across a multi-year DRIP history. Pre-history positions are found by the
+  **union** of two detectors (running-balance minimum ∪ first-event-is-a-sell-or-reinvest) because
+  each misses what the other catches, and a **third** case — already short before the window,
+  balance never negative, first event a buy — is documented as undetectable rather than implied
+  away.
+
+  **`broker/reconcile.py` is the point of the package.** Every blocking check re-measures from the
+  original rows rather than re-reading the transformation's own output: dropped groups are re-added
+  leg by leg (suppression *asserts* its zeros without ever summing them), trades are re-derived
+  from `quantity × price ± fees`, and cash and per-symbol shares are conserved end to end. Blocking
+  and advisory are split on a stated line — blocking means *our own transformation* invented or
+  destroyed money, and refuses the **whole** batch; advisory means rows that will not be written,
+  named individually by `file:line`, because an export legitimately contains option legs and
+  positions older than its window and a gate that rejected those would be switched off within a
+  week. Two ratios are deliberately **left blank** for the owner rather than derived: a one-leg
+  split states only its delta, and replaying the file to recover the ratio was implemented, then
+  measured on the two real one-leg splits, and **removed** — it produced `4:1` for one (right) and
+  `109:24` for a 3-for-1 (wrong, and wrong in the silent way, because that position predates the
+  export and the replay cannot know it is incomplete).
+
+  Privacy is structural, in `verify_corporate_actions.py`'s terms: no path has a default, **stdout
+  carries only labels, integer counts, issue codes and masked symbols** (held by a test that greps
+  its own output for a decimal point), and the detailed report goes to a file inside `--out`, which
+  already holds the converted ledger. `scripts/privacy.py` now owns the symbol mask and the Windows
+  UTF-8 stdio fix for both scripts — a privacy control with two copies is one copy short of a leak.
+  The regression corpus (`tests/golden/broker/`, generated by `scripts/gen_broker_corpus.py`) is
+  synthetic, committed, and its output is re-parsed through the **production** preview builders, so
+  a column the importer would reject fails here rather than on the owner's ledger. Workflow, the blocking-issue table and the paste-safety rule are written up in `docs/reference/broker-import.md`.
+
+- **Three cash-movement kinds — `INTEREST` / `INTEREST_EXPENSE` / `BROKER_FEE`**, excluded from
+  XIRR (owner ruling D1=A, 2026-08-13). Adding them was **not** adding enum values: three places
+  wrote the debit test as *"WITHDRAW vs everything else"*, so a broker fee would have **increased**
+  the cash balance and been counted as an unbased foreign-currency acquisition, dragging
+  `covered_ratio` down on a pool that had lost nothing. `shared/cash_kinds.py` now holds one table
+  classifying every kind on **two orthogonal axes** — cash direction and whether it is an FX
+  *acquisition* — and `INTEREST` is the row proving one boolean was never enough: a **credit that
+  is not an acquisition**, because income arising inside the pool inherits the pool's average
+  exactly as sale proceeds and foreign cash dividends already do. Treated otherwise, a USD account
+  that never converted a cent would report an incomplete basis merely for being paid interest, and
+  a false alarm over the whole foreign exposure is worse than none. The overdraft guard stays
+  WITHDRAW-only: a withdrawal is an intention worth blocking, a fee is a recorded fact, and a
+  margin account legitimately runs negative.
+
+- **US cash dividends (P1b).** `drip_us` accepts `CASH` as well as `DRIP`. The same US position
+  pays plain cash in some quarters and reinvests in others, so every real cash payout was being
+  rejected row by row as a `dividend_type_mismatch`. No accounting change was needed — a `CASH`
+  row is in `CASH_DIVIDEND_TYPES` and reduces `adjusted_total` like any other (D35) — and that
+  claim is only worth something because the phase-1 oracle now recomputes such a position and
+  agrees. The manual dividend form gains a CASH/DRIP switch, and its withholding field is
+  **overridable** instead of locked to `gross × 0.30`: real broker cent-rounding does not match the
+  computed product, and a read-only field that is wrong forces the owner to lie somewhere else.
+
+- **Import provenance — `import_batches` + `import_batch_id` / `source_row_hash`** on the five
+  append-only ledgers. Re-importing the same export no longer duplicates it, and a batch can be
+  deleted precisely. The batch is a property of the **file** (name + sha256); the row hash is
+  derived from the row's own content plus its **occurrence ordinal** among identical rows, because
+  two identical $50 deposits on one date are a real statement pair and a set-based hash would
+  silently merge them. Stated limitation: the ordinal is per-file, so the same row arriving in two
+  different exports reads as a duplicate — right for five overlapping real exports, wrong for a
+  genuinely separate movement, and the manual form is the escape hatch.
+
+  The import banner now **says** when rows were already held. Re-uploading a file the ledger
+  already has used to read 「成功 0 筆・跳過 0 筆」 — true, uninformative, and the reading a user
+  takes from it is *the upload failed, try again*. A duplicate is neither written nor skipped
+  (skipped means the user deselected it), so it gets its own words. ~~⚠ Known gap: the batch list
+  and the undo exist as API only.~~ **Closed below.**
+
+- **The broker converter has a door in the app** — 輸入 → CSV 匯入 → 來源「券商對帳單」. Drop the
+  broker's raw export, read one report, press one button. `POST /api/broker/convert` runs the
+  **same** `data_ingestion/broker/convert.py` the CLI runs (the row-building moved out of
+  `scripts/` so there is one implementation and not two that disagree about money), and returns
+  CSV **text** which the page feeds back through the ordinary `/api/import/*` path — so the
+  converted rows meet every validation a hand-made CSV meets, inherit the duplicate detection,
+  and land in the same undoable batches. Nothing is written server-side and nothing is stored; a
+  blocking reconcile issue withholds **every** file rather than shipping them behind a flag.
+  The CLI stays, unchanged and byte-identical, for anyone who would rather the statement never
+  left the laptop. What the file genuinely does not determine — a one-leg split's ratio, a
+  pre-history position's cost — is asked for as **form fields** instead of a `*_TO_COMPLETE.csv`
+  to open in a spreadsheet, with the ratio as two integer boxes (D14: a decimal ratio replays as
+  a wrong share count that looks right). Blank stays blank and the result says which rows were
+  left out.
+
+- **最近匯入, with 復原** — the import-batch list and its undo now exist on the page (they had
+  been API-only). This ships in the same change as the one-click import deliberately: an easy way
+  to load five years of broker history into a ledger, with no way to take it back, is a button
+  nobody should press. Visible for ordinary CSV imports too.
+
+### Fixed
+- **The assistant cited its own record — in the wrong unit, from the wrong cell, at the wrong
+  confidence (W7.1, AI-D38).** The first live run of the v3 advice cards on the demo produced
+  three output defects with correct producers behind all of them, so all three fixes put the
+  semantics next to the numbers rather than adding a validator. **(1) Unit.** Every
+  `mean`/`median`/`pct_positive` in the event study is a FRACTION, a fact that lived only in
+  the variable registry's `desc` — UI documentation the model never sees. One batch of cards
+  rendered `0.1336` as 「+0.1336%」 (the true value 100× smaller), as `+0.0640 USD`, as a bare
+  `0.1053`, and correctly as `+9.61%`. `signal_backtest_json` now carries a `units` block with
+  a worked example, and both citing templates state it. **(2) Substitution and fabrication.**
+  A cell below the sample gate emits no mean at all; two cards printed the same-window
+  BASELINE (the unconditional average over every trading day) as that signal's event return,
+  and one invented a number present nowhere in the payload. The citation law now forbids both
+  by name. **(3) The ceiling.** Asking the model to walk a bins table and apply a three-step
+  conditional mid-generation produced 0 of 13 compliant cards; `scoring.confidence_ceiling`
+  computes the largest self-consistent value once and ships it as
+  `backtest_json.confidence_ceiling`. **AI-D33 stands** — nothing clamps what the model
+  writes. Also: `calibration_gap_json` gains a plain-language `reading`, because the weekly
+  card read a −0.466 gap as 「低估自身表現」 (the opposite) with the sign convention stated in
+  the same section.
+- **W6 post-ship review (three LOW findings, no HIGH/MEDIUM across three lenses).** The
+  `signal_backtest_json` producer rebuilt the corporate-action index per symbol per run —
+  `_per_symbol_ctx` already threads a caller-built `actions` (trap #21) but never passed it
+  in; the index is now built once per request and threaded through `_external_vars`
+  (a required argument — forgetting it is a TypeError, not a silent re-read).
+  `_read_series` briefly returned a third value (the last price date) that no call site
+  consumed — reverted to the 2-tuple rather than leave a decoy that invites a future reader
+  to treat it as load-bearing. And an honest limitation is now documented where it lives:
+  a provider *revision* mid-series (a corrected close on an already-stored date) leaves
+  downstream `signal_history` rows stale — the missing-set rule only fills absent dates;
+  the manual remedy (`delete_symbol` + rescan) is named in the module docstrings.
+- **The AI input door showed one tax and wrote another.** `AiDraft.daytrade` reached the
+  preview's `TxnInput`, so a TW same-day round trip was priced at the 當沖 rate of 0.15% — but
+  the commit-ready CSV the same function emitted had no `daytrade` column, and
+  `/api/import/commit` **re-derives its own preview from that CSV** ("the preview's answer is
+  advisory, this one writes"). The row was therefore written as an ordinary sell at 0.3%,
+  **double what the screen had just shown**, with the difference riding into `original_total`
+  as cost basis. Measured on the disproof test before the fix: previewed 900, written 1800.
+  The column already existed in `TRANSACTION_COLUMNS` and in `OPTIONAL_COLUMNS`; it was simply
+  never emitted. Two neighbours were checked and are **not** the same bug: `is_etf` is dropped
+  too but the instrument registry wins at the fee seam in both paths, and an unregistered
+  symbol is a hard issue that never commits — so there is no reachable divergence; `short_sale`
+  is absent from the draft schema entirely, which is a gap awaiting its prompt rule, not a
+  disagreement between two paths.
+  - **The flag is now visible, because it now has teeth.** While `daytrade` was being dropped
+    it was harmless whatever the model inferred; carrying it to the ledger makes a wrong
+    inference a money error, so the AI preview row gains an amber 當沖 chip next to the
+    direction chip. A flag the reader cannot see is a flag the reader cannot correct. What the
+    model should *infer* is a separate question and is deliberately not answered here: the
+    prompt has never taught it when to set the field, and changing that without the extraction
+    accuracy corpus would be a guess dressed as an improvement.
+  - ⚠ **A second defect found on the way, worse than expected:** the same generator did no CSV
+    quoting at all — its own docstring said so — while the prompt *asks* the model for a
+    free-text `note`. One comma did not merely shift the columns: the row parsed to more fields
+    than the header declared, `csv.DictReader` filed the surplus under a `None` key, and
+    `build_transaction_preview` raised `AttributeError` on its first line, **outside** the
+    try/except that catches malformed rows. So the commit route did not degrade, it crashed —
+    on text an LLM was invited to write. Now emitted through `csv.writer` (QUOTE_MINIMAL, so
+    comma-free values stay byte-identical); CR/LF in a note are still collapsed to a space,
+    because quoting would faithfully preserve a newline and the frontend commits only the
+    checked rows by splitting this text on `\n` and taking data line `index + 1`.
+
+- **A pasted JPEG went to the vision model labelled as a PNG.** The intake door sniffed a
+  screenshot's real format by magic bytes to decide whether to accept it, and the transport
+  then hardcoded `data:image/png` for every payload — the app identified the type correctly and
+  told the provider something else. Lenient providers sniff the bytes and shrug; a strict one
+  rejects it, and the failure surfaces as a generic vision/parse error nowhere near the cause.
+  One sniffer now serves both (`shared/image_types.py`), so "is this an image?" and "what do we
+  call it?" can no longer be answered differently. An unrecognised payload still falls back to
+  PNG rather than raising: the door rejects non-images before this point, so reaching it means a
+  direct caller skipped the check, and a wrong label beats no message.
+
+- **The cash ledger was writable and invisible: no export, no ledger tab, no printed
+  section.** It became the 6th ledger on 2026-08-13 and every surface that enumerates ledgers
+  was left at five, so a round trip through the export silently dropped rows the import had
+  just accepted, and the page that owns the ledgers had no way to show them. Closed by one
+  registry field (`export_kind`), which carried the zip, the single-ledger CSV, the export
+  centre's copy and the printable report with it — the payoff for the previous entry's work.
+  - **`GET /api/ledgers/cash`** feeds the new 資金收支 tab, in the same shape as its five
+    neighbours so the pager, the account/date filters and the CSV button need no special
+    case. It sends a **`signed_amount`**: amounts are stored unsigned with the direction in
+    the kind, so a page rendering the raw figure would print a broker fee as money arriving,
+    and `web/` may not compute money. The printed report's new section signs its total the
+    same way.
+  - ⚠ **A defect found on the way, already live:** `export/cash_statement.py` kept its own
+    four-entry label map, and the three kinds added on 2026-08-13 never reached it — so a
+    Chinese statement printed 利息 as `interest` and 券商費用 as `broker_fee`. Nothing failed,
+    because a `.get(kind, kind)` fallback is exactly what turns a missing label into
+    plausible output. One `CASH_KIND_ZH` in `shared/cash_kinds.py` now feeds every consumer.
+  - The tab↔export mapping is asserted from outside the page source
+    (`tests/contract/test_ledgers_cash_tab.py`). `trades.html`'s own comment already warned
+    what an omission costs — *"a 5th tab that is not here silently exports the transactions
+    ledger under the corporate-action tab"* — a wrong FILE under a right-looking button, with
+    no error to notice. Proven by removing the pair and watching it go red.
+
+- **A target weight stranded itself on a dead ticker after an EXCHANGE.**
+  `target_weights_config` is a single-row JSON keyed by SYMBOL STRING and nothing re-keyed it,
+  so a merger or rename left the owner's target filed under a symbol the ledger no longer
+  holds — unmeetable, and visible only as a permanent `rebalance.excluded_with_target` entry,
+  one indirection away from the event that caused it. **This is D47's shape, missed when D47
+  shipped**, and the reason it was missed is worth keeping: a weight is *config that nothing
+  recomputes*, so there is no second number for it to disagree with. No reconciliation goes
+  red, no replay complains. The alert band at least fires.
+  - **Value unchanged, source cleared, destination never overwritten** (D47 parity — that
+    number is the owner's judgement about the destination security and no merge rule could be
+    right). ⚠ In that collision case the source's weight **stays stranded**, deliberately:
+    `excluded_with_target` is the honest place for an unsatisfiable target, and silently
+    deleting a value the owner typed is worse. **SPINOFF does nothing** — the child is a
+    different company and carving the parent's target between them needs an allocation rule
+    nobody has given. A SPLIT is immune either way: a ratio is unitless.
+  - Called from `api/` at **both doors**, not from the row writer where the band move lives:
+    `data_ingestion -> strategy` is not an authorised edge (`architecture.md`), and
+    re-deriving the weights format on that side would make it a second owner. Two call sites
+    means two chances to wire only one, which is this defect's own shape — so each door has
+    its own test, and each was watched to fail with the call removed.
+
+- **Nine sentences said the app had four ledgers. It has six, and exports five.** The ledger
+  registry removed hand-maintained ledger enumerations from the *code* and never reached the
+  *copy*, so when corporate actions became the 5th ledger the words stayed put: the export
+  centre told the owner they were about to download four CSVs while the route built five; the
+  帳本記錄 panel printed a count beside a tab bar showing more tabs than the count; and the
+  report button read 「四帳本＋期初庫存」, which names five things over a report that had four
+  sections and counts 期初庫存 twice. **A count typed into a sentence is not wrong in any way a
+  type checker, a route test or a golden payload can see** — it is only wrong against a fact
+  stated somewhere else — which is why the fix is structural rather than a set of better
+  numbers: `GET /api/export/ledgers` serves the list from `EXPORT_KINDS` for the one card that
+  genuinely needs it, and every other site stops stating a count. Adding a 7th ledger now
+  updates that sentence with no edit to the frontend at all.
+  - ⚠ **One of the nine was not a count but a wrong claim.** The 重算 dialog said it rebuilt
+    from 「期初庫存、交易、股利、換匯」. `LedgerBundle` has no `fx_conversions` field —
+    `build_book` cannot see the FX ledger — and the one ledger it *does* replay, 公司行動, was
+    missing from the sentence. So the dialog promised a check it never performed, on the ledger
+    a user is most likely to want checked after typing a rate by hand. The copy now names what
+    is actually replayed and says the other two are record-only. **Deliberately not "fixed" by
+    widening the endpoint:** `forex/pools.py` and `portfolio/cash.py` cannot raise, so replaying
+    them would be a verification that can never fail — which is a progress bar, not a check.
+  - The printable 帳本報告 gained its **公司行動** section (it had four sections out of six). It
+    is the one section with no money total, and that is the point: an action moves shares
+    without moving cash, so a 「合計」 line would have to be zero or invented. The ratio prints
+    as **two terms**, because a quotient on a reconciliation page turns 7-for-1 into 0.142857.
+  - `KIND_ZH` moved to `shared/corporate_actions.py` so `export/` could use it without importing
+    `api/`. ⚠ Recorded there, not fixed: `web/detail.js` holds a **third** copy that disagrees —
+    it labels SPINOFF 「分割」, which is the backend's word for SPLIT. Two different kinds under
+    one word, on two screens of the same app.
+  - Two guards, each **watched to fail** before being kept: no file may state a ledger count
+    (`tests/contract/test_ledger_count_not_hardcoded.py`), and the endpoint, the zip's members
+    and the report's section count must all equal the registry
+    (`tests/contract/test_export_ledger_list.py`). The first one found a **ninth** site on its
+    first run — inside `ledger_registry.py` itself, the file whose existence is the argument
+    against counting ledgers by hand. The zip's existing member test could never have caught
+    any of this: it asserts a **subset**, and a subset assertion cannot see an addition.
+- **A CSV import now validates each row against the ledger PLUS its own siblings.** Measured on a
+  synthetic broker export 2026-08-12: **7 of 47** transaction rows raised 賣超 whose covering buy
+  was three lines above them in the same file. The numbers end up right if the owner confirms —
+  which is the harm, because 賣超 is the **one** confirmation in this system whose acknowledgement
+  permanently discards a cost basis (the STICKY rule), so every false one trains the owner to
+  click the dialog that must stay frightening. `cash_import.py` had named this class and fixed it
+  a release earlier ("**The whole file is one batch** … the E1a class of failure"); the trade door
+  never got the `batch` argument. ⚠ The fix is in the **share walker**, not in `validate.py`: the
+  obvious version adds the siblings to the returned count and is corporate-action-*unaware* about
+  them, so a sibling buy of 100 before a 4-for-1 split would meet a later sell of 400 as 100 — the
+  split-then-sell cascade the corporate-action feature exists to prevent, reintroduced through the
+  import door. One test fails on that version and only on that version.
+  The same change hoists **one** `ActionIndex` per file instead of building one per row (spec trap
+  #21, live on this door): 1,374 fewer full reads of the action ledger on the owner's export.
+
+- **A corporate-action CHAIN imports in one file, instead of failing silently.** A SPLIT whose
+  shares arrive from an EXCHANGE earlier in the *same* file was hard-rejected
+  `no_position_on_action_date`, because the importer built its `ActionIndex` from stored rows
+  only. **Both of the owner's real chains have that shape** (a de-SPAC then a rename; a de-SPAC
+  then a reverse split). The failure was invisible: the row landed in `skipped` and the import
+  reported success while the share count stayed wrong by the whole ratio. A row still cannot
+  justify **itself** — the walk's cut excludes the action being validated by the ordering rather
+  than by a rule anyone has to remember, and the paired test proves a lone SPLIT onto an empty
+  position is still refused.
+
+- **「跳過」 no longer means two different things.** A row the caller deselected and a row the
+  importer **refused** shared one counter, so an import that dropped 3 of 5 corporate actions
+  announced 「成功 2 筆・跳過 3 筆」 — read by everyone as *I didn't tick three*. `rejected` is now
+  its own bucket and carries each row's own reason verbatim; the banner says 「擋下 N 筆」, explains
+  that this is not a deselection, and stops clearing the paste box on a run that had refusals.
+  Additive and only when non-zero, so the other kinds' payloads are byte-identical.
+
+- **The corporate-action import template no longer contradicts itself.** Its EXCHANGE moved the
+  whole AAPL position out on 2026-06-02 and its SPINOFF then carved cost from AAPL on 06-03 — not
+  an enterable pair. It read as valid only because the importer could not see a row's siblings;
+  the moment it could, the SPINOFF was correctly refused. The example was wrong, not the verdict.
+
+### Changed
+- **ECharts 5.5.0 is now self-hosted** (`web/echarts.min.js`), so a `cdn.jsdelivr.net` outage
+  can no longer take the charts down (owner ruling 2026-08-12). The webfont deliberately stays
+  on Google's CDN: `--font-ui` / `--font-num` already end in a generic family, 9 of 18 pages
+  never request the font at all, and the e2e suite runs the whole app against an EMPTY Google
+  Fonts stylesheet — a font outage is cosmetic and continuously tested, where a chart-library
+  outage is not.
+  - **Four load sites, not three.** `index.html`, `insights.html` and `settings.html` carry a
+    parser-blocking `<head>` tag each; the fourth is a **runtime-injected** copy in
+    `web/shell.js::pdEnsureDrawer`, which lazily loads the library on **every** page when the
+    symbol drawer is first opened and which no HTML grep finds. It had **zero** browser
+    coverage (every drawer e2e reaches the drawer via `/index.html`, where `window.echarts`
+    is already set, so the load branch never ran); `tests/e2e/test_echarts_selfhosted.py` now
+    opens the drawer from `/instruments.html` and covers it.
+  - **Pinned artifact, cross-witnessed.** `scripts/vendor_echarts.py` (stdlib only — no Node,
+    no bundler) downloads the file from **jsdelivr AND unpkg**, requires the two mirrors to be
+    byte-identical, and requires
+    `sha256 = 42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946`
+    (1,029,203 bytes) before writing anything. The pin lives in
+    `tests/contract/test_vendored_assets.py` and the script imports it, so there is exactly one
+    machine-readable copy. Apache-2.0; provenance and the upgrade procedure are in
+    `docs/reference/vendored-assets.md`.
+  - **`.gitattributes` is new, and load-bearing.** This repo is developed with
+    `core.autocrlf=true`, and a minified bundle has no NUL bytes, so git classifies it as text
+    and rewrites LF → CRLF on **checkout**. Measured before the fix: the committed file checks
+    out as **1,029,248 bytes** with 45 conversions and a different digest — on a file nobody
+    edited. It still *runs* (JS tolerates CRLF), so nothing but the pin would have noticed, and
+    the pin would have failed on every fresh Windows clone while passing on the Linux host.
+    `*.min.js -text` fixes it in both directions, and a test fails the build if the rule is
+    removed — otherwise the symptom is a size mismatch whose suggested remedy (re-run the
+    vendor script) leads straight into a loop.
+  - **Flat path, not `web/vendor/`.** `scripts/stamp_asset_version.py` and
+    `tests/contract/test_static_cache_discipline.py` share a regex that matches bare relative
+    filenames only (`[A-Za-z0-9._-]+\.(?:js|css)`), so a nested path would be invisible to both
+    the `?v=` stamper and its guard. Flat keeps the asset inside the existing cache discipline
+    instead of carving out an exception for it.
+  - **Accepted cost.** The library is now served by the app: **1,029,203 bytes** on the first
+    load of the three chart pages and on the first drawer open of each other page, instead of
+    from jsdelivr's edge. `_NoCacheStaticFiles` sends `Cache-Control: no-cache`, so subsequent
+    loads revalidate to a 304 rather than re-transferring. The other 15 pages deliberately do
+    **not** get a `<head>` tag: eager-loading 1 MB on `cash.html` for a drawer most sessions
+    never open would trade a rare outage for a permanent regression.
+  - **The dashboard now degrades legibly if the file is ever missing.** `web/charts.js` was the
+    only unguarded consumer, and the failure was worse than blank charts: `initAll()` threw
+    before `wireModeOnce()`, so `#trend-mode` / `#twr-windows` / `#value-ranges` got **no click
+    listeners at all** — dead buttons with no cue — and every later theme toggle raised an
+    uncaught error. It now renders 「圖表元件未載入」 into the chart hosts and wires the controls
+    anyway.
+  - **The browser suite now makes zero outbound connections.** With nothing third-party left to
+    fetch, `tests/e2e/conftest.py`'s memo-cache machinery (`_cdn_get` / `_cdn_put` /
+    `route.fetch`) is deleted: font hosts get an empty 200 stylesheet, anything else gets an
+    empty 200 and is recorded. `test_thirdparty_isolation.py` asserts the only non-loopback host
+    contacted is `fonts.googleapis.com`. `scripts/verify_live.py` checks that
+    `GET /echarts.min.js` returns the pinned size and hash — the only check that proves the
+    offline-resilience property on a **deployed** instance.
+- **`validate_cash_movement` extracted from `api/routers/cash.py` into `data_ingestion/validate.py`.**
+  `POST`, `PUT`, the rebate-inbox confirm and the new CSV importer now run **one** guard, so the
+  bulk path cannot be weaker than the single-row form. Proven a pure refactor rather than asserted:
+  35 recorded request/response cases plus the resulting ledger and balances reproduce **byte for
+  byte** against the pre-change tree, and that matrix is now a permanent contract test.
+- **Injection is now a stated convention, not a one-off** (`.claude/rules/architecture.md`).
+  `portfolio/cash.py`'s pool arithmetic reaches `data_ingestion` through a required callable bound
+  by `api/routers/cash.py::cash_pool_fn` — D17's shape, one binding per import rather than per row.
+  D39's objection to injection was to an **optional** registration; a required parameter makes a
+  missed binding a build failure instead of a silent loss of the guard.
+- **An undocumented `data_ingestion → portfolio` edge is now authorised and guarded.**
+  `validate.py` and `corporate_action_import.py` import `build_book` / `Book` so the four
+  corporate-action rejections can read a replayed book. Added by W2/W4, it reached 2026-08-12 with
+  no diagram entry and no guard — the exact F-01 class the architecture rules warn about, and it
+  surfaced only because the cash-movement work declined to copy it. Together with the existing
+  `portfolio → data_ingestion` it is a **package-level cycle**, dormant only because
+  `portfolio/cost_basis.py` and `portfolio/results.py` import nothing above `shared/`. Nothing
+  enforced that until now: `tests/architecture/test_layer_edges.py` asserts the allowlist, that the
+  allowlisted imports are actually present, and — the load-bearing one — that those two modules
+  stay leaves.
+- The `tests/contract/test_import_template.py` round-trip guard kept its **own copy** of the five
+  preview builders, so "re-parses through the real preview builder" was quietly untrue. It now
+  imports the production registry.
+- Fixed: the CSV preview table stamped a red 「賣」 chip on every non-transaction row (fx, openings,
+  corporate actions — and would have on cash deposits).
+
+- **E23's one-click convert-to-SPLIT** (spec §5.1 / D22). The `identifier_change_suspected` warning
+  now carries its own repair: the corporate-action preview attaches the exact converted row — a
+  SPLIT on `to_symbol`, the identifier retired into `note` per §3.4, ratio unchanged — and the
+  shared entry form renders it as a one-click that rewrites the form and re-runs the preview. It
+  never writes directly, so the owner reads the resulting shares, the corrected average and
+  成本不變 ✓ before committing. `to_symbol` survives rather than `from_symbol` because a SPLIT on
+  the identifier would re-express an empty price series (E23's own condition is that `from_symbol`
+  has no stored prices) and leave the real security in pre-split terms — a repair that repairs
+  nothing. Where the ledger records the position under the identifier rather than the ticker the
+  converted row would fail E1a, so the API **validates it before offering it** and returns the
+  reason plus the real fix instead of a button that ends in an error.
+
+### Fixed
+- **The shared modal could not be scrolled at desktop widths, so its primary button was
+  unreachable.** `.modal` carried `max-height` + `overflow-y` **only** inside
+  `@media (max-width: 760px)`, while `.modal-backdrop` is `position: fixed` + `align-items:
+  center` — so any dialog taller than the window overflowed **both** ends with nothing to scroll.
+  Measured on the tallest dialog in the app (補登公司行動, whose preview grows one block per
+  holding account): 1,089px in a 1280×720 window, top −184.5px, computed `overflow-y: visible` /
+  `max-height: none`, 登錄公司行動 184px below the fold — **the owner could not save a corporate
+  action on an ordinary laptop.** The cap now lives on the base rule; the narrow-width rule keeps
+  its tighter mobile value. Not corporate-action-specific: every shared dialog had it. The
+  corporate-action e2e no longer forces a tall window, so all nine flows now measure the feature
+  at 1280×720 and the whole file is a standing guard.
+- **Door 2 opened the repair form underneath the drawer that launched it.** `.modal-backdrop` was
+  z-index 60 against `.sd-backdrop`'s 70, so every control overlapping the drawer was inert — and
+  because the interceptor was the drawer's own *content*, a click produced nothing at all: no
+  error, no cue. Modals now sit at 72, above the drawers and below the search palette and toasts,
+  with the whole overlay ladder written down beside the rule — the bug existed because it was not.
+  Escape follows the same rule (capture-phase, so it no longer reaches through an open form to
+  close the drawer under it). Rejected: dismissing the drawer as the form opens — door 2's whole
+  argument is that the repair is offered *where the evidence is*.
+- **Door 1 — the feature's primary door — was unreachable on the ordinary path.** The manual form
+  renders its own 賣超 acknowledgement inline and gates 確認寫入 on it; ticking it makes the commit
+  carry `ack_oversell: true`, which is exactly what stops the 422 the three-option dialog is wired
+  to. So on the path every owner actually walks, **the owner ticked a box, the position's cost
+  basis was discarded permanently, and 補登公司行動 was never offered.** The repair is now offered
+  inline *above* the tick, through the same prefill the dialog uses so the two cannot drift. The
+  tick remains — a declared short or a deliberate oversell is still the owner's call — but now
+  names its consequence instead of reading 「我了解，仍要寫入」. Both additions are gated on the
+  issue code, because that same box also carries `cash_overdraft`, `future_trade_date` and
+  `duplicate_trade`: ungated, a cash overdraft would have grown a corporate-action repair button.
+- **The corporate-action preview double-counted the sell it was judging.** `_unblocked_sells` read
+  the covering position off a ledger that **already contains** the sell, testing `Q > H − Q` where
+  the guard it mirrors tests `Q > H`. A legal 900-of-1,000 sell was announced as 「目前為賣超」,
+  and in §1's own scenario (100 shares, an oversold 400, a 7-for-1 that legalises it)
+  `400 <= 700 − 400` is false — so 「✓ 這筆行動會讓…賣出通過檢查」 stayed silent in the exact case
+  it exists for. Both counts now add the sell back, which is *exact* rather than approximate
+  because `EventPriority` evaluates a same-day action strictly before a same-day sell. That ✓
+  sentence is asserted for the first time.
+- **A spec'd repair that was never wired.** E23 shipped with the warning only —
+  `identifier_change_suspected` appeared nowhere under `web/` or `portfolio_dash/api/`. A contract
+  test now asserts every field of the repair is consumed by the shared form, including the branch
+  that renders it. An earlier, weaker version of that guard stayed **green** with the branch
+  disabled — every field name was still present in the file — so it was tightened to pin the
+  condition and the handler, and only then went red.
+- **Price SERIES reads are expressed in one share denomination** (spec §5.1(d2), W6c / D42).
+  `get_price_history` returns closes **as traded on their own dates**, so a SPLIT inside a read
+  window left the older points in a different denomination and every cross-date comparison over
+  them was wrong by the whole ratio. Twelve `api/` readers now route through the new
+  `portfolio/price_basis.series_in` (which calls the existing `price_in` per point — one owner,
+  no second formula): the technical rule engine (momentum / MA cross / RSI / 52-week / MA200),
+  the market-risk alert feed, the daily digest movers, the DRIP reinvest-price estimate, the
+  insight evaluation window and per-symbol prompt context, the prompt preview, `spark_30d`, the
+  watchlist day-change, the TWR benchmark overlay, and the symbol drawer's price chart. Worst
+  case fixed: a 7-for-1 put a symbol at its 52-week low and **fired a real drawdown notification**
+  for an 86% collapse that never happened.
+- Where such a reader also used a live quote or a stored scalar **in the same computation**
+  (`alert_inputs`'s target-cross price, the watchlist's `last`, `insight_service`'s
+  `price_at_create`), that value is re-expressed into the **same** valuation day. Correcting one
+  leg only would have *manufactured* the discrepancy rather than removed it.
+- **The DRIP inbox's reinvest price is money of record, and was wrong across a split.** It divides
+  the net dividend into a share count that `confirm()` writes to the dividend ledger, so a
+  carried-forward pre-split close booked **one seventh** of the shares actually reinvested on a
+  7-for-1. Now expressed in the pay date's share terms.
+- **The canonical transaction CSV can express a declared short sale** (`short_sale` column). The
+  engine has carried the flag since v0.1.25, but the import template had no column for it, so
+  **every imported declared short became an ordinary sell** — which the 賣超 guard flags as an
+  undeclared oversell and whose cost basis it then discards, stickily. Found by §10.5's acceptance
+  run against a real broker export. The column is optional and never inferred: absent means
+  `false`, because inferring a short from an oversell would turn a data-entry slip into a
+  plausible-looking realized loss.
+- **`scripts/verify_corporate_actions.py` — the acceptance gate's own privacy guarantee was
+  incomplete, and its missing-row count double-counted.** (1) The module argued that no `Decimal`
+  reaches stdout, which is true and insufficient: a *symbol* is a free string and a broker writes
+  option contracts as `TICKER MM/DD/YYYY STRIKE C|P`, so **the strike printed**. Symbols are now
+  masked — masked, not rejected, because dropping a supplied row would change the verdict to
+  protect the output. The mask keys on whitespace or `\d\.\d`, never on "contains a digit": TW
+  (`2330`, `0050`) and MY (`3182`) tickers are numeric and a digit rule would blank most of the
+  report on two of the app's three markets. (2) The count excluded a supplied-but-rejected row
+  from the oversold population by checking the **written** rows — and a rejected row is never
+  written, so the exclusion could never fire and the same missing row was counted twice. (3) The
+  verdict now reports the two counts separately (`FAIL — 標的 n、缺漏 m`) instead of summing them:
+  the missing rows are the *cause* of the failing tickers, and the halves use different
+  denominators (per symbol vs per account×symbol). **The PASS criterion is unchanged.**
+- The transactions CSV column set is stated in three places (the parser constant, `web/input.js`'s
+  dropzone hint, `web/trades.html`'s paste placeholder); the latter two now derive from the first
+  in a contract test, proven by breaking the hint and watching it go red.
+
+### Notes / known limitations
+- `ActionIndex` is built from **recorded ledger actions**, so a symbol nobody holds — notably a
+  **benchmark** — is not re-expressed even if the real instrument split. There is no independent
+  split feed, and inferring one from a price gap is forbidden (`domain-ledger.md`) and would
+  silently rewrite market history; the repair is a recorded action. The discontinuity is left
+  **visible** rather than guessed away.
+- `volume` keeps the provider's basis (D39b — it has no `*_raw` column, so a factor on it could
+  never be restated or reversed), so the volume-confirmation signal still spans two denominations
+  across a split.
+- **D45 — the whole-account IRR (D36) is retired, and D12's blind spot is standing again.** D36 was
+  approved on 2026-08-10 and never implemented; the owner retired it on 2026-08-11. Its only
+  load-bearing consequence was the wording of one limitation, and that wording was wrong in a way
+  worth naming: the accounting manual said the reorganisation fee is "invisible to XIRR by design
+  but visible in the whole-account IRR (pending D36)". With D36 gone, the fee is invisible to
+  **every** return metric this system has, and no resolution is planned. Corrected in five places —
+  spec §3.3, §7.5 and §8, and both manual mirrors (§4.4.7 limitation 2 and the §7 XIRR flow note) —
+  and the sentence is *deleted* rather than softened to "pending", because a manual promising a fix
+  that never arrives is worse than one stating the blind spot plainly: the reader stops looking for
+  the workaround. **No figure moved** — XIRR never included cash movements — so every historical
+  number, worked anchor and oracle expectation is unchanged. Manual → `v1.7a`.
+  **Sixth place, found 2026-08-15:** `docs/spec/2026-08-06-broker-import-backlog.md` §P2b was where
+  D36 was *originally recorded*, and the propagation never reached it — so the file still called the
+  metric **CHOSEN** and still instructed the manual to write D12 as resolved by it, four days after
+  the manual had correctly stopped doing that. There is the shape of the failure: the correction
+  swept the documents that *quoted* the decision and missed the one that *made* it. Owner
+  instruction 2026-08-15 — in a **backlog**, delete the retired design rather than strike it: a
+  rejected plan left standing reads as work waiting to be picked up. The struck record with its
+  original reasoning stays in the corporate-actions spec §8, which is where a decision belongs.
+  Closed independently by **D1=A** (2026-08-13), which excluded all seven cash kinds from XIRR after
+  the interest and fee rows actually existed.
+- **D44 — RULED 2026-08-15, option (b): ask once, at entry.** The owner-entered target band
+  (`instruments.target_low` / `target_high`) is still **not** re-expressed across a SPLIT, so a
+  stale band meets a re-expressed price (W6c) and `target_cross` crosses on the split date and
+  every scan after it — on the **notification** path, which is what made this worth a mechanism
+  rather than a docs note. Option (a) was rejected on this codebase's own terms: the band has no
+  `*_raw` column, so an in-place rewrite is the irreversible restatement D39b already refused for
+  `open`/`high`/`low`, and it would still be *guessing* — 「alert me at 600」 may survive a 10-for-1
+  as 60 (a view about the company) or as 600 (a view about the share price). Recording the SPLIT
+  now raises the soft `target_band_predates_split`, **quoting the restated number**, and the form
+  offers it as a checkbox that **defaults to OFF** — doing nothing keeps what the owner typed,
+  which is the (c) behaviour retained as the floor. **New column `instruments.target_set_at`**
+  (nullable, additive) is what makes the finding *precise* rather than noisy: it dates the band, so
+  a historical split imported from years of broker history — against a band set last week — stays
+  silent. Without it the one-click broker import would warn on nearly every action it carries, and
+  「a guard that mostly cries wolf trains the owner to click through」 is E23's own argument. `NULL`
+  (every pre-existing row) means *unknown* and makes no claim.
+- **D47 (new, owner ruling 2026-08-15) — an EXCHANGE carries the target band to the new ticker.**
+  「ticker更換簡單一些可以直接換名字就好，其他都不動」: the band **moves** (source cleared) and
+  its values are **not** restated. A move rather than a copy is the load-bearing half —
+  `target_cross` fires for every *registered* symbol with a band, held or watched, so one left
+  behind keeps alerting about a ticker that has stopped trading. A destination that already carries
+  the owner's own band is never overwritten. Announced in the preview before saving; ⚠ **not
+  reversible** — deleting the EXCHANGE does not move it back, which is stated rather than
+  engineered around, because the band is a setting and 重算 never covered it.
+- **D48 (new, owner ruling 2026-08-15) — a SPINOFF auto-registers its child, and can seed its
+  first price.** E10's hard rejection of an unregistered destination is **narrowed to SPINOFF
+  only**: that symbol does not exist until the very event being recorded, so "register it first"
+  asked the owner to pre-create it. Market and quote currency are **inherited** from the parent
+  (E11 requires them to match, so it is a derivation, not a guess); name and sector stay blank.
+  **Soft, never silent** — D19/E10 exists so a broker CUSIP never becomes an instrument, so the
+  owner is shown exactly what will be created. A source symbol and an EXCHANGE destination both
+  keep the hard rejection. The form also gained an optional **子公司起始價**, written through
+  `pricing.store.upsert_prices` from `api/` (`pricing/` owns every price write): one unpriced
+  holding blanks the **whole** portfolio's XIRR, and a spin-off is guaranteed to create one. A
+  malformed or inapplicable value is **refused**, not dropped.
+- `shared/money.cap_dp` — one home for the cap-not-pad rounding that `pricing/store`,
+  `data_ingestion/store` and now `shared/corporate_actions.apply_ratio_to_price` had each written.
+  Cap-not-pad matters here specifically: `quantize` would store a restated `60` as `60.0000`,
+  equal to Python and different to the byte comparison D38 invariant 3 and every golden payload use.
+- A ledger with **no** corporate action reads byte-identically: `series_in` short-circuits
+  structurally rather than computing an equal answer, proved by a `split_factor` landmine driving
+  every re-expressed path (D38 invariant 1).
+
+### Changed
+- **`LedgerBundle` — one argument for every ledger replay** (corporate-actions spec W0 / D9;
+  **pure refactor, no behaviour change**). `build_book` and `daily_value_series` took one
+  positional argument per ledger, at eight sites; adding a ledger meant editing all eight, and
+  *missing* one is silent — a book without a ledger still builds. They now take a single
+  `shared.models.ledger.LedgerBundle`, loaded once by `data_ingestion.store.load_ledger_bundle`.
+  The `Stored*` → ledger-model conversion, previously copy-pasted at five sites (dashboard,
+  what-if, tax package, 重算, ledger-edit revalidation), lives only in that loader; the trend
+  replay's per-day cut is `bundle.through(day)`; the unregistered-symbol skip-set is
+  `bundle.unregistered_symbols` / `.without_unregistered()` instead of being rebuilt from three
+  lists at each caller. Verified by the full suite plus a byte-identical
+  `tests/golden/dashboard_full.json` — for a refactor, any moved number is the bug.
+- **`shared/ledger_registry.py` — the ledger table catalogue, declared once.** Four modules
+  enumerated the ledger tables by hand (`db_stats` labels, the export zip + CSV tabs, the Moomoo
+  account merge, `scripts/merge_reconcile.py`), and every failure mode of a missed entry is
+  silent: an account merge orphans rows on the dead account id and the reconciliation still
+  reports PASS. All four now derive from one declaration. A new account-scoped ledger table in
+  `data_ingestion/schema.py` that is not registered fails a named test
+  (`tests/shared/test_ledger_registry.py`), proven to fire by removing `cash_movements` and
+  watching exactly that assertion break.
 ### Planned
+- **Corporate actions (SPLIT / EXCHANGE / SPINOFF) — P0, in progress.** A broker-export coverage
+  assessment (2026-08-06) found this to be the only *blocking* ingestion gap: a share count that
+  changes with no cash cannot be recorded, so the later sells trip the STICKY 賣超 guard and
+  **discard that position's cost basis permanently**. Spec: `docs/spec/2026-08-06-corporate-actions.md`.
+- **Broker-import backlog (P1a converter · P1b US cash dividend · P2 interest/fees · P3 options)**
+  recorded in `docs/spec/2026-08-06-broker-import-backlog.md` — deferred, each with its code
+  reference points and the owner decisions that gate it. P1b and P2b are decision-blocked, not
+  effort-blocked.
 - **Unified auto-import principle:** the manual ledger is the source of truth; data-source data
   (FinMind dividend/ex-div, Schwab transactions) is matched to holdings and offered for a
   **user-confirmed** auto-import into the ledger following the account's accounting rules —
@@ -49,6 +3225,389 @@ headings. (`## [Unreleased]` is intentionally not counted.)
   dataset(s) within one deployment. (The current prod/test split is achieved by **separate
   instances** — own checkout + venv + data folder per instance — not by switching datasets on one
   site; see `engineering-process.md` → "Two-environment loop-engineering".)
+
+**Full-site interaction sweep remediation (2026-08-27)** — report
+`docs/audit/2026-08-27-full-site-interaction-sweep.html`. A hands-on pass over all 18 page
+entry points in a real browser: 504 presses on 340 distinct named controls (974 distinct
+controls in the resting DOM), 188 of them producing an `/api/*` call, 19 downloads opened and
+content-checked. Its premise was that the 2026-08-03 wiring sweep (2,287 controls, "0 dead")
+proved listeners EXIST and not that they DO anything — which the export-centre cards had since
+demonstrated. 17 findings; all fixed here, each pinned by a test proven RED first. One
+observation (F-18) was re-checked and DISMISSED — see below.
+
+- **F-01 (high) — the sell preview printed the PRE-trade average as the post-trade average**
+  on the declared-short and undeclared-oversell branches. `web/input.js` was handed no
+  `new_*_avg` on a SELL and stated the omission as a fact — "a SELL leaves the averages
+  unchanged" — which is true of the ORDINARY branch and of no other: a declared short leaves a
+  SHORT lot based on the proceeds received, an oversell DISCARDS the basis, and a full exit
+  leaves no position at all. Measured: preview 300.43 → 300.43 where the ledger books 308.63,
+  and 「240.00 → 240.00」 printed directly above the card's own warning that the basis was about
+  to be permanently discarded. ⚠ This is the SAME rule the 2026-08-24 review fixed one column
+  over: that wave pinned `preview.realized` against the booked realized row for all three
+  branches and left the average pair projecting a single happy path. `_position_preview` now
+  projects the position TOTALS per branch and divides on read; `whatif.py` does the same for
+  the drawer, which has no 放空 declaration to read and so states the fork and gives no figure,
+  exactly as it already did for the realized amount. The parametrised guard now asserts BOTH
+  columns against `build_book` for all six shapes.
+- **F-02 (high) — one acked oversell blanked every symbol's 試算, and the reason was thrown
+  away twice.** `compute_whatif` builds the book strictly on purpose, and its own comment
+  records that the 2026-08-11 repair was "to degrade with the reason" — only the 500-to-400
+  half had shipped. `OversellError` now carries the offending account / symbol / date as
+  REQUIRED kwargs, `WhatIfError` carries `field` + `issues` so the router stops stamping every
+  case with an unrelated `field="account_id"`, and the drawer repeats the server's sentence
+  instead of a bare 「試算暫不可用」. Owner option A: the strictness is unchanged.
+- **F-03 (med) — 「確認寫入勾選列」 ignored the ticks and wrote the whole paste.** Measured:
+  3 rows pasted, 2 unticked, 3 written, banner 「成功 3 筆」. A step worse than the export
+  buttons that reported success and did nothing — this wrote ledger rows the user had removed.
+  `commit_preview` has always taken an `accept` set (its comment already reasons about "a row
+  the caller deselected"); it simply had no caller. `/api/import/commit` gains an optional
+  `select` of row INDICES — not a re-rendered CSV, because `csv.DictReader` row *n* is not text
+  line *n+1* once a quoted field contains a newline, and this frontend has no CSV parser.
+  Omitting it still writes everything, so the AI door and undo are byte-compatible.
+- **F-04 (med) — `window.pdAfterLedgerChange` was never defined anywhere.** Called from two
+  places in `broker-import.js`; the defensive `if (window.x)` idiom turned the wrong name into
+  a silent no-op, so an undo toasted 「已復原 刪除 3 筆」 over a table still listing all three.
+  The real seam is `pdLedgerRefresh`. A new contract test scans every `window.pd*()` call in
+  `web/` against its assignments — the class of typo that is invisible to a listener count.
+- **F-05 (med) — the symbol picker could not be driven from the keyboard.** Rows are bound on
+  `mousedown` (deliberately — it beats the input's `focusout`), and `mousedown` is not what
+  Enter fires, so typing filtered the list and nothing could then choose from it. ArrowUp /
+  ArrowDown / Home / End / Enter added; the pointer path is untouched. Arrowing uses
+  `ensureOpen()`, never `open()`, which would clear the filter the user just typed.
+- **F-06 (med) — the rebalance footer said 100.00% over fields that summed to 100.1%.** The
+  inputs were `toFixed(1)` views of full-precision weights while the footer total and the plan
+  POSTed to `/api/rebalance/preview` summed the unrounded state, so 匯出執行報告 computed a
+  plan the owner had never seen. Owner option A: seed the state THROUGH the display precision,
+  so the two agree by construction and the existing over-100% warning fires when it should.
+- **F-07…F-17 (low), each with its own regression:** the AI 「重試」 button had no listener at
+  all and it is that card's only action (the two sibling degrade cards each offer a way out) ·
+  the variable-table 「複製」 fired a success toast unconditionally because `clipboard.writeText`
+  is async — the run's ONE uncaught exception, beside a green ✓ · the 「部分過期」 chip scrolled
+  to a `<details>` it left collapsed · four of sixteen alerts rendered as `href="#"`, and they
+  were exactly the portfolio-level risks (`sector_weight`, `fx_drift`, `portfolio_drawdown`,
+  `currency_weight`) — each now lands on the panel showing the number it is about, guarded by
+  an AST test that no `Alert(...)` is built without an href · 「產生洞察」 destroyed its own
+  explanatory toast with a same-tick navigation · 「閒置」 named two different judgements on one
+  screen (five cards stamped 閒置 behind a 閒置 filter matching none of them) · B's degradation
+  blamed 「缺價」 for a 賣超, while XIRR two rows above named it correctly — `incomplete` has
+  five causes and the reason named one · the insight wizard was the only overlay in the app
+  that ignored ESC · fee reset was the app's only native `window.confirm`, and it is the
+  control that changes what every future trade costs (now `confirmDialog`, stating up front
+  that history keeps its own fee snapshot; a contract test bans native dialogs) · the oversell
+  block quoted the position's FINAL NET quantity — 「部位將為 9.5 股」, a positive number offered
+  as proof of a shortfall — where the date-aware guard knows the day: the replay now records
+  `oversold_on` / `oversold_sold` / `oversold_held` and the message names it · the 加值 guard
+  turned a field red and said nothing.
+- **Owner review of the remediation itself (2026-08-27).** Four calls put back to the owner
+  because each deviated from the report's recommendation or went beyond it. Ruled: the 賣超
+  preview shows the ledger's **zero plus a 「基礎已捨棄」 note** (the report suggested an
+  em-dash; zero is what the holdings row will actually hold, so the projection agrees with
+  the screen the user is about to see, and the note stops it reading as "your average cost is
+  nothing"); F-03 **keeps the server-side row indices** rather than the report's client-side
+  CSV rebuild; F-12 **keeps 待執行/已停用** rather than the report's one-line 尚未執行, which
+  would have duplicated the timestamp cell beside it and left a disabled task labelled as
+  merely not-yet-run. And the ruling table itself: **only AI-D52 is an owner ruling** —
+  AI-D53/D54 are marked 〔記錄〕, because a blanket 「fix them all」 accepts WHAT is done and is
+  not a decision about how the implementer categorises it. The table's preamble now says so,
+  or the marker would read as a typo.
+
+- **F-18 — DISMISSED, nothing changed.** The sweep read a `DELETE /api/instruments/2330 → 422`
+  as 永久移除 being pressable while the dialog said it was impossible. Re-checked: that 422 is
+  the HIDE path (`DELETE`; purge is `POST …/purge`) refusing a HELD symbol with code `held`,
+  which `instruments.js` catches by name to raise its 「無法移除」 dialog. 永久移除 is genuinely
+  disabled whenever the warning shows — the type-to-confirm input that alone can enable it is
+  not created on that branch. A test pins the two API facts so the next reader need not
+  re-derive them.
+- **Payload / spec impact.** `tests/golden/dashboard_full.json` moves by exactly TWO lines —
+  `sector_weight` and `fx_drift` gain the hrefs they never had; nothing else in the snapshot
+  changes (the other two href-less rules do not fire in the golden fixture). `_Position` gains
+  three locator fields, so `docs/spec/2026-08-06-corporate-actions.md` §4.4 — the NORMATIVE
+  field-transfer table — gains a row for each, stating that they are not transferred and are
+  unreachable (E3/E22 refuse any action on a position that has them set) plus the warning that
+  the two quantities are in PRE-action share terms and must never be carried forward if those
+  guards are ever relaxed. That table's own count guard caught the addition and refused the
+  change until the rows existed; it also surfaced that the `_apply_action` docstring still said
+  "nine fields" while the table listed ten, stale since `vacated_to` landed. `.claude/rules/
+  domain-ledger.md`'s preview rule is widened from `preview.realized` to every projected column.
+
+- **A gate claim from `9fcc832` was wrong, and the tree carried a real error.** `mypy` was
+  reported clean at 665 files; re-run with a COLD cache it found an existing type error in
+  `tests/portfolio/test_review_r7_b_takes_cash_kinds.py` (a decomposition summed over
+  `Decimal | None`). The earlier run was reading a stale incremental cache. Fixed, and the
+  assertion is now stronger — `is not None` first, so a never-computed figure fails as itself
+  rather than as a value mismatch. This is the second over-read of a gate in this programme
+  (the first was counting pytest result characters); both are in `LESSONS_LEARNED.md`.
+
+**Programme close-out, owner rulings 2026-08-27 (AI-D55…D58).** The owner reviewed every
+remaining open item at once and ruled: hold on shipping, remove two things permanently, add
+two, and hand two back as blocked-on-them.
+
+- **二代健保補充保費 — permanently excluded, term removed (AI-D55).** It was never
+  implemented: `FEE_RULES` and the dividend model carry no rate, threshold or field for it,
+  and `dividend_model.py` already said "owner decision 2026-07-26: out of scope". What this
+  ruling changes is the STATUS — from "paused, may return" to "excluded, will not" — and the
+  term is now gone from live code and design docs (four call sites, all explanatory). The
+  explanation those mentions were carrying is kept, generalised: the dividend gate does NOT
+  demand `gross − withholding == net`, because a TW cash dividend legitimately nets less
+  through levies this app does not model. That identity was genuinely proposed once
+  (`LESSONS_LEARNED.md`), so the reason is written down rather than left to be re-derived.
+  ⚠ **Dated records are untouched** — CHANGELOG entries, the lesson, and the 2026-07 audit
+  reports say what was decided at the time, and rewriting them to erase a real decision is
+  falsifying the log. The only forward-looking place the term survives is the exclusion
+  ruling itself, which has to name what it excludes or the decision becomes unfindable.
+- **MY finally has a benchmark: KLCI (`^KLSE`).** The blocker was real and was documented in
+  `benchmarks.py`: `yf_symbol` appends the market suffix unconditionally, so `^KLSE` with
+  `Market.MY` would have been fetched as `^KLSE.KL`. Re-derived: **a `^`-prefixed Yahoo
+  ticker is an INDEX and carries no exchange suffix in any market.** That is not a guess
+  about `^KLSE` — `pricing/index_source.py` has been fetching exactly those three raw tickers
+  (`^TWII`, `^GSPC`, `^KLSE`) for the sentiment variable all along, bypassing `yf_symbol`
+  entirely; the rule was already true of the codebase and only this function did not know it,
+  with `^GSPC` never exposing the gap because the US suffix is empty anyway. MY `relative`
+  predictions and the R4 counterfactual now have a yardstick. Safe before any price is
+  fetched: `dashboard.py` only admits a market whose converted closes are non-empty, so MY
+  stays honestly `uncovered` until the daily job has run. The `None` degradation path lost
+  the market that used to exercise it, so it is now pinned by monkeypatch instead of deleted
+  — code no test exercises is code that stops working quietly.
+- **W8: `open` / `high` / `low` get the same two-column basis as `close` (AI-D58).** Each
+  gains a `*_raw` and is stored as `cap_4dp(raw × split_basis)`, with the raw un-capped
+  because it is the input the reconcile recomputes from. **This supersedes D39b**, whose
+  objection was precisely that a factor on a column with no raw "could never be restated or
+  reversed" and whose own escape clause was "or add its own raw columns". Until now a row
+  could carry a post-split close beside pre-split highs and lows — harmless only because
+  nothing read them (verified again: the sole statement naming those columns is the INSERT),
+  and a trap for the first candlestick chart. The reconcile restates all four from their own
+  raws, so a SPLIT inserted and then deleted restores the row byte-identically — pinned,
+  because `prices` is the only place this feature writes outside the ledgers and 重算 does
+  not rebuild it. ⚠ **`volume` is still never multiplied**, now for a stronger reason than
+  the old OHLC one: it is a count, not a price, so the price factor would be actively wrong.
+  ⚠ The three new columns sit AFTER `split_basis` in the DDL, which reads oddly, because
+  `ALTER TABLE` can only append and a guard demands the fresh and migrated schemas agree
+  column for column.
+- **Permanently excluded, not deferred (AI-D56):** portfolio-scope `relative` / `volatility`
+  scoring (it needs a blended-benchmark ruling the owner declined to make) and the
+  `_ratio_str` / `_avg_str` HALF_EVEN inconsistency (accepted as-is; aligning it would move
+  the last digit of `miss_rate` and several other displayed values). Both leave the backlog.
+  The difference from "deferred" is that a deferred item comes back as a question next round.
+- **Held on the owner, not on the code:** the ETF-flag audit found nothing to confirm because
+  the local ledger is empty (0 instruments, 0 transactions) — it is meaningful only against
+  real TW rows, and running it against demo/prod is a VM operation needing approval. The W4
+  live extraction baseline needs an API key that is not configured.
+- **A count correction:** this branch is **76 commits** ahead of `main` and of `v0.1.28`, not
+  the 13–15 quoted earlier in the programme. That figure was this sub-programme's own commits,
+  not the branch's divergence, and it understates the size of an eventual single deployment.
+
+**The stress harness now reconciles a PAST-DATE share count (AI-D59).** The last disclosed gap
+in `scripts/stress_audit/README.md` §6 is closed, and closed with a measurement rather than a
+claim.
+
+- **What was missing.** AI-D51 gave the harness a daily replay and the `trend.*` family, but
+  `trend.total_value` could only be asserted from `ASOF` onward: `seed_all` seeds exactly ONE
+  close per symbol, dated `ASOF`, so every earlier day was unpriced by construction and
+  therefore `incomplete` — and skipped. That is precisely where a defect confined to a window
+  lives, which is R6's ex-date: a 配股 booked on the payment date instead of the ex-date changes
+  the share count only BETWEEN those dates, and ends at the same position either way.
+- **What closed it.** `_ensure_daily_prices` seeds a close for every fixture symbol on every day
+  from the first ledger event through `ASOF`. At a known price, `total_value` pins the share
+  count — the app and the oracle read the same close, so any surviving disagreement is a
+  quantity. The closes are **as traded on their own date** (`oracle.price_as_traded` multiplies
+  the ASOF quote back out by the intervening splits, one action at a time with the division
+  last, never a product of quotients), and each row is stamped `fetched_at` = its own date so
+  that both the write window `(as_of, fetched_at]` and the read window `(priced_on, day]` are
+  empty — nothing re-expresses these rows, so inserting or deleting a SPLIT can never repaint
+  the history the family asserts against. Seeding is derived from `facts` inside `reconcile`
+  before the dashboard is fetched, so it self-corrects across checkpoints.
+- ★ **Detection power, measured.** The R6 defect was deliberately reintroduced into the ORACLE
+  (`facts_through` cutting dividends on the payment date — exactly the pre-R6 behaviour) and the
+  harness run both ways. **Pre-change harness: `pass=5663 fail=0` — silent.** Current harness:
+  `fail=53`, every one a `trend.total_value`, every one dated **2026-05-02 … 2026-05-29** (the
+  ex-date-to-payment window), each off by 70,000 TWD — the value of the 配股 shares that should
+  exist in that gap. The pre-change row reproducing the previously recorded baseline *to the
+  digit* is itself the evidence that the probe restored the old state faithfully: that `fail=0`
+  was never coverage, it was blindness.
+- **New baseline: `ops=128 pass=6075 fail=0`** (was 5663). `ops` is unchanged and must stay 128
+  — this was closed with fixture data and assertions, not a new route.
+- ⚠ **Still reviewed rather than reconciled:** that a 配股 attaches on the ex-date while a cash
+  dividend does not is a reading of `domain-ledger.md` on BOTH sides, so two independent
+  implementations of the same misreading would still agree. Only the hermetic hand-computed
+  walk (`tests/portfolio/test_review_r6_ex_date.py`) catches that class, and it stays.
+- Two fixture defects were found and fixed by the new family on its first run, both mine: 91
+  `total_value` failures off by 0.0070 (the oracle valued at an unquantized repeating decimal
+  the 4-dp price column cannot hold — the quantization now lives in the one expression that
+  owns both the seed and the valuation), and 4 `trend.incomplete` failures from treating a day
+  AFTER the seeded series as unpriced, when carrying the last close forward is a valid
+  valuation and what the app does.
+
+**R4's missing leg: the benchmark comparison is now visible to the prompt (AI-D60).** R4
+shipped the counterfactual onto the dashboard and the drawer and never built the variable its
+own plan specified — so the anchor existed and the narrator could not see it. No insight card
+could say the portfolio beat or lagged the index, which is the one sentence R4 was built to
+make sayable, and the four-lens review had called it the highest-value item in the programme.
+
+- `benchmark_counterfactual_json` (36 → 37 variables, `position` category 6 → 7), fed from the
+  dashboard's own `BenchmarkComparison` — a record-of-figure the LLM narrates and never
+  recomputes.
+- ⚠ **Wired into the WEEKLY PORTFOLIO report, not the per-symbol advice card.** The
+  counterfactual is a portfolio-level number; on a per-symbol card it invites 「this stock beat
+  the market」 from a figure about the whole book. `kpis_json` already carries a `scope_note`
+  for exactly this trap ("a per_market card must not read them as this market's numbers"), and
+  the same reasoning applies here. Weekly `v2.4` → `v2.5`, `LIBRARY_VERSION` →
+  `official-v20`.
+- ⚠ **The coverage red line lives in the DATA, not in the prompt's memory.** When
+  `uncovered_ratio > 0` the variable attaches a `coverage_note` naming the uncovered markets,
+  and the template is instructed to quote it verbatim and to avoid 「超額報酬」/「打敗大盤」
+  entirely — `BenchmarkComparison`'s own docstring forbids the bare label in that state, and a
+  variable that hands the model a bare `excess` invites the sentence the rule prohibits.
+- **The ETF-flag audit ran against demo** (read-only, owner-authorised, via `vm_exec.py` so the
+  operation log carries it). Demo sits at `v0.1.28-62-g4990b3b` — 16 commits behind this branch
+  — so `scripts/audit_etf_flags.py` is not on that box and the audit's own question was run as a
+  read-only query instead. Result: 18 TW instruments, `etf_flag_unknown` column ABSENT
+  (confirming demo predates AI-D40's three-state fix), and one genuine suspect — `0056`
+  元大高股息, a real ETF recorded as `is_etf=False`, with 0 sells so far. Nothing was written:
+  AI-D40 forbids the program relabelling those rows, and prod's ledger is empty anyway.
+
+**The ETF question is now asked at the door, and the weekly lens exists (AI-D61 / AI-D62).**
+
+- **`is_etf` at entry, not after the first sell (AI-D61, owner's own proposal).** The manual
+  door's auto-register path can now carry the answer: `ManualBody.new_symbol_is_etf`, surfaced
+  as a checkbox beside the existing 「未註冊」 hint. The old path made the user find out later —
+  register (unknown) → trade → sell → soft issue → go to 標的管理 → tick → re-check the rate.
+  ⚠ Shown **only for TW and MY**, the two markets where the flag prices something (TW sell tax
+  0.3% vs ETF 0.1%; the MY stamp duty is ETF-exempt); on a US trade it would be a control that
+  never does anything. ⚠ Named `new_symbol_is_etf` rather than `is_etf` because the difference
+  is the whole point: it is read at exactly one line — the auto-register call — so a REGISTERED
+  instrument can never be relabelled by a trade. That is the 2026-07-15 stress-audit fix (an
+  input flag beating the registry) and this field must not re-open it. AI-D40 is not relaxed:
+  no answer still records unknown and still discloses `etf_flag_unknown` on the first TW sell.
+  ★ Motivated by a measurement, not a hunch — the read-only demo audit found `0056` 元大高股息
+  registered as `is_etf=False` with 0 sells: not yet wrong, wrong on its first sell.
+- **W8's second half as a READ-ONLY LENS (AI-D62).** `technicals.resample_weekly` collapses
+  daily closes to one per ISO week (the week's last close) at read time, feeding one new
+  per-symbol variable `weekly_signals_json` (37 → 38) — MA over 10/20/40 **weeks** and 13/52
+  **week** returns. It answers the question the daily-only stack cannot: 「日線轉弱，但週線
+  還沒破」. ⚠ Grouped by ISO week, **never by taking every 5th row**: a four-session holiday
+  week pushes the next Monday into the wrong bucket and the error compounds across a year of
+  holidays rather than cancelling. ⚠ Nothing persists — `signal_history`'s key stays
+  `(symbol, as_of)`, and TechScore / `alert_events` / the event-study backtest / `rules-v1` are
+  untouched. A real second timeframe needs a timeframe dimension in that key plus a migration,
+  because two timeframes under one key overwrite each other and a composite score would
+  silently average two different questions; that is a W6-sized wave, not a close-out. Every
+  key is named in weeks and the payload states its own `timeframe`, and the checkup card
+  (v2.8 → v2.9, `LIBRARY_VERSION` → `official-v21`) is told the two timeframes may not be
+  compared or written into one sentence — AI-D2's 「one name, two definitions」 applied before
+  it can bite. Cited by a template on the way in, because W6 shipped three variables no
+  official template referenced and they stayed dark until W7.
+
+**W4's live extraction baseline exists at last — and measuring it stopped a regression the
+obvious fix would have shipped (AI-D63).** The corpus was built so a prompt edit would be
+measured rather than blind; it had never run, because it needs a real model and a real key. The
+owner supplied a dedicated key on 2026-08-28. Thirteen runs of
+`google/gemini-2.5-flash` via OpenRouter.
+
+**Baseline: field hit rate 99.3–100% (best run 295/295), and the three silent-money fields
+AI-D20 demands be reported separately are clean — cash `kind` 12/12, `short_sale` 24/24,
+`daytrade` 24/24.** Known non-deterministic cases, listed rather than averaged away:
+`div-tw-stock` ≈29%, `english-statement-fragment` (date) ≈23%, `unparsed-ambiguous-cash` ≈23%.
+
+Three things the runs showed that no single run could:
+
+- ★ **A harness defect wearing a model failure's clothes.** The first run read 34/40 and four of
+  its six failures were `RUNNER ERROR: no such table: fx_rates` — the eval built its in-memory
+  DB with `bootstrap_db` alone, which owns the LEDGER tables, while `prices`/`fx_rates` belong
+  to pricing's schema. Every FX-touching case died: **all three MY cases plus the merged-account
+  US case**. MY extraction was not poor, it was UNMEASURED. Fixed; evaluated fields 263 → 295.
+- ★ **`daytrade` was a real defect and the prose rule could not hold it.** The prompt already
+  said 「never infer it from two same-day opposite drafts」 and the model broke it on the exact
+  scenario that sentence names — setting `daytrade=1` on a same-day round trip the user never
+  declared, which halves the TW sell tax (0.3% → 0.15%). A **negative one-shot** — showing the
+  shape that must NOT be produced — took it from **0/2 to 11/11**. Prompt `v7` → `v7.1`,
+  `LIBRARY_VERSION` → `official-v22`.
+- ★ **The same technique applied to `div-tw-stock` was measured to be a REGRESSION, and was
+  reverted.** A STOCK one-shot fixed that case 6/6 — and taught the model to zero the `gross`
+  on OTHER dividend types: `div-my-net` went from 0/4 failing to 4/6 failing, writing a real
+  88.50 as 0. Trading 「a 配股's gross printed as 50」 (a field the replay does not read) for 「a
+  MY net dividend zeroed」 is strictly worse, so the one-shot is gone and `div-tw-stock` is
+  recorded as a known limitation rather than dressed up as fixed. **That is what the corpus is
+  for**: it turned 「this fix is actually a regression」 into a visible fact instead of an
+  undetected one.
+
+⚠ Thresholds stay OFF. `--max-cash-kind-miss 0 --max-daytrade-miss 0 --max-short-miss 0` are
+sound for a manual run; `--min-field-hit` is deliberately left unset, because pinning a
+non-deterministic runner's default to one run turns the next run's noise into a false
+regression. ⚠ The preview's 當沖 chip stays — a better prompt is not a reason to remove the
+backstop that lets the user see and untick a flag that moves money.
+
+*Architecture*
+
+- **A third authorised upward edge, recorded and guarded** (D-01 of the 2026-09-09 site
+  architecture map). `data_ingestion/agents.py` has imported the code-owned AI-input prompt from
+  `llm_insight/official_templates.py` since FU-D20 (2026-07-17) — with no diagram entry and no
+  guard — and it closes a second package-level cycle (`llm_insight → portfolio → data_ingestion
+  → llm_insight`), dormant only because `official_templates.py` and `llm_insight/__init__.py`
+  import nothing above `shared/`. `architecture.md` now records the edge in D39's form, and
+  `tests/architecture/test_layer_edges.py` guards it: allowlist, presence, and the two leaves
+  (which may import `shared/` only — not even an `llm_insight` sibling). Injection from the
+  router was rejected: a prompt body is a constant, not a computation with an ownership problem.
+- **The dependency diagram redrawn from the verified import graph** (D-02 / D-03 / D-04).
+  `architecture.md` still drew a `web_ui/` Jinja2/HTMX layer that decision (B) of 2026-06-13
+  had replaced with `api/` + `web/`, omitted `forex/`, `export/`, `news/`, `ops/` and the
+  `scheduler → strategy / ops` edges, and its testability bullet asked for HTML-fragment
+  assertions on a layer that does not exist; `engineering-process.md` repeated the sentence and
+  `CLAUDE.md`'s module map listed 10 of 13 modules. All three now describe the ladder as it is.
+- **`refresh_quotes` / `refresh_history` take `factor_of` with NO default** (D-05, owner
+  ruling (a) 2026-09-10). The identity default was "safe" only for a symbol with no split in
+  `(as_of, fetched_at]`; a caller that forgot the binding on a held symbol that had split would
+  store re-stated history as if as-traded and the read path would divide it again, silently —
+  the exact failure `architecture.md`'s injection obligation (1) exists to make impossible.
+  `upsert_prices` keeps its default as the `pricing`-internal seam and says why.
+  `tests/architecture/test_injection_seams.py` pins both the signatures and, by AST, every
+  caller in `portfolio_dash/`; the eleven test call sites now spell `factor_of=_no_factor` out.
+- **The benchmark history sweeps bind the split factor** (D-11). Both omitted it on the
+  argument that "an index is never the subject of a corporate action" — true of `^GSPC` /
+  `^KLSE`, false of `0050`, an ETF the owner may also hold. For a held 0050 with a SPLIT row
+  the instrument sweeps wrote `close_raw × factor` and the benchmark sweep wrote the same
+  `(instrument, as_of_date)` rows as `close_raw × 1` — last, in both jobs, so every deep
+  backfill reverted the pre-split rows the reconcile had repaired, and the holding's trend
+  replay and the benchmark overlay both divided a provider-adjusted price again. With the
+  ledger bound the two writers are byte-identical (`tests/scheduler/test_benchmark_history.py`
+  holds them to it); for the two true indices the factor is the identity by construction.
+- **The map's remaining six findings closed** (D-06 – D-10, D-12; 2026-09-10). README said
+  `v0.1.1` and 「ECharts (CDN)」 — now v0.1.28, vendored, and honest about the branch. The numeric
+  stack as it is: `CLAUDE.md` and `stack.md` named pandas / numpy / numpy-financial, none of which
+  is a dependency; the calculation core is `Decimal` + `pyxirr` (since v0.1.0), and adding a
+  DataFrame library is now recorded as a stack decision, not a convenience. The accounting manual
+  (zh + en) pointed `split_factor` at `portfolio/price_basis.py`; it lives in
+  `shared/corporate_actions.py` and `price_basis` applies it on read. `llm-insight.md` described
+  the cache key as 「snapshot + source articles + prompt version」; it is
+  `sha256(insight_type_id + assembled prompt + snapshot digest + prompt_version)`, day-anchored,
+  and the rule now says so. `make mypy` ran the narrow gate that has missed real errors twice; it
+  now runs the bare `mypy --strict` the project pins. And the ten routes no browser code reaches
+  are no longer a drift: `tests/contract/test_api_routes_have_frontend_callers.py` matches every
+  `/api/*` route against `web/` (direct `pdApi` calls verb-aware, helper-routed literals
+  verb-agnostic, inline `<script>` included) and holds each of the ten as an allowlist entry with
+  its reason — a new silent route fails the build, and so does an entry whose route gains a
+  caller. Kept, not deleted: `POST /api/instruments/quick` (superseded by the quick-add dialog,
+  still the scriptable one-step add), the news-organizer prompt trio (user-editable prompt whose
+  settings UI was never built — backlog), the signals collection view, and the spec-4.7
+  calibration-sample / active-calibration / schedule-removal surfaces the pipeline drawer does
+  not expose.
+
+*Features*
+
+- **The news-organizer prompt has a settings panel** (spec by demo
+  `docs/spec/2026-09-10-news-prompt-settings.html`; owner rulings D1(a) / D2(b) / D3(a) / D4(a),
+  2026-09-10). The prompt the nightly news pipeline hands the model for every article had been
+  「user-editable」 since batch ④ (2026-07-06) — routes, contract test, action-log labels — and no
+  screen had ever reached it; the only way to change it was `curl`, and `PUT {"body": ""}` was
+  accepted (measured: 200, then 0 characters). Now 設定 → AI 提示詞 carries a third panel with the
+  same grammar as the system prompt: a badge that says 「與官方版相同 / 已自訂 / 未儲存的修改」
+  from the backend's new `is_official` + `official_version` fields (one truth, computed once),
+  重置回官方版 behind a confirmDialog, and an amber reminder — never a block — when the text stops
+  naming one of the four keys the organizer parses back (`title` / `news_date` / `body_summary` /
+  `related_stocks`). A blank body is refused with **422 `news_prompt_empty`** and the textarea
+  keeps the user's text; the system prompt got the same guard (`system_prompt_empty`) because it
+  had the same hole. The news library's schedule hint links to the panel. The three routes left
+  the frontend-caller allowlist the way its presence test demands; a Playwright flow walks
+  acceptance rows 3–7 against the real stack.
 
 ## [v0.1.28] - 2026-08-09
 

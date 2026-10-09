@@ -5,6 +5,11 @@ into ONE call. Layering: this is api-layer orchestration — it may call
 ``data_ingestion`` (register/store), ``pricing`` (probe/name/refresh), and the
 ``scheduler.jobs`` worklist constants; none of those layers import it back.
 
+It also hosts :func:`reconcile_price_basis` — the application-level entry point for the
+W6b price-basis reconcile — for the same layering reason: it already binds
+``scheduler.jobs.split_factor_fn`` for the quote/history legs, and ``pricing/`` may not
+reach the corporate-action ledger for itself (D17).
+
 The correctness gate: by default a symbol is registrable ONLY when a real quote
 can be fetched for it (``require_quote=True``) — a symbol whose price no source
 can supply is almost always a typo, and admitting it would recreate the
@@ -15,14 +20,17 @@ register endpoint passes it for backward compatibility.
 
 import logging
 import sqlite3
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.data_ingestion.register import register_instrument
 from portfolio_dash.data_ingestion.store import (
     get_instrument,
+    list_instruments,
+    set_instrument_aliases,
     set_instrument_archived,
     upsert_instrument,
 )
@@ -30,6 +38,7 @@ from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.bursa_registry import bursa_name
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.names import lookup_name
+from portfolio_dash.pricing.reconcile import reconcile_prices
 from portfolio_dash.pricing.refresh import (
     refresh_dividends,
     refresh_history,
@@ -41,15 +50,145 @@ from portfolio_dash.scheduler.jobs import (
     DEFAULT_BOARD,
     REPORTING_FX_PAIRS,
     refresh_instrument_quote,
+    split_factor_fn,
 )
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_names import (
+    AliasError,
+    NamedInstrument,
+    alias_conflicts,
+    name_conflict,
+    normalize_aliases,
+)
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.symbol_format import contains_cjk
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Currency.MYR}
+
+
+# --- Price-basis reconcile (spec §5.1(c), D30 · W6b) ---------------------------------
+
+
+def reconcile_price_basis(conn: sqlite3.Connection, symbols: Iterable[str]) -> int:
+    """Restate *symbols*' stored closes against the CURRENT action ledger. Rows changed.
+
+    **Call this on any insert / edit / delete of a SPLIT row** (§5.1(c)) — W7's ledger
+    router is the caller that makes it real; today the CRUD in ``data_ingestion/store.py``
+    has no production caller at all (audit F-32). Pass the SPLIT's ``from_symbol`` (which
+    E20 forces to equal its ``to_symbol``). Passing extra symbols is harmless — the
+    reconcile is a no-op for anything with no SPLIT in the ledger — so a router that cannot
+    cheaply tell a SPLIT from an EXCHANGE may simply pass both ends of the edited row.
+
+    **Why the entry point lives here and not in ``data_ingestion/``.** ``pricing/`` may not
+    import anything above ``shared/`` (D17 / trap #12), so the ratio lookup is injected;
+    this module already binds ``split_factor_fn(conn)`` for the quote/history legs and
+    ``api/`` may legally import both ``pricing`` and ``scheduler``. The alternative — a
+    ``data_ingestion → pricing`` import from inside the CRUD — is an edge
+    ``architecture.md``'s diagram does not have, and this feature has already spent one
+    owner decision (D39a) on adding a single documented edge.
+
+    The factor is bound ONCE for the whole call (trap #21): ``split_factor_fn`` reads and
+    groups the entire action ledger, so binding it per symbol would re-read it per symbol.
+    """
+    return reconcile_prices(conn, symbols, factor_of=split_factor_fn(conn))
+
+
+# --- Aliases (owner 2026-09-30, item 8: 「登錄名稱＋中文別名」) --------------------------
+#
+# A card may name an instrument by its registered name or by an alias, and nothing else — so
+# the alias list is part of what makes a card checkable. Two doors write it: the owner's own
+# (the edit / register forms: STRICT — a bad list is refused whole with the reason) and the
+# auto-fill at registration (the exchange's short name, the AI's common names: LENIENT — a bad
+# candidate is dropped and the rest kept, because a convenience must never fail a registration).
+# Both apply the same registry-wide rule: one name, one instrument.
+
+#: At most this many auto-filled aliases per registration: every stored alias widens what a
+#: card may call the instrument, and a reply listing a dozen names is noise, not knowledge.
+AUTO_ALIAS_CAP = 5
+
+
+def named_registry(conn: sqlite3.Connection) -> list[NamedInstrument]:
+    """Every registered instrument's names, for the conflict check. Archived rows included:
+    an archived instrument still owns its names, and restoring it must not find them taken."""
+    return [NamedInstrument(symbol=i.symbol, name=i.name, aliases=tuple(i.aliases))
+            for i in list_instruments(conn)]
+
+
+def checked_aliases(
+    conn: sqlite3.Connection, *, symbol: str, name: str, raw: Iterable[str]
+) -> list[str]:
+    """An owner-typed alias list, normalized — or :class:`AliasError` with the zh sentence.
+
+    Refused whole when any alias is unusable (``normalize_aliases``) or is another
+    instrument's code / name / alias: 長榮 may not mean both 2603 and 2618, or the card check
+    could no longer tell which pairing is wrong. Every conflict is named at once.
+    """
+    aliases = normalize_aliases(raw, symbol=symbol, name=name)
+    conflicts = alias_conflicts(symbol, aliases, named_registry(conn))
+    if conflicts:
+        raise AliasError("；".join(conflicts))
+    return aliases
+
+
+def checked_name(conn: sqlite3.Connection, *, symbol: str, name: str) -> None:
+    """Raise :class:`AliasError` when an owner-typed *name* is another instrument's alias.
+
+    The strict doors only (register / edit with a typed name). A name a provider or the
+    exchange supplied is never refused: it is the market's answer, and a registration must
+    not fail on it — an alias that collides with it is the thing to fix.
+    """
+    refused = name_conflict(symbol, name, named_registry(conn))
+    if refused is not None:
+        raise AliasError(refused)
+
+
+def auto_aliases(
+    conn: sqlite3.Connection, *, symbol: str, name: str, candidates: Iterable[str | None]
+) -> list[str]:
+    """Auto-filled alias candidates with every unusable or taken one dropped SILENTLY.
+
+    The lenient half: a candidate that is a code, the symbol itself, too long, the name
+    itself, a repeat, or a name another instrument already answers to is skipped and the
+    rest kept — capped at :data:`AUTO_ALIAS_CAP`. Never raises.
+    """
+    registry = named_registry(conn)
+    kept: list[str] = []
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            cleaned = normalize_aliases([raw], symbol=symbol, name=name)
+        except AliasError:
+            continue
+        for alias in cleaned:
+            if any(alias.casefold() == k.casefold() for k in kept):
+                continue
+            if alias_conflicts(symbol, [alias], registry):
+                continue
+            kept.append(alias)
+            if len(kept) >= AUTO_ALIAS_CAP:
+                return kept
+    return kept
+
+
+def _save_registration_aliases(
+    conn: sqlite3.Connection, symbol: str, name: str, *,
+    explicit: Sequence[str], found: Iterable[str | None],
+) -> None:
+    """Store the aliases a registration ends with: the door's already-checked ``explicit``
+    list, then the auto-filled ``found`` candidates. Re-normalized against the FINAL name — a
+    provider may have filled the name after the door checked — so an alias equal to it drops.
+    Writes nothing when the result is empty (a new row already reads ``[]``)."""
+    merged = normalize_aliases(
+        [*explicit, *auto_aliases(conn, symbol=symbol, name=name, candidates=found)],
+        symbol=symbol, name=name,
+    )
+    if merged:
+        set_instrument_aliases(conn, symbol, merged)
 
 
 class QuickRegisterError(Exception):
@@ -60,6 +199,15 @@ class QuickRegisterError(Exception):
         self.code = code
         self.message = message
         self.status = status
+
+
+def _quote_not_found(sym: str) -> QuickRegisterError:
+    """The typo guard's refusal — ONE sentence for the provider miss and the CJK fast path."""
+    return QuickRegisterError(
+        "quote_not_found",
+        f"查無 {sym} 的報價 — 請確認代號與市場是否正確（確定無誤可強制加入）",
+        422,
+    )
 
 
 class QuickRegisterOutcome(BaseModel):
@@ -91,6 +239,10 @@ class InstrumentLookup(BaseModel):
     sector: str = ""
     board: str | None = None
     is_etf: bool = False
+    # Owner 2026-09-30, item 8: a known symbol's stored aliases; for a brand-new TW symbol the
+    # exchange's short name (read from the board probe's own response) when it differs from
+    # ``name``. The dialog pre-fills its 別名 field with them and sends them back on register.
+    aliases: list[str] = Field(default_factory=list)
 
 
 def lookup_instrument(
@@ -116,9 +268,17 @@ def lookup_instrument(
             sector=existing.sector,
             board=existing.board or None,
             is_etf=existing.is_etf,
+            aliases=list(existing.aliases),
         )
+    if contains_cjk(sym):
+        # Owner 2026-09-30 (R8 F-01): a name (台積電) is never a code, so the provider can only
+        # answer 「查無報價」 — after the board probe + quote fetch had taken 25–30 s. Same
+        # answer, from the registry alone; the dialog then goes straight to AI 辨識.
+        return InstrumentLookup(found=False)
     # Brand-new symbol: probe the board (TW) then verify existence via a real quote fetch.
-    board = probe_tw_board(sym) if market is Market.TW else None
+    # ``names`` catches the exchange's short name from the probe's own response (item 8).
+    exchange_names: dict[str, str] = {}
+    board = probe_tw_board(sym, names=exchange_names) if market is Market.TW else None
     resolved_board = board if board is not None else (
         None if market is Market.TW else DEFAULT_BOARD[market]
     )
@@ -128,7 +288,10 @@ def lookup_instrument(
     registry = default_registry(conn)
     quote_ok = False
     try:
-        summary = refresh_quotes(conn, registry, [ref], REPORTING_FX_PAIRS, now=now)
+        summary = refresh_quotes(
+            conn, registry, [ref], REPORTING_FX_PAIRS, now=now,
+            factor_of=split_factor_fn(conn),
+        )
         quote_ok = sym in summary.ok
     except Exception:  # noqa: BLE001 — a provider crash degrades like "no quote" (typo guard)
         logger.warning("lookup quote fetch crashed for %s", sym, exc_info=True)
@@ -151,13 +314,17 @@ def lookup_instrument(
                     is_etf=False,
                 )
         return InstrumentLookup(found=False)
+    # Item 8: no looked-up name -> the exchange's short name from the probe, not a blank.
+    name = lookup_name(sym, market, board=resolved_board) or exchange_names.get(sym, "")
     return InstrumentLookup(
         found=True,
         registered=False,
-        name=lookup_name(sym, market, board=resolved_board) or "",
+        name=name,
         sector="",
         board=resolved_board,
         is_etf=False,
+        aliases=auto_aliases(conn, symbol=sym, name=name,
+                             candidates=[exchange_names.get(sym)]),
     )
 
 
@@ -187,7 +354,7 @@ def restore_archived(
     board: str | None = None,
     quote_ccy: Currency | None = None,
     target_low: Decimal | None = None,
-    is_etf: bool = False,
+    is_etf: bool | None = None,
 ) -> Instrument:
     """Un-archive an already-registered archived instrument and apply any provided metadata
     overrides (FU-D18 restore doors b/c). Caller-supplied non-empty values win; omitted
@@ -201,7 +368,12 @@ def restore_archived(
             "board": board if board is not None else existing.board,
             "quote_ccy": quote_ccy or existing.quote_ccy,
             "target_low": target_low if target_low is not None else existing.target_low,
-            "is_etf": is_etf or existing.is_etf,
+            # AI-D40: None means "the caller did not answer", so the archived row keeps
+            # whatever it knew — including its own unknown marker. A real bool is an
+            # answer and clears the marker.
+            "is_etf": bool(is_etf) or existing.is_etf,
+            "etf_flag_unknown": (existing.etf_flag_unknown if is_etf is None
+                                 else False),
         }
     )
     upsert_instrument(conn, merged)  # never touches ``archived`` (owned by the flag setter)
@@ -253,7 +425,10 @@ def _gap_backfill_inner(conn: sqlite3.Connection, symbol: str, now: datetime) ->
     # history + dividends degrade internally (failed keys are summarized, never raised);
     # refresh_instrument_quote CAN raise on a provider crash — run it last so a quote
     # failure never skips the history/dividend backfill.
-    refresh_history(conn, registry, [ref], start, now=now)
+    # ``factor_of`` (D17): a restored symbol's backfill re-fetches history the provider
+    # may have re-stated across a split — spec §5.1's own example of how the artifact
+    # enters. ``refresh_instrument_quote`` binds its own inside ``scheduler.jobs``.
+    refresh_history(conn, registry, [ref], start, now=now, factor_of=split_factor_fn(conn))
     refresh_dividends(conn, registry, [ref], now=now)
     refresh_instrument_quote(
         conn, symbol=symbol, market=inst.market, board=inst.board or None, now=now
@@ -295,9 +470,10 @@ def quick_register(
     board: str | None = None,
     quote_ccy: Currency | None = None,
     target_low: Decimal | None = None,
-    is_etf: bool = False,
+    is_etf: bool | None = None,
     force: bool = False,
     backfill_history: bool = True,
+    aliases: Sequence[str] = (),
 ) -> QuickRegisterOutcome:
     """Register *symbol* in one step: probe, fetch a real quote, name it, backfill.
 
@@ -310,6 +486,11 @@ def quick_register(
     (the classic register endpoint, FU-D23) instead schedules the heavy history/dividend
     backfill on FastAPI ``BackgroundTasks`` so the response returns fast (the instant quote
     is still fetched synchronously so ``last`` is populated immediately).
+
+    ``aliases`` (owner 2026-09-30, item 8) is a list the calling door has ALREADY checked
+    (``checked_aliases``). A new registration stores it plus the exchange's short name when this
+    call probed the TW board; restoring an archived symbol replaces the stored list only when
+    ``aliases`` is non-empty (blank keeps what the row had, like every other restore field).
     """
     sym = symbol.strip().upper()
     if not sym:
@@ -325,6 +506,10 @@ def quick_register(
             conn, existing, name=name, sector=sector, board=board,
             quote_ccy=quote_ccy, target_low=target_low, is_etf=is_etf,
         )
+        if aliases:
+            set_instrument_aliases(conn, sym, normalize_aliases(
+                aliases, symbol=sym, name=restored_inst.name))
+            restored_inst = get_instrument(conn, sym) or restored_inst
         gap_backfill(sym, now=now, conn=conn)
         price = get_latest_price(conn, sym, now=now)
         last_date = last_price_date(conn, sym)
@@ -337,12 +522,19 @@ def quick_register(
             restored=True,
             last_price_date=last_date,
         )
+    if contains_cjk(sym) and not force:
+        # Owner 2026-09-30 (R8 F-01): a name is never a code — refuse with the SAME 查無報價
+        # the provider would have produced, without first spending 25–30 s asking it. This is
+        # also the manual-trade auto-register door. ``force`` (an explicit register despite a
+        # provider outage) keeps its path unchanged.
+        raise _quote_not_found(sym)
 
     # 1. Board: explicit value respected; TW probed once here (register_instrument
     #    receives the result and must NOT re-probe — no double network call).
     resolved_board = board
+    exchange_names: dict[str, str] = {}  # item 8: the probe's own response names the symbol
     if resolved_board is None and market is Market.TW:
-        resolved_board = probe_tw_board(sym)
+        resolved_board = probe_tw_board(sym, names=exchange_names)
     if resolved_board is None and market is not Market.TW:
         resolved_board = DEFAULT_BOARD[market]
 
@@ -353,24 +545,25 @@ def quick_register(
         symbol=sym, market=market, board=resolved_board or DEFAULT_BOARD[market]
     )
     registry = default_registry(conn)
+    factor_of = split_factor_fn(conn)  # D17: bound once, shared by the quote + history legs
     quote_ok = False
     try:
-        summary = refresh_quotes(conn, registry, [ref], REPORTING_FX_PAIRS, now=now)
+        summary = refresh_quotes(
+            conn, registry, [ref], REPORTING_FX_PAIRS, now=now, factor_of=factor_of
+        )
         quote_ok = sym in summary.ok
     except Exception:  # noqa: BLE001 — a provider crash degrades like "no quote"
         logger.warning("quick-register quote fetch crashed for %s", sym, exc_info=True)
     if not quote_ok and not force:
-        raise QuickRegisterError(
-            "quote_not_found",
-            f"查無 {sym} 的報價 — 請確認代號與市場是否正確（確定無誤可強制加入）",
-            422,
-        )
+        raise _quote_not_found(sym)
 
     # 3. Name: caller-supplied wins; otherwise best-effort provider lookup.
     resolved_name = name.strip()
     name_source = "user" if resolved_name else "none"
     if not resolved_name:
-        found = lookup_name(sym, market, board=resolved_board)
+        # Item 8: when the name lookup finds nothing, the exchange's short name read by the
+        # board probe above is still the exchange's own answer — better than a blank row.
+        found = lookup_name(sym, market, board=resolved_board) or exchange_names.get(sym)
         if found:
             resolved_name, name_source = found, "provider"
 
@@ -378,9 +571,17 @@ def quick_register(
     inst = Instrument(
         symbol=sym, market=market, quote_ccy=quote_ccy or _DEFAULT_CCY[market],
         sector=sector, name=resolved_name, board=resolved_board or "",
-        target_low=target_low, is_etf=is_etf,
+        target_low=target_low, is_etf=bool(is_etf),
+        # AI-D40: the DEFAULT is now None = "nobody answered". The auto-register path in
+        # api/routers/input_center.py reaches here without an ETF answer, and the old
+        # ``False`` default made that silence mean "not an ETF" — authoritatively, because
+        # the fee seams treat the registry as authoritative. Explicit registration (the
+        # instruments form) always passes a real bool, so it is unaffected.
+        etf_flag_unknown=is_etf is None,
     )
     register_instrument(conn, inst, prober=None, confirm=True)
+    _save_registration_aliases(conn, sym, resolved_name, explicit=aliases,
+                               found=[exchange_names.get(sym)])
 
     # 5. Initial history window (config-driven, 5y default; owner 2026-07-08) —
     #    best-effort, never blocks registration. Skipped when ``backfill_history=False``
@@ -389,7 +590,9 @@ def quick_register(
     if backfill_history:
         try:
             start = (now - timedelta(days=get_settings().history_backfill_days)).date()
-            hist_summary = refresh_history(conn, registry, [ref], start, now=now)
+            hist_summary = refresh_history(
+                conn, registry, [ref], start, now=now, factor_of=factor_of
+            )
             history_points = sym in hist_summary.ok
         except Exception:  # noqa: BLE001 — presentation backfill must not fail the write
             logger.warning("quick-register history backfill failed for %s", sym, exc_info=True)

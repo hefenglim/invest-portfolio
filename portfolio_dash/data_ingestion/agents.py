@@ -1,35 +1,87 @@
-"""AI Agents Input: parse natural-language transaction text into a preview."""
+"""AI Agents Input: parse natural-language text into transaction / dividend / cash previews.
 
+**W4 (AI-D17..D21, 2026-08-18): the door is a DISCRIMINATED UNION, one prompt for three
+kinds.** A real broker statement is mixed — the same page carries buys/sells, dividends,
+interest, and broker fees — so the model returns ``rows: list[TxnDraft | DivDraft |
+CashDraft]`` (discriminator ``kind``) plus ``unparsed``: the rows it saw but could NOT
+classify (FX conversions, corporate actions, options). Confessing them is the point —
+AI-D3 exists to kill "skip the awkward rows", and a model that drops them silently would
+be the same sin with better handwriting.
+
+**Preview and commit go through the three EXISTING doors (AI-D18).** The drafts are
+grouped by kind; each group is rendered to that kind's canonical CSV (the same column
+constants the CSV templates are generated from) and previewed by that kind's whole-file
+builder — so what the preview priced and what ``/api/import/commit`` re-derives from the
+CSV cannot diverge (the AI-1 class of bug), and no new endpoint or writer exists. The
+cash builder's ``pool`` probe is a REQUIRED argument here, exactly as it is at the CSV
+door — see ``data_ingestion/cash_import.py``'s module docstring for why it has no default.
+
+**C7 per kind.** Within each kind, preview row ``i`` is data line ``i + 1`` of that
+kind's CSV — the frontend commits only the checked rows by splitting that kind's text on
+``\\n``. A draft may therefore never span two lines: proper ``csv.writer`` quoting is
+applied AND CR/LF inside a note is still collapsed to a space (quoting would preserve the
+newline and break the line mapping; see the git history of this invariant, W1/AI-2).
+"""
+
+import csv
+import io
 import sqlite3
-from collections.abc import Callable
-from datetime import date, datetime
+from collections.abc import Callable, Sequence
+from datetime import date
 from decimal import Decimal
-from zoneinfo import ZoneInfo
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
+from portfolio_dash.data_ingestion.cash_import import (
+    CASH_MOVEMENT_COLUMNS,
+    build_cash_movement_preview,
+)
 from portfolio_dash.data_ingestion.csv_import import txn_preview_row
+from portfolio_dash.data_ingestion.dividend_import import (
+    DIVIDEND_COLUMNS,
+    build_dividend_preview,
+)
 from portfolio_dash.data_ingestion.markets import CCY_MARKET
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets
 from portfolio_dash.data_ingestion.store import list_accounts
-from portfolio_dash.data_ingestion.validate import Issue, TxnInput
+from portfolio_dash.data_ingestion.validate import CashPoolFn, Issue, TxnInput
 from portfolio_dash.llm_insight.official_templates import AI_INPUT_PROMPT_BODY
+from portfolio_dash.shared import llm_fail_log as fail_log
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.enums import Market
-from portfolio_dash.shared.llm import LLMError, complete_structured
+from portfolio_dash.shared.llm import (
+    LLMError,
+    StructuredCompletion,
+    complete_structured_meta,
+)
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.symbol_format import matches_market_format
 
-_TAIPEI = ZoneInfo("Asia/Taipei")
+#: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
+#: inside its own class body, so every annotation after it — ``ex_date``, the
+#: ``effective_date`` return — resolves to the FIELD and mypy rejects it. Aliasing is the
+#: least surprising fix: renaming the field would change the ledger's wire contract.
+Date = date
 
 # Market VALUE -> that market's quote ccy (inverse of markets.CCY_MARKET). Used to render a
 # MERGED account's per-market catalog line (id=name (USD:US＋MYR:MY)) for the AI parse prompt.
 _MARKET_CCY = {m.value: ccy for ccy, m in CCY_MARKET.items()}
 
 
-class AiDraft(BaseModel):
-    """One transaction extracted from user text by the LLM."""
+class TxnDraft(BaseModel):
+    """One BUY/SELL extracted from user text by the LLM (formerly ``AiDraft``, pre-union).
 
+    ``short_sale`` arrived WITH its prompt rule (v6, AI-D19): the model sets it only on
+    explicit 放空／融券／short wording, never by inference — a false positive books a short
+    the user never declared, and the flag exempts the sell from the 賣超 guard.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["txn"] = "txn"
     account_id: str
     symbol: str
     side: Side
@@ -37,6 +89,7 @@ class AiDraft(BaseModel):
     shares: Decimal
     price: Decimal
     daytrade: bool = False
+    short_sale: bool = False
     is_etf: bool = False
     note: str | None = None
     # Batch B (F15): optional target market ("US"/"TW"/"MY") naming the stock's exchange, for a
@@ -44,60 +97,339 @@ class AiDraft(BaseModel):
     # quick-add dialog's market default in the preview and steers the per-row format check; the
     # real provider lookup at registration stays the authority. Blank on single-market accounts.
     market: str = ""
+    #: DEF-036 (2026-09-23): the statement's OWN total for this line (成交金額／應付金額／
+    #: 淨收付), copied verbatim when the text states one — never computed by the model. It is
+    #: EVIDENCE, not ledger data: it never reaches the commit CSV (``_TXN_CSV_COLUMNS``); the
+    #: door compares it against ``shares × price`` (:func:`_append_amount_check`) and flags a
+    #: contradiction instead of choosing between the two. Before it existed, 「100股 成交價 46
+    #: 成交金額 50,000 元」 parsed clean with the 50,000 parked in ``note``, where nothing reads.
+    stated_amount: Decimal | None = None
+
+
+class DivDraft(BaseModel):
+    """One dividend extracted by the LLM — mirrors ``DIVIDEND_COLUMNS`` exactly.
+
+    No ``note``: the dividends CSV kind has no note column, and this model must not carry
+    a field the commit door cannot see (the AI-1 lesson, generalised).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["div"] = "div"
+    account_id: str
+    symbol: str
+    date: date  # the PAYMENT date (R6 pinned the meaning)
+    type: str  # CASH / STOCK / DRIP / NET — canonicalised + gated per account model downstream
+    gross: Decimal
+    withholding: Decimal | None = None
+    net: Decimal | None = None
+    reinvest_shares: Decimal | None = None
+    reinvest_price: Decimal | None = None
+    #: R6 — the EX-DIVIDEND date, only when the statement states it. The prompt forbids
+    #: inferring one: a guessed ex-date silently moves a 配股's shares to the wrong day,
+    #: which is the very error R6 exists to remove.
+    ex_date: Date | None = None
+
+
+class CashDraft(BaseModel):
+    """One cash movement extracted by the LLM — mirrors ``CASH_MOVEMENT_COLUMNS``.
+
+    The direction lives in ``cash_kind`` (amounts are unsigned): mislabel BROKER_FEE as
+    DEPOSIT and the pool is wrong by 2× the amount with nobody raising an error (AI-D3).
+    The field is ``cash_kind``, not ``kind``, because ``kind`` is already the union
+    DISCRIMINATOR on this model — one field cannot be both. ``cash_kind`` accepts the
+    canonical spelling (``DEPOSIT``) or a zh alias (``入金``); the CSV door's
+    ``_canonical_kind`` owns the alias table, so this door and the CSV door can never
+    drift apart on what 入金 means.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["cash"] = "cash"
+    account_id: str
+    date: date
+    cash_kind: str
+    ccy: str
+    amount: Decimal
+    # The home-currency cost of a foreign acquisition (F1: the AMOUNT, never a rate). The
+    # prompt rule is strict: fill it ONLY when the statement itself states the cost.
+    acq_home_amount: Decimal | None = None
+    note: str | None = None
+
+
+class UnparsedRow(BaseModel):
+    """A statement row the model saw but could NOT classify (AI-D17).
+
+    FX conversions (two-amount algebra), corporate actions (ratio algebra + batch-level
+    validation), options — all deliberately OUT of the union (AI-D3). Listing them here
+    surfaces them to the user (「請改用 CSV／表單」) instead of dropping them silently.
+    """
+
+    text: str
+    reason: str = ""
+
+
+#: The union itself. ``kind`` is the discriminator, so a dividend row missing ``gross``
+#: fails at the PARSE boundary (and triggers the completion layer's one retry) instead of
+#: exploding inside a preview builder (AI-D17).
+AnyDraft = Annotated[TxnDraft | DivDraft | CashDraft, Field(discriminator="kind")]
 
 
 class AiDraftList(BaseModel):
-    """Structured LLM output: a list of extracted transaction drafts."""
+    """Structured LLM output: the extracted drafts plus the confessed unparsed rows.
 
-    drafts: list[AiDraft]
+    ``extra="forbid"`` here and on the three drafts (W4 review): the same parse boundary
+    AI-D17 set for MISSING fields, from the other side. Pydantic's default ignores unknown
+    keys, so a mistyped optional money field (``with_hold`` for ``withholding``) parsed
+    clean with the statement's number silently gone — and a model regressing to the v5
+    ``{"drafts": [...]}`` shape parsed to ``rows=[]``, the whole extraction dropped without
+    a word. Both are AI-D3's silent-drop sin; both now fail validation and take the one
+    retry instead. ``UnparsedRow`` stays lenient: an extra key on a confession costs
+    nothing, and the confession itself is the failure-soft path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rows: list[AnyDraft] = Field(default_factory=list)
+    unparsed: list[UnparsedRow] = Field(default_factory=list)
 
 
 class AiMeta(BaseModel):
-    """Provenance of the LLM run that produced a preview (latest usage row)."""
+    """Provenance of the LLM run that produced a preview — read off the completion itself.
+
+    ``fallback_note`` is set when the model that answered is NOT the first one tried: the
+    chain fails over silently, so without it an owner who picked haiku-4.5 by hand read
+    「模型：google/gemini-2.5-flash-lite」 under 「✓ 解析完成」 and no word about why (DEF-083,
+    #520). Built here, in Chinese, from the completion layer's own per-candidate reasons.
+    """
 
     model: str | None = None
     via: str = "litellm"
     cost_usd: Decimal | None = None
+    fallback_note: str | None = None
 
 
 class AiInputResult(BaseModel):
-    """Bundle returned by :func:`ai_agents_input`: preview + meta + commit CSV."""
+    """Bundle returned by :func:`ai_agents_input`: per-kind previews + commit CSVs + meta.
 
-    preview: ImportPreview
-    meta: AiMeta
-    csv_text: str = ""
-
-
-def _latest_meta(conn: sqlite3.Connection) -> AiMeta:
-    """Read the most recent ``llm_usage`` row for the AI-input agent into meta."""
-    row = conn.execute(
-        "SELECT model, cost FROM llm_usage WHERE agent='ai_agents_input' "
-        "ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return AiMeta()
-    return AiMeta(model=row["model"], cost_usd=Decimal(row["cost"]))
-
-
-def _drafts_to_csv(drafts: list[AiDraft]) -> str:
-    """Render drafts as canonical transaction CSV for /api/import/commit — ONE line per draft.
-
-    The one-line-per-draft invariant is load-bearing: the AI preview's per-row index maps to
-    csv data line ``index + 1`` so the frontend can commit only the CHECKED rows (C7). A note
-    carrying an embedded newline would split a draft across lines and break that mapping, so
-    CR/LF in the note are collapsed to a single space here (this generator does no CSV quoting).
+    ``previews`` / ``csv_texts`` are keyed by the EXISTING import kinds
+    (``transactions`` / ``dividends`` / ``cash``); a kind with zero drafts is absent.
+    ``error`` is set only on the LLM-failure degrade path (the router maps it to the
+    HTTP degrade response, exactly as the pre-union single-row degrade did).
     """
-    lines = ["account,symbol,side,date,shares,price,note"]
-    for d in drafts:
-        note = (d.note or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-        lines.append(
-            f"{d.account_id},{d.symbol},{d.side.value},{d.date.isoformat()},"
-            f"{d.shares},{d.price},{note}"
-        )
-    return "\n".join(lines) + "\n"
+
+    previews: dict[str, ImportPreview] = Field(default_factory=dict)
+    csv_texts: dict[str, str] = Field(default_factory=dict)
+    #: The drafts themselves, per kind and ROW-ALIGNED with ``previews[kind].rows`` (DEF-035).
+    #: They are what the draft table edits and sends back to :func:`revalidate_ai_drafts` —
+    #: the browser edits typed fields, never a CSV line, and never re-parses one.
+    drafts: dict[str, list[AnyDraft]] = Field(default_factory=dict)
+    unparsed: list[UnparsedRow] = Field(default_factory=list)
+    meta: AiMeta = Field(default_factory=AiMeta)
+    error: Issue | None = None
 
 
-Completer = Callable[..., AiDraftList]
+def _fallback_note(
+    completion: "StructuredCompletion[AiDraftList]", requested: str | None
+) -> str | None:
+    """「指定模型 haiku-4.5 失敗：請求內容被拒（HTTP 400）。本次改由 gemini-2.5-flash-lite 產出。」
+
+    ``None`` when the first candidate answered. The chain is [picked model, role primary,
+    role fallback] when the owner picked one (``shared.llm._select_for``), else [primary,
+    fallback]; each failed candidate is named by that position and its own reason.
+    """
+    if not completion.failed_before:
+        return None
+    # The pick heads the chain only when it resolved to an enabled model (the API rejects
+    # any other pick up front); compare the alias rather than trust the position alone.
+    picked = bool(requested) and completion.failed_before[0].alias == requested
+    primary_at = 1 if picked else 0
+    parts = []
+    for i, failed in enumerate(completion.failed_before):
+        role = ("指定模型" if picked and i == 0
+                else "主模型" if i == primary_at else "備援")
+        parts.append(f"{role} {failed.alias} 失敗：{failed.reason}")
+    return f"{'；'.join(parts)}。本次改由 {completion.model} 產出。"
+
+
+def _meta_of(completion: "StructuredCompletion[AiDraftList]", requested: str | None) -> AiMeta:
+    """The preview's provenance, from the completion that produced it.
+
+    It was read back as 「the newest ``llm_usage`` row of this agent」 — a reconstruction that
+    could name another request's model, and could never know a failover had happened.
+    """
+    return AiMeta(
+        model=completion.model_name or completion.model,
+        cost_usd=completion.cost,
+        fallback_note=_fallback_note(completion, requested),
+    )
+
+
+#: The columns the transaction renderer emits, a deliberate SUBSET of
+#: ``csv_import.TRANSACTION_COLUMNS``.
+#:
+#: ``fee``/``tax`` are omitted ON PURPOSE: they are money of record, and leaving them out
+#: is what makes the fee engine — not the model — compute them at both ends. Supplying
+#: them here would let an LLM-invented number override the engine
+#: (``build_transaction_preview`` honours a CSV fee/tax when present).
+#:
+#: ``daytrade`` and ``short_sale`` are BOTH present: the flags reach the preview's
+#: ``TxnInput`` AND this CSV, because the commit route re-derives its own preview from
+#: this text ("the preview's answer is advisory, this one writes") and cannot see a field
+#: the CSV drops. ``daytrade`` was the W1/AI-1 bug (preview showed 0.15%, the ledger got
+#: 0.3%); ``short_sale`` was then withheld because the prompt never taught it — v6
+#: (AI-D19) added the rule, so the column arrives now, exactly as planned.
+#:
+#: ``is_etf`` is not a transaction column at all: the instrument registry owns that flag
+#: and wins at the fee seam (``csv_import.py`` ETF resolution), so ``TxnDraft.is_etf``
+#: steers only the preview, and an UNREGISTERED symbol is a hard issue that never reaches
+#: a commit. There is therefore no reachable divergence to close.
+_TXN_CSV_COLUMNS = [
+    "account", "symbol", "side", "date", "shares", "price", "daytrade", "short_sale", "note",
+]
+
+
+def _collapse_note(note: str | None) -> str:
+    """CR/LF inside a note collapse to a space — a draft may never span two lines (C7)."""
+    return (note or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
+def _csv_text(header: list[str], rows: list[list[object]]) -> str:
+    """One canonical CSV text — ``csv.writer`` QUOTE_MINIMAL, ``\\n`` line terminator.
+
+    Proper quoting is load-bearing (W1/AI-2): the prompt asks the model for free-text
+    notes, and an unquoted comma in the LAST column produced a surplus field that
+    ``csv.DictReader`` filed under a ``None`` key — an ``AttributeError`` outside the
+    try/except. Minimal quoting leaves comma-free values byte-identical.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buf.getvalue()
+
+
+def _opt(value: Decimal | None) -> str:
+    """An optional Decimal cell: blank when absent, canonical string otherwise."""
+    return "" if value is None else str(value)
+
+
+def _txn_csv(drafts: list[TxnDraft]) -> str:
+    """Render transaction drafts as canonical CSV — ONE line per draft (C7)."""
+    return _csv_text(_TXN_CSV_COLUMNS, [
+        [
+            d.account_id, d.symbol, d.side.value, d.date.isoformat(),
+            d.shares, d.price, "1" if d.daytrade else "0",
+            "1" if d.short_sale else "0", _collapse_note(d.note),
+        ]
+        for d in drafts
+    ])
+
+
+def _div_csv(drafts: list[DivDraft]) -> str:
+    """Render dividend drafts as canonical CSV — the SAME columns as the CSV template."""
+    return _csv_text(DIVIDEND_COLUMNS, [
+        [
+            d.account_id, d.symbol, d.date.isoformat(), d.type, d.gross,
+            _opt(d.withholding), _opt(d.net),
+            _opt(d.reinvest_shares), _opt(d.reinvest_price),
+            d.ex_date.isoformat() if d.ex_date is not None else "",
+        ]
+        for d in drafts
+    ])
+
+
+def _cash_csv(drafts: list[CashDraft]) -> str:
+    """Render cash drafts as canonical CSV — the SAME columns as the CSV template."""
+    return _csv_text(CASH_MOVEMENT_COLUMNS, [
+        [
+            d.account_id, d.date.isoformat(), d.cash_kind, d.ccy, d.amount,
+            _opt(d.acq_home_amount), _collapse_note(d.note),
+        ]
+        for d in drafts
+    ])
+
+
+def cash_kind_vocabulary() -> list[dict[str, str]]:
+    """Every cash kind as ``{kind, label, sign}`` — the AI draft table's 類型 options (DEF-035).
+
+    Server-owned for the same reason ``kind_label`` / ``sign`` are (AI-D21): the frontend
+    renders this vocabulary rather than keeping another copy of ``CASH_KIND_ZH``, so a kind
+    added to ``shared/cash_kinds.py`` reaches the editable select without a web change.
+    """
+    return [{"kind": kind, "label": zh, "sign": str(movement_sign(kind))}
+            for kind, zh in CASH_KIND_ZH.items()]
+
+
+#: DEF-036: how far a statement's own total may sit from ``shares × price`` (or from that
+#: gross ± the engine's fee and tax) before the draft is flagged — a fraction of the gross.
+#: 1% is wide enough for what legitimately separates the two on a real statement (an average
+#: fill price printed to fewer decimals than the total was computed with, a broker whose fee
+#: differs from the engine's by a few units) and narrow enough to catch every mis-read the
+#: check exists for: a dropped or extra digit is a factor of 10, a lot/share confusion 1,000.
+STATED_AMOUNT_TOLERANCE = Decimal("0.01")
+
+
+def _append_amount_check(row: PreviewRow, draft: TxnDraft) -> None:
+    """Flag a draft whose transcribed total contradicts its own ``shares × price`` (DEF-036).
+
+    The model copies ``stated_amount`` and computes nothing; this door does the arithmetic,
+    in Decimal, against three readings a statement's total can have — the gross (成交金額),
+    the gross plus the engine's fee and tax (a buy's 應付金額) and the gross minus them (a
+    sell's 淨收付). Any one within :data:`STATED_AMOUNT_TOLERANCE` of the gross is consistent.
+    Otherwise the row gets a NEEDS-CONFIRM ``amount_mismatch`` naming both figures: the door
+    never picks a winner and never fills one field from the other (functional manual F-05:
+    「矛盾數字…系統應拒絕或標示，不得自行補齊」). A row whose share count or price is not
+    positive is left alone — those findings belong to the validator, and a tolerance of a
+    non-positive gross would be meaningless.
+
+    The flag is PREVIEW-ONLY on purpose: ``stated_amount`` is not a ledger column, so the
+    commit door re-derives the row without it. The draft table therefore never pre-ticks a
+    flagged row and asks again before writing one (``web/input.js``) — the acknowledgement
+    lives where the evidence is shown.
+    """
+    if draft.stated_amount is None:
+        return
+    row.payload["stated_amount"] = str(draft.stated_amount)
+    gross = draft.shares * draft.price
+    if draft.shares <= 0 or draft.price <= 0:
+        return
+    stated = abs(draft.stated_amount)
+    costs = (row.fee or Decimal(0)) + (row.tax or Decimal(0))
+    band = gross * STATED_AMOUNT_TOLERANCE
+    if any(abs(c - stated) <= band for c in (gross, gross + costs, gross - costs)):
+        return
+    pct = f"{(STATED_AMOUNT_TOLERANCE * 100).normalize():f}"
+    row.payload["amount_mismatch"] = "1"
+    row.issues.append(Issue(
+        kind="amount_mismatch",
+        needs_confirm=True,
+        message=(f"金額矛盾：文字寫成交金額 {stated:,}，但 {draft.shares:,} 股 × "
+                 f"{draft.price:,} = {gross:,}，差距超過 {pct}%；"
+                 "請確認股數、價格與金額後再勾選寫入"),
+    ))
+
+
+def _label_cash_rows(preview: ImportPreview) -> None:
+    """Attach the server-owned zh label + explicit sign to each cash row's payload (AI-D21).
+
+    The label vocabulary lives in ``shared/cash_kinds.py`` (``CASH_KIND_ZH``) — the
+    frontend renders ``kind_label`` / ``sign`` verbatim rather than keeping a fourth copy
+    of the map (the third copy, in the printed statement, is how an unlabelled kind once
+    shipped as raw English). Parse-error rows carry no payload ``kind`` and are skipped.
+    """
+    for row in preview.rows:
+        kind = row.payload.get("kind")
+        if not kind:
+            continue
+        row.payload["kind_label"] = CASH_KIND_ZH.get(kind, kind)
+        row.payload["sign"] = str(movement_sign(kind))
+
+
+#: The injectable completion seam: the ``complete_structured_meta`` shape, so the door reads
+#: WHICH model answered (and which failed first) off the reply instead of guessing it back
+#: from the usage table (DEF-083 / DEF-084).
+Completer = Callable[..., StructuredCompletion[AiDraftList]]
 
 # The AI-parse prompt is code-owned but centralized in ``llm_insight/official_templates``
 # (FU-D20, 2026-07-17): all shipped prompt content has one home. ``{accounts}`` / ``{today}``
@@ -124,7 +456,7 @@ def _draft_market(value: str) -> Market | None:
 
 
 def _append_format_warning(
-    conn: sqlite3.Connection, row: PreviewRow, draft: AiDraft
+    conn: sqlite3.Connection, row: PreviewRow, draft: TxnDraft
 ) -> None:
     """Append the FU-D41 soft warning when the row's EFFECTIVE symbol shape mismatches
     the account's market(s) (e.g. non-numeric on a TW account). The check runs on the
@@ -192,50 +524,59 @@ def ai_agents_input(
     conn: sqlite3.Connection,
     text: str,
     *,
+    pool: CashPoolFn,
     completer: Completer | None = None,
     today: date | None = None,
     images: list[bytes] | None = None,
     model_alias: str | None = None,
 ) -> AiInputResult:
-    """Extract transactions from natural-language *text* (+ screenshots) and return a preview.
+    """Extract transactions + dividends + cash movements from *text* (+ screenshots).
 
     Calls the LLM (via *completer*) to parse the user's free-form text and any attached
-    statement *images* into structured drafts, then feeds each draft through the same
-    validate/fee-compute pipeline used by the CSV importer.  The result is an
-    :class:`ImportPreview` that the caller inspects and optionally commits.
+    statement *images* into the discriminated-union drafts, then builds ONE preview per
+    kind through that kind's existing door: transactions per draft via
+    :func:`txn_preview_row` (the FU-D41 format warning and the F15 market hint are
+    per-draft extras the CSV cannot carry), dividends and cash by rendering the kind's
+    canonical CSV and calling its whole-file builder — so the preview IS what a commit
+    of the returned CSV will re-derive, by construction.
 
     The LLM is **never** called synchronously on page load — callers invoke this
-    explicitly (manual trigger or route handler) and commit via
-    :func:`~preview.commit_preview`.  The LLM only *extracts* what the text/screenshot
-    already states; every number still flows through preview→confirm→commit where the
-    real fee/tax engine computes the values of record.
+    explicitly (manual trigger or route handler) and commit via the ordinary
+    ``/api/import/commit``. The LLM only *extracts* what the text/screenshot already
+    states; every number still flows through preview→confirm→commit where the real
+    fee/tax engine computes the values of record.
 
     Args:
         conn:        Active SQLite connection (schema in place, accounts seeded).
-        text:        Free-form user text describing one or more transactions.
+        text:        Free-form user text describing one or more ledger rows.
+        pool:        The cash-pool probe for the withdraw guard — REQUIRED, no default,
+                     same rule as the cash CSV door (see ``cash_import.py``). The router
+                     binds :func:`api.routers.cash.cash_pool_fn`; tests bind a stub.
         completer:   Injectable LLM callable. Defaults to ``None``, resolved at call
-                     time to :func:`~shared.llm.complete_structured` via module lookup
+                     time to :func:`~shared.llm.complete_structured_meta` via module lookup
                      (so ``monkeypatch.setattr`` on the module attribute takes effect).
                      Replaced with a mock in tests.
+        today:       Anchors relative/yearless dates (audit §2.7: "7/3" must resolve to
+                     the most recent PAST occurrence, never a future trade date). The
+                     router feeds get_now's date; the fallback keeps direct callers working.
         images:      Optional decoded screenshot bytes; when present the completion layer
                      auto-routes to the VISION role chain and the model reads the images.
         model_alias: Optional explicit per-run model alias (registry) forwarded as the
                      completion layer's ``model_override`` (head of the candidate chain).
     Returns:
-        :class:`AiInputResult` bundling the :class:`ImportPreview` (one
-        :class:`PreviewRow` per extracted draft, or a single degradation row when
-        the LLM call fails), the latest-run :class:`AiMeta`, and a commit-ready CSV.
+        :class:`AiInputResult` with one :class:`ImportPreview` + commit CSV per kind
+        present in the extraction, the confessed ``unparsed`` rows, and the latest-run
+        :class:`AiMeta`. On LLM failure the bundle is empty and ``error`` carries the
+        degradation issue.
     """
-    completer = completer or complete_structured
-    # ``today`` anchors relative/yearless dates (audit §2.7: "7/3" must resolve to the
-    # most recent PAST occurrence, never a future trade date). The router feeds get_now's
-    # date; the fallback keeps direct callers working.
-    anchor = today if today is not None else datetime.now(_TAIPEI).date()
+    completer = completer or complete_structured_meta
+    anchor = today if today is not None else app_now().date()
+    rendered = _PROMPT.format(
+        text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
+    )
     try:
-        result = completer(
-            _PROMPT.format(
-                text=text, accounts=_accounts_catalog(conn), today=anchor.isoformat()
-            ),
+        completion = completer(
+            rendered,
             AiDraftList,
             agent="ai_agents_input",
             conn=conn,
@@ -243,44 +584,171 @@ def ai_agents_input(
             model_override=model_alias,
         )
     except LLMError as exc:
-        return AiInputResult(
-            preview=ImportPreview(
-                rows=[
-                    PreviewRow(
-                        index=0,
-                        raw={"text": text},
-                        issues=[Issue(kind=exc.kind, message=str(exc))],
-                    )
-                ]
-            ),
-            meta=AiMeta(),
-            csv_text="",
+        return AiInputResult(error=Issue(kind=exc.kind, message=str(exc)))
+    result = completion.value
+
+    if result.unparsed:
+        # AI-D65: a SUCCESSFUL call whose model confessed it could not classify some rows.
+        # The seam above records only calls that failed outright, so without this the
+        # confessions are shown on screen once and then thrown away -- and they are the
+        # richest signal in the log, because the model is naming its own boundary against
+        # real text. ONE row per call, not per confessed line: the unit of diagnosis is
+        # "this paste, this prompt, this reply", and splitting it would duplicate the
+        # prompt N times while losing which confessions arrived together.
+        fail_log.record(
+            conn,
+            agent="ai_agents_input",
+            outcome="unparsed_rows",
+            source_text=text,
+            # The prompt is captured here too. Measured on the live demo 2026-08-28: a
+            # `schema_mismatch` row carried 13,242 chars of prompt while an
+            # `unparsed_rows` row carried ZERO — one corpus holding two completenesses,
+            # with the confession rows (the richest ones) as the poorer half.
+            prompt=rendered,
+            raw_output="\n".join(f"{u.text}\t{u.reason}" for u in result.unparsed),
+            error_reason=f"{len(result.unparsed)} row(s) could not be classified",
+            # DEF-084: the reply described here has a model and a billed usage row, and
+            # every other capture of a reply (shared.llm's parse failures) names both.
+            # Without them the confession rows — the richest in the log — could not say
+            # whose they were (demo #499–#518: model "", usage_id null).
+            model=completion.model_name,
+            usage_id=completion.usage_id,
         )
 
-    rows: list[PreviewRow] = []
-    for idx, d in enumerate(result.drafts):
-        inp = TxnInput(
-            account_id=d.account_id,
-            symbol=d.symbol,
-            side=d.side,
-            quantity=d.shares,
-            price=d.price,
-            trade_date=d.date,
-            daytrade=d.daytrade,
-            is_etf=d.is_etf,
-            note=d.note,
-        )
-        row = txn_preview_row(conn, idx, {"text": text}, inp)
-        if d.market:
-            # Batch B (F15): carry the AI-suggested market to the frontend preview row so the
-            # quick-add dialog can default its market select. PREVIEW-ONLY — the committed CSV
-            # (_drafts_to_csv) is unchanged, so the C7 row<->line commit mapping is preserved.
-            row.payload["market"] = d.market
-        _append_format_warning(conn, row, d)  # FU-D41 soft check — warns, never rewrites
-        rows.append(row)
+    built = _build_result(conn, text, result, pool=pool)
+    built.meta = _meta_of(completion, model_alias)
+    return built
 
+
+class TradeContext(BaseModel):
+    """One trade the SAME submission will write before its dividends — just what a dividend's
+    position check reads: account, symbol, trade date (S4 / S10, 2026-10-04).
+
+    The draft table re-judges an edited dividend without re-sending (and re-previewing) the
+    trades: it sends the TICKED, well-formed trade drafts as this minimal context, and
+    :func:`_build_result` folds them into the same ``pending_trades`` map a first preview
+    builds from the trade rows themselves — so the rule (``validate_dividend(pending_trades=)``
+    → ``holdings.position_exists_by``) keeps exactly one owner, here on the server. A context
+    entry only ever RELAXES a preview; the commit door re-validates every dividend against the
+    ledger after the trades are written.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    symbol: str
+    date: date
+
+
+def revalidate_ai_drafts(
+    conn: sqlite3.Connection,
+    drafts: AiDraftList,
+    *,
+    pool: CashPoolFn,
+    text: str = "",
+    trade_context: Sequence[TradeContext] = (),
+) -> AiInputResult:
+    """Re-validate EDITED drafts through the same post-parse pipeline — no model call (DEF-035).
+
+    The draft table's per-row edits come back here: the same per-row preview, FU-D41 format
+    check, DEF-036 amount check and AI-D21 cash labels that :func:`ai_agents_input` applies
+    to the model's output, and a commit CSV regenerated from the edited drafts. One pipeline,
+    two entry points — so an edited preview is still exactly what ``/api/import/commit`` will
+    re-derive (AI-D18), and the browser never assembles a CSV line of its own. It takes no
+    completer at all, so an edit cannot spend tokens; ``meta`` stays empty for the same reason.
+    ``unparsed`` is echoed back untouched (a confession is not editable into a row here).
+
+    Args:
+        conn:   Active SQLite connection.
+        drafts: The edited drafts (``rows`` in draft order; the kinds are regrouped
+                order-preservingly, so row *n* of a kind is still draft *n* of that kind).
+        pool:   The cash-pool probe — REQUIRED, exactly as at :func:`ai_agents_input`.
+        text:   The original pasted text, for the per-row ``raw`` provenance only.
+        trade_context: The ticked trades of the same paste, when only the dividends are being
+                re-judged (see :class:`TradeContext`).
+    """
+    return _build_result(conn, text, drafts, pool=pool, trade_context=trade_context)
+
+
+def _build_result(
+    conn: sqlite3.Connection,
+    text: str,
+    result: AiDraftList,
+    *,
+    pool: CashPoolFn,
+    trade_context: Sequence[TradeContext] = (),
+) -> AiInputResult:
+    """The post-parse pipeline shared by a model parse and an edit re-validation."""
+    txns = [r for r in result.rows if isinstance(r, TxnDraft)]
+    divs = [r for r in result.rows if isinstance(r, DivDraft)]
+    cashs = [r for r in result.rows if isinstance(r, CashDraft)]
+
+    previews: dict[str, ImportPreview] = {}
+    csv_texts: dict[str, str] = {}
+    # CR-02 (2026-10-04): (account, symbol) → the earliest trade of THIS paste that can be
+    # written. The page commits 交易 before 股利 (web/input.js AI_KINDS), so a dividend whose buy
+    # is in the same paste is not "a dividend with no position" at preview time.
+    pending_trades: dict[tuple[str, str], date] = {}
+
+    if txns:
+        # Sibling-aware (C1, extended to this door in W4): the oversell guard counts the
+        # WHOLE extracted set, so 「買 10 股、隔天賣 10 股」 in one paste does not flag the
+        # sell against a position the same batch is still building.
+        inputs = [
+            TxnInput(
+                account_id=d.account_id,
+                symbol=d.symbol,
+                side=d.side,
+                quantity=d.shares,
+                price=d.price,
+                trade_date=d.date,
+                daytrade=d.daytrade,
+                short_sale=d.short_sale,
+                is_etf=d.is_etf,
+                note=d.note,
+            )
+            for d in txns
+        ]
+        rows: list[PreviewRow] = []
+        for idx, (d, inp) in enumerate(zip(txns, inputs, strict=True)):
+            row = txn_preview_row(conn, idx, {"text": text}, inp, batch=inputs)
+            if d.market:
+                # Batch B (F15): carry the AI-suggested market to the frontend preview row so
+                # the quick-add dialog can default its market select. PREVIEW-ONLY — the
+                # committed CSV is unchanged, so the C7 row<->line mapping is preserved.
+                row.payload["market"] = d.market
+            _append_format_warning(conn, row, d)  # FU-D41 soft check — warns, never rewrites
+            _append_amount_check(row, d)  # DEF-036 — a contradicted total is flagged, not fixed
+            rows.append(row)
+            if not row.has_hard_issue:   # a row that can never be written opens nothing
+                key = (inp.account_id, inp.symbol)
+                pending_trades[key] = min(pending_trades.get(key, inp.trade_date),
+                                          inp.trade_date)
+        previews["transactions"] = ImportPreview(rows=rows)
+        csv_texts["transactions"] = _txn_csv(txns)
+    # S10: the same map from a minimal context, when the trades are not re-sent as drafts.
+    for c in trade_context:
+        key = (c.account_id, c.symbol)
+        pending_trades[key] = min(pending_trades.get(key, c.date), c.date)
+
+    if divs:
+        csv_texts["dividends"] = _div_csv(divs)
+        previews["dividends"] = build_dividend_preview(
+            conn, csv_texts["dividends"], pending_trades=pending_trades)
+
+    if cashs:
+        csv_texts["cash"] = _cash_csv(cashs)
+        cash_preview = build_cash_movement_preview(conn, csv_texts["cash"], pool=pool)
+        _label_cash_rows(cash_preview)
+        previews["cash"] = cash_preview
+
+    drafts: dict[str, list[AnyDraft]] = {}
+    for kind, group in (("transactions", txns), ("dividends", divs), ("cash", cashs)):
+        if group:
+            drafts[kind] = list(group)
     return AiInputResult(
-        preview=ImportPreview(rows=rows),
-        meta=_latest_meta(conn),
-        csv_text=_drafts_to_csv(result.drafts),
+        previews=previews,
+        csv_texts=csv_texts,
+        drafts=drafts,
+        unparsed=result.unparsed,
     )

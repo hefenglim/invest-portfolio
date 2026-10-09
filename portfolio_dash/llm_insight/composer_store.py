@@ -1,8 +1,9 @@
 """Insight-composer persistence: the static "design object" layer of spec 04.
 
-Owns four composer tables + a single-row evolution config via :mod:`config_store`:
+Owns five composer tables + a single-row evolution config via :mod:`config_store`:
 
 - ``strategy_prompts``        — pure design objects (body holds ``{{var}}`` tokens).
+- ``strategy_prompt_versions`` — the append-only body history of each strategy (DEF-033).
 - ``insight_types``           — the composition (scope + 1..n strategies + toggles);
   the sole schedule/calibration mount point.
 - ``insight_type_strategies`` — the ordered many-to-many link (insight_type → strategy).
@@ -22,11 +23,11 @@ import json
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from portfolio_dash.shared import config_store
+from portfolio_dash.shared import config_store, prompt_versions
 
 CATEGORY = "evolution"
 
@@ -79,6 +80,55 @@ class StrategyPrompt(BaseModel):
     archived: bool
     created_at: str
     updated_at: str
+    # DEF-033 (owner ruling 2026-09-24): the number of the newest ``strategy_prompt_versions``
+    # row — the version a card generated NOW would record. ADDITIVE on the wire; None only
+    # on a connection whose versions table has not been created yet.
+    current_version: int | None = None
+
+
+# DEF-033: why a version row exists. Every write door states it (``create_strategy`` /
+# ``update_strategy`` / ``restore_version``); ``migration`` / ``backfill`` are written only by
+# ``_backfill_versions`` (the body a strategy had when versioning began, or a body some path
+# wrote around this module — recorded so the history never has a hole).
+VersionSource = Literal[
+    "create", "official_copy", "user_save", "sync_official", "restore", "migration",
+    "backfill",
+]
+
+# zh labels for the history list (the page renders the string, it holds no table of its own).
+# DEF-057: built ON the global prompts' vocabulary (``shared/prompt_versions.py``), so an
+# event both histories share (儲存 / 回復 / the back-fill) reads the same word on one page.
+VERSION_SOURCE_LABELS: dict[str, str] = {
+    **prompt_versions.SOURCE_LABELS,
+    "create": "新增",
+    "official_copy": "自官方模板加入",
+    "sync_official": "同步官方",
+}
+
+
+class StrategyVersion(BaseModel):
+    """One ``strategy_prompt_versions`` row — a body a strategy HAD, never rewritten."""
+
+    id: int
+    strategy_id: int
+    version: int
+    name: str  # the strategy's name when this version was saved
+    body: str
+    source: str  # a VersionSource value (str so a future source never breaks a read)
+    restored_from: int | None  # the version number a ``restore`` copied, else None
+    saved_at: str
+
+
+class StrategyVersionRef(BaseModel):
+    """What a card records about one strategy layer it was generated with (DEF-033).
+
+    ``version`` is None when the rendered body matches no stored version — impossible
+    through this module's write doors, and reported as 「版本不明」 rather than guessed.
+    """
+
+    strategy_id: int
+    name: str
+    version: int | None
 
 
 class StrategyRef(BaseModel):
@@ -133,6 +183,17 @@ CREATE TABLE IF NOT EXISTS strategy_prompts (
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strategy_prompt_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    source TEXT NOT NULL,
+    restored_from INTEGER,
+    saved_at TEXT NOT NULL,
+    UNIQUE (strategy_id, version)
 );
 CREATE TABLE IF NOT EXISTS insight_types (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +278,56 @@ def _create(conn: sqlite3.Connection) -> None:
     # installs gain the column; their pre-existing official tasks stay NULL (the pack's
     # idempotency falls back to the name match for those).
     _add_column_if_missing(conn, "insight_types", "preset_key", "TEXT")
+    _backfill_versions(conn)
+
+
+def _backfill_versions(conn: sqlite3.Connection) -> None:
+    """Make every strategy's CURRENT body its newest version (DEF-033). Idempotent.
+
+    Runs on every ``ensure_seeded`` (the create hook runs always), so it is the migration
+    AND the invariant's repair:
+
+    - a strategy with no version row (every strategy that existed before this table) gets
+      its current body as version 1, source ``migration`` — the owner ruling's backfill;
+    - a strategy whose newest version body differs from its row (a write that went around
+      :func:`update_strategy` — a direct SQL edit, a restored backup) gets that body appended
+      as the next version, source ``backfill``, so the history never has a hole and a card
+      generated now can still name the version it used.
+
+    Both are INSERTs; nothing already recorded is touched.
+
+    READ FIRST (DEF-065): this runs on every ``ensure_seeded``, and ``ensure_seeded`` sits
+    on ~20 GET routes (``/api/dashboard`` included). Two ``INSERT … SELECT`` + ``commit``
+    that insert nothing still open a WRITE transaction, so every one of those reads took
+    SQLite's write lock — and waited out the 5 s busy timeout, then answered 500, behind any
+    long write. The invariant almost always holds, so it is checked with a read and the
+    INSERTs run only when a strategy actually lacks its current body.
+    """
+    if conn.execute(
+        "SELECT 1 FROM strategy_prompts s WHERE NOT EXISTS "
+        "(SELECT 1 FROM strategy_prompt_versions v WHERE v.strategy_id = s.id "
+        " AND v.version = (SELECT MAX(version) FROM strategy_prompt_versions w "
+        "                  WHERE w.strategy_id = s.id) AND v.body = s.body) LIMIT 1"
+    ).fetchone() is None:
+        return
+    conn.execute(
+        "INSERT INTO strategy_prompt_versions "
+        "(strategy_id, version, name, body, source, restored_from, saved_at) "
+        "SELECT s.id, 1, s.name, s.body, 'migration', NULL, s.updated_at "
+        "FROM strategy_prompts s WHERE NOT EXISTS "
+        "(SELECT 1 FROM strategy_prompt_versions v WHERE v.strategy_id = s.id)"
+    )
+    conn.execute(
+        "INSERT INTO strategy_prompt_versions "
+        "(strategy_id, version, name, body, source, restored_from, saved_at) "
+        "SELECT s.id, m.mv + 1, s.name, s.body, 'backfill', NULL, s.updated_at "
+        "FROM strategy_prompts s JOIN "
+        "(SELECT strategy_id, MAX(version) AS mv FROM strategy_prompt_versions "
+        " GROUP BY strategy_id) m ON m.strategy_id = s.id "
+        "JOIN strategy_prompt_versions lv ON lv.strategy_id = s.id AND lv.version = m.mv "
+        "WHERE lv.body != s.body"
+    )
+    conn.commit()
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -252,7 +363,19 @@ def ensure_seeded(conn: sqlite3.Connection) -> None:
 # --- strategy_prompts CRUD ----------------------------------------------------
 
 
-def _strategy_from_row(row: sqlite3.Row) -> StrategyPrompt:
+def _current_version_no(conn: sqlite3.Connection, strategy_id: int) -> int | None:
+    """The newest version number of a strategy, or None (no row / table not created)."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(version) AS m FROM strategy_prompt_versions WHERE strategy_id = ?",
+            (strategy_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:  # a connection that never ran ensure_seeded
+        return None
+    return int(row["m"]) if row is not None and row["m"] is not None else None
+
+
+def _strategy_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> StrategyPrompt:
     return StrategyPrompt(
         id=row["id"],
         name=row["name"],
@@ -261,21 +384,54 @@ def _strategy_from_row(row: sqlite3.Row) -> StrategyPrompt:
         archived=bool(row["archived"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        current_version=_current_version_no(conn, int(row["id"])),
     )
 
 
+def _append_version(
+    conn: sqlite3.Connection,
+    strategy_id: int,
+    *,
+    name: str,
+    body: str,
+    source: VersionSource,
+    now: datetime,
+    restored_from: int | None = None,
+) -> int:
+    """Append the next version of *strategy_id* (max+1); return its number. No commit."""
+    version = (_current_version_no(conn, strategy_id) or 0) + 1
+    conn.execute(
+        "INSERT INTO strategy_prompt_versions "
+        "(strategy_id, version, name, body, source, restored_from, saved_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (strategy_id, version, name, body, source, restored_from, now.isoformat()),
+    )
+    return version
+
+
 def create_strategy(
-    conn: sqlite3.Connection, *, name: str, body: str, now: datetime
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    body: str,
+    now: datetime,
+    source: VersionSource = "create",
 ) -> StrategyPrompt:
-    """Insert a new (enabled, non-archived) strategy prompt; return the stored row."""
+    """Insert a new (enabled, non-archived) strategy prompt; return the stored row.
+
+    DEF-033: the body is also recorded as version 1, stamped with *source* (``create`` for
+    the owner's own 新增, ``official_copy`` for a row copied from the official library).
+    """
     ts = now.isoformat()
     cur = conn.execute(
         "INSERT INTO strategy_prompts (name, body, enabled, archived, created_at, "
         "updated_at) VALUES (?, ?, 1, 0, ?, ?)",
         (name, body, ts, ts),
     )
+    new_id = int(cur.lastrowid or 0)
+    _append_version(conn, new_id, name=name, body=body, source=source, now=now)
     conn.commit()
-    sp = get_strategy(conn, int(cur.lastrowid or 0))
+    sp = get_strategy(conn, new_id)
     assert sp is not None  # just inserted
     return sp
 
@@ -285,7 +441,7 @@ def get_strategy(conn: sqlite3.Connection, strategy_id: int) -> StrategyPrompt |
     row = conn.execute(
         "SELECT * FROM strategy_prompts WHERE id = ?", (strategy_id,)
     ).fetchone()
-    return _strategy_from_row(row) if row is not None else None
+    return _strategy_from_row(conn, row) if row is not None else None
 
 
 def list_strategies(
@@ -296,7 +452,7 @@ def list_strategies(
     if not include_archived:
         sql += " WHERE archived = 0"
     sql += " ORDER BY id"
-    return [_strategy_from_row(r) for r in conn.execute(sql)]
+    return [_strategy_from_row(conn, r) for r in conn.execute(sql).fetchall()]
 
 
 def update_strategy(
@@ -307,11 +463,18 @@ def update_strategy(
     body: str,
     enabled: bool,
     now: datetime,
+    source: VersionSource = "user_save",
 ) -> StrategyPrompt | None:
     """Update a strategy's name/body/enabled + re-stamp ``updated_at``; None if absent.
 
     ``created_at`` is never re-stamped (history retained); ``archived`` is changed only
     via :func:`archive_strategy` / the delete cascade.
+
+    DEF-033 (owner ruling 2026-09-24): a save that CHANGES the body appends the next
+    version (stamped *source* — ``user_save`` / ``sync_official``); the row is still
+    overwritten, but the body it held stays readable and restorable. A save that leaves the
+    body as it was (the enable toggle PUTs the stored body; a rename) adds no version — the
+    newest version already IS that body, so a duplicate row would only pad the list.
     """
     if get_strategy(conn, strategy_id) is None:
         return None
@@ -320,8 +483,123 @@ def update_strategy(
         "WHERE id = ?",
         (name, body, 1 if enabled else 0, now.isoformat(), strategy_id),
     )
+    latest = latest_version(conn, strategy_id)
+    if latest is None or latest.body != body:
+        _append_version(conn, strategy_id, name=name, body=body, source=source, now=now)
     conn.commit()
     return get_strategy(conn, strategy_id)
+
+
+# --- strategy_prompt_versions (DEF-033) ----------------------------------------
+
+
+def _version_from_row(row: sqlite3.Row) -> StrategyVersion:
+    return StrategyVersion(
+        id=row["id"],
+        strategy_id=row["strategy_id"],
+        version=row["version"],
+        name=row["name"],
+        body=row["body"],
+        source=row["source"],
+        restored_from=row["restored_from"],
+        saved_at=row["saved_at"],
+    )
+
+
+def list_versions(conn: sqlite3.Connection, strategy_id: int) -> list[StrategyVersion]:
+    """A strategy's whole history, newest first (archived strategies included)."""
+    rows = conn.execute(
+        "SELECT * FROM strategy_prompt_versions WHERE strategy_id = ? ORDER BY version DESC",
+        (strategy_id,),
+    ).fetchall()
+    return [_version_from_row(r) for r in rows]
+
+
+def get_version(conn: sqlite3.Connection, version_id: int) -> StrategyVersion | None:
+    """One version row by its id, or None."""
+    row = conn.execute(
+        "SELECT * FROM strategy_prompt_versions WHERE id = ?", (version_id,)
+    ).fetchone()
+    return _version_from_row(row) if row is not None else None
+
+
+def get_version_by_number(
+    conn: sqlite3.Connection, strategy_id: int, version: int
+) -> StrategyVersion | None:
+    """One version of *strategy_id* by its number, or None."""
+    row = conn.execute(
+        "SELECT * FROM strategy_prompt_versions WHERE strategy_id = ? AND version = ?",
+        (strategy_id, version),
+    ).fetchone()
+    return _version_from_row(row) if row is not None else None
+
+
+def latest_version(conn: sqlite3.Connection, strategy_id: int) -> StrategyVersion | None:
+    """The newest version of *strategy_id* (its current body), or None."""
+    no = _current_version_no(conn, strategy_id)
+    return get_version_by_number(conn, strategy_id, no) if no is not None else None
+
+
+def version_of_body(conn: sqlite3.Connection, strategy_id: int, body: str) -> int | None:
+    """The version number a card generated from *body* records, or None when it matches none.
+
+    The newest version whose body is exactly *body* — normally the current version, since
+    every write door appends one. Read-only (the generation path must not write history).
+    """
+    try:
+        row = conn.execute(
+            "SELECT MAX(version) AS m FROM strategy_prompt_versions "
+            "WHERE strategy_id = ? AND body = ?",
+            (strategy_id, body),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return int(row["m"]) if row is not None and row["m"] is not None else None
+
+
+class RestoreRefusedError(Exception):
+    """A restore the store will not perform (archived strategy); ``reason`` is zh text."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def restore_version(
+    conn: sqlite3.Connection, version_id: int, *, now: datetime
+) -> tuple[StrategyPrompt, bool] | None:
+    """Make an old version's body current again → ``(strategy, changed)``; None if absent.
+
+    History is never rewritten: the restore is a NEW version (source ``restore``,
+    ``restored_from`` = the chosen number) whose body equals the chosen one, and the
+    strategy row takes that body. The name is kept as it is now (a restore brings back the
+    prompt text, not an old label — the 同步官方 gate keys on the current name). Restoring a
+    body identical to the current one changes nothing and adds no version (``changed`` is
+    False). An archived strategy is refused (:class:`RestoreRefusedError`): it is off every
+    list, and bringing its text back would edit a row the owner removed.
+    """
+    chosen = get_version(conn, version_id)
+    if chosen is None:
+        return None
+    sp = get_strategy(conn, chosen.strategy_id)
+    if sp is None:
+        return None
+    if sp.archived:
+        raise RestoreRefusedError("此策略已封存，無法回復版本")
+    if sp.body == chosen.body:
+        return sp, False
+    conn.execute(
+        "UPDATE strategy_prompts SET body = ?, updated_at = ? WHERE id = ?",
+        (chosen.body, now.isoformat(), sp.id),
+    )
+    _append_version(
+        conn, sp.id, name=sp.name, body=chosen.body, source="restore", now=now,
+        restored_from=chosen.version,
+    )
+    conn.commit()
+    after = get_strategy(conn, sp.id)
+    assert after is not None  # just updated
+    return after, True
 
 
 def archive_strategy(
@@ -336,6 +614,78 @@ def archive_strategy(
     )
     conn.commit()
     return get_strategy(conn, strategy_id)
+
+
+# --- insight_types: the universe's accepted shapes (owner 2026-09-30) -----------------------
+#
+# A per_symbol task's universe is one of three objects or nothing at all. The create wizard
+# (``web/pipeline-wizard.js``) and the universe dialog (``web/pipeline.js``) only ever write
+# these, and the one resolver (``api/insight_service.py::_resolve_universe_raw``) knows only
+# these. Until 2026-09-30 anything else was stored as opaque JSON and resolved as "follow
+# holdings": the verifier's R10 task sent ``["2884"]`` for one symbol and paid for 13 cards.
+# Owner ruling (item 11): every door refuses an unknown shape loudly, never coerces it. The
+# READ side stays tolerant (``_json_or_none`` below + the resolver): a row written before the
+# rule keeps loading; only writing that shape again is refused.
+
+#: The modes the resolver understands — ``custom`` carries ``symbols``, the others nothing.
+UNIVERSE_MODES: tuple[str, ...] = ("all", "all_registered", "custom")
+
+#: The accepted shapes, machine-readable, for a refusal's ``issues``. The zh message names
+#: them in the owner's words instead (DEF-053: user text never names an identifier).
+UNIVERSE_SHAPES: tuple[dict[str, Any], ...] = (
+    {"mode": "all"},
+    {"mode": "all_registered"},
+    {"mode": "custom", "symbols": ["2330"]},
+)
+
+
+class UniverseShapeError(ValueError):
+    """A universe that is none of :data:`UNIVERSE_SHAPES`; ``str(exc)`` is the zh message."""
+
+
+def universe_shape_problem(universe: object) -> str | None:
+    """Why *universe* is not an accepted shape (a short zh clause), or None when it is one.
+
+    ``None`` (not set → follow holdings) is accepted. An empty ``custom`` list is accepted
+    too: it is a shape the universe dialog can reach, and the R2 gate already reports it
+    loudly as 「標的宇宙為空」 at run time. A symbol must be a non-blank STRING — a JSON
+    number is refused rather than stringified, because ``0056`` sent as a number is ``56``.
+    """
+    if universe is None:
+        return None
+    if isinstance(universe, list):
+        return "收到的是清單"
+    if not isinstance(universe, dict):
+        return "收到的是文字" if isinstance(universe, str) else "收到的格式無法辨識"
+    mode = universe.get("mode")
+    if mode is None:
+        return "缺少模式"
+    if not isinstance(mode, str) or mode not in UNIVERSE_MODES:
+        return f"未知的模式「{mode}」"
+    allowed = {"mode", "symbols"} if mode == "custom" else {"mode"}
+    extra = sorted(str(k) for k in universe if k not in allowed)
+    if extra:
+        return f"含無法辨識的欄位「{'、'.join(extra)}」"
+    if mode == "custom":
+        symbols = universe.get("symbols")
+        if not isinstance(symbols, list):
+            return "自選標的需附代號清單"
+        if not all(isinstance(s, str) and s.strip() for s in symbols):
+            return "代號清單只能是非空白的文字代號"
+    return None
+
+
+def universe_shape_message(problem: str) -> str:
+    """The zh refusal sentence for a :func:`universe_shape_problem` clause."""
+    return (f"標的範圍格式不符（{problem}）：只接受「全部持倉」、「持倉＋觀察清單」、"
+            "「自選標的（附代號清單）」三種設定，或不填（跟隨持倉）")
+
+
+def _check_universe(universe: object) -> None:
+    """The persistence seam's backstop: the API doors refuse first, with a 422."""
+    problem = universe_shape_problem(universe)
+    if problem is not None:
+        raise UniverseShapeError(universe_shape_message(problem))
 
 
 # --- insight_types CRUD -------------------------------------------------------
@@ -399,7 +749,9 @@ def create_insight_type(
     ``horizon_days`` is the task-default prediction horizon (spec 04.10), ``eval_prompt``
     an optional custom self-evaluation prompt (NULL → standard master-scoring template).
     ``preset_key`` is the official-pack provenance stamp (M3 fix; NULL for user tasks).
+    A universe that is none of :data:`UNIVERSE_SHAPES` raises :class:`UniverseShapeError`.
     """
+    _check_universe(universe)
     ts = now.isoformat()
     cur = conn.execute(
         "INSERT INTO insight_types (name, scope, use_system_prompt, self_correct, "
@@ -480,7 +832,9 @@ def update_insight_type(
     Does not touch ``job_id``/``active_calibration_version``/``archived`` (those move via
     the schedule, active-calibration, and cascade helpers). ``horizon_days``/``eval_prompt``
     are overwritten on every update (spec 04.10), so a None ``eval_prompt`` clears it.
+    A universe that is none of :data:`UNIVERSE_SHAPES` raises :class:`UniverseShapeError`.
     """
+    _check_universe(universe)
     if get_insight_type(conn, insight_type_id) is None:
         return None
     conn.execute(
@@ -743,6 +1097,10 @@ def delete_strategy(
     "Has history" proxy: a strategy is only ever archived after being referenced (the
     in-use path blocks deletes while linked), so the ``archived`` flag is a sufficient
     stand-in for "was ever used" without a separate usage-marker column.
+
+    DEF-033: a hard delete leaves the strategy's ``strategy_prompt_versions`` rows in place.
+    Ids are AUTOINCREMENT (never reused), so the orphans cannot attach to a later strategy,
+    and a card that recorded one of those versions keeps a history it can be read against.
     """
     sp = get_strategy(conn, strategy_id)
     if sp is None:

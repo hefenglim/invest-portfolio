@@ -25,7 +25,10 @@ in `CHANGELOG.md`.
 - **Web layer (decision (B), 2026-06-13 — supersedes the prior Jinja2+HTMX rule;
   see CHANGELOG):** a **FastAPI JSON API** (`portfolio_dash/api/*`, all routes under
   `/api/*`) serving a **static vanilla-JS frontend** (`web/`, served via `StaticFiles`)
-  + **ECharts** (CDN). Vanilla JS only — **no framework, no bundler, no build step**.
+  + **ECharts, self-hosted** (`web/echarts.min.js` — vendored 2026-08-12, owner ruling, so a
+  CDN outage cannot take the charts down; the **webfont deliberately stays** on Google's CDN.
+  See `docs/reference/vendored-assets.md`). Vanilla JS only — **no framework, no bundler, no
+  build step** (a pre-minified `dist` file copied in is a file copy, not a build step).
   The frontend never computes money or returns; all numbers come from the API as
   Decimal **strings** (`web/api.js` is the single fetch layer). The **spec-17 golden
   payload** (`tests/golden/dashboard_full.json`) is the documented JSON contract, guarded
@@ -33,8 +36,11 @@ in `CHANGELOG.md`.
   `tests/contract/test_web_pdapi_only.py` asserts it stays deleted.)
 - **Storage:** **SQLite**. DuckDB is deferred — add it *only* if analytical query
   volume later justifies a second engine. Do not add it pre-emptively.
-- **Financial math:** pandas / numpy / numpy-financial. **Money is never `float`** —
-  use `Decimal` (or scaled integers). See `rules/data-and-pricing.md`.
+- **Financial math:** `decimal.Decimal` arithmetic in the package + **`pyxirr`** for
+  irregular-cashflow XIRR (the dependency since v0.1.0). pandas / numpy / numpy-financial were
+  named in the 2026-06-05 plan and never became dependencies — adding one is a stack decision,
+  not a convenience (`rules/stack.md`; recorded 2026-09-10). **Money is never `float`** — use
+  `Decimal` (or scaled integers). See `rules/data-and-pricing.md`.
 - **LLM access:** **LiteLLM**, OpenAI-compatible interface. Providers
   (OpenRouter / OpenAI-compatible / Anthropic) are swappable by config, not code.
 - **Scheduling:** APScheduler, in-process.
@@ -69,11 +75,15 @@ portfolio_dash/
   pricing/       # market quotes + FX -> SQLite, scheduled refresh, idempotent upserts
   portfolio/     # CORE calc: cost basis, realized/unrealized P&L, returns, sector mix
   forex/         # currency-exchange ledger, FX cost basis, realized/unrealized FX P&L
-  strategy/      # user-defined strategy logic as Python modules (parameterized)
-  llm_insight/   # LiteLLM orchestration: portfolio + news -> structured cards (cached)
+  strategy/      # user-defined strategy logic as Python modules (parameterized), rules/alerts
+  llm_insight/   # LiteLLM orchestration: portfolio + news -> structured cards (cached); prompts
+  news/          # news library: fetch, store, organizer-prompt seed
+  export/        # report + CSV builders (holdings, ledgers, tax, cash statement, print)
+  ops/           # backup, notification dispatch, digests
   api/           # FastAPI JSON API: routers (call core + serialize), no business logic
-  web/           # static vanilla-JS frontend (HTML/CSS/JS + ECharts CDN); served by api/
-  scheduler/     # APScheduler jobs (pricing refresh, scheduled insight runs)
+  web/           # static vanilla-JS frontend (HTML/CSS/JS + vendored echarts.min.js); by api/
+  scheduler/     # APScheduler jobs (pricing refresh, insight, alert, digest, backup runs)
+  bootstrap.py   # first-run composition root (schema + config seed)
 ```
 
 Markets: **TW / US / MY**. Accounts: **TW broker · Charles Schwab (US) · Moomoo MY

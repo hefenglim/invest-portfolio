@@ -8,7 +8,7 @@ strategy alert computation stubbed so they assert the bridge wiring, not market 
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -37,35 +37,72 @@ def conn() -> Iterator[sqlite3.Connection]:
 @pytest.fixture(autouse=True)
 def _clear_runner() -> Iterator[None]:
     jobs.register_insight_runner(None)
+    jobs.register_alert_held_fn(None)
     yield
     jobs.register_insight_runner(None)
+    jobs.register_alert_held_fn(None)
 
 
 def test_alert_scan_records_events_and_dispatches(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Stub the alert computation so the job sees a single fx_drift event.
+    # Stub the alert computation so the job sees a single per-symbol event. (Until DEF-037
+    # this test used ``fx_drift:schwab`` and asserted the ACCOUNT id reached the card as its
+    # symbol — the defect itself, pinned; tests/scheduler/test_def037_alert_scope_dispatch.py
+    # now pins the opposite.)
     monkeypatch.setattr(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
-            Alert(id="fx_drift:schwab", sev="info", rule="fx_drift", title="t", detail="d")
+            Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d",
+                  href="/symbol/2330", scope="symbol", subject="2330")
         ],
     )
     sub = cs.create_insight_type(
-        conn, name="FX", scope="on_alert", alert_rules=["fx_drift"], enabled=True, now=NOW
+        conn, name="Vol", scope="on_alert", alert_rules=["vol_spike"], enabled=True, now=NOW
     )
     calls: list[tuple[int, str, str | None]] = []
 
     def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime,
-               fired_rule: str, fired_symbol: str | None) -> None:
+               fired_rule: str, fired_symbol: str | None, trigger: object) -> None:
         calls.append((insight_type_id, fired_rule, fired_symbol))
 
     jobs.register_insight_runner(runner)
-    detail = jobs.alert_scan(conn, now=NOW)
+    # DEF-041: the 持倉提點 card is for HELD symbols — 2330 is held in this scenario.
+    jobs.register_alert_held_fn(lambda c, *, now: {"2330"})
+    detail = jobs.alert_scan(conn, now=NOW).detail  # DEF-067: a JobOutcome
     # event recorded + consumed; subscriber dispatched once
-    assert calls == [(sub.id, "fx_drift", "schwab")]
+    assert calls == [(sub.id, "vol_spike", "2330")]
     assert ab.unconsumed_events(conn) == []
-    assert "fx_drift" in detail
+    # DEF-062: the run detail (排程中心) names the fired rule in words, never by its id
+    assert "波動突升" in detail and "vol_spike" not in detail
+
+
+def test_alert_scan_detail_counts_what_the_24h_debounce_skipped(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner 2026-09-30 (item 5, measured on demo in the G-09 re-run): a same-day re-scan
+    whose every candidate had been carded within 24h wrote only 「派發 AI 預警卡 0 張」 —
+    nothing said the debounce, not a fault, produced the zero. The detail now counts what
+    the debounce skipped, and says nothing about it when it skipped nothing."""
+    symbols = ("2330", "2317", "2454")
+    monkeypatch.setattr(
+        jobs, "_compute_alerts_for_scan",
+        lambda c, *, now: [
+            Alert(id=f"vol_spike:{s}", sev="warn", rule="vol_spike", title="t", detail="d",
+                  scope="symbol", subject=s)
+            for s in symbols
+        ],
+    )
+    cs.create_insight_type(
+        conn, name="Vol", scope="on_alert", alert_rules=["vol_spike"], enabled=True, now=NOW
+    )
+    jobs.register_insight_runner(lambda c, i, **kw: None)
+    jobs.register_alert_held_fn(lambda c, *, now: set(symbols))
+    first = jobs.alert_scan(conn, now=NOW).detail
+    assert "，派發 AI 預警卡 3 張；推播" in first  # unchanged: no 「略過 0 條」 clause
+    assert "24 小時" not in first
+    again = jobs.alert_scan(conn, now=NOW + timedelta(hours=1)).detail
+    assert "，派發 AI 預警卡 0 張；另有 3 條 24 小時內已派發，略過；推播" in again
 
 
 def test_alert_scan_no_subscribers_records_but_no_dispatch(
@@ -75,7 +112,7 @@ def test_alert_scan_no_subscribers_records_but_no_dispatch(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
             Alert(id="single_weight:2330", sev="risk", rule="single_weight",
-                  title="t", detail="d")
+                  title="t", detail="d", scope="symbol", subject="2330")
         ],
     )
     calls: list[int] = []
@@ -95,7 +132,7 @@ def test_alert_scan_records_new_market_risk_rule_event(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
             Alert(id="drawdown_from_peak:2330", sev="risk", rule="drawdown_from_peak",
-                  title="t", detail="d")
+                  title="t", detail="d", scope="symbol", subject="2330")
         ],
     )
     jobs.alert_scan(conn, now=NOW)
@@ -109,7 +146,8 @@ def test_compute_alerts_for_scan_uses_registered_runner(
     # The runner seam: when the app registers the alert-compute runner, the scan delegates to
     # it (the full P3 rule set). A scheduler-only process (no runner) falls back to the base
     # engine — proven here by clearing the runner and asserting the fallback returns a list.
-    sentinel = [Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d")]
+    sentinel = [Alert(id="vol_spike:2330", sev="warn", rule="vol_spike", title="t", detail="d",
+                      scope="symbol", subject="2330")]
     jobs.register_alert_compute_runner(lambda c, *, now: sentinel)
     try:
         assert jobs._compute_alerts_for_scan(conn, now=NOW) == sentinel
@@ -132,7 +170,8 @@ def test_alert_scan_symbol_extracted_from_alert_id(
     monkeypatch.setattr(
         jobs, "_compute_alerts_for_scan",
         lambda c, *, now: [
-            Alert(id="quota_low", sev="warn", rule="quota_low", title="t", detail="d")
+            Alert(id="quota_low", sev="warn", rule="quota_low", title="t", detail="d",
+                  scope="portfolio")
         ],
     )
     jobs.alert_scan(conn, now=NOW)

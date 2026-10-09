@@ -40,17 +40,21 @@
   </section>
 
   <div class="pp-assets" data-screen-label="資產庫">
-    <a class="pp-asset" href="settings.html#prompts"><b>分析模板庫</b><span class="cnt" id="pp-cnt-templates">…</span><span>分析模板 — 設計物件，與執行解耦</span></a>
-    <a class="pp-asset" href="settings.html#prompts"><b>數據變數庫</b><span class="cnt" id="pp-cnt-vars">…</span><span>變數總表＋預覽/測試送出</span></a>
+    <a class="pp-asset" href="settings.html#prompts/templates"><b>分析模板庫</b><span class="cnt" id="pp-cnt-templates">…</span><span>分析模板 — 設計物件，與執行解耦</span></a>
+    <a class="pp-asset" href="settings.html#prompts/vars"><b>數據變數庫</b><span class="cnt" id="pp-cnt-vars">…</span><span>變數總表＋預覽/測試送出</span></a>
     <a class="pp-asset" href="news.html"><b>新聞資料庫</b><span class="cnt">每晚整理入庫</span><span>個股新聞瀏覽＋過濾＋逐則 token/成本評估</span></a>
     <a class="pp-asset" href="settings.html#scheduler"><b>運行中心</b><span class="cnt">全部 jobs</span><span>跨任務的排程工作表與完整歷史</span></a>
-    <a class="pp-asset" href="settings.html"><b>進化設定</b><span class="cnt">5 項安全邊界</span><span>影子批次數/最低樣本/自動晉升…</span></a>
+    <a class="pp-asset" href="settings.html#prompts/evolution"><b>進化設定</b><span class="cnt">5 項安全邊界</span><span>影子批次數/最低樣本/自動晉升…</span></a>
   </div>
 
 </div>
 </div>
 </div>
 
+<!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
+     tokens through window.pdNames on every response, so the resolver must exist before the
+     first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
+<script src="names.js?v=0.1.28"></script>
 <script src="api.js?v=0.1.28"></script>
 <script src="shell.js?v=0.1.28"></script>
 <script src="format.js?v=0.1.28"></script>
@@ -66,7 +70,10 @@
     window.pdApi.post('/api/insight-tasks/official-pack').then(function (r) {
       var made = (r && r.created || []).map(function (c) { return c.name; });
       var skip = (r && r.skipped) || [];
-      window.toast(made.length ? '官方套組已建立' : '官方套組已存在', made.length ? 'ok' : 'warn',
+      /* 'ok' for both outcomes: "already exists" is a successful no-op, not a partial
+         result. M10-02 gave 'warn' a third face (amber, stays until closed) — right for
+         a partial write, wrong for a message that means nothing needed doing. */
+      window.toast(made.length ? '官方套組已建立' : '官方套組已存在', 'ok',
         (made.length ? '建立：' + made.join('、') + '（含週排程）' : '') +
         (skip.length ? (made.length ? '；' : '') + '已存在跳過：' + skip.join('、') : ''));
       if (window.ppRefresh) window.ppRefresh();

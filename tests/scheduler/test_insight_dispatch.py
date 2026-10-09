@@ -22,7 +22,8 @@ def _clear_runner() -> None:
 def test_kind_insight_row_dispatches_to_registered_runner(conn: sqlite3.Connection) -> None:
     seen: list[int] = []
 
-    def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime) -> None:
+    def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime,
+               **kw: object) -> None:
         seen.append(insight_type_id)
 
     jobs.register_insight_runner(runner)
@@ -63,7 +64,8 @@ def test_dispatch_overlap_guard_skips_when_run_in_flight(conn: sqlite3.Connectio
     # skips with a job_runs 'skipped' row (reason already_running) — no duplicate batch.
     seen: list[int] = []
 
-    def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime) -> None:
+    def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime,
+               **kw: object) -> None:
         seen.append(insight_type_id)
 
     jobs.register_insight_runner(runner)
@@ -102,7 +104,8 @@ def test_trigger_job_uses_taipei_day_anchor_clock(monkeypatch: pytest.MonkeyPatc
 
 def test_insight_runner_records_job_run_via_dispatch(conn: sqlite3.Connection) -> None:
     # The runner is responsible for the job_runs row; dispatch just invokes it.
-    def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime) -> None:
+    def runner(c: sqlite3.Connection, insight_type_id: int, *, now: datetime,
+               **kw: object) -> None:
         c.execute(
             "INSERT INTO job_runs (job_id, started_at, finished_at, status, payload) "
             "VALUES (?, ?, ?, 'ok', ?)",

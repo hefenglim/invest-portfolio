@@ -12,17 +12,24 @@ from pydantic import BaseModel, Field
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.results import (
     CombinedView,
+    OpenedPosition,
+    OversoldPosition,
     RealizedPnL,
     ReturnSummary,
     SectorAllocation,
+    UnappliedAction,
+    UnbookableDividend,
 )
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.models.ledger import Dividend
 
 
 class HoldingRow(BaseModel):
     """Flattened holding row: all ``Holding`` fields + instrument/account enrichment."""
 
     account_id: str
+    #: The account as a ``{account:<id>}`` token (``shared/account_ref.py``, I-10) — resolved
+    #: to the display name by the fetch layer (``web/api.js``), never an English name here.
     account_name: str
     symbol: str
     name: str
@@ -53,6 +60,23 @@ class HoldingRow(BaseModel):
     # A dividend row landed while this position was short; it was NOT booked (a short
     # pays the dividend in lieu). The position's figures are incomplete by that payout.
     unbookable_dividend: bool = False
+    # A corporate action could not be applied and was SKIPPED (see Holding.unbookable_action).
+    # Strictly worse than the flag above: `shares` is in PRE-action terms while `market_price`
+    # is global and already POST-action, so `market_value`, `unrealized_pnl`, `weight` and
+    # `unrealized_pct` are wrong by the action's ratio — not short by one payout. The UI must
+    # therefore say something different about it than it says about a missed dividend.
+    unbookable_action: bool = False
+    # QA-06: the position was FLAT when a DRIP/STOCK dividend added shares, so it exists only
+    # because of that payout and its basis is zero (see Holding.revived_by_dividend). Unlike
+    # the two flags above nothing is wrong or missing — `unrealized_pnl` really is the whole
+    # market value — so the UI states the CAUSE, not a warning that the numbers are unreliable.
+    revived_by_dividend: bool = False
+    # M1-03 / D21: whose dividends `payback_ratio` is built on, when a SPINOFF carved this
+    # position's basis in (see Holding). The UI labels the ratio 「承接自 <parent>：分拆時承接
+    # 配息 X・自身配息 Y」 wherever it shows it; all three are None on a position no SPINOFF fed.
+    payback_from_symbol: str | None = None
+    payback_carried_dividends: Decimal | None = None
+    payback_own_dividends: Decimal | None = None
     # Unrealized return rate for THIS holding, server-computed (audit H1, 2026-07-26):
     # ``unrealized_pnl / original_cost_total``. The denominator is deliberately the ORIGINAL
     # invested cost — the same basis as ``KpiSummary.total_return_rate`` (domain-ledger.md:
@@ -77,6 +101,36 @@ class KpiSummary(BaseModel):
     total_return_rate: Decimal | None = None
     realized_total: Decimal | None = None
     unrealized_total: Decimal | None = None
+    # AI-D41 (2026-08-24) — the A · B · B−A decomposition. ``total_return`` above is A:
+    # Σ_ccy (realized + unrealized) × TODAY'S spot, so the rate is applied to each
+    # currency's GAIN and never to its PRINCIPAL. B is the trend's
+    # ``total_value − net_invested``, where every flow was converted at ITS OWN
+    # trade-date rate — the FX-complete lifetime figure, which the UI used to label
+    # 浮動損益. B − A was the principal-FX effect (the content of the 換匯損益 card) until
+    # AI-D48 put the trading/financing cash kinds into B; it is now a TWO-term difference,
+    # split into the two fields below.
+    #
+    # ⚠ These are PRESENTED SIDE BY SIDE, never summed. Adding the 換匯損益 figure to A
+    # double-counts the cross term (MV − C)(spot − acq) — the same red line
+    # domain-ledger.md draws for XIRR, applied to the figure that rule did not cover.
+    # ``total_return``'s own definition is UNCHANGED; only its label and B's presence
+    # beside it are new, so every golden payload and stored snapshot still reconciles.
+    total_return_fx_complete: Decimal | None = None
+    principal_fx_effect: Decimal | None = None
+    # AI-D48 (2026-08-27) made the decomposition THREE terms, because B now counts the
+    # trading/financing cash kinds (REBATE / INTEREST_EXPENSE / BROKER_FEE) and A never did:
+    #
+    #     B = A + principal_fx_effect + trading_financing_cost
+    #
+    # Sign is the P&L one — a broker fee is NEGATIVE here (it lowers B) while it RAISES
+    # `net_invested`. Without this field `principal_fx_effect` would have gone on being
+    # labelled 「本金匯率效果」 while silently carrying the costs too, which is exactly the
+    # mislabelling AI-D48 was raised to remove.
+    trading_financing_cost: Decimal | None = None
+    # Why B is absent, when it is (owner ruling 2026-08-25). Without it the UI could
+    # only drop the row, and a row that silently vanishes is indistinguishable from a
+    # feature that was never built. Server-owned wording — web never composes it.
+    fx_complete_reason: str | None = None
     xirr: Decimal | None = None
     # Observation window (days) the XIRR was measured over; a short window (< 365) is a
     # low-confidence hint surfaced by the UI. None when there are no flows or no XIRR run.
@@ -186,6 +240,95 @@ class FxFreshness(BaseModel):
     quote: Currency
     as_of: date | None  # None = pair never stored
     stale: bool
+    # Where the rate came from — a provider name, or "derived:USD" for a cross rate
+    # computed by `pricing/cross.py` (owner ruling 2026-09-16, M1). Additive; the
+    # freshness panel labels a derived row so the reader knows it is not a market quote.
+    source: str | None = None
+
+
+class FxTriangle(BaseModel):
+    """One stored-rate triangle: does ``A/B × B/C`` agree with the stored ``A/C``?
+
+    M1 (measured on the demo 2026-09-16, all three rows freshly refreshed and dated
+    2026-09-15, none stale): USD/TWD 31.834999 · MYR/TWD 7.803300 · USD/MYR 4.082500, so
+    USD/MYR × MYR/TWD = 31.856972 — **+0.0690% above** the stored USD/TWD. The three rates
+    are fetched independently and no derivation ties them together, so the reporting-
+    currency total depends on WHICH PATH a conversion happens to take: converting
+    4,000 MYR → 983.28 USD at spot moved ``reporting_total`` by −40.88 TWD, and deleting
+    the row restored it bit-identically. That is a phantom P&L produced by the conversion
+    path alone.
+
+    This model is the **check and the disclosure only**. Whether a base currency should be
+    picked and the third rate DERIVED as a cross rate (which would make the triangle close
+    by construction) is an owner decision, not one to take in a read path. Until it is
+    taken, the gap is measured from the rates as stored and shown — never silently
+    corrected, and the rates themselves are never mutated (``data-and-pricing.md``: the
+    stored rate is the provider's number of record).
+
+    ``implied`` / ``direct`` are quantized to 6 dp and ``gap_pct`` to 4 dp **for display**;
+    the underlying reads keep full precision. ``ok`` is judged on the QUANTIZED gap so the
+    verdict can never disagree with the number printed beside it.
+
+    **DEF-077 (owner ruling ⑥ A, 2026-09-26) — judged on ONE day.** The three legs are
+    compared on their latest COMMON date (not after the valuation day), never latest row
+    against latest row: a refresh that has moved one leg to a new day while another is still
+    on the previous one measured the market's move between two days and reported it as a
+    data inconsistency (verifier J-01 on 3be67db: gap −0.0938%, ``ok: false``, no data
+    error). ``compared_on`` is that day and ``implied`` / ``direct`` / ``gap_pct`` are the
+    values ON it. ``dates_differ`` says the legs' latest dates are not all the same (the
+    page labels it 「日期不同」; ``leg_dates`` names each). With no common date in the lookback
+    the triangle **cannot be compared**: ``ok`` is ``None`` (never ``False`` — nothing was
+    found to disagree), the three figures are ``None`` and ``reason`` says why.
+    """
+
+    via: str  # the two-leg path, e.g. "USD/MYR × MYR/TWD"
+    pair: str  # the directly stored pair the path is compared against, e.g. "USD/TWD"
+    implied: Decimal | None  # None ⇔ ok is None (no common date)
+    direct: Decimal | None
+    gap_pct: Decimal | None  # (implied / direct - 1) * 100, in PERCENT
+    ok: bool | None  # |gap_pct| <= 0.05 on ``compared_on``; None = cannot be compared
+    as_of: date | None = None  # the OLDEST of the three reads (the triangle is only as
+    # current as its stalest leg)
+    stale: bool = False  # any of the three legs is stale
+    # DEF-077 — additive fields (a construction that predates them still validates).
+    compared_on: date | None = None  # the latest common date the verdict is judged on
+    dates_differ: bool = False  # the three legs' latest dates are not all the same
+    leg_dates: dict[str, date] = Field(default_factory=dict)  # "A/B" → that leg's latest
+    reason: str | None = None  # zh, set only when ok is None
+
+
+class BenchmarkMarketLeg(BaseModel):
+    """One market's share of the benchmark counterfactual (which index, and what it did)."""
+
+    market: Market
+    label: str  # zh-TW benchmark name, server-owned (the web layer never names an index)
+    terminal_value: Decimal
+    net_invested: Decimal
+
+
+class BenchmarkComparison(BaseModel):
+    """R4 / AI-D43 — 「同一筆錢、同樣的日期，買指數會是多少？」, lifetime.
+
+    ⚠ ``excess`` is measured against **B** (``total_return_fx_complete``), never against A
+    (``total_return``). The counterfactual buys its units with reporting-currency money at
+    each flow's own trade-date rate, exactly as ``trend.net_invested`` does; A applies FX to
+    the gain only (AI-D41), so subtracting the counterfactual from A would contrast two
+    different treatments of the principal's FX and call the difference market-beating skill.
+
+    ⚠ ``uncovered_ratio > 0`` means the headline covers only part of the money (MY has no
+    benchmark; a flow can also predate an index's stored history). The UI must degrade the
+    label rather than print a bare 「超額報酬」 — the same discipline as ``covered_ratio``.
+    """
+
+    available: bool
+    reason: str | None = None
+    terminal_value: Decimal | None = None
+    net_invested: Decimal | None = None
+    benchmark_return: Decimal | None = None
+    excess: Decimal | None = None
+    uncovered_markets: list[str] = Field(default_factory=list)
+    uncovered_ratio: Decimal | None = None
+    by_market: list[BenchmarkMarketLeg] = Field(default_factory=list)
 
 
 class FreshnessReport(BaseModel):
@@ -196,6 +339,14 @@ class FreshnessReport(BaseModel):
     missing_fx: list[str]
     xirr_unavailable_reason: str | None = None
     trend_unavailable_reason: str | None = None
+    # Why the WHOLE ``fx`` block is null, when it is (QA-01, 2026-08-29). Additive with a
+    # default of None = the section is present. It is the last-resort companion to
+    # ``FXSummary.reporting_unavailable_reason``: that one explains a PARTIAL rollup while
+    # the section still renders; this one explains its complete absence, which until now
+    # was reported by no field at all — the silence that let an empty account's missing
+    # rate erase a correct 33,000 TWD unnoticed. Same shape and same source (the resolver's
+    # own message) as ``xirr_unavailable_reason`` directly above.
+    fx_unavailable_reason: str | None = None
     # Ledger symbols with no Instrument row: their events are EXCLUDED from all
     # computation (cannot be booked without a quote currency) and listed here so the
     # UI can prompt the user to register them (2026-07-02).
@@ -203,6 +354,17 @@ class FreshnessReport(BaseModel):
     # Router-fed (ops/file state, not pure calc): build_dashboard leaves this None;
     # the dashboard router fills it from ops.backup.latest_backup_at() after to_wire.
     last_backup_at: str | None = None
+    # M1 — triangular consistency of the stored FX rates (see FxTriangle). Empty whenever
+    # fewer than three pairs closing a triangle were read, which is the normal single- or
+    # dual-currency case; a non-empty list with ok=False means a conversion's reporting-
+    # currency effect depends on the path it takes. Additive with an empty default so
+    # FreshnessReport constructions that predate it still validate.
+    fx_triangulation: list[FxTriangle] = Field(default_factory=list)
+    # Router-fed exactly like last_backup_at above (process state, not pure calc):
+    # build_dashboard leaves this None; the dashboard router fills it from the scheduler
+    # router's scheduler_state(). False means nothing on this instance refreshes on a
+    # schedule — every 「最後更新」 stamp on the page is only as new as the last manual run.
+    scheduler_running: bool | None = None
 
 
 class InsightCardStub(BaseModel):
@@ -234,8 +396,48 @@ class DashboardData(BaseModel):
     dividends: DividendSummary
     ex_dividend_calendar: list[ExDividendItem]
     trend: TrendSeries
+    # R4 / AI-D43: the lifetime index counterfactual. Additive with an honest default so
+    # DashboardData constructions predating it still validate; build_dashboard always fills
+    # it (with available=False + a reason when it cannot be computed).
+    benchmark: BenchmarkComparison | None = None
     freshness: FreshnessReport
     insights: list[InsightCardStub] = Field(default_factory=list)
     # Optional default: build_dashboard always populates it; the default only avoids
     # breaking direct DashboardData constructions that predate spec 05.
     dividend_projection: DividendProjection | None = None
+    # Corporate actions the replay REFUSED to book (``Book.unapplied_actions``), carried
+    # onto the public read surface for W5 / audit F-17.
+    #
+    # It is NOT a duplicate of ``HoldingRow.unbookable_action`` and must not be collapsed
+    # into one: TWO of the three ways an action goes unapplied leave **no surviving
+    # position to flag** (an EXCHANGE that already emptied the source — the flag is dropped
+    # with its zero-share carrier — and a source that never existed at all). See
+    # :class:`UnappliedAction`. §6.3's reconciliation footer turns red on exactly those
+    # cases, and without these rows the drawer would render ⚠ 對帳不一致 with nothing
+    # beside it to name the cause, which is the specific defect D33 exists to prevent.
+    #
+    # Empty by construction on the strict path (``allow_oversell=False`` raises instead), so
+    # a non-empty list always means the dashboard path degraded and the share counts in this
+    # payload are 待釐清.
+    unapplied_actions: list[UnappliedAction] = Field(default_factory=list)
+    # ``Book.oversold_positions`` / ``Book.orphan_dividends`` (CR-01 / CR-02 / CR-11,
+    # 2026-10-04), carried for IN-PROCESS readers — the drawer (``api/routers/symbol.py``)
+    # names a 賣超 netted back to zero shares and a dividend with no position from these.
+    #
+    # ``exclude=True``: NOT on the dashboard wire, deliberately, so the spec-17 golden payload
+    # is unchanged. The page already shows both, named, where it shows the consequence — the
+    # XIRR reason, the FX-complete reason and the trend's incomplete days all read the same
+    # book — and a dashboard banner for them is a follow-up that would add these keys to the
+    # contract on purpose, not by accident of a model dump.
+    oversold_positions: list[OversoldPosition] = Field(default_factory=list, exclude=True)
+    orphan_dividends: list[Dividend] = Field(default_factory=list, exclude=True)
+    # ``Book.opened_positions`` (S9, 2026-10-04): the drawer's 「部位已結清」 versus 「從未持有」
+    # is the REPLAY's fact — did it ever open this position — not a reading of activity rows.
+    # Excluded from the wire for the same reason as the two fields above.
+    opened_positions: list[OpenedPosition] = Field(default_factory=list, exclude=True)
+    # ``Book.unbookable_dividends`` (K3, 2026-10-05): dividends refused on an open short or a
+    # vacated ticker, with the position carrying the flag — which may be flat and so have no
+    # holding row. The drawer names each one (on the dividend's symbol and on the carrier) and
+    # the reconciliation footer reads them; excluded from the wire like the fields above (the
+    # dashboard names them through the FX-complete reason and the trend's incomplete days).
+    unbookable_dividends: list[UnbookableDividend] = Field(default_factory=list, exclude=True)

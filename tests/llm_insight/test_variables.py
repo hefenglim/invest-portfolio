@@ -3,8 +3,9 @@
 The registry mirrors web/vars.js PLUS three backend-only date/time system tokens
 (spec 04.10: now / card_created_at / eval_date), two batch-③ signal vars
 (technical_signals_json / fear_greed_json), one batch-④ news var (symbol_news_json),
-one P1-batch-2 consensus var (consensus_json), and one P2-batch-3 rule-signals var
-(rule_signals_json) — 34 total across 10 categories.
+one P1-batch-2 consensus var (consensus_json), one P2-batch-3 rule-signals var
+(rule_signals_json), and one W3 fundamentals-union var (fundamentals_json)
+— 35 total across 11 categories.
 validate_tokens is the single reusable core (spec 04 R1 + spec 07 preflight):
 preview lists diagnostics, the execution path turns them into 422s. Value assembly reads
 only already-computed DashboardData / per-symbol detail / technicals / fed date context —
@@ -16,20 +17,26 @@ from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from portfolio_dash.llm_insight import variables as V
+from portfolio_dash.portfolio import technicals as T
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.shared.enums import Currency
 
 _NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 
 
-def test_registry_has_34_and_categories() -> None:
+def test_registry_has_36_and_categories() -> None:
     # 26 vars.js mirror + 3 date/time (04.10) + 2 batch-③ signals + 1 batch-④ news
-    # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json) = 34.
-    assert len(V.REGISTRY) == 34
-    assert len({v.category for v in V.REGISTRY}) == 10  # rule_signals joins existing 'price'
+    # + 1 P1-batch-2 consensus + 1 P2-batch-3 rule_signals (rule_signals_json)
+    # + 1 W3 fundamentals (fundamentals_json) + 1 W6 signal_backtest_json = 36.
+    # 38 since 2026-08-28: R4's benchmark_counterfactual_json + the weekly lens.
+    assert len(V.REGISTRY) == 38
+    assert len({v.category for v in V.REGISTRY}) == 11  # fundamentals is its own category
     # tokens are unique
-    assert len({v.token for v in V.REGISTRY}) == 34
+    # 38 since 2026-08-28: R4's benchmark_counterfactual_json + the weekly lens.
+    assert len({v.token for v in V.REGISTRY}) == 38
     # BY_TOKEN index covers every spec
     assert set(V.BY_TOKEN) == {v.token for v in V.REGISTRY}
 
@@ -40,22 +47,35 @@ def test_category_counts_mirror_vars_js_plus_date_vars() -> None:
         counts[v.category] = counts.get(v.category, 0) + 1
     assert counts == {
         # price gained technical_signals_json (4 → 5, batch ③) then rule_signals_json
-        # (5 → 6, P2 batch 3); sentiment gained fear_greed_json (2 → 3) — batch ③; news
-        # gained symbol_news_json — batch ④; consensus is the P1-batch-2 category.
-        "position": 6, "price": 6, "dividend": 3, "fx": 2,
+        # (5 → 6, P2 batch 3) then signal_backtest_json (6 → 7, W6); sentiment gained
+        # fear_greed_json (2 → 3) — batch ③; news gained symbol_news_json — batch ④;
+        # consensus is the P1-batch-2 category; fundamentals is the W3 category.
+        # position 7 since 2026-08-28: R4's benchmark_counterfactual_json.
+        "position": 7, "price": 8, "dividend": 3, "fx": 2,
         # system gained 3 date/time tokens (spec 04.10): 2 + 3 = 5.
-        "chips": 5, "consensus": 1, "news": 1, "sentiment": 3, "ai": 2, "system": 5,
+        "chips": 5, "consensus": 1, "fundamentals": 1, "news": 1, "sentiment": 3,
+        "ai": 2, "system": 5,
     }
 
 
-def test_available_split_32_now_2_later() -> None:
+def test_available_split_all_live_since_w6() -> None:
     available = [v.token for v in V.REGISTRY if v.available]
     unavailable = [v.token for v in V.REGISTRY if not v.available]
-    # 31 previously live + 1 P2-batch-3 rule_signals = 32; only the 2 'ai' vars stay deferred.
-    assert len(available) == 32
-    assert len(unavailable) == 2
-    # only the 2 'ai' vars remain deferred (spec 04).
-    assert {v.token for v in V.REGISTRY if v.category == "ai"} == set(unavailable)
+    # W6 (AI-D31) lit the last two deferred vars (the 'ai' pair) and added
+    # signal_backtest_json live — the registry is now fully live, 36/36.
+    # 38 since 2026-08-28: R4's benchmark_counterfactual_json + the weekly lens.
+    assert len(available) == 38
+    assert unavailable == []
+
+
+def test_fundamentals_var_registered_per_symbol_live() -> None:
+    """W3 (AI-D13..D16): the union variable — per_symbol, live, its own category, and
+    external-fed (assembled by the api seam, never by llm_insight itself)."""
+    spec = V.BY_TOKEN["fundamentals_json"]
+    assert spec.category == "fundamentals"
+    assert spec.scope == "per_symbol"
+    assert spec.available is True
+    assert "fundamentals_json" in V._EXTERNAL_TOKENS
 
 
 def test_date_vars_registered_as_available_portfolio_system() -> None:
@@ -114,11 +134,19 @@ def test_render_unknown_marker(golden_db: sqlite3.Connection) -> None:
     assert used == []  # unknown tokens are not "used" registry vars
 
 
-def test_unavailable_var_renders_marker(golden_db: sqlite3.Connection) -> None:
-    # backtest_json is available=false (spec 04) -> {"unavailable": true}
-    assert any(v.token == "backtest_json" and not v.available for v in V.REGISTRY)
+def test_unavailable_var_renders_marker(
+    golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # W6 (AI-D31) lit the last unavailable registry token, so the marker path
+    # (variables.py: the ``not spec.available`` guard) is pinned with a SYNTHETIC
+    # unavailable spec instead of sacrificing a real token.
+    monkeypatch.setitem(
+        V.BY_TOKEN, "synthetic_stub_json",
+        V.VarSpec("synthetic_stub_json", "合成樁", "ai", "portfolio", False,
+                  "測試用", '{}'),
+    )
     data = _data(golden_db)
-    out, _ = V.render_prompt("{{backtest_json}}", V.VarContext(data=data))  # type: ignore[arg-type]
+    out, _ = V.render_prompt("{{synthetic_stub_json}}", V.VarContext(data=data))  # type: ignore[arg-type]
     assert '"unavailable"' in out and "true" in out
 
 
@@ -442,7 +470,7 @@ def test_technical_signals_var_from_closes(golden_db: sqlite3.Connection) -> Non
     closes = [Decimal(str(100 + i)) for i in range(1, 80)]
     ctx = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes)
     val = V.value_for("technical_signals_json", ctx)
-    assert isinstance(val, dict) and "rsi14" in val and "ma_cross" in val
+    assert isinstance(val, dict) and "rsi14" in val and "ma_cross_short" in val
     assert "volume" not in val  # probe-gated: no volumes fed
     # empty closes -> honest unavailable
     empty = V.value_for("technical_signals_json", V.VarContext(data=data, now=_NOW, symbol="X"))
@@ -464,6 +492,32 @@ def test_technical_signals_volume_probe_gate(golden_db: sqlite3.Connection) -> N
     val = V.value_for("technical_signals_json", ctx_vol)
     assert isinstance(val, dict) and "volume" in val
     assert set(val["volume"]) == {"ratio_to_avg", "surge"}
+
+
+def test_the_two_crosses_are_named_different_windows(golden_db: sqlite3.Connection) -> None:
+    """★ Why the rename exists. TWO different "moving-average cross" definitions reached the
+    SAME prompt: this variable computed 20/60 and ``rule_signals_json`` carries the rules
+    engine's 50/200, both under the bare word "cross". A card could quote one as the other.
+
+    The pin is not just the new key NAME — it is that the two variables, fed the SAME closes,
+    are built from different windows. A rename that left both computing the same thing would
+    be cosmetic, and the next reader would "simplify" them back into one.
+    """
+    data = build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
+    closes = [Decimal(str(100 + i)) for i in range(1, 80)]  # 79 sessions
+    ctx = V.VarContext(data=data, now=_NOW, symbol="2330", closes=closes)
+
+    short = V.value_for("technical_signals_json", ctx)
+    assert isinstance(short, dict)
+    # 79 sessions is enough for the 20/60 short cross and NOT enough for the 50/200 rule —
+    # the difference this pin exists to protect. The rules engine reads its own series
+    # (260 sessions) separately; this asserts the SHORT variable is the 20/60 one.
+    short_cross = short.get("ma_cross_short")
+    assert short_cross is not None  # evaluable at 79 sessions...
+    assert T.ma_cross(closes, fast=20, slow=60) == short_cross  # ...and it IS the 20/60 math
+
+    # The rule engine's crossover needs 260 sessions, so on the same 79 it cannot even run —
+    # the two are computationally different, not just relabelled.
 
 
 def test_fear_greed_var_is_external_fed(golden_db: sqlite3.Connection) -> None:
@@ -504,3 +558,46 @@ def test_per_market_kpis_and_fx_carry_scope_note(golden_db: sqlite3.Connection) 
     # without a market, no scope_note (portfolio card unchanged)
     p = V.value_for("kpis_json", V.VarContext(data=data, now=_NOW))
     assert "scope_note" not in p
+
+
+def test_symbol_detail_hands_the_model_the_cross_account_total() -> None:
+    """Second re-verification 2026-09-17 (audit M9): a symbol held in TWO accounts carries
+    its ``combined`` position — the drawer's own definition — so the model quotes a total the
+    system computed instead of adding the per-account rows itself (the AAPL card's correct
+    「總計 95.0457 股」 was flagged 數值待核 because no fed number said so). A single-account
+    symbol has no ``combined`` block: its prompt is byte-identical to before.
+    """
+    import json as _json
+
+    from portfolio_dash.llm_insight.figure_check import check_figures, prompt_figures_json
+    from tests.conftest import _seed_dual_account, init_golden_base
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_golden_base(conn)
+    _seed_dual_account(conn)
+    data = build_dashboard(conn, now=_NOW, reporting=Currency.TWD)
+
+    out, _ = V.render_prompt("{{symbol_detail_json}}", V.VarContext(data=data, symbol="AAPL"))
+    detail = _json.loads(out)
+    assert len(detail["positions"]) == 2
+    combined = detail["combined"]
+    assert combined["account_count"] == 2
+    # 30 + 10 shares; (3000 + 1100) / 40 average — computed on read, quoted as strings
+    assert Decimal(combined["shares"]) == Decimal("40")
+    assert Decimal(combined["original_cost_total"]) == Decimal("4100")
+    assert Decimal(combined["original_avg"]) == Decimal("102.5")
+    assert Decimal(combined["market_value"]) == Decimal("4800")
+    assert Decimal(combined["unrealized_pnl"]) == Decimal("700")
+    assert "note" in combined
+    # the top-level fields are still the largest account's (spec-01 Q1) — unchanged
+    assert Decimal(detail["shares"]) == Decimal("30")
+    # and the totals are now in the population the figure check reads
+    flags = check_figures(
+        "持有 AAPL 總成本 4,100.00 USD，市值 4,800 USD。", prompt_figures_json(out), {"AAPL"}
+    )
+    assert flags.unverified_figures == []
+
+    single, _ = V.render_prompt("{{symbol_detail_json}}", V.VarContext(data=data, symbol="2330"))
+    assert "combined" not in _json.loads(single)
+    conn.close()

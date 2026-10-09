@@ -316,7 +316,7 @@ async def test_notify(
         return {
             "channel": body.channel,
             "ok": False,
-            "detail": "error: 尚未設定必要欄位",
+            "detail": "error：尚未設定必要欄位",
         }
     # FU-D17: link the test message to the site when a public base URL is configured, so
     # the owner verifies the whole deep-link path (empty ⇒ None ⇒ legacy link-free test).

@@ -7,6 +7,7 @@ route degrades gracefully when it is absent. Money/cost is a Decimal **string**;
 router computes no business numbers.
 """
 
+import os
 import sqlite3
 import threading
 from datetime import datetime
@@ -22,16 +23,22 @@ from pydantic import BaseModel
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
     ensure_job_rows,
+    insight_job_id,
+    insight_task_of,
+    job_kind,
     latest_run_unfinished,
     run_job_func,
     running_job_ids,
     running_progress,
-    start_job_run,
+    start_run,
+    unknown_job_message,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
+from portfolio_dash.shared.wire import decimal_str, stored_decimal_str
 
 router = APIRouter()
 
@@ -42,6 +49,49 @@ def get_scheduler(request: Request) -> BaseScheduler | None:
     """The live APScheduler singleton, or None (no lifespan / PD_DISABLE_SCHEDULER=1)."""
     sched = getattr(request.app.state, "scheduler", None)
     return sched if isinstance(sched, BaseScheduler) else None
+
+
+def scheduler_state(request: Request) -> dict[str, Any]:
+    """Is the APScheduler singleton actually RUNNING in this process, and if not, why?
+
+    M3 (measured on the demo 2026-09-16): 排程中心 listed all 25 jobs 「啟用」 with
+    「下次執行」 = 「—」 for every one of them, because the instance runs with
+    ``PD_DISABLE_SCHEDULER=1`` — ``app.state.scheduler`` is None, so ``_next_fire`` has
+    nothing to ask. ``enabled`` is a row in ``schedule_config`` (a stored *intent*); it says
+    nothing about whether a scheduler exists to honour it, and 25 empty next-fire cells look
+    exactly like 25 jobs that merely have not been scheduled yet. Nothing on the page — or
+    in this payload — distinguished "the scheduler is off" from "the next fire is unknown",
+    and the dashboard's 今日摘要 sat 56 days stale under a current-looking title as a result.
+
+    ``reason`` is diagnostic, not user-facing prose: the frontend owns the zh sentence and
+    prints this as the cause. Two causes are distinguishable and both are real deployments —
+    the env var (demo/test/CI) and a process that simply never ran lifespan (hermetic
+    TestClient). Rejected: reporting ``running`` per JOB row — the scheduler is a
+    process-wide fact, and repeating it 25 times invites the reader to treat it as a
+    per-job setting they can toggle.
+    """
+    if get_scheduler(request) is not None:
+        return {"running": True, "reason": None}
+    reason = (
+        "PD_DISABLE_SCHEDULER=1"
+        if os.environ.get("PD_DISABLE_SCHEDULER") == "1"
+        else "scheduler not started"
+    )
+    return {"running": False, "reason": reason}
+
+
+def scheduler_running_dep(request: Request) -> bool:
+    """``Depends`` form of :func:`scheduler_state`'s ``running`` flag, for other routers.
+
+    A dependency rather than a bare ``request: Request`` parameter on the consuming route:
+    several tests call those route functions DIRECTLY as Python (no ASGI scope, no app), and
+    a required ``Request`` argument would break every one of them for a field that is a
+    side-note on the payload. A defaulted ``Depends`` leaves the signature backwards
+    compatible; the consumer treats an unresolved default as **None = unknown**, never as
+    False — reporting "the scheduler is off" without a request to ask would accuse a
+    perfectly healthy instance.
+    """
+    return bool(scheduler_state(request)["running"])
 
 
 def _desc(job_id: str) -> str:
@@ -86,18 +136,71 @@ def _next_fire(scheduler: BaseScheduler | None, job_id: str) -> str | None:
     return str(job.next_run_time.isoformat())
 
 
+def _insight_tasks(conn: sqlite3.Connection) -> dict[int, cs.InsightType]:
+    """Every insight task by id, archived included — read ONCE per request (trap #21).
+
+    Degrades to ``{}`` when the composer tables are absent (a scheduler-only database):
+    the rows then fall back to their ids, never a 500.
+    """
+    try:
+        return {it.id: it for it in cs.list_insight_types(conn, include_archived=True)}
+    except sqlite3.OperationalError:
+        return {}
+
+
+def _insight_label(task_id: int, tasks: dict[int, cs.InsightType]) -> str:
+    """The 排程中心 name of an ``insight:<id>`` row: the TASK's name (DEF-030)."""
+    task = tasks.get(task_id)
+    if task is None:
+        return f"AI 洞察任務 #{task_id}（已刪除）"
+    if task.archived:
+        return f"AI 洞察任務「{task.name}」（已刪除）"
+    return f"AI 洞察任務「{task.name}」"
+
+
+def _insight_pause(task_id: int, tasks: dict[int, cs.InsightType]) -> str | None:
+    """Why an insight row will not execute although its schedule is on — or None."""
+    task = tasks.get(task_id)
+    if task is None or task.archived:
+        return "任務已刪除，排程觸發時不會執行"
+    if not task.enabled:
+        return "任務已在 AI 洞察管線暫停，排程觸發時不會執行；請至洞察管線啟用"
+    return None
+
+
 def _job_element(
-    conn: sqlite3.Connection, row: sqlite3.Row, scheduler: BaseScheduler | None
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    scheduler: BaseScheduler | None,
+    tasks: dict[int, cs.InsightType],
 ) -> dict[str, Any]:
+    """One 排程中心 row. DEF-030 adds ``kind`` / ``label`` / ``effective_enabled`` /
+    ``paused_reason``: an ``insight:<id>`` row is named by its TASK (it used to render its
+    raw id, the description fallback), and the schedule row's ``enabled`` (its stored
+    intent, unchanged) is combined HERE with the task's own ``enabled`` — a task paused in
+    the 洞察管線 kept a schedule toggle reading 「啟用」 while every fire was skipped. The
+    frontend only displays the combined state; ``next`` is withheld for a paused task (the
+    trigger may still fire, but it will not execute)."""
     job_id = row["job_id"]
+    enabled = bool(row["enabled"])
+    task_id = insight_task_of(conn, job_id)
+    label: str | None = None
+    paused: str | None = None
+    if task_id is not None:
+        label = _insight_label(task_id, tasks)
+        paused = _insight_pause(task_id, tasks)
     return {
         "id": job_id,
         "desc": _desc(job_id),
+        "kind": "insight" if task_id is not None else "system",
+        "label": label,
         "cron": row["cron"],
         "tz": row["timezone"],
-        "enabled": bool(row["enabled"]),
+        "enabled": enabled,
+        "effective_enabled": enabled and paused is None,
+        "paused_reason": paused,
         "last": _last_run(conn, job_id),
-        "next": _next_fire(scheduler, job_id),
+        "next": None if paused is not None else _next_fire(scheduler, job_id),
     }
 
 
@@ -106,13 +209,22 @@ def list_jobs(
     request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """§15.1 — schedule config + latest run + next fire for every scheduled job."""
+    """§15.1 — schedule config + latest run + next fire for every scheduled job.
+
+    M3: the top-level ``scheduler`` block says whether a scheduler exists at all, so the
+    page can explain 25 empty 「下次執行」 cells instead of leaving them ambiguous (see
+    :func:`scheduler_state`).
+    """
     ensure_job_rows(conn)  # idempotent seed so registry jobs always have a config row
     scheduler = get_scheduler(request)
     rows = conn.execute(
         "SELECT job_id, enabled, cron, timezone FROM schedule_config ORDER BY job_id"
     ).fetchall()
-    return {"jobs": [_job_element(conn, r, scheduler) for r in rows]}
+    tasks = _insight_tasks(conn)
+    return {
+        "jobs": [_job_element(conn, r, scheduler, tasks) for r in rows],
+        "scheduler": scheduler_state(request),
+    }
 
 
 class _PutBody(BaseModel):
@@ -169,7 +281,43 @@ def update_job(
         "SELECT job_id, enabled, cron, timezone FROM schedule_config WHERE job_id = ?",
         (job_id,),
     ).fetchone()
-    return _job_element(conn, updated, get_scheduler(request))
+    return _job_element(conn, updated, get_scheduler(request), _insight_tasks(conn))
+
+
+def insight_task_run_refusal(
+    conn: sqlite3.Connection, insight_type_id: int
+) -> JSONResponse | None:
+    """THE refusal for "run this insight task now" — shared by both doors (DEF-030).
+
+    ``POST /api/insight-tasks/{id}/run`` and the 排程中心's ``POST /api/scheduler/jobs/
+    insight:{id}/run`` start the same run, so they refuse it in the same words: an unknown
+    task 404, a deleted or paused task 409 (H2 fix, decision Q2a), a run already in flight
+    409. The 排程中心 door used to have none of these — it accepted a paused task's run and
+    failed it in the background.
+    """
+    cs.ensure_seeded(conn)
+    it = cs.get_insight_type(conn, insight_type_id)
+    if it is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("not_found", f"未知洞察組合：{insight_type_id}"),
+        )
+    if it.archived:
+        return JSONResponse(
+            status_code=409,
+            content=error_body("task_archived", "任務已刪除，無法執行"),
+        )
+    if not it.enabled:
+        return JSONResponse(
+            status_code=409,
+            content=error_body("task_disabled", "任務已停用，請先啟用再執行"),
+        )
+    if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
+        return JSONResponse(
+            status_code=409,
+            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
+        )
+    return None
 
 
 @router.post("/scheduler/jobs/{job_id}/run")
@@ -178,19 +326,34 @@ def run_job_now(
     conn: sqlite3.Connection = Depends(get_conn),
     now: datetime = Depends(get_now),
 ) -> Any:
-    """§15.3 — fire a job once now (async 202; background thread opens its own session)."""
+    """§15.3 — fire a job once now (async 202; background thread opens its own session).
+
+    DEF-030: accepted only when something in this process can RUN the id (``job_kind``) —
+    a row the registry cannot run is a 404 here, not a background ``KeyError``. An
+    ``insight:<id>`` row is refused exactly as the task door refuses it
+    (:func:`insight_task_run_refusal`), and its running row is pre-inserted in the insight
+    shape (:func:`scheduler.jobs.start_run`) for the worker to finalize.
+    """
     ensure_job_rows(conn)
     known = conn.execute(
         "SELECT 1 FROM schedule_config WHERE job_id = ?", (job_id,)
     ).fetchone()
-    if known is None:
-        raise HTTPException(status_code=404, detail=f"{job_id} 不存在")
-    if latest_run_unfinished(conn, job_id):
+    kind = job_kind(conn, job_id) if known is not None else None
+    if kind is None:
+        return JSONResponse(
+            status_code=404, content=error_body("not_found", unknown_job_message(job_id))
+        )
+    task_id = insight_task_of(conn, job_id) if kind == "insight" else None
+    if task_id is not None:
+        refusal = insight_task_run_refusal(conn, task_id)
+        if refusal is not None:
+            return refusal
+    elif latest_run_unfinished(conn, job_id):
         return JSONResponse(
             status_code=409,
             content=error_body("already_running", f"{job_id} 執行中"),
         )
-    run_id = start_job_run(conn, job_id, now=now)
+    run_id = start_run(conn, job_id, now=now)
     thread = threading.Thread(
         target=run_job_func, kwargs={"job_id": job_id, "now": now}, daemon=True
     )
@@ -198,114 +361,54 @@ def run_job_now(
     return JSONResponse(status_code=202, content={"run_id": run_id, "job_id": job_id})
 
 
-# FU-D46 — honest LLM-cost attribution per job kind. Each LLM-bearing STATIC job maps to
-# the exact ``llm_usage.agent`` string(s) its run writes (they are 1:1 — no other code path
-# logs those agents), so summing usage rows inside the run's [started_at, finished_at]
-# window attributes that run's spend. Deliberate omissions:
-#   * ``insight:*`` runs — their runner already records the EXACT per-run spend on the
-#     ``job_runs.cost_usd`` column (served via the run-row path below; no window sum).
-#   * ``alert_scan`` — its on_alert dispatch spawns ``insight:*`` runs which record their
-#     own cost rows; window-summing ``insight_generate`` here would double-count them.
-#   * everything else — no LLM involvement, no cost block. Never guessed.
-_LLM_JOB_AGENTS: dict[str, list[str]] = {
-    "news_daily": ["news_organize"],
-    "digest_daily": ["digest_note"],
-    "digest_weekly": ["digest_note"],
-    "evaluate_insights": ["master_score"],
-    "generate_calibrations": ["master_calibrate", "master_validate"],
-}
+# FU-D46 — the ``last_run.cost`` block, read from the run row for EVERY job. Since 2026-09-30
+# (owner, the verifier's R10 observation ③) a run row carries its own spend, written when the
+# run finishes from the ``llm_usage`` rows it wrote (``shared.llm.usage_tally``): ``cost_usd``
+# beside ``llm_calls`` / ``tokens_in`` / ``tokens_out``. The block used to be re-derived here,
+# for five static jobs, by summing their agents' usage inside the run's time window — a guess
+# that lived in this one popover while the run history printed, for the same run, the row's
+# empty ``cost_usd`` (evaluate_insights #212: $0.0021532 here, — there). Rows written before
+# the change carry no spend and serve no block, exactly as the history already showed them.
 
 
-def _usage_window_cost(
-    conn: sqlite3.Connection, agents: list[str], started_at: str, finished_at: str
-) -> dict[str, Any] | None:
-    """Sum ``llm_usage`` calls/tokens/cost for *agents* within the run window, or None.
+def _cost_block(row: Any) -> dict[str, Any] | None:
+    """The FU-D46 ``last_run.cost`` block for a completed run, or None (omitted).
 
-    Aggregation of already-recorded audit numbers (same altitude as ``_duration_s``) —
-    the router computes no business numbers. Degrades to None (no cost block) on any
-    unparseable timestamp / missing table / malformed cost string, and when the window
-    saw ZERO calls (an LLM-capable run that made no calls honestly serves no block).
-    Cost is summed as Decimal and serialized as a string.
+    A run that made no AI call has NULL spend columns → no block. A legacy insight row (a
+    cost but no counts) serves its cost with null tokens / calls, as before; a zero-cost
+    legacy row serves none. The stored TEXT is re-serialized through the canonical wire form
+    (it can be ``9E-8``); value-preserving, so a canonical string round-trips byte-identically.
     """
-    try:
-        start = datetime.fromisoformat(started_at)
-        end = datetime.fromisoformat(finished_at)
-    except (TypeError, ValueError):
+    keys = row.keys()
+    cost_usd = row["cost_usd"] if "cost_usd" in keys else None
+    if cost_usd is None:
         return None
-    placeholders = ",".join("?" for _ in agents)
     try:
-        rows = conn.execute(
-            f"SELECT ts, input_tokens, output_tokens, cost FROM llm_usage "
-            f"WHERE agent IN ({placeholders})",
-            tuple(agents),
-        ).fetchall()
-    except sqlite3.Error:  # table absent (partial bootstrap) — no block, never a 500
+        exact = Decimal(cost_usd)
+    except (InvalidOperation, TypeError):
         return None
-    calls = tokens_in = tokens_out = 0
-    total = Decimal("0")
-    for row in rows:
-        try:
-            ts = datetime.fromisoformat(row["ts"])
-            in_window = start <= ts <= end
-        except (TypeError, ValueError):  # unparseable / naive-vs-aware mix — skip row
-            continue
-        if not in_window:
-            continue
-        try:
-            total += Decimal(row["cost"])
-        except (InvalidOperation, TypeError):
-            continue
-        calls += 1
-        tokens_in += int(row["input_tokens"] or 0)
-        tokens_out += int(row["output_tokens"] or 0)
-    if calls == 0:
+    calls = row["llm_calls"] if "llm_calls" in keys else None
+    if calls is None and exact == 0:
         return None
     return {
-        "cost_usd": str(total),
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
+        "cost_usd": decimal_str(exact),
+        "tokens_in": row["tokens_in"] if calls is not None else None,
+        "tokens_out": row["tokens_out"] if calls is not None else None,
         "calls": calls,
-        "source": "usage_window",
+        "source": "run_row",
     }
 
 
-def _cost_block(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[str, Any] | None:
-    """The FU-D46 ``last_run.cost`` block for a completed run, or None (omitted).
-
-    ``insight:*`` → the run row's own exact ``cost_usd`` (written by the insight runner;
-    tokens are not recorded per-run, so those fields are null). Mapped static LLM jobs →
-    the agent/window sum. Zero-cost run rows (skipped / no calls) serve no block.
-    """
-    if job_id.startswith("insight:"):
-        cost_usd = row["cost_usd"] if "cost_usd" in row.keys() else None
-        if cost_usd is None:
-            return None
-        try:
-            if Decimal(cost_usd) == 0:
-                return None
-        except (InvalidOperation, TypeError):
-            return None
-        return {
-            "cost_usd": cost_usd,
-            "tokens_in": None,
-            "tokens_out": None,
-            "calls": None,
-            "source": "run_row",
-        }
-    agents = _LLM_JOB_AGENTS.get(job_id)
-    if not agents or not row["finished_at"]:
-        return None
-    return _usage_window_cost(conn, agents, row["started_at"], row["finished_at"])
-
-
-def _status_last_run(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[str, Any]:
+def _status_last_run(row: Any) -> dict[str, Any]:
     """Map a COMPLETED job_runs row to the FU-D36/D46 ``last_run`` shape.
 
     ``ok`` is the boolean the chip keys off (green 成功 / red 失敗); ``status`` is passed
-    through raw so the frontend can render the non-terminal ``skipped`` (略過) distinctly.
-    FU-D46 adds ``duration_seconds`` (server-computed) and the honest ``cost`` block
-    (null unless the run is LLM-bearing AND its spend is attributable — see
-    ``_LLM_JOB_AGENTS`` / ``_cost_block``).
+    through raw so the frontend can render the non-terminal ``skipped`` (略過) distinctly —
+    and, since M10-02, ``partial`` (部分, amber). ``ok`` stays False for a partial run on
+    purpose: a partial failure is not a success (owner ruling 2026-09-06); the RENDERER
+    branches on ``status`` before it falls through to 失敗, so ``ok`` is not the only fact.
+    FU-D46 adds ``duration_seconds`` (server-computed) and the ``cost`` block (null unless
+    the run made an AI call — see ``_cost_block``).
     """
     return {
         "started_at": row["started_at"],
@@ -314,7 +417,7 @@ def _status_last_run(conn: sqlite3.Connection, job_id: str, row: Any) -> dict[st
         "ok": row["status"] == "ok",
         "message": row["detail"] or "",
         "duration_seconds": _duration_s(row["started_at"], row["finished_at"]),
-        "cost": _cost_block(conn, job_id, row),
+        "cost": _cost_block(row),
     }
 
 
@@ -331,9 +434,8 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     ``duration_seconds`` and the honest ``cost`` block (see ``_cost_block``); a job that
     never completed reports null. Shadow (Loop-4) and legacy ``export:*`` rows are
     excluded, matching the /runs view. Cheap by design — two windowed queries + a registry
-    snapshot (+ a small usage-window sum only for the few LLM-kind jobs) — so the frontend
-    polls it ONLY while something is active and stops when ``active`` goes false. The
-    router derives; it computes no business numbers.
+    snapshot — so the frontend polls it ONLY while something is active and stops when
+    ``active`` goes false. The router derives; it computes no business numbers.
     """
     ensure_job_rows(conn)
     job_ids = [
@@ -355,7 +457,7 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         r["job_id"]: r
         for r in conn.execute(
             "SELECT jr.job_id, jr.started_at, jr.finished_at, jr.status, jr.detail, "
-            "jr.cost_usd FROM job_runs jr "
+            "jr.cost_usd, jr.llm_calls, jr.tokens_in, jr.tokens_out FROM job_runs jr "
             "JOIN (SELECT job_id, MAX(id) AS mid FROM job_runs "
             "      WHERE finished_at IS NOT NULL AND COALESCE(is_shadow, 0) = 0 "
             "      AND job_id NOT LIKE 'export:%' GROUP BY job_id) m ON jr.id = m.mid"
@@ -377,21 +479,41 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "running": is_running,
             "queued": is_queued,
             "progress": progress_by_job.get(jid) if is_running else None,
-            "last_run": _status_last_run(conn, jid, done) if done is not None else None,
+            "last_run": _status_last_run(done) if done is not None else None,
         }
     return {"jobs": jobs, "active": active}
 
 
-def _run_row(row: sqlite3.Row) -> dict[str, Any]:
+def _run_task_id(row: sqlite3.Row, bindings: dict[str, int]) -> int | None:
+    """The insight task a run row belongs to — its ``payload`` (only insight runs write
+    one), else the schedule binding of its job id; never parsed out of the id string."""
+    payload = row["payload"]
+    if payload is not None:
+        try:
+            return int(payload)
+        except (TypeError, ValueError):
+            return None
+    return bindings.get(row["job_id"])
+
+
+def _run_row(
+    row: sqlite3.Row,
+    tasks: dict[int, cs.InsightType] | None = None,
+    bindings: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    task_id = _run_task_id(row, bindings or {}) if "payload" in row.keys() else None
     return {
         "id": row["id"],
         "job_id": row["job_id"],
+        # DEF-030: an insight run is named by its task, like its 排程中心 row.
+        "label": _insight_label(task_id, tasks or {}) if task_id is not None else None,
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
         "status": row["status"],
         "detail": row["detail"],
         "duration_s": _duration_s(row["started_at"], row["finished_at"]),
-        "cost_usd": row["cost_usd"],
+        # Canonical wire form: an insight run stored ``str(cost)``, which can be ``9E-8``.
+        "cost_usd": stored_decimal_str(row["cost_usd"]),
     }
 
 
@@ -423,8 +545,24 @@ def list_runs(
         f"SELECT COUNT(*) AS n FROM job_runs {where}", params
     ).fetchone()["n"]
     rows = conn.execute(
-        f"SELECT id, job_id, started_at, finished_at, status, detail, cost_usd "
+        f"SELECT id, job_id, started_at, finished_at, status, detail, cost_usd, payload "
         f"FROM job_runs {where} ORDER BY id DESC LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
-    return {"rows": [_run_row(r) for r in rows], "total_count": total}
+    tasks = _insight_tasks(conn)
+    bindings = _insight_bindings(conn)
+    return {"rows": [_run_row(r, tasks, bindings) for r in rows], "total_count": total}
+
+
+def _insight_bindings(conn: sqlite3.Connection) -> dict[str, int]:
+    """job_id → task id for every kind=insight schedule row (one read per request)."""
+    out: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT job_id, payload FROM schedule_config WHERE kind = 'insight' "
+        "AND payload IS NOT NULL"
+    ):
+        try:
+            out[str(r["job_id"])] = int(r["payload"])
+        except (TypeError, ValueError):
+            continue
+    return out

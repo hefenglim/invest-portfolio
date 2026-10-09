@@ -22,9 +22,10 @@ import json
 import logging
 import math
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,7 +37,7 @@ from portfolio_dash.api.routers.prompts import (
     _external_vars,
     _resolve_fx_rates,
 )
-from portfolio_dash.data_ingestion.store import list_instruments
+from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight import (
     alerts_bridge,
     assemble,
@@ -54,12 +55,20 @@ from portfolio_dash.llm_insight import variables as V
 from portfolio_dash.llm_insight.cards import Prediction
 from portfolio_dash.llm_insight.gating import GateContext, GateResult
 from portfolio_dash.llm_insight.generate import RunInputs, RunResult, run_insight_type
+from portfolio_dash.llm_insight.insights_store import InsightTrigger
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import DashboardData, FreshnessReport
+from portfolio_dash.portfolio.dashboard_models import DashboardData
+from portfolio_dash.portfolio.price_basis import price_in, series_in
+from portfolio_dash.portfolio.technicals import annualized_volatility
+from portfolio_dash.portfolio.twr import twr_index
+from portfolio_dash.pricing.benchmarks import Benchmark, benchmark_for_market
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.scheduler.jobs import insight_job_id
-from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.corporate_actions import ActionIndex
+from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.instrument_scope import tracked_symbols
 from portfolio_dash.shared.llm_config import (
+    LLMBudgetExceeded,
     LLMError,
     LLMRole,
     budget_remaining,
@@ -79,6 +88,13 @@ logger = logging.getLogger(__name__)
 _NARRATIVE_MISS_THRESHOLD = 60
 # How far back to look for the create-time / due-time price closes when building the actual.
 _EVAL_LOOKBACK_DAYS = 14
+# AI-D24: the volatility metric's fixed measurement window (trading days) — the same
+# estimator length the alert inputs use (``api/alert_inputs.py`` vol_30d). Fixed, NOT the
+# prediction's horizon: a 3-day on_alert horizon would otherwise be a 3-return noise
+# reading. The lookback covers the create-side window's 31 closes: 30 trading days ≈ 42
+# calendar days + long-holiday cushion.
+_VOL_WINDOW = 30
+_VOL_LOOKBACK_DAYS = 75
 
 
 def calibration_gap(conn: sqlite3.Connection) -> Decimal | None:
@@ -108,30 +124,95 @@ def _resolve_markets(data: DashboardData) -> list[str]:
     return sorted({h.market.value for h in data.holdings})
 
 
-def _all_registered_symbols(conn: sqlite3.Connection) -> list[str]:
-    """Every registered instrument symbol (held + watchlist) — the opt-in ``all_registered``
-    universe (P2 batch 3). Watch symbols are entry candidates, so a checkup task MAY analyse
-    them — but only when the user explicitly opts in (each is LLM cost; default stays holds)."""
-    return sorted({i.symbol for i in list_instruments(conn)})
+def held_in_book(data: DashboardData) -> set[str]:
+    """The symbols HELD in the computed book: a position with shares != 0 in any account.
+
+    DEF-041 (owner ruling 2026-09-24): the ONE definition of "held" for the insight
+    producers — the ``mode:all`` universe, its draft-preflight twin, and the on_alert
+    持倉提點 dispatch all read it. ``data.holdings`` is the dashboard's replay of the ledgers
+    (``build_book``), one row per (account, symbol), so the union is taken over accounts; a
+    declared short (shares < 0) is a live position and counts. It is never re-derived from
+    the ledger rows (``current_shares``) — that would be a second owner of the answer.
+    """
+    return {h.symbol for h in data.holdings if h.shares != 0}
+
+
+def held_symbols_for_alerts(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+) -> set[str]:
+    """The held set the alert dispatcher filters on (DEF-041) — registered into the
+    scheduler by ``api/app.py`` (``register_alert_held_fn``), because ``scheduler/`` cannot
+    replay the book. One dashboard build per dispatch pass (the dispatcher calls it lazily,
+    at most once)."""
+    return held_in_book(build_dashboard(conn, now=now, reporting=reporting))
+
+
+def _all_registered_symbols(conn: sqlite3.Connection, held: set[str]) -> list[str]:
+    """The opt-in ``all_registered`` universe (P2 batch 3): holdings + the ACTIVE watchlist.
+
+    Watch symbols are entry candidates, so a checkup task MAY analyse them — but only when the
+    user explicitly opts in (each is LLM cost; default stays holds).
+
+    DEF-059 (owner ruling 2026-09-24): an ARCHIVED instrument is out. Archiving is the owner's
+    「停止追蹤」 (FU-D13) — the quote, signal and news scopes already drop it — yet this read
+    returned every row of ``list_instruments`` (whose docstring leaves the archived filter to
+    the caller), so a task paid for a card on a symbol nobody tracks any more. A HELD symbol
+    always stays (``held => not archived`` is enforced at booking, and ``all_registered`` must
+    never be narrower than ``all``). This is the only definition: the status card's 「N 檔標
+    的」, the dry-run preflight, the draft preflight and the actual run all resolve through
+    :func:`_resolve_universe_raw`, and the page's estimate mirrors it (``web/pipeline.js``).
+    DEF-064: "not archived" itself is the shared ``shared/instrument_scope.py`` predicate —
+    the quote worklist and the snapshot-ingest universes read the same one.
+    """
+    return sorted(held | set(tracked_symbols(conn)))
+
+
+def _custom_symbols(syms: object) -> list[str]:
+    """A ``mode:custom`` universe as a list of DISTINCT symbols, first occurrence kept.
+
+    DEF-032 (2026-09-23): the create wizard listed one checkbox per HOLDING ROW, so a symbol
+    held in two accounts (AAPL at 嘉信 and Moomoo) could be ticked twice and was stored as
+    ``["AAPL", "AAPL"]`` — two cards and two LLM charges for one symbol, and 「N 檔標的」
+    over-counted. The wizard is fixed, but rows already written keep the duplicate, so the
+    read side de-duplicates: a universe is a SET of symbols, and ``mode:all`` /
+    ``all_registered`` were always resolved through one (``sorted({...})``).
+    """
+    if not isinstance(syms, list):
+        return []
+    return list(dict.fromkeys(str(s) for s in syms))
 
 
 def _resolve_universe(
     conn: sqlite3.Connection, it: cs.InsightType, data: DashboardData
 ) -> list[str]:
-    """The per_symbol universe: custom list, all current holdings (``mode:all``, the
-    default), or holdings + watchlist (``mode:all_registered`` — explicit opt-in)."""
-    held = sorted({h.symbol for h in data.holdings})
-    universe = it.universe
-    if isinstance(universe, dict):
-        mode = universe.get("mode")
-        if mode == "custom":
-            syms = universe.get("symbols")
-            return list(syms) if isinstance(syms, list) else []
-        if mode == "all_registered":
-            return _all_registered_symbols(conn)
-        if mode == "all":
-            return held
-    return held  # default: follow holdings
+    """The per_symbol universe of a SAVED task: custom list, all current holdings
+    (``mode:all``, the default), or holdings + the active watchlist (``mode:all_registered``
+    — explicit opt-in).
+
+    DEF-059: delegates to :func:`_resolve_universe_raw` — the draft preflight's resolver used
+    to be a second copy of these branches, and one universe rule written twice is two rules
+    the day one of them is edited.
+    """
+    return _resolve_universe_raw(conn, it.universe, data)
+
+
+
+def _unavailable_across(var_contexts: dict[Any, Any]) -> list[str]:
+    """Union of the injected variables that came back "no data", over every context in a run.
+
+    R5 is a per-RUN gate while unavailability is per-symbol-per-token, so a union is the only
+    honest reduction: if ANY symbol in the batch was synthesised without its news / consensus /
+    fundamentals, the run was degraded. Intersecting would report a clean run whenever a single
+    symbol happened to have complete data.
+
+    This is the read that was missing (2026-08-25). ``RunInputs.unavailable_vars`` was threaded
+    all the way to the gate and set at NONE of the four construction sites, so R5 had never
+    fired: a run built entirely from absent inputs was recorded as clean.
+    """
+    seen: set[str] = set()
+    for ctx in var_contexts.values():
+        seen.update(V.unavailable_tokens(getattr(ctx, "external_vars", {}) or {}))
+    return sorted(seen)
 
 
 def _per_symbol_ctx(
@@ -141,9 +222,15 @@ def _per_symbol_ctx(
     *,
     now: datetime,
     reporting: Currency,
+    actions: ActionIndex,
 ) -> V.VarContext:
-    """Build a per-symbol VarContext (dashboard + history + external snapshots + fx)."""
-    external_vars = _external_vars(conn, symbol, now=now)
+    """Build a per-symbol VarContext (dashboard + history + external snapshots + fx).
+
+    ``actions`` is built ONCE by the caller and threaded in (trap #21) — this function runs
+    once per universe symbol, so building the index here would re-read the action ledger
+    once per card.
+    """
+    external_vars = _external_vars(conn, symbol, now=now, actions=actions)
     ctx = V.VarContext(
         data=data,
         symbol=symbol,
@@ -152,14 +239,27 @@ def _per_symbol_ctx(
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
+        # ⑬ — derived from the payloads just built; no extra read.
+        external_as_of=V.external_as_of_map(external_vars),
     )
     as_of = now.date()
     # SR fix (2026-07-06): the technical signals (52-week position, MA120) need up to ~252
     # trading sessions, but 180 CALENDAR days ≈ 123 sessions — so fetch a longer close
     # series (the backfill already stores 365d) for ctx.closes, while price_history_json
     # keeps only the recent 180d window (then downsampled) to stay token-bounded.
-    long_hist = get_price_history(
-        conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+    # §5.1(d) / W6c: every consumer of this series compares points ACROSS dates — the
+    # 52-week position and MA120 read the whole window, and `price_points` is handed to the
+    # model as a price path. A split inside it puts the pre-split points in a different
+    # denomination, so the model is shown a phantom −86% cliff (7-for-1) and the technical
+    # signals fire on it. Re-expressed into `as_of`, which is also the day `data`'s holding
+    # prices were re-expressed into at the `price_map` seam (W6b) — one denomination for the
+    # whole context. ⚠ `volume` is NOT re-expressed (D39b: it has no raw column).
+    long_hist = series_in(
+        actions, symbol,
+        get_price_history(
+            conn, symbol, as_of - timedelta(days=_TECHNICAL_HISTORY_DAYS), as_of
+        ),
+        valued_on=as_of,
     )
     ctx.closes = [p.value for p in long_hist]
     # Volumes aligned 1:1 with closes; fed only when at least one session has volume
@@ -177,7 +277,7 @@ def _portfolio_ctx(
     conn: sqlite3.Connection, data: DashboardData, *, now: datetime, reporting: Currency
 ) -> V.VarContext:
     """Build the portfolio-scope VarContext (no per-symbol detail)."""
-    external_vars = _external_vars(conn, None)
+    external_vars = _external_vars(conn, None, actions=None)
     return V.VarContext(
         data=data,
         now=now,
@@ -185,6 +285,8 @@ def _portfolio_ctx(
         dividend_rows=_dividend_rows(conn),
         external_vars=external_vars,
         external_reasons=_external_reasons(conn, external_vars),
+        # ⑬ — derived from the payloads just built; no extra read.
+        external_as_of=V.external_as_of_map(external_vars),
     )
 
 
@@ -198,12 +300,15 @@ def run_for_id(
     fired_symbol: str | None = None,
     is_shadow: bool = False,
     run_id: int | None = None,
+    trigger: InsightTrigger | None = None,
 ) -> RunResult:
     """Load conn-bearing inputs and run one insight_type generation (the api seam).
 
     Builds the per-target VarContexts + the fed gate inputs, then delegates to the pure
     ``generate.run_insight_type``. ``fired_rule``/``fired_symbol`` are set for an on_alert
     dispatch (R7). ``run_id`` finalizes a pre-inserted running row (async manual run).
+    ``trigger`` (DEF-037) is what started the run — every door passes it (the scheduler's
+    ``_execute_insight``, the alert dispatcher) — and every card this run stores records it.
     Returns the run result.
 
     H2 fix (decision Q2a): a DISABLED or ARCHIVED task is enforced HERE, at the execution
@@ -236,11 +341,15 @@ def run_for_id(
 
     var_contexts: dict[str | None, V.VarContext] = {}
     universe_symbols: list[str] = []
+    # ONE ActionIndex for the whole run (trap #21), built here and threaded into every
+    # per-symbol context below.
+    actions = load_action_index(conn)
 
     if it.scope == "per_symbol":
         universe_symbols = _resolve_universe(conn, it, data)
         for sym in universe_symbols:
-            ctx = _per_symbol_ctx(conn, data, sym, now=now, reporting=reporting)
+            ctx = _per_symbol_ctx(conn, data, sym, now=now, reporting=reporting,
+                                  actions=actions)
             var_contexts[sym] = ctx
             # R4: a universe symbol with no price history at all (e.g. a custom-list symbol
             # not in the holdings/prices) is a missing-price anomaly → zero-LLM card.
@@ -259,7 +368,7 @@ def run_for_id(
         target = fired_symbol
         if target is not None:
             var_contexts[target] = _per_symbol_ctx(
-                conn, data, target, now=now, reporting=reporting
+                conn, data, target, now=now, reporting=reporting, actions=actions
             )
         else:
             var_contexts[None] = _portfolio_ctx(conn, data, now=now, reporting=reporting)
@@ -271,9 +380,13 @@ def run_for_id(
         master_configured=master_configured,
         universe_symbols=universe_symbols,
         missing_price_symbols=missing_prices,
+        # R5 (2026-08-25): the field the gate reads, finally populated. See
+        # _unavailable_across for why a union rather than an intersection.
+        unavailable_vars=_unavailable_across(var_contexts),
         is_shadow=is_shadow,
         fired_rule=fired_rule,
         fired_symbol=fired_symbol,
+        trigger=trigger,
     )
     result = run_insight_type(
         conn, insight_type_id, var_contexts=var_contexts, inputs=inputs, now=now,
@@ -288,13 +401,146 @@ def run_for_id(
     return result
 
 
-def _shadow_card_count(conn: sqlite3.Connection, insight_type_id: int) -> int:
-    """Current number of stored shadow cards for an insight_type (the max_shadows cap)."""
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM insights WHERE insight_type_id = ? AND is_shadow = 1",
-        (insight_type_id,),
-    ).fetchone()
-    return int(row["c"]) if row is not None else 0
+# --- Loop 4: the shadow period (spec 04 §4.6; R6 DEF-070, owner ruling ⑧ = A) -------------
+# ``max_shadows`` caps the TASKS concurrently in their shadow period. The old cap counted
+# every shadow CARD a task had ever stored: a per_symbol batch of 9 passed a cap of 2, the
+# next batch produced none, and once a task's first promotion was behind it no later version
+# could ever be shadow-evaluated (old shadow cards never go away). One definition here feeds
+# the run (``_maybe_run_shadow``), the promote pass, the diagnosis (G7) and the calibration
+# chain on the page, so the four can never disagree about whether a task is shadowing.
+
+
+@dataclass(frozen=True)
+class ShadowState:
+    """Where one task's shadow version stands (see :data:`promote.ShadowPhase`).
+
+    ``scored``/``needed`` are the shadow VERSION's own scored evaluations vs
+    ``shadow_batches``; ``slots_used`` counts the OTHER tasks holding a slot (running) and
+    ``max_shadows`` is the cap. ``active_score``/``shadow_score`` are the two versions' own
+    records (``es.version_score``) — the evidence the promotion is decided on.
+    """
+
+    insight_type_id: int
+    version: int | None
+    phase: promote.ShadowPhase
+    scored: int
+    needed: int
+    active_version: int | None
+    slots_used: int
+    max_shadows: int
+    active_score: dict[str, Any] = field(default_factory=dict)
+    shadow_score: dict[str, Any] = field(default_factory=dict)
+
+    def wire(self) -> dict[str, Any]:
+        """The JSON block the calibration chain renders (counts only — nothing to compute)."""
+
+        def rec(score: dict[str, Any]) -> dict[str, int]:
+            return {"n": int(score.get("n", 0)), "miss_count": int(score.get("miss_count", 0))}
+
+        return {
+            "phase": self.phase,
+            "scored": self.scored,
+            "needed": self.needed,
+            "active_version": self.active_version,
+            "slots_used": self.slots_used,
+            "max_shadows": self.max_shadows,
+            "active_record": rec(self.active_score),
+            "shadow_record": rec(self.shadow_score),
+        }
+
+
+_ShadowCore = tuple[
+    int | None, bool, dict[str, Any], dict[str, Any], promote.PromotionVerdict
+]
+
+
+def _shadow_eligible(it: cs.InsightType, cfg: dict[str, Any]) -> bool:
+    """Whether a task can shadow at all: self_correct, live, and not an opted-out on_alert."""
+    if not it.self_correct or it.archived:
+        return False
+    return not (it.scope == "on_alert" and not bool(cfg["shadow_on_alert"]))
+
+
+def _shadow_core(
+    conn: sqlite3.Connection, it: cs.InsightType, cfg: dict[str, Any]
+) -> _ShadowCore:
+    """(shadow version, started, active record, shadow record, verdict) — slot-independent."""
+    if not _shadow_eligible(it, cfg):
+        return None, False, {}, {}, "hold"
+    versions = cs.list_calibrations(conn, it.id)
+    latest = versions[-1].version if versions else None
+    shadow_v = promote.shadow_version(
+        active_version=it.active_calibration_version, latest_version=latest
+    )
+    if shadow_v is None:
+        return None, False, {}, {}, "hold"
+    active_score = es.version_score(conn, it.id, version=it.active_calibration_version)
+    shadow_score = es.version_score(conn, it.id, version=shadow_v)
+    verdict = promote.decide_promotion(active_score, shadow_score, cfg)
+    started = istore.has_shadow_cards(conn, it.id, version=shadow_v)
+    return shadow_v, started, active_score, shadow_score, verdict
+
+
+def shadow_states(conn: sqlite3.Connection) -> dict[int, ShadowState]:
+    """Every live task's :class:`ShadowState`, keyed by task id. Read-only.
+
+    A slot is held by a task whose shadow version has started and is not yet decided, and
+    only while the task is ENABLED — a disabled task cannot run, so letting it hold a slot
+    would block the queue for as long as it stays off.
+    """
+    cfg = cs.get_evolution_config(conn)
+    needed = int(cfg["shadow_batches"])
+    cap = int(cfg["max_shadows"])
+    cores: dict[int, tuple[cs.InsightType, _ShadowCore]] = {}
+    holders: set[int] = set()
+    for it in cs.list_insight_types(conn):
+        core = _shadow_core(conn, it, cfg)
+        cores[it.id] = (it, core)
+        shadow_v, started, _active, shadow_score, _verdict = core
+        if (
+            shadow_v is not None and started and it.enabled
+            and int(shadow_score.get("n", 0)) < max(needed, 1)
+        ):
+            holders.add(it.id)
+    states: dict[int, ShadowState] = {}
+    for tid, (it, core) in cores.items():
+        shadow_v, started, active_score, shadow_score, verdict = core
+        used = len(holders - {tid})
+        shadow_n = int(shadow_score.get("n", 0))
+        states[tid] = ShadowState(
+            insight_type_id=tid,
+            version=shadow_v,
+            phase=promote.shadow_phase(
+                shadow_version=shadow_v, started=started, shadow_n=shadow_n,
+                shadow_batches=needed, verdict=verdict, slots_used=used, max_shadows=cap,
+            ),
+            scored=shadow_n,
+            needed=needed,
+            active_version=it.active_calibration_version,
+            slots_used=used,
+            max_shadows=cap,
+            active_score=active_score,
+            shadow_score=shadow_score,
+        )
+    return states
+
+
+def shadow_state(conn: sqlite3.Connection, it: cs.InsightType) -> ShadowState:
+    """One task's :class:`ShadowState` (``phase="none"`` for an archived task)."""
+    found = shadow_states(conn).get(it.id)
+    if found is not None:
+        return found
+    cfg = cs.get_evolution_config(conn)
+    return ShadowState(
+        insight_type_id=it.id, version=None, phase="none", scored=0,
+        needed=int(cfg["shadow_batches"]), active_version=it.active_calibration_version,
+        slots_used=0, max_shadows=int(cfg["max_shadows"]),
+    )
+
+
+def shadow_queue_text(state: ShadowState) -> str:
+    """「影子排隊中（目前 N／上限 M）」 — the one wording of the queue (G7 + the chain)."""
+    return f"影子排隊中（目前 {state.slots_used}／上限 {state.max_shadows}）"
 
 
 def _maybe_run_shadow(
@@ -304,36 +550,33 @@ def _maybe_run_shadow(
     var_contexts: dict[str | None, V.VarContext],
     base_inputs: RunInputs,
     now: datetime,
-) -> None:
-    """Generate the SHADOW cards alongside the active run when a shadow version exists.
+) -> ShadowState:
+    """Generate the SHADOW cards alongside the active run while the task is in its period.
 
-    No shadow when: the active version is the latest (no shadow); the combo is on_alert and
-    ``shadow_on_alert`` is off; or the max_shadows cap is reached (queued — skip this run).
+    ``running`` (this version already holds its slot) and ``waiting`` (a slot is free — the
+    task enters now) shadow the WHOLE batch: a per_symbol batch of N cards is one slot.
+    ``queued`` produces nothing this batch and is retried on the next one; ``none`` /
+    ``won`` / ``lost`` have nothing left to evaluate. A task that started, was disabled and
+    is re-enabled keeps its version's place (it is ``running``) — a cap lowered mid-period
+    likewise never aborts a version half-way; both only bound who may ENTER.
     """
-    if not it.self_correct:
-        return
-    cfg = cs.get_evolution_config(conn)
-    if it.scope == "on_alert" and not bool(cfg["shadow_on_alert"]):
-        return
-    versions = cs.list_calibrations(conn, it.id)
-    latest = versions[-1].version if versions else None
-    shadow_v = promote.shadow_version(
-        active_version=it.active_calibration_version, latest_version=latest
-    )
-    if shadow_v is None:
-        return
-    if _shadow_card_count(conn, it.id) >= int(str(cfg["max_shadows"])):
-        return  # cap reached → queue (skip this batch)
+    state = shadow_state(conn, it)
+    if state.phase == "queued":
+        logger.info("insight_type %s: %s", it.id, shadow_queue_text(state))
+        return state
+    if state.phase not in ("running", "waiting"):
+        return state
     shadow_inputs = base_inputs.model_copy(
         update={
             "is_shadow": True,
-            "calibration_version_override": shadow_v,
+            "calibration_version_override": state.version,
             "budget_remaining": budget_remaining(conn),
         }
     )
     run_insight_type(
         conn, it.id, var_contexts=var_contexts, inputs=shadow_inputs, now=now,
     )
+    return state
 
 
 # --- Loop 2: evaluate due insights (spec 04.4) --------------------------------
@@ -343,67 +586,282 @@ def _maybe_run_shadow(
 # runner (``scheduler.register_evaluation_runner`` at startup — no scheduler→api import).
 
 
-def _price_on_or_after(conn: sqlite3.Connection, symbol: str, on: date) -> Decimal | None:
-    """The first stored close on/after *on* within the lookback window, or None."""
-    series = get_price_history(conn, symbol, on, on + timedelta(days=_EVAL_LOOKBACK_DAYS))
+def _price_on_or_after(
+    conn: sqlite3.Connection, symbol: str, on: date, *,
+    actions: ActionIndex, valued_on: date,
+) -> Decimal | None:
+    """The first stored close on/after *on*, expressed in ``valued_on``'s share terms."""
+    series = series_in(
+        actions, symbol,
+        get_price_history(conn, symbol, on, on + timedelta(days=_EVAL_LOOKBACK_DAYS)),
+        valued_on=valued_on,
+    )
     return series[0].value if series else None
 
 
-def _price_on_or_before(conn: sqlite3.Connection, symbol: str, on: date) -> Decimal | None:
-    """The last stored close on/before *on* within the lookback window, or None."""
-    series = get_price_history(conn, symbol, on - timedelta(days=_EVAL_LOOKBACK_DAYS), on)
+def _price_on_or_before(
+    conn: sqlite3.Connection, symbol: str, on: date, *,
+    actions: ActionIndex, valued_on: date,
+) -> Decimal | None:
+    """The last stored close on/before *on*, expressed in ``valued_on``'s share terms."""
+    series = series_in(
+        actions, symbol,
+        get_price_history(conn, symbol, on - timedelta(days=_EVAL_LOOKBACK_DAYS), on),
+        valued_on=valued_on,
+    )
     return series[-1].value if series else None
 
 
+def _benchmark_for_symbol(conn: sqlite3.Connection, symbol: str) -> Benchmark | None:
+    """The fixed benchmark for the symbol's market (AI-D22), or ``None`` when unscorable.
+
+    Reads the ``instruments`` table (a ``data_ingestion`` table) directly — the established
+    cross-layer SQL convention (architecture.md): one shared connection, the coupling named
+    here, and a missing table/row degrades to ``None`` rather than raising. ``None`` covers
+    both an unregistered/removed symbol and a market with no wired benchmark (MY) — the
+    caller lands both as honest ``pending_data``, never a guessed proxy (an MYR stock vs a
+    USD index is noise, per the ruling).
+    """
+    try:
+        row = conn.execute(
+            "SELECT market FROM instruments WHERE symbol = ?", (symbol,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None  # no instruments table → no market → honestly unscorable
+    if row is None:
+        return None
+    return benchmark_for_market(Market(row[0]))
+
+
+def _window_return(
+    closes: list[tuple[date, Decimal]], start: date, end: date
+) -> Decimal | None:
+    """Fractional return ``start``→``end`` over an ASCENDING stored close series, or None.
+
+    The start leg is the first close ON/AFTER ``start`` (within ``+_EVAL_LOOKBACK_DAYS``),
+    the end leg the last close ON/BEFORE ``end`` — the same tolerance the price_change arms
+    use, so a benchmark weekend/holiday never fabricates a measurement gap. A zero start
+    leg → ``None``. Pure: the caller fetches the series (AI-D22/23 — used for the
+    benchmark leg of a ``relative`` prediction; both legs stay in their local currency,
+    per-market identical by construction).
+    """
+    lo = [c for d, c in closes
+          if start <= d <= start + timedelta(days=_EVAL_LOOKBACK_DAYS)]
+    hi = [c for d, c in closes
+          if end - timedelta(days=_EVAL_LOOKBACK_DAYS) <= d <= end]
+    if not lo or not hi or lo[0] == Decimal("0"):
+        return None
+    return (hi[-1] - lo[0]) / lo[0]
+
+
+def _portfolio_return(
+    conn: sqlite3.Connection, created: date, due_date: date,
+    *, now: datetime, reporting: Currency,
+) -> Decimal | None:
+    """The portfolio's create→due return from the chain-linked TWR index (W7, AI-D35).
+
+    Flow-adjusted by construction: a mid-window deposit/withdrawal moves
+    ``net_invested``, not the return (the day's flow is removed from the day's value
+    change), so injected cash never reads as a gain. The series is the SAME
+    ``daily_value_series`` the dashboard trend card plots (the performance router's
+    ``twr_index`` feed, `routers/performance.py:93`), in the reporting currency. There is
+    no stored portfolio baseline analogous to ``price_at_create`` — the start leg is the
+    first index point ON/AFTER ``created`` (the honest on-or-after basis, the same
+    tolerance as the per-symbol legs). A thin/unavailable trend → ``None``
+    (pending_data, never a fabricated miss). Built per card, deliberately not hoisted:
+    a daily pass matures at most a handful of portfolio-scope cards (trap #21 is about
+    per-symbol loops).
+    """
+    data = build_dashboard(conn, now=now, reporting=reporting)
+    if not data.trend.available:
+        return None
+    index = twr_index(data.trend.points)
+    if not index:
+        return None
+    # The index ratio IS the window's TWR (chain-linked returns compound); the legs ride
+    # the same ±_EVAL_LOOKBACK_DAYS tolerance as the per-symbol arms.
+    return _window_return([(p.date, p.value) for p in index], created, due_date)
+
+
+#: How many of the symbol's own one-sigma horizon moves count as 「持平」 (review ⑩).
+#: 0.5 puts the three directions at roughly 38 / 31 / 31 on a normal move, against the
+#: 6 / 51 / 51 the fixed ±0.5% band produced over a 14-day horizon at 30% vol.
+_FLAT_BAND_SIGMAS = Decimal("0.5")
+#: Trading days per year — the same annualiser ``annualized_volatility`` uses, so the
+#: de-annualisation below is in its own units. Calendar days would be a units error.
+_TRADING_DAYS_PER_YEAR = Decimal("252")
+
+
+def _flat_band(
+    closes: list[tuple[date, Decimal]], created: date, due: date
+) -> Decimal | None:
+    """The 「持平」 band for THIS card: half the symbol's own one-sigma move over the horizon.
+
+    A fixed ±0.5% band is not a statement about the market, it is a statement about a number
+    someone picked — and over any real horizon it made 「持平」 nearly unhittable while up/down
+    stayed near even (review ⑩; AI-D25 already fixed the identical bias for volatility).
+
+    The horizon is counted in TRADING DAYS from the price series itself rather than from the
+    calendar: ``annualized_volatility`` annualises with 252, so a calendar-day horizon would
+    silently mix two day-counts. Counting the closes is also exact through holidays.
+
+    ``None`` when the baseline volatility is unavailable or zero, or the window contains no
+    trading days — the caller then falls back to the fixed band rather than to a guess.
+    """
+    vol = annualized_volatility([c for d, c in closes if d <= created], window=_VOL_WINDOW)
+    if vol is None or vol <= Decimal("0"):
+        return None
+    sessions = sum(1 for d, _ in closes if created < d <= due)
+    if sessions <= 0:
+        return None
+    horizon_sigma = vol * (Decimal(sessions) / _TRADING_DAYS_PER_YEAR).sqrt()
+    return _FLAT_BAND_SIGMAS * horizon_sigma
+
+
+def _vol_change_pct(
+    closes: list[tuple[date, Decimal]], created: date, due: date
+) -> Decimal | None:
+    """Fractional change in realized volatility, create→due (AI-D24), or ``None``.
+
+    Two fixed ``_VOL_WINDOW``-trading-day windows of ``annualized_volatility`` — one ending
+    at the create date (the baseline the model saw), one at the due date. The series MUST
+    already be re-expressed into one share basis: a split inside the window would read as a
+    vol spike, not a split (the caller passes it through ``series_in``). A zero or
+    insufficient-history baseline → ``None`` (pending_data, never a fabricated miss).
+    """
+    base = annualized_volatility([c for d, c in closes if d <= created], window=_VOL_WINDOW)
+    after = annualized_volatility([c for d, c in closes if d <= due], window=_VOL_WINDOW)
+    if base is None or after is None or base == Decimal("0"):
+        return None
+    return (after - base) / base
+
+
 def _measure_actual(
-    conn: sqlite3.Connection, due: es.DueInsight, prediction: Prediction
+    conn: sqlite3.Connection, due: es.DueInsight, prediction: Prediction,
+    *, actions: ActionIndex, now: datetime, reporting: Currency,
 ) -> scoring.ActualMeasurement | None:
     """Build the objective measurement for a due insight, or None when unavailable.
 
     A None return (or all-None measurement fields) signals the actual value is unavailable
-    (missing/halted price) → the caller defers as pending_data (anti-poison). Only
-    ``price_change`` is fully measured in v1; ``volatility``/``relative`` degrade to None
-    when their inputs are absent.
+    (missing/halted price) → the caller defers as pending_data (anti-poison). All three
+    metrics are measured at PER-SYMBOL scope (W5, AI-D22..D26): ``price_change`` from the
+    symbol's own legs; ``relative`` adds the fixed market benchmark's create→due return
+    (``None`` for an MY symbol, an unregistered symbol, or a missing benchmark series →
+    honest pending_data); ``volatility`` compares two fixed 30-day realized-vol windows.
+    At PORTFOLIO scope (symbol=None, W7 AI-D35) only ``price_change`` is measurable — via
+    the flow-adjusted TWR index (``_portfolio_return``); the other two stay honest None.
 
     Baseline (M4 fix, decision Q1c): the card's stored ``price_at_create`` — the last
     close the model actually saw — is the preferred start price, so the score measures
     the move from the model's own reference point. LEGACY cards without it fall back to
     the old basis (the first stored close ON/AFTER the create date), so old cards keep
     scoring on the basis they were created under.
+
+    §5.1(d) / W6c — **both legs are expressed in the DUE DATE's share terms.** ``change``
+    divides one date's close by another's, and a split between them is the whole ratio: a
+    7-for-1 scores every open card as a −86% collapse, i.e. a fabricated miss on the model's
+    permanent record. ``price_at_create`` gets the same treatment as a fetched start price
+    (``priced_on=created``, the closest date the stored scalar carries) — re-expressing one
+    leg and not the other would MANUFACTURE the discrepancy this fixes. The volatility arm's
+    whole series is re-expressed the same way (a split inside a vol window is a vol spike,
+    not a split), and the benchmark leg rides the same seam as the performance router's
+    read — a structural no-op while the ledger records no action on the benchmark key, but
+    a HELD 0050 with a recorded SPLIT would otherwise fabricate a −86% "benchmark return".
     """
     symbol = due.symbol
-    if symbol is None:
-        return None  # portfolio-scope quant cards are v1 narrative-only (spec 04.10)
     created = datetime.fromisoformat(due.created_at).date()
     due_date = datetime.fromisoformat(due.due_at).date() if due.due_at is not None else None
     if due_date is None:
         return None
+    if symbol is None:
+        # Portfolio scope (W7, AI-D35 — closes AI-D26's deferred question): only
+        # ``price_change`` is measured, via the flow-adjusted TWR over create→due (a
+        # mid-window deposit never reads as profit). ``relative``/``volatility`` stay
+        # per-symbol — a blended three-market benchmark is a separate ruling. The shared
+        # ±0.5% flat band applies downstream in ``score_quant`` (AI-D25 untouched).
+        if prediction.metric != "price_change":
+            return None
+        change = _portfolio_return(conn, created, due_date, now=now, reporting=reporting)
+        if change is None:
+            return None  # thin/unavailable trend → pending_data (anti-poison)
+        return scoring.ActualMeasurement(price_change_pct=change)
     start_px = (
-        Decimal(due.price_at_create)
+        price_in(actions, symbol, Decimal(due.price_at_create),
+                 priced_on=created, valued_on=due_date)
         if due.price_at_create
-        else _price_on_or_after(conn, symbol, created)
+        else _price_on_or_after(conn, symbol, created,
+                                actions=actions, valued_on=due_date)
     )
-    end_px = _price_on_or_before(conn, symbol, due_date)
+    end_px = _price_on_or_before(conn, symbol, due_date,
+                                 actions=actions, valued_on=due_date)
     if start_px is None or end_px is None or start_px == Decimal("0"):
         return None  # price unavailable/halted → pending_data
     change = (end_px - start_px) / start_px
     if prediction.metric == "relative":
-        # No benchmark series wired in v1 → benchmark unavailable → score_quant returns None.
-        return scoring.ActualMeasurement(symbol_return_pct=change, benchmark_return_pct=None)
+        bench = _benchmark_for_symbol(conn, symbol)
+        bench_ret: Decimal | None = None
+        if bench is not None:
+            bench_ret = _window_return(
+                [
+                    (p.as_of, p.value)
+                    for p in series_in(
+                        actions, bench.storage_key,
+                        get_price_history(
+                            conn, bench.storage_key, created,
+                            due_date + timedelta(days=_EVAL_LOOKBACK_DAYS),
+                        ),
+                        valued_on=due_date,
+                    )
+                ],
+                created, due_date,
+            )
+        return scoring.ActualMeasurement(
+            symbol_return_pct=change, benchmark_return_pct=bench_ret
+        )
     if prediction.metric == "volatility":
-        # Realized-vol change is not yet derived in v1 → unavailable → None verdict.
-        return scoring.ActualMeasurement(vol_change_pct=None)
-    return scoring.ActualMeasurement(price_change_pct=change)
+        series = series_in(
+            actions, symbol,
+            get_price_history(
+                conn, symbol,
+                created - timedelta(days=_VOL_LOOKBACK_DAYS), due_date,
+            ),
+            valued_on=due_date,
+        )
+        return scoring.ActualMeasurement(
+            vol_change_pct=_vol_change_pct(
+                [(p.as_of, p.value) for p in series], created, due_date
+            )
+        )
+    # Review ⑩: the 「持平」 band is scaled to THIS symbol's own volatility over the real
+    # horizon. Reuses the same long window the volatility metric fetches, because the baseline
+    # must be the vol the model could have seen AT CREATE — not the post-hoc one.
+    band_series = series_in(
+        actions, symbol,
+        get_price_history(
+            conn, symbol, created - timedelta(days=_VOL_LOOKBACK_DAYS), due_date,
+        ),
+        valued_on=due_date,
+    )
+    return scoring.ActualMeasurement(
+        price_change_pct=change,
+        flat_band=_flat_band(
+            [(p.as_of, p.value) for p in band_series], created, due_date),
+    )
+
+
+_EvalOutcome = Literal["scored", "deferred", "undetermined"]
 
 
 def _score_one(
-    conn: sqlite3.Connection, due: es.DueInsight, *, master_configured: bool, now: datetime
-) -> None:
+    conn: sqlite3.Connection, due: es.DueInsight, *, master_configured: bool, now: datetime,
+    actions: ActionIndex, reporting: Currency,
+) -> _EvalOutcome:
     """Evaluate one due insight: quant → (master narrative) → miss → write the row.
 
     A prediction card with an unavailable actual defers as pending_data (or, past the
     defer cap, becomes undetermined — never a miss). Pure-narrative cards (no prediction)
-    are scored on narrative alone when master is configured, else left pending.
+    are scored on narrative alone when master is configured, else left pending. Returns
+    which of the three happened (DEF-073: the job detail counts them).
     """
     prediction = (
         Prediction.model_validate_json(due.prediction) if due.prediction is not None else None
@@ -411,11 +869,12 @@ def _score_one(
     quant_hit: bool | None = None
     actual: scoring.ActualMeasurement | None = None
     if prediction is not None:
-        actual = _measure_actual(conn, due, prediction)
+        actual = _measure_actual(
+            conn, due, prediction, actions=actions, now=now, reporting=reporting
+        )
         quant_hit = scoring.score_quant(prediction, actual)
         if quant_hit is None:
-            _defer_or_undetermined(conn, due, now=now)
-            return
+            return _defer_or_undetermined(conn, due, now=now)
 
     narrative_score: int | None = None
     note: str | None = None
@@ -434,8 +893,7 @@ def _score_one(
 
     if prediction is None and narrative_score is None:
         # Pure-narrative card with no master signal → cannot judge yet → defer.
-        _defer_or_undetermined(conn, due, now=now)
-        return
+        return _defer_or_undetermined(conn, due, now=now)
 
     miss = scoring.decide_miss(
         quant_hit=quant_hit, narrative_score=narrative_score,
@@ -445,13 +903,19 @@ def _score_one(
         conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id,
         calibration_version=due.calibration_version, is_shadow=due.is_shadow,
         status="scored", quant_hit=quant_hit, narrative_score=narrative_score, miss=miss,
-        actual_value=_actual_value(actual), confidence=due.confidence, now=now, notes=note,
+        actual_value=_actual_value(actual),
+        # DEF-003 (owner ruling 2026-09-24): a narrative card (no prediction) is scored on its
+        # narrative, but carries no confidence into the row — so it can never reach the
+        # calibration curve / gap populations, whatever the card's column holds.
+        confidence=due.confidence if prediction is not None else None,
+        now=now, notes=note,
     )
+    return "scored"
 
 
 def _defer_or_undetermined(
     conn: sqlite3.Connection, due: es.DueInsight, *, now: datetime
-) -> None:
+) -> _EvalOutcome:
     """Bump the defer counter; past ``defer_limit_days`` → terminal undetermined (never miss).
 
     ``now`` is the evaluate pass's injected clock (L7 fix — no wall-clock reads here).
@@ -464,10 +928,11 @@ def _defer_or_undetermined(
         es.mark_undetermined(
             conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
         )
-    else:
-        es.bump_defer(
-            conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
-        )
+        return "undetermined"
+    es.bump_defer(
+        conn, insight_id=due.insight_id, insight_type_id=due.insight_type_id, now=now
+    )
+    return "deferred"
 
 
 def _card_text(conn: sqlite3.Connection, due: es.DueInsight) -> str:
@@ -508,33 +973,107 @@ def _actual_value(actual: scoring.ActualMeasurement | None) -> Decimal | None:
     return actual.price_change_pct or actual.symbol_return_pct or actual.vol_change_pct
 
 
-def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
-    """Score every due insight (Loop 2). Returns the count evaluated/deferred.
+@dataclass(frozen=True)
+class PromotionOutcome:
+    """One shadow version the promote pass found WINNING (spec 4.6).
+
+    ``switched`` — ``auto_promote`` was on and the active version was switched; otherwise the
+    win is only surfaced (the calibration chain marks it; 設為生效 is a click).
+    """
+
+    insight_type_id: int
+    name: str
+    version: int
+    switched: bool
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} v{self.version}"
+
+
+@dataclass
+class EvaluateSummary:
+    """What one Loop-2 pass did. ``str()`` is the zh 排程中心 detail (R6 DEF-073).
+
+    The job used to print 「evaluate pass complete」 whatever happened; the owner could not
+    tell a pass that scored nothing from one that promoted a version.
+    """
+
+    scored: int = 0
+    deferred: int = 0
+    undetermined: int = 0
+    failed: int = 0
+    promotions: list[PromotionOutcome] = field(default_factory=list)
+    promote_failed: bool = False
+
+    @property
+    def processed(self) -> int:
+        """Due insights handled this pass (scored + deferred + undetermined)."""
+        return self.scored + self.deferred + self.undetermined
+
+    def __str__(self) -> str:
+        head = f"評分 {self.scored} 張、延後 {self.deferred} 張"
+        if self.undetermined:
+            head += f"、無法判定 {self.undetermined} 張（超過延後上限）"
+        if self.failed:
+            head += f"、失敗 {self.failed} 張（詳見伺服器日誌）"
+        parts = [head]
+        switched = [p.label for p in self.promotions if p.switched]
+        waiting = [p.label for p in self.promotions if not p.switched]
+        if switched:
+            parts.append("晉升：" + "、".join(switched))
+        if waiting:
+            parts.append("勝出待設為生效：" + "、".join(waiting))
+        if self.promote_failed:
+            parts.append("晉升判定失敗（詳見伺服器日誌）")
+        elif not switched and not waiting:
+            parts.append("晉升：無")
+        return "；".join(parts)
+
+
+def evaluate_due(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency = Currency.TWD
+) -> EvaluateSummary:
+    """Score every due insight (Loop 2), then run the promote pass. Returns what happened.
 
     The registered Loop-2 runner. Reads prices to build each actual measurement, feeds it
     into the pure quant scorer, runs master narrative scoring (skipped/degraded when the
     master role is unset or over budget), and writes ``insight_evaluations`` rows. One bad
     insight never aborts the rest (degrade, never crash the daily job). Archived tasks'
     cards are excluded (L2 fix) — their matured predictions must not keep consuming
-    scoring (incl. master narrative cost) after the task was deleted.
+    scoring (incl. master narrative cost) after the task was deleted. ``reporting`` sets
+    the currency the portfolio-scope TWR measurement runs in (AI-D35; the cards are
+    narrated against the TWD dashboard, so TWD is the default — the `run_for_id`
+    precedent). The returned :class:`EvaluateSummary` is what the job prints (DEF-073).
     """
     es.ensure_tables(conn)
     istore.ensure_tables(conn)  # runs the price_at_create migration for legacy DBs (M4)
     master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
-    processed = 0
+    summary = EvaluateSummary()
+    # ONE index for the whole pass (trap #21) — the loop is per due insight.
+    actions = load_action_index(conn)
     for due in es.due_insights(conn, now=now, exclude_type_ids=cs.archived_type_ids(conn)):
         try:
-            _score_one(conn, due, master_configured=master_configured, now=now)
-            processed += 1
+            outcome = _score_one(conn, due, master_configured=master_configured, now=now,
+                                 actions=actions, reporting=reporting)
         except Exception:  # noqa: BLE001 — one insight failing must not abort the pass
             logger.exception("evaluate_due failed for insight %s", due.insight_id)
+            summary.failed += 1
+            continue
+        if outcome == "scored":
+            summary.scored += 1
+        elif outcome == "deferred":
+            summary.deferred += 1
+        else:
+            summary.undetermined += 1
     # After scoring, run the Loop-4 promote + regression pass (spec 4.6) over the fresh
     # accumulated scores. Isolated so an evaluate failure never blocks the promote step.
     try:
-        promote_and_check(conn, now=now)
+        summary.promotions = promote_and_check(conn, now=now)
     except Exception:  # noqa: BLE001 — the promote step must not crash the evaluate job
         logger.exception("promote_and_check failed during evaluate_due")
-    return processed
+        summary.promote_failed = True
+    return summary
 
 
 # --- Loop 3: generate calibration versions (spec 04.5 / 4.8) ------------------
@@ -542,64 +1081,169 @@ def evaluate_due(conn: sqlite3.Connection, *, now: datetime) -> int:
 # new body (master.generate_calibration), the validator gates it (master.validate_calibration),
 # and only a valid body is appended (append-only). Master unset → pipeline pauses (no crash).
 
+_CalibKind = Literal["made", "below_min", "no_trigger", "pending", "rejected", "paused"]
+
+
+@dataclass
+class CalibrationSummary:
+    """What one Loop-3 pass did. ``str()`` is the zh 排程中心 detail (R6 DEF-073).
+
+    The job used to print 「calibration pass complete」 for a pass that produced a version,
+    one whose sample was below 門檻 and one whose version the validator rejected alike.
+    """
+
+    tasks: int = 0
+    made: list[str] = field(default_factory=list)       # 「個股健檢 v3・失誤樣本 8 筆」
+    below_min: list[str] = field(default_factory=list)  # 「個股健檢 新樣本 3／門檻 8」
+    no_trigger: int = 0
+    pending: list[str] = field(default_factory=list)    # 「個股健檢 v2 影子評估中」
+    rejected: list[str] = field(default_factory=list)   # 「個股健檢：<validator reasons>」
+    paused: int = 0
+    pause_reason: str = ""
+    failed: int = 0
+
+    def __str__(self) -> str:
+        if self.tasks == 0:
+            return "沒有開啟自我校正的任務，未產生校正版本"
+        head = f"產生 {len(self.made)} 版"
+        if self.made:
+            head += "（" + "、".join(self.made) + "）"
+        parts = [head]
+        if self.below_min:
+            parts.append(
+                f"略過 {len(self.below_min)} 個任務（" + "、".join(self.below_min) + "）"
+            )
+        if self.no_trigger:
+            parts.append(f"{self.no_trigger} 個任務未達觸發條件")
+        if self.pending:
+            parts.append(
+                f"暫不產生 {len(self.pending)} 個任務（" + "、".join(self.pending) + "）"
+            )
+        if self.rejected:
+            parts.append(
+                f"驗證器拒絕 {len(self.rejected)} 版（" + "、".join(self.rejected) + "）"
+            )
+        if self.paused:
+            parts.append(f"{self.pause_reason}，暫停 {self.paused} 個任務")
+        if self.failed:
+            parts.append(f"失敗 {self.failed} 個任務（詳見伺服器日誌）")
+        return "；".join(parts)
+
+
+def _pause_reason(conn: sqlite3.Connection, exc: LLMError) -> str:
+    """Why the master could not write a version, in the job detail's words."""
+    if get_role_model_id(conn, LLMRole.MASTER) is None:
+        return "未設定 AI 大師模型"
+    if isinstance(exc, LLMBudgetExceeded):
+        return "AI 額度用罄"
+    return "AI 大師模型無法使用"
+
 
 def _generate_one(
     conn: sqlite3.Connection, it: cs.InsightType, *, now: datetime, cfg: dict[str, object]
-) -> bool:
+) -> tuple[_CalibKind, str]:
     """Evaluate the triggers + min_samples gate for one combo; generate a version if due.
 
-    Returns True when a new (valid) calibration version was appended. Master unset / over
-    budget / a validator rejection → no version, no crash (the pipeline pauses).
+    Returns ``(kind, text)`` — what happened and the task's piece of the job detail
+    (DEF-073): ``made`` (「name vN・失誤樣本 k 筆」), ``below_min`` (「name 新樣本 k／門檻 m」),
+    ``no_trigger``, ``pending`` (the newest version is still being judged), ``rejected``
+    (「name：reasons」) or ``paused`` (the reason). Master unset / over budget / a validator
+    rejection → no version, no crash (the pipeline pauses).
+
+    R6 DEF-080 — the evidence is the task's :func:`es.calibration_window`: the ACTIVE
+    version's own scored evaluations (no active version = the cards with no calibration
+    layer) made AFTER the newest calibration version was written. It read the whole history,
+    so the misses that produced a version re-triggered the next Sunday and every Sunday
+    after. And nothing is written while the newest version is still shadow-evaluated or has
+    won and waits for 設為生效: a new latest version would take its place as the shadow
+    and the candidate would never be judged.
+
+    R6 DEF-079 — the master is handed the ACTIVE version's body (``""`` with none active)
+    and exactly the window's misses. It was handed ``list_calibrations()[-1]`` — the LATEST
+    version, possibly an unadopted or losing shadow — and the misses recorded under version
+    ``active[-1].version if active else 1``: for a task with no version that is v1, while its
+    cards carry NULL, so the first version was written from zero failure samples.
     """
-    resolved = es.resolved_sample_count(conn, it.id)
-    miss_count = es.combo_score(conn, it.id)["miss_count"]
-    streak = es.consecutive_misses(conn, it.id)
+    shadow = shadow_state(conn, it)
+    if shadow.version is not None and shadow.phase in ("waiting", "queued", "running"):
+        return "pending", f"{it.name} v{shadow.version} 影子評估中"
+    if shadow.version is not None and shadow.phase == "won":
+        return "pending", f"{it.name} v{shadow.version} 勝出待設為生效"
+    chain = cs.list_calibrations(conn, it.id, include_archived=True)
+    since = datetime.fromisoformat(chain[-1].created_at) if chain else None
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=now.tzinfo)
+    window = es.calibration_window(
+        conn, it.id, version=it.active_calibration_version, since=since
+    )
+    min_samples = int(str(cfg["min_samples"]))
+    if window.n < min_samples or window.n == 0:
+        return "below_min", f"{it.name} 新樣本 {window.n}／門檻 {min_samples}"
     gap = Decimal(str(cfg["gap_alert_pp"]))
     if not scoring.should_calibrate(
-        resolved_samples=resolved, min_samples=int(str(cfg["min_samples"])),
-        consecutive_misses=streak, miss_count=miss_count, gap_alert_pp=gap,
+        resolved_samples=window.n, min_samples=min_samples,
+        consecutive_misses=window.streak, miss_count=window.miss_count, gap_alert_pp=gap,
     ):
-        return False
-    active = cs.list_calibrations(conn, it.id)
-    active_body = active[-1].body if active else ""
-    active_version = active[-1].version if active else 1
-    samples = es.miss_samples_for_version(
-        conn, insight_type_id=it.id, version=active_version
+        return "no_trigger", it.name
+    active_body = next(
+        (c.body for c in chain
+         if c.version == it.active_calibration_version and not c.archived),
+        "",
     )
+    samples = es.miss_samples_by_ids(conn, window.miss_ids)
     bins = es.calibration_bins(conn, it.id)
     try:
         out = master.generate_calibration(
             active_body=active_body, miss_samples=samples, bins=bins, conn=conn
         )
-        ok, _reasons = master.validate_calibration(out["body"], conn=conn)
-    except LLMError:
-        return False  # master unset / budget → pause (cards still generate)
+        ok, reasons = master.validate_calibration(out["body"], conn=conn)
+    except LLMError as exc:
+        return "paused", _pause_reason(conn, exc)  # master unset / budget → pause
     if not ok:
         logger.info("calibration for insight_type %s rejected by validator", it.id)
-        return False
-    cs.create_calibration(conn, it.id, body=out["body"], cause=out["cause"], now=now)
-    return True
+        return "rejected", f"{it.name}：" + ("，".join(reasons) or "未說明原因")
+    cal = cs.create_calibration(conn, it.id, body=out["body"], cause=out["cause"], now=now)
+    return "made", f"{it.name} v{cal.version}・失誤樣本 {len(samples)} 筆"
 
 
-def generate_calibrations_for_all(conn: sqlite3.Connection, *, now: datetime) -> int:
-    """Run the Loop-3 calibration pass over every self_correct combo. Returns versions made.
+def generate_calibrations_for_all(
+    conn: sqlite3.Connection, *, now: datetime
+) -> CalibrationSummary:
+    """Run the Loop-3 calibration pass over every self_correct combo. Returns what happened.
 
     The registered Loop-3 runner. Per spec 4.5: only self_correct, non-archived combos with
-    resolved samples ≥ min_samples AND a trigger get a new version. One combo failing never
-    aborts the rest (degrade, never crash the weekly job).
+    ≥ min_samples NEW resolved samples of the active version (``_generate_one``, DEF-080)
+    AND a trigger get a new version. One combo failing never
+    aborts the rest (degrade, never crash the weekly job). The returned
+    :class:`CalibrationSummary` is what the job prints (DEF-073).
     """
     es.ensure_tables(conn)
     cfg = cs.get_evolution_config(conn)
-    made = 0
+    summary = CalibrationSummary()
     for it in cs.list_insight_types(conn):
         if not it.self_correct:
             continue
+        summary.tasks += 1
         try:
-            if _generate_one(conn, it, now=now, cfg=cfg):
-                made += 1
+            kind, text = _generate_one(conn, it, now=now, cfg=cfg)
         except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
             logger.exception("generate_calibrations failed for insight_type %s", it.id)
-    return made
+            summary.failed += 1
+            continue
+        if kind == "made":
+            summary.made.append(text)
+        elif kind == "below_min":
+            summary.below_min.append(text)
+        elif kind == "no_trigger":
+            summary.no_trigger += 1
+        elif kind == "pending":
+            summary.pending.append(text)
+        elif kind == "rejected":
+            summary.rejected.append(text)
+        else:
+            summary.paused += 1
+            summary.pause_reason = summary.pause_reason or text
+    return summary
 
 
 # --- Loop 4: shadow promote + regression check (spec 04.6) --------------------
@@ -633,44 +1277,44 @@ def _check_regression(conn: sqlite3.Connection, it: cs.InsightType, *, now: date
         baseline_miss=sum(1 for r in baseline if r["miss"]), baseline_n=len(baseline),
     ):
         alerts_bridge.ensure_tables(conn)
+        # DEF-037: the subject is an insight TASK, not a symbol — say so, so the on_alert
+        # dispatcher never hands a task id to a per-symbol card as its "symbol".
         alerts_bridge.record_event(
-            conn, rule_id="calibration_regression", symbol=str(it.id), now=now
+            conn, rule_id="calibration_regression", symbol=str(it.id), now=now, scope="task"
         )
 
 
-def promote_and_check(conn: sqlite3.Connection, *, now: datetime) -> list[int]:
-    """Loop-4 promote + regression pass over self_correct combos. Returns promoted ids.
+def promote_and_check(conn: sqlite3.Connection, *, now: datetime) -> list[PromotionOutcome]:
+    """Loop-4 promote + regression pass over self_correct combos. Returns the winners.
 
-    For each combo with a shadow version: compute active vs shadow scores; on a promotion
-    verdict, switch the active version when ``auto_promote`` else leave it (the win is
-    surfaced via ai-score for a manual switch). Always run the regression check. One combo
-    failing never aborts the rest.
+    For each combo with a shadow version: the shadow VERSION's own record against the
+    ACTIVE version's own record (``es.version_score`` via :func:`shadow_states` — R6
+    DEF-070: the pooled shadow history let a brand-new v3 win on v2's evaluations). On a
+    promotion verdict, switch the active version when ``auto_promote``, else leave it (the
+    win is surfaced on the calibration chain for a manual 設為生效). Always run the regression
+    check. One combo failing never aborts the rest.
     """
     es.ensure_tables(conn)
     cfg = cs.get_evolution_config(conn)
     auto = bool(cfg["auto_promote"])
-    promoted: list[int] = []
+    states = shadow_states(conn)
+    winners: list[PromotionOutcome] = []
     for it in cs.list_insight_types(conn):
         if not it.self_correct:
             continue
         try:
             _check_regression(conn, it, now=now)
-            versions = cs.list_calibrations(conn, it.id)
-            latest = versions[-1].version if versions else None
-            shadow_v = promote.shadow_version(
-                active_version=it.active_calibration_version, latest_version=latest
-            )
-            if shadow_v is None:
+            state = states.get(it.id)
+            if state is None or state.version is None or state.phase != "won":
                 continue
-            active_score = es.combo_score(conn, it.id, is_shadow=False)
-            shadow_score = es.combo_score(conn, it.id, is_shadow=True)
-            if promote.decide_promotion(active_score, shadow_score, cfg) == "promote":
-                if auto:
-                    cs.set_active_calibration(conn, it.id, shadow_v)
-                promoted.append(it.id)
+            if auto:
+                cs.set_active_calibration(conn, it.id, state.version)
+            winners.append(PromotionOutcome(
+                insight_type_id=it.id, name=it.name, version=state.version, switched=auto,
+            ))
         except Exception:  # noqa: BLE001 — one combo failing must not abort the pass
             logger.exception("promote_and_check failed for insight_type %s", it.id)
-    return promoted
+    return winners
 
 
 # --- spec 07 §7.1: pipeline-hub task status (read-only fact gathering) ---------
@@ -726,16 +1370,51 @@ def _unapplied_calibration(conn: sqlite3.Connection, it: cs.InsightType) -> bool
     return it.active_calibration_version != latest
 
 
-def _freshness_affected(freshness: FreshnessReport, symbols: list[str]) -> list[str]:
-    """The given symbols whose dashboard price is missing OR stale (the R4-source view).
+def _price_population(
+    data: DashboardData, scope: str, universe_symbols: list[str]
+) -> list[str]:
+    """The SYMBOLS a task's price check covers, DEDUPED in first-seen order.
 
-    Reuses the dashboard's own freshness (same snapshot): a symbol is affected when it is in
-    ``missing_prices`` or its ``PriceFreshness.stale`` flag is set. Preserves *symbols* order.
+    ``per_symbol`` reads its own resolved universe; every other scope (portfolio / on_alert /
+    per_market — whose ``universe_symbols`` are MARKET codes, not symbols) reads the whole
+    book. M2 (2026-09-16): ``data.holdings`` is one row per (account, symbol), so the old
+    ``[h.symbol for h in data.holdings]`` listed a symbol held in two accounts TWICE — the
+    pipeline card's sub-line printed AAPL twice on the demo site. A price is a property of
+    the symbol, never of the account holding it.
     """
-    missing = set(freshness.missing_prices)
-    stale = {p.symbol for p in freshness.prices if p.stale}
-    affected = missing | stale
-    return [s for s in symbols if s in affected]
+    symbols = universe_symbols if scope == "per_symbol" else [h.symbol for h in data.holdings]
+    return list(dict.fromkeys(symbols))
+
+
+def _price_state_for(
+    data: DashboardData, scope: str, universe_symbols: list[str], conn: sqlite3.Connection
+) -> tuple[list[str], list[str]]:
+    """``(missing, stale)`` prices for one task — the ONE helper BOTH surfaces read (M8).
+
+    Measured 2026-09-16 on one task: the pipeline card's input node said ⚠ 「… 8299 缺價/過期」
+    while that task's own dry-run preflight said 「R4 價格資料 ✓ 通過」. Two code paths, two
+    definitions: the card called ``_freshness_affected`` (missing OR stale, flattened into one
+    warn) and the dry run called ``_missing_prices_for`` (missing only). The fix is one helper
+    returning the PAIR, with both surfaces keeping the distinction rather than flattening it:
+
+    * **missing** → the R4 warn on both surfaces. Gate behaviour is UNCHANGED (the same list
+      still feeds ``GateContext.missing_price_symbols`` → the deterministic zero-LLM anomaly
+      card); ``_missing_prices_for`` below is still the missing leg's one implementation,
+      including its per_symbol "no stored history at all" extension.
+    * **stale** → an ``info`` line on both. A stale close still produces a real card, off an
+      older price; calling that a warning on one surface and a pass on the other is the
+      double-truth this fixes.
+
+    ``stale`` EXCLUDES ``missing``: the dashboard marks a symbol with no read at all
+    ``stale=True`` as well (``dashboard.py``: ``stale=pr.stale if pr is not None else True``),
+    so without the exclusion every missing symbol would be reported twice, once per level.
+    """
+    population = _price_population(data, scope, universe_symbols)
+    missing_all = set(_missing_prices_for(data, scope, universe_symbols, conn))
+    missing = [s for s in population if s in missing_all]
+    stale_all = {p.symbol for p in data.freshness.prices if p.stale}
+    stale = [s for s in population if s in stale_all and s not in missing_all]
+    return missing, stale
 
 
 def _last_run_for(conn: sqlite3.Connection, insight_type_id: int) -> dict[str, Any] | None:
@@ -772,7 +1451,9 @@ def _gather_facts(
         else _resolve_markets(data) if it.scope == "per_market"
         else []
     )
-    affected_scope = universe if it.scope == "per_symbol" else [h.symbol for h in data.holdings]
+    # M8: the SAME helper the dry-run preflight reads, so the card and the dry run can no
+    # longer disagree about this task's price data.
+    missing, stale = _price_state_for(data, it.scope, universe, conn)
     live, total = _template_counts(conn, it.id)
     last_run = _last_run_for(conn, it.id)
     return ps.PipelineFacts(
@@ -781,7 +1462,8 @@ def _gather_facts(
         scheduled=_is_scheduled(conn, it.id),
         universe_symbols=universe,
         removed_recently=[],  # R2 removal events are surfaced by the gate; v1 status: none
-        missing_or_stale_symbols=_freshness_affected(data.freshness, affected_scope),
+        missing_price_symbols=missing,
+        stale_price_symbols=stale,
         live_template_count=live,
         total_template_count=total,
         r1_mismatch=_r1_mismatch(conn, it),
@@ -795,26 +1477,42 @@ def _gather_facts(
 
 
 def _last_batch(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    """The most recent FINISHED non-shadow insight batch: ``{at, cards, cost_usd}`` or None.
+    """The most recent FINISHED non-shadow insight batch: ``{at, cards, cost_usd, runs}``.
 
-    ``cards`` counts the non-shadow insight rows created in that batch (their ``created_at``
-    equals the run's ``started_at`` — both stamped from the same injected ``now``).
+    DEF-058 (2026-09-25): a BATCH is defined ONCE — the finished non-shadow insight runs that
+    share one ``started_at`` (one injected ``now``: an alert dispatch runs one task per event,
+    a scheduler tick several tasks, all stamped with the same clock) — and BOTH figures are
+    taken over that one set. ``cards`` counts the non-shadow cards created at that instant
+    (a card's ``created_at`` is its run's ``now``); ``cost_usd`` is the Decimal sum of the
+    set's run costs, as a string. Before, the cards were counted over the set while the cost
+    was read off ``ORDER BY id DESC LIMIT 1`` — one run of seven — so the page printed
+    「7 卡 本批成本 $0.001」 for a batch that cost $0.0050487. ``at`` is the latest finish of
+    the set; ``runs`` (additive) is its size. None when no insight run has finished.
     """
-    row = conn.execute(
-        "SELECT started_at, finished_at, cost_usd FROM job_runs "
+    anchor = conn.execute(
+        "SELECT started_at FROM job_runs "
         "WHERE job_id LIKE 'insight:%' AND is_shadow = 0 AND finished_at IS NOT NULL "
         "ORDER BY id DESC LIMIT 1",
     ).fetchone()
-    if row is None:
+    if anchor is None:
         return None
+    started_at = anchor["started_at"]
+    runs = conn.execute(
+        "SELECT finished_at, cost_usd FROM job_runs "
+        "WHERE job_id LIKE 'insight:%' AND is_shadow = 0 AND finished_at IS NOT NULL "
+        "AND started_at = ?",
+        (started_at,),
+    ).fetchall()
+    cost = sum((Decimal(r["cost_usd"]) for r in runs if r["cost_usd"]), Decimal("0"))
     cards_row = conn.execute(
         "SELECT COUNT(*) AS c FROM insights WHERE is_shadow = 0 AND created_at = ?",
-        (row["started_at"],),
+        (started_at,),
     ).fetchone()
     return {
-        "at": row["finished_at"],
+        "at": max(str(r["finished_at"]) for r in runs),
         "cards": int(cards_row["c"]) if cards_row is not None else 0,
-        "cost_usd": row["cost_usd"] if row["cost_usd"] is not None else "0",
+        "cost_usd": decimal_str(cost),
+        "runs": len(runs),
     }
 
 
@@ -832,10 +1530,20 @@ def build_status(
     quota = budget_remaining(conn)
     quota_low = get_alert_threshold(conn)
     master_configured = get_role_model_id(conn, LLMRole.MASTER) is not None
-    data = build_dashboard(conn, now=now, reporting=reporting)
+    # M7-07: built on FIRST USE, not unconditionally. `data` is read only inside
+    # `_gather_facts`, so zero tasks meant zero reads — and a 124-byte response still paid
+    # for a full replay (measured: 1,939 ms of which `build_dashboard` was 1,401 ms, and
+    # 87% of THAT is `daily_value_series` replaying the book once per day, 2,053 times).
+    # Same function, same arguments, same connection snapshot: only the evaluation ORDER
+    # changes, so the payload is byte-identical. This does not help a prod DB with tasks
+    # configured — a lighter builder would, but a second freshness definition is a second
+    # truth, so that stays a separate ticket.
+    data: DashboardData | None = None
 
     tasks: list[dict[str, Any]] = []
     for it in cs.list_insight_types(conn):
+        if data is None:
+            data = build_dashboard(conn, now=now, reporting=reporting)
         facts = _gather_facts(
             conn, it, data, quota_remaining=quota, quota_low=quota_low,
             master_configured=master_configured,
@@ -891,20 +1599,21 @@ def _resolve_universe_raw(
     universe: dict[str, Any] | list[Any] | str | None,
     data: DashboardData,
 ) -> list[str]:
-    """Resolve a per_symbol universe value (mode:all → holdings, mode:custom → listed,
-    mode:all_registered → holdings + watchlist). The draft-preflight twin of
-    ``_resolve_universe`` (spec 07 §7.2 dry run)."""
-    held = sorted({h.symbol for h in data.holdings})
+    """Resolve a per_symbol universe value — THE one resolver (DEF-059): mode:all →
+    holdings, mode:custom → the listed symbols, mode:all_registered → holdings + the active
+    (non-archived) watchlist; anything else follows holdings. A saved task
+    (:func:`_resolve_universe`) and an unsaved draft (spec 07 §7.2 dry run) both land here."""
+    held_set = held_in_book(data)
+    held = sorted(held_set)
     if isinstance(universe, dict):
         mode = universe.get("mode")
         if mode == "custom":
-            syms = universe.get("symbols")
-            return list(syms) if isinstance(syms, list) else []
+            return _custom_symbols(universe.get("symbols"))
         if mode == "all_registered":
-            return _all_registered_symbols(conn)
+            return _all_registered_symbols(conn, held_set)
         if mode == "all":
             return held
-    return held
+    return held  # default: follow holdings
 
 
 def _missing_prices_for(
@@ -914,6 +1623,10 @@ def _missing_prices_for(
 
     Dashboard freshness ``missing_prices`` plus, for per_symbol, any universe symbol with
     NO stored price history at all (a custom-list symbol not in the priced holdings).
+
+    RAW read, deliberately (W6c): this is an EXISTENCE test — no close is read, compared or
+    displayed — and a corporate action changes the denomination of a price, never whether a
+    row is there. Do not "fix" it by routing it through ``series_in``.
     """
     missing = list(data.freshness.missing_prices)
     if scope == "per_symbol":
@@ -927,7 +1640,10 @@ def _missing_prices_for(
 
 
 def _has_no_history(conn: sqlite3.Connection, symbol: str, as_of: date) -> bool:
-    """True when a symbol has no stored price within the standard history window."""
+    """True when a symbol has no stored price within the standard history window.
+
+    RAW read (W6c): emptiness only — see :func:`_missing_prices_for`.
+    """
     history = get_price_history(conn, symbol, as_of - timedelta(days=_HISTORY_DAYS), as_of)
     return not history
 
@@ -977,7 +1693,10 @@ def _preview_var_context(
 ) -> V.VarContext:
     """One representative VarContext for the assembled preview (first symbol / portfolio)."""
     if scope == "per_symbol" and universe_symbols:
-        return _per_symbol_ctx(conn, data, universe_symbols[0], now=now, reporting=reporting)
+        # ONE symbol, so one index — built here rather than threaded from the caller, which
+        # has no other use for it (trap #21 is about a per-symbol build inside a loop).
+        return _per_symbol_ctx(conn, data, universe_symbols[0], now=now, reporting=reporting,
+                               actions=load_action_index(conn))
     return _portfolio_ctx(conn, data, now=now, reporting=reporting)
 
 
@@ -1001,15 +1720,24 @@ def _est_tokens(prompt: str) -> int:
 _RULE_SLOTS = ("R1", "R2", "R3", "R4", "R5", "R6")
 _RULE_NAMES: dict[str, str] = {
     "R1": "範圍相容", "R2": "標的宇宙", "R3": "模板啟用",
-    "R4": "價格資料", "R5": "變數可用性", "R6": "LLM 額度",
+    "R4": "價格資料", "R5": "變數可用性", "R6": "AI 額度",
 }
-# The one-key fix per rule slot (§7.2 fix.kind enum). R6 (LLM quota) has NO one-click
-# fix — a budget top-up is not in the §7.2 enum (senior-review fix: it must not emit
-# create_schedule, which belongs to G1 only).
+# The one-key fix per rule slot (§7.2 fix.kind enum). EVERY slot that can fail or warn has
+# one (DEF-085, owner ruling A 2026-09-29: the dry run must say what to do, not only what is
+# wrong). R6 had none by design — "a top-up is not a one-click action" — and R1 had none by
+# omission, so the modal printed a red row with nothing to press while the frontend already
+# held 「前往額度設定」 (`fund_quota`) for exactly this and no backend path ever sent it. A
+# fix need not perform the repair: `fund_quota` takes the owner to the page that does
+# (設定 › AI 與額度), the same entry the AI door's quota panel links. R6 still never emits
+# create_schedule, which belongs to G1 only (senior-review fix). R1 (a 「單一標的」 variable in
+# a non-per_symbol task) is repaired by changing the templates → the assemble tab.
 _RULE_FIX: dict[str, str] = {
-    "R2": "edit_universe", "R3": "enable_template", "R4": "edit_universe",
-    "R5": "edit_templates",
+    "R1": "edit_templates", "R2": "edit_universe", "R3": "enable_template",
+    "R4": "edit_universe", "R5": "edit_templates", "R6": "fund_quota",
 }
+# The display name of the R4-adjacent stale-price info row (M8). Distinct from R4's own
+# 「價格資料」 so the two rows are not read as one duplicated line.
+_RULE_STALE_NAME = "價格新鮮度"
 
 
 def _finding_for(result: GateResult, rule_id: str) -> gating.GateFinding | None:
@@ -1024,8 +1752,36 @@ def _lv_of(finding: gating.GateFinding | None) -> str:
     return "fail" if finding.lv == "block" else finding.lv
 
 
-def _rule_gates(result: GateResult, *, disabled_template_id: int | None) -> list[dict[str, Any]]:
-    """The R1..R6 display gates (in order), each mapped from the shared gate's findings."""
+def _stale_price_finding(stale: list[str]) -> gating.GateFinding:
+    """The R4-adjacent ``info`` finding for STALE (present but old) prices — M8, 2026-09-16.
+
+    Not part of ``gating.evaluate_gates``: R4's hard job is the missing-price anomaly card,
+    and staleness changes NEITHER the verdict NOR what executes (the run proceeds off the
+    older close). What it does change is what the owner is told — and until now the pipeline
+    card warned about staleness while this very dry run reported 「R4 價格資料 ✓ 通過」 for the
+    same task. It is emitted at the display layer, beside R4, in the gate layer's own
+    ``GateFinding`` shape, so the modal renders it like any other row (``pipeline-preflight.
+    js`` iterates the list; ``_verdict``/``_first_blocker`` read only fail/warn, so an info
+    row is display-only by construction — the same posture as a labelled stale price on the
+    dashboard: disclosed, never guessed, never blocking).
+    """
+    return gating.GateFinding(
+        id="R4", lv="info",
+        msg=f"價格過期（以舊價產生）：{', '.join(stale)}",
+        reason="R4_stale_price",
+    )
+
+
+def _rule_gates(
+    result: GateResult, *, disabled_template_id: int | None, stale_prices: list[str],
+) -> list[dict[str, Any]]:
+    """The R1..R6 display gates (in order), each mapped from the shared gate's findings.
+
+    ``stale_prices`` appends ONE extra info row directly after the R4 slot (M8). It is
+    appended rather than merged into R4 because the slot must keep reporting the gate's own
+    verdict verbatim — a reader comparing the modal against ``job_runs`` must still see the
+    R4 the runtime gate produced.
+    """
     gates: list[dict[str, Any]] = []
     for rule_id in _RULE_SLOTS:
         finding = _finding_for(result, rule_id)
@@ -1041,6 +1797,12 @@ def _rule_gates(result: GateResult, *, disabled_template_id: int | None) -> list
         gates.append(
             {"id": rule_id, "name": _RULE_NAMES[rule_id], "lv": lv, "msg": msg, "fix": fix}
         )
+        if rule_id == "R4" and stale_prices:
+            extra = _stale_price_finding(stale_prices)
+            gates.append({
+                "id": extra.id, "name": _RULE_STALE_NAME, "lv": extra.lv,
+                "msg": extra.msg, "reason": extra.reason, "fix": None,
+            })
     return gates
 
 
@@ -1086,21 +1848,43 @@ def _g0_g1(
     return g0, g1
 
 
+def _g7_unapplied_msg(shadow: ShadowState | None) -> str:
+    """G7's info text for an unapplied version — WHERE its shadow evaluation stands (DEF-070).
+
+    「有未套用的校正版本」 alone sent the owner to a chain with nothing to press (DEF-071) and
+    never said the version was queued behind ``max_shadows``.
+    """
+    if shadow is None or shadow.version is None:
+        return "有未套用的校正版本（不會進行影子評估，需手動設為生效）"
+    v = f"v{shadow.version}"
+    if shadow.phase == "running":
+        return f"影子評估中：{v} 已評分 {shadow.scored}／{shadow.needed}"
+    if shadow.phase == "waiting":
+        return f"有未套用的校正版本 {v}，下一批開始影子評估"
+    if shadow.phase == "queued":
+        return f"有未套用的校正版本 {v}；{shadow_queue_text(shadow)}"
+    if shadow.phase == "won":
+        return f"影子 {v} 勝出（評分 {shadow.scored}／{shadow.needed}），可設為生效"
+    return f"影子 {v} 未勝出（成績不如生效版），可封存或手動設為生效"
+
+
 def _g7(
     conn: sqlite3.Connection, *, self_correct: bool, master_configured: bool,
-    unapplied_calibration: bool,
+    unapplied_calibration: bool, shadow: ShadowState | None = None,
 ) -> dict[str, Any]:
     """G7 (calibration pipeline): master unset (with self_correct) → warn; an unapplied
-    calibration version → info; else ok (§7.2)."""
+    calibration version → info, saying where its shadow evaluation stands; else ok (§7.2)."""
     if self_correct and not master_configured:
+        # DEF-085 class: this warning had no fix while the frontend's 「前往 AI 大師設定」
+        # (`activate_role`) was defined for it and never sent.
         return {
             "id": "G7", "name": "校正管線", "lv": "warn",
             "msg": "已開啟自我校正但未設定 AI 大師模型；校正管線暫停",
-            "fix": None,
+            "fix": {"kind": "activate_role"},
         }
     if unapplied_calibration:
         return {
-            "id": "G7", "name": "校正管線", "lv": "info", "msg": "有未套用的校正版本",
+            "id": "G7", "name": "校正管線", "lv": "info", "msg": _g7_unapplied_msg(shadow),
             "fix": {"kind": "set_active_calibration"},
         }
     return {"id": "G7", "name": "校正管線", "lv": "ok", "msg": "校正管線正常", "fix": None}
@@ -1228,7 +2012,8 @@ def _preflight_saved(
         else _resolve_markets(data) if it.scope == "per_market"
         else []
     )
-    missing = _missing_prices_for(data, it.scope, universe, conn)
+    # M8: the SAME pair the pipeline card's input node reads (``_gather_facts``).
+    missing, stale = _price_state_for(data, it.scope, universe, conn)
     inputs = RunInputs(
         budget_remaining=quota,
         master_configured=master_configured,
@@ -1243,7 +2028,7 @@ def _preflight_saved(
         enabled=it.enabled, scope=it.scope, scheduled=_is_scheduled(conn, it.id),
         self_correct=it.self_correct, master_configured=master_configured,
         unapplied_calibration=_unapplied_calibration(conn, it),
-        strategy_ids=strategy_ids,
+        strategy_ids=strategy_ids, stale_prices=stale, shadow=shadow_state(conn, it),
     )
     payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
     if include_preview:
@@ -1273,7 +2058,7 @@ def _preflight_draft(
         else _resolve_markets(data) if draft.scope == "per_market"
         else []
     )
-    missing = _missing_prices_for(data, draft.scope, universe, conn)
+    missing, stale = _price_state_for(data, draft.scope, universe, conn)
     inputs = RunInputs(
         budget_remaining=quota,
         master_configured=master_configured,
@@ -1287,7 +2072,7 @@ def _preflight_draft(
         enabled=draft.enabled, scope=draft.scope, scheduled=False,  # a draft has no schedule
         self_correct=draft.self_correct, master_configured=master_configured,
         unapplied_calibration=False,  # a draft has no calibration chain
-        strategy_ids=draft.strategy_ids,
+        strategy_ids=draft.strategy_ids, stale_prices=stale,
     )
     payload: dict[str, Any] = {"gates": gates, "verdict": _verdict(gates)}
     if include_preview:
@@ -1312,15 +2097,18 @@ def _compose_gates(
     master_configured: bool,
     unapplied_calibration: bool,
     strategy_ids: list[int],
+    stale_prices: list[str],
+    shadow: ShadowState | None = None,
 ) -> list[dict[str, Any]]:
-    """Assemble the fixed §7.2 gate list: G0, G1, R1..R6 (shared gate), G7."""
+    """Assemble the fixed §7.2 gate list: G0, G1, R1..R6 (shared gate) [+R4 stale info], G7."""
     g0, g1 = _g0_g1(enabled=enabled, scope=scope, scheduled=scheduled)
     rule_gates = _rule_gates(
-        result, disabled_template_id=_disabled_template_id(conn, strategy_ids)
+        result, disabled_template_id=_disabled_template_id(conn, strategy_ids),
+        stale_prices=stale_prices,
     )
     g7 = _g7(
         conn, self_correct=self_correct, master_configured=master_configured,
-        unapplied_calibration=unapplied_calibration,
+        unapplied_calibration=unapplied_calibration, shadow=shadow,
     )
     return [g0, g1, *rule_gates, g7]
 

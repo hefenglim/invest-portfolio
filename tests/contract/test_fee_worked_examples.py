@@ -29,8 +29,9 @@ def test_gunyi_sell_floor_and_tax() -> None:  # fee 156.75->156; tax 0.3%×110,0
 
 
 def test_gunyi_rebate_forecast_floor() -> None:  # floor(142×0.77)=109, floor(156×0.77)=120
-    assert forecast_tw_rebate(Decimal("142"), TW.rebate_rate) == Decimal("109")
-    assert forecast_tw_rebate(Decimal("156"), TW.rebate_rate) == Decimal("120")
+    one = TW.discount  # charge-first: the fee is the FULL fee, so the refund applies
+    assert forecast_tw_rebate(Decimal("142"), TW.rebate_rate, discount=one) == Decimal("109")
+    assert forecast_tw_rebate(Decimal("156"), TW.rebate_rate, discount=one) == Decimal("120")
 
 
 def test_rebate_rate_never_used_by_compute_fees() -> None:

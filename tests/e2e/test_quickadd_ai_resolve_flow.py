@@ -143,7 +143,13 @@ def test_quickadd_auto_resolve_fills_and_verifies(
     sym_input = dialog.locator("input.qa-symbol")
     expect(sym_input).to_be_editable()
 
-    # AUTOMATIC: no button click — the miss auto-resolves UMC → 2303 and re-validates it.
+    # L13 (owner ruling 2026-09-16, demo audit): a code-like input of up to 6 letters/digits
+    # no longer auto-fires the resolve (it is almost always a typo, and the LLM has nothing to
+    # add but a bill). The miss text shows and the never-gated manual 「AI 辨識」 button is the
+    # path this flow takes; the resolve pipeline behind it is the same.
+    expect(dialog.get_by_text("查無報價").first).to_be_visible()
+    dialog.locator("button.qa-ai-resolve").click()
+    # UMC → 2303 and re-validates it.
     expect(sym_input).to_have_value("2303")
     expect(dialog.locator("input.qa-name")).to_have_value("聯電")
     expect(dialog.locator("input.qa-industry")).to_have_value("Semiconductors")
@@ -171,10 +177,14 @@ def test_quickadd_candidates_pick_then_not_found_retry(
     _route_lookup(page, seen)
     _route_ai_resolve(page)
 
-    # Phase A — candidates: open with MULTI → auto-resolve → 2 clickable rows → pick 2303.
+    # Phase A — candidates: open with MULTI → 「AI 辨識」 → 2 clickable rows → pick 2303.
+    # (L13, 2026-09-16: a ≤6-character code-like input no longer auto-fires; the manual
+    # button is never gated.)
     _open_dialog(page, base, "MULTI")
     dialog = page.locator(".modal-backdrop").last
     sym_input = dialog.locator("input.qa-symbol")
+    expect(dialog.get_by_text("查無報價").first).to_be_visible()
+    dialog.locator("button.qa-ai-resolve").click()
     cands = dialog.locator("button.qa-cand")
     expect(cands).to_have_count(2)
     cands.first.click()
@@ -183,8 +193,11 @@ def test_quickadd_candidates_pick_then_not_found_retry(
     expect(dialog.get_by_text("已找到")).to_be_visible()
     expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_enabled()
 
-    # Phase B — not_found: edit to NOPE → auto-resolve → 查無此標的, confirm blocked, retry shown.
+    # Phase B — not_found: edit to NOPE → 「AI 辨識」 (L13: a code-like edit does not auto-fire)
+    # → 查無此標的, confirm blocked, retry shown.
     sym_input.fill("NOPE")
+    expect(dialog.get_by_text("查無報價").first).to_be_visible()
+    dialog.locator("button.qa-ai-resolve").click()
     expect(dialog.get_by_text("查無此標的")).to_be_visible()
     expect(dialog.get_by_role("button", name="確認", exact=True)).to_be_disabled()
     ai_btn = dialog.get_by_role("button", name="AI 辨識")
@@ -230,8 +243,10 @@ def test_candidate_pick_keeps_name_sector_when_revalidation_misses(
     page.route("**/api/instruments/lookup**", _lookup)
     page.route("**/api/instruments/ai-resolve", _resolve)
 
-    _open_dialog(page, base, "PICKME")  # a miss → auto-resolve → candidates
+    _open_dialog(page, base, "PICKME")  # a miss → 「AI 辨識」 (L13: no auto-fire) → candidates
     dialog = page.locator(".modal-backdrop").last
+    expect(dialog.get_by_text("查無報價").first).to_be_visible()
+    dialog.locator("button.qa-ai-resolve").click()
     cands = dialog.locator("button.qa-cand")
     expect(cands).to_have_count(2)
 

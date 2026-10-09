@@ -13,6 +13,7 @@ stays a pure scheduler view.
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.errors import error_body
+from portfolio_dash.data_ingestion.validate import unknown_account_message
 from portfolio_dash.export.ai_predictions import build_ai_predictions_csv
 from portfolio_dash.export.artifact import ExportArtifact, content_disposition
 from portfolio_dash.export.cash_statement import (
@@ -28,6 +30,7 @@ from portfolio_dash.export.cash_statement import (
 )
 from portfolio_dash.export.holdings import build_holdings_csv
 from portfolio_dash.export.holdings_report import build_holdings_report_html
+from portfolio_dash.export.ledger_audit import build_ledger_audit_csv
 from portfolio_dash.export.ledgers import LEDGER_KINDS, build_ledger_csv, build_ledgers_zip
 from portfolio_dash.export.ledgers_report import build_ledgers_report_html
 from portfolio_dash.export.realized import build_realized_csv
@@ -35,8 +38,10 @@ from portfolio_dash.export.rebalance_report import build_rebalance_report_html
 from portfolio_dash.export.symbol_detail import build_symbol_detail_csv
 from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.export.usage import build_job_runs_csv, build_llm_usage_csv
-from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError
+from portfolio_dash.portfolio.cost_basis import OversellError, UnbookableLedgerError
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.ledger_registry import EXPORT_KINDS
+from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 router = APIRouter()
 
@@ -109,6 +114,29 @@ def export_holdings(
         conn, now=now, reporting=reporting, account=account, market=market))
 
 
+@router.get("/export/ledgers")
+def list_export_ledgers() -> Any:
+    """Which ledgers the zip below contains — the SAME set, from the same declaration.
+
+    Exists so the export centre can name them without holding its own copy of the list.
+    It held one until 2026-08-16, written as 「四帳本（期初/交易/股利/換匯）」, and it went
+    stale the moment corporate actions joined the zip: the sentence under-reported what the
+    user was about to download, and nothing could have caught it, because a hand-written
+    count is not wrong in any way a test can see.
+
+    Deliberately **not** served off ``/api/db-stats``, which also derives from the registry
+    but lists all SIX ledgers. Filtering ``cash_movements`` out on the client would put
+    "which ledgers are exportable" back in the frontend — the exact knowledge this endpoint
+    exists to keep in one place. ``export_kind is None`` is that answer, and it is a
+    property of the registry row, not of the caller.
+
+    GET beside the POST of the same path is the pairing it looks like: GET says what the
+    artifact would contain, POST builds it.
+    """
+    return {"ledgers": [{"kind": kind, "label": t.label}
+                        for kind, t in EXPORT_KINDS.items()]}
+
+
 @router.post("/export/ledgers")
 def export_ledgers(
     conn: sqlite3.Connection = Depends(get_conn),
@@ -163,7 +191,7 @@ def export_symbol_detail(
     now: datetime = Depends(get_now),
 ) -> Response:
     # Symbol drawer 配息史 from the dividend ledger. Unknown symbol -> 400.
-    art = build_symbol_detail_csv(conn, symbol=body.symbol)
+    art = build_symbol_detail_csv(conn, symbol=body.symbol, today=now.date())
     if art is None:
         return JSONResponse(
             status_code=400,
@@ -225,6 +253,19 @@ def export_job_runs(
     return _respond(build_job_runs_csv(conn, frm=body.frm, to=body.to))
 
 
+@router.post("/export/ledger-audit")
+def export_ledger_audit(
+    body: RangeBody,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Response:
+    """The ledger audit trail (post-closure item 10, owner 2026-09-30) — the 資料中心 list's
+    CSV, built by the same presenter so the two cannot label a column differently."""
+    bad = _bad_range(body)
+    if bad is not None:
+        return bad
+    return _respond(build_ledger_audit_csv(conn, frm=body.frm, to=body.to))
+
+
 @router.post("/export/tax-package")
 def export_tax_package(
     body: TaxPackageBody,
@@ -239,6 +280,21 @@ def export_tax_package(
     except UnbookableLedgerError as exc:
         return JSONResponse(status_code=422, content=error_body(
             "unbookable_ledger", str(exc)))
+    except OversellError as exc:
+        # QA-06: ``OversellError`` is a SEPARATE hierarchy (``Exception``, not ``ValueError``,
+        # and ``cost_basis.py`` says so on purpose), so the arm above never caught it — and one
+        # acknowledged 賣超 took the tax package down with a 500 while /api/dashboard and the
+        # realized / holdings / holdings-report exports all answered 200 on the SAME ledger.
+        # 賣超 is a state this app is designed to survive; surviving it everywhere but here is
+        # the defect. The exact shape ``strategy/whatif.py`` already fixed at this same seam.
+        #
+        # ``build_tax_package_zip``'s ``build_book`` stays STRICT (``allow_oversell`` defaults
+        # False) — a tax package must not silently omit a sale — so this degrades with the
+        # REASON rather than relaxing the strictness, and names the offending row (the error
+        # carries account/symbol/date precisely so no caller has to regex a sentence for them).
+        return JSONResponse(status_code=422, content=error_body(
+            "oversold_position", oversold_position_message(exc, "無法產生稅務套件"),
+            issues=oversold_position_issues(exc, str(exc))))
     return _respond(art)
 
 
@@ -259,7 +315,8 @@ def export_cash_statement(
     if art is None:
         return JSONResponse(
             status_code=400,
-            content=error_body("validation_error", f"未知帳戶：{body.account}", field="account"),
+            content=error_body("validation_error", unknown_account_message(body.account),
+                               field="account"),
         )
     return _respond(art)
 
@@ -275,7 +332,8 @@ def export_cash_statement_report(
     if art is None:
         return JSONResponse(
             status_code=400,
-            content=error_body("validation_error", f"未知帳戶：{body.account}", field="account"),
+            content=error_body("validation_error", unknown_account_message(body.account),
+                               field="account"),
         )
     return _respond(art)
 

@@ -184,6 +184,9 @@
 .pp-ver-top .date { font-family: var(--font-num); color: var(--text-3); font-size: 10.5px; }
 .pp-ver-stats { font-family: var(--font-num); font-size: 10.5px; color: var(--text-3); }
 .pp-ver-cause { font-size: 11px; color: var(--text-2); }
+/* DEF-071: G7's 「前往設為生效」 lands on the recommended version's button — ringed so the
+   landing is seen, not left to the browser's focus outline. */
+.pp-ver .pp-focus { box-shadow: 0 0 0 2px var(--accent); }
 .pp-ver details summary { font-size: 10.5px; color: var(--text-3); cursor: pointer; }
 .pp-ver pre {
   margin: 6px 0 0; padding: 8px 10px; background: var(--panel-2); border-radius: 6px;
@@ -281,3 +284,17 @@
   .wz-shell { flex-direction: column; }
   .wz-rail { position: static; width: 100%; }
 }
+
+/* DEF-031 / DEF-032: 標的宇宙 picker — one checkbox per SYMBOL with its account chips, shared
+   by the wizard's 自選標的 step and the drawer's 編輯標的 dialog (pipeline.js). Columns size to
+   the content (code + name + chips) and fold to one column in a phone-width dialog. */
+.pp-uni-body { display: flex; flex-direction: column; gap: 10px; }
+.pp-uni-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+.pp-uni-picker .pv-symgrid { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+.pp-uni-picker .pv-check { flex-wrap: wrap; min-width: 0; gap: 6px; }
+.pp-uni-sym { font-family: var(--font-num); font-weight: 600; }
+.pp-uni-name {
+  color: var(--text-3); font-size: 11px; max-width: 120px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pp-uni-count { color: var(--text-2); }

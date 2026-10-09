@@ -215,7 +215,10 @@
     const field = el('div', 'field');
     field.appendChild(el('label', null, 'API Key'));
     const inp = el('input', 'input');
-    inp.type = 'text'; inp.spellcheck = false; inp.placeholder = '貼上新的 API Key…';
+    /* DEF-078 (owner ruling ⑦): a key being typed is a password field — never echoed in the
+       clear. The stored key's mask (first 3 + ••• + last 3) is already on the row behind. */
+    inp.type = 'password'; inp.autocomplete = 'new-password';
+    inp.spellcheck = false; inp.placeholder = '貼上新的 API Key…';
     inp.style.fontFamily = 'var(--font-num)';
     field.appendChild(inp);
     field.appendChild(el('span', 'hint', '永不顯示既存金鑰；留空並送出可清除金鑰。'));

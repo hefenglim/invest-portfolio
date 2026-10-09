@@ -1,15 +1,21 @@
 """Shared API wire mappers: enum case, Issue shape, fee-rule + dividend-model serialization."""
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
+from fastapi import HTTPException
+
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
+from portfolio_dash.data_ingestion.csv_import import _CellError, _side_cell
 from portfolio_dash.data_ingestion.validate import Issue
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.returns import DividendIdentity, DividendRefusals
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import MarketRule
 from portfolio_dash.shared.models.enums import Side
-from portfolio_dash.shared.wire import decimal_str
+from portfolio_dash.shared.wire import decimal_str, to_wire
+from portfolio_dash.strategy.alerts import Alert
 
 _ISSUE_FIELD = {
     "sell_exceeds_holdings": "shares",
@@ -25,16 +31,72 @@ _ISSUE_FIELD = {
 
 _DIV_MODEL = {"cash_cost_reduction": "tw", "drip_us": "drip", "cash": "net"}
 
+#: The column name the borrowed CSV cell reader puts in its message. It is also the JSON
+#: field name on every body that carries a side, so the sentence names something the caller
+#: can actually find in the payload they sent.
+_SIDE_COLUMN = "side"
+
 
 def parse_side(value: str) -> Side:
-    """Accept lowercase/any-case wire side ('buy'/'sell') -> core Side enum."""
-    return Side(value.strip().upper())
+    """Accept lowercase/any-case wire side ('buy'/'sell') -> core Side enum.
+
+    ⚠ **A bad side is a DATA problem, and this function is where it used to become a 500.**
+    ``Side(value.strip().upper())`` raised a bare ``ValueError`` — ``'HODL' is not a valid
+    Side`` — which no router caught, so ``api/errors.py``'s catch-all answered
+    ``internal_error``「系統發生未預期的錯誤，請稍後再試」 for a typo (M4-03, measured
+    2026-09-02 on ``hodl`` / ``""`` / ``" "`` / ``b`` / ``0`` / ``买``; ``ManualBody.side`` and
+    ``TxnEditBody.side`` are both bare ``str`` with no validator, so the manual door and the
+    ledger-correction door shared the fault).
+
+    Fixed HERE rather than with a per-body Pydantic validator because this is the seam every
+    caller crosses — four call sites in ``input_center.py`` and three in ``ledgers.py`` — and
+    a validator would have to be repeated on each body to cover them.
+
+    **The sentence is BORROWED, not written.** ``csv_import._side_cell`` has always answered
+    the same bad cell with 「欄位 side 的內容「hodl」不是有效的買賣別（請填 BUY 或 SELL）」 and
+    a blank one with 「必填欄位不可空白（欄位 side）」, so the CSV door and the manual door now
+    give byte-identical answers by construction (``tests/contract/test_m4_manual_side_zh.py``
+    compares them). Reusing the private helper follows the precedent ``api/errors.py`` set
+    when it imports ``portfolio.cost_basis._UNCOMPUTABLE_ZH``: one owner for the sentence
+    beats two copies that drift. ``.strip()`` is applied first so ``"buy "`` keeps working
+    and ``" "`` reads as blank rather than as an invalid value.
+
+    Raises ``HTTPException(400)``, which ``api/errors.py::_http`` renders through the standard
+    envelope (``code: "validation_error"``) — the same shape ``instruments.py`` and
+    ``performance.py`` already raise for their own zh refusals.
+    """
+    try:
+        return _side_cell({_SIDE_COLUMN: value.strip()}, _SIDE_COLUMN)
+    except _CellError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from None
+
+
+def alerts_wire(alerts: Sequence[Alert]) -> list[Any]:
+    """Alerts on the wire WITH what each is about — ``scope`` + ``subject`` (I-16).
+
+    DEF-037 made both required on :class:`~strategy.alerts.Alert` and kept them off the wire
+    (``exclude=True``), so the bell went on recovering the subject from the id's suffix — a
+    symbol for ten rules, an ACCOUNT for ``fx_drift``, a sector for ``sector_weight``, a
+    currency for ``currency_weight`` — and listed all of them as 「檔」. ADDITIVE fields, the
+    one mapper for every route that serves alerts (the dashboard embed and GET /api/alerts).
+    """
+    return [
+        {**to_wire(a.model_dump()), "scope": a.scope, "subject": a.subject} for a in alerts
+    ]
 
 
 def issue_wire(issue: Issue) -> dict[str, Any]:
-    """Map the core Issue to the frontend's {sev, code, text, field} shape."""
+    """Map the core Issue to the frontend's {sev, code, text, field} shape.
+
+    Three severities, one per tier of :class:`Issue`: ``info`` (advisory — shown, never
+    gating, never acknowledged; DEF-014), ``warn`` (``needs_confirm``) and ``error``. The
+    advisory tier rides ``needs_confirm=True`` so the shared hard/soft predicates keep their
+    answer, which is why ``info`` is tested FIRST. It lived in a wrapper in
+    ``input_center.py`` (``_wire_issue``) until I-13 (2026-09-23), so the ledger routes' own
+    issue lists still rendered an advisory as a warning; every door reads this one now.
+    """
     return {
-        "sev": "warn" if issue.needs_confirm else "error",
+        "sev": "info" if issue.info else "warn" if issue.needs_confirm else "error",
         "code": issue.kind,
         "text": issue.message,
         "field": _ISSUE_FIELD.get(issue.kind),
@@ -118,4 +180,27 @@ def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:
         "tax_sell": decimal_str(r.tax_normal),
         "tax_sell_etf": decimal_str(r.tax_etf),
         "label": label,
+    }
+
+
+def unbooked_wire(refusals: DividendRefusals, row: DividendIdentity) -> dict[str, Any]:
+    """X1 (owner ruling 2026-10-05): a listed dividend row's booking state.
+
+    On every wire that lists dividend rows — the 交易帳本 股利 tab
+    (``api/routers/ledgers.py``), the drawer's 配息史 (``api/routers/symbol.py``) — in the
+    keys the 現金收支明細 rows carry:
+
+    * ``booked`` — false only on a row the replay refused (no position by its date, an open
+      declared short, a ticker an EXCHANGE vacated);
+    * ``unbooked_note`` — 「未入帳（待釐清）」;
+    * ``unbooked_reason`` — the replay's own sentence for the row
+      (``returns.DividendRefusals.why``).
+
+    A refused row is LISTED — it is in the ledger, and the owner must be able to find and
+    correct it — but it is in no balance, no return and no total."""
+    why = refusals.why(row)
+    return {
+        "booked": why is None,
+        "unbooked_note": None if why is None else UNBOOKED_DIVIDEND_NOTE,
+        "unbooked_reason": None if why is None else why[1],
     }

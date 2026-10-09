@@ -16,13 +16,21 @@ user-facing :func:`library_wire` payload (``agents.py`` imports it and fills the
 ``{accounts}`` / ``{today}`` / ``{text}`` placeholders).
 """
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
+from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.sectors import GICS_SECTOR_KEYS
 
 # LIBRARY_VERSION tags the shipped default prompt CONTENT — bump it whenever any default
 # prompt body/version below changes (the user-visible "official has a newer version" signal).
-LIBRARY_VERSION = "official-v11 (2026-07-22)"
+# v22: the W8 weekly lens in the checkup card, and the daytrade negative one-shot the
+# W4 live baseline measured into existence. v25: the AI-input prompt v8 (DEF-036
+# stated_amount — a transcribed total the door checks against shares × price). v26: the
+# on-alert addendum v2 (DEF-037 — ``ON_ALERT_CONTEXT`` names WHICH alert fired); the content
+# changed under v25 and the library tag did not follow (I-17). v27: the insight naming note v1
+# (item 8 — a card may name a code only by its registered name or an alias) and the AI
+# instrument-resolve prompt v3 (it now proposes aliases).
+LIBRARY_VERSION = "official-v27 (2026-10-01)"
 
 # ─── HOW TO ADD A PROMPT (FU-D30 site-wide prompt registry) ────────────────────────────
 # Every prompt the app sends to an LLM MUST be traceable to THIS module:
@@ -54,43 +62,171 @@ LIBRARY_VERSION = "official-v11 (2026-07-22)"
 # v5 (W3 batch-B, 2026-07-22): merged (multi-market) account support (F15) — such an account
 # is listed with its per-market ccys (e.g. USD:US＋MYR:MY); the model takes the ticker format
 # OF THE STOCK'S market and sets the new optional ``market`` output field to that market.
-AI_INPUT_PROMPT_VERSION = "v5"
+# v6 (AI-assistant W4, AI-D17/D19, 2026-08-18): the door becomes a DISCRIMINATED UNION —
+# one prompt extracts transactions + dividends + cash movements (a real statement is mixed),
+# discriminated by ``kind``, plus an ``unparsed`` confession list (FX / corporate actions /
+# options / unclassifiable — surfaced, never silently dropped). ``daytrade`` finally teaches
+# its semantics (explicit 當沖 only — the debt W1 left) and ``short_sale`` arrives with its
+# rule (explicit 放空/融券/short only), exactly as the CSV column comment planned. The cash-kind
+# vocabulary is JOINED from ``shared/cash_kinds.py`` at module level (the GICS-keys precedent)
+# so the prompt can never drift from the door's allowed set.
+_CASH_KIND_VOCAB = "、".join(f"{kind}（{zh}）" for kind, zh in CASH_KIND_ZH.items())
+
+# v8 (DEF-036, 2026-09-23): the txn row gains ``stated_amount`` — the statement's OWN total
+# for the line (成交金額／應付金額／淨收付), COPIED, never computed, and never "reconciled" by
+# bending shares or price toward it. Measured before: 「100股 成交價 46 成交金額 50,000 元」
+# came back as 100 × 46 with the 50,000 parked in ``note``, where nothing reads it, and the
+# draft said 「✓ 解析完整」. ``agents.py::_append_amount_check`` now compares the two in
+# Decimal and flags a contradiction. The one-shot is a CONTRASTIVE PAIR (the 2026-08-28
+# technique): one total that agrees and one that does not, both copied verbatim — a lone
+# consistent example would teach "make them agree". Neither instance is in the corpus.
+AI_INPUT_PROMPT_VERSION = "v8"  # DEF-036 stated_amount (transcribed total, contrastive pair)
 AI_INPUT_PROMPT_BODY = (
-    "<task>Extract stock transactions from the user's text and any attached statement\n"
-    "screenshot into JSON.</task>\n"
-    '<schema>{{"drafts": [{{"account_id","symbol","side":"BUY|SELL","date":"YYYY-MM-DD",\n'
-    '"shares","price","daytrade":false,"is_etf":false,"note","market"}}]}}</schema>\n'
+    "<task>Extract stock transactions, dividends, and cash movements from the user's text\n"
+    "and any attached statement screenshot into JSON. A real statement is MIXED — one page\n"
+    "can carry all three kinds.</task>\n"
+    '<schema>{{"rows": [<one object per ledger line, discriminated by "kind">],\n'
+    '"unparsed": [{{"text", "reason"}}]}}</schema>\n'
+    "<row_shapes>\n"
+    'txn 買賣交易: {{"kind":"txn","account_id","symbol","side":"BUY|SELL",\n'
+    '"date":"YYYY-MM-DD","shares","price","daytrade":false,"short_sale":false,\n'
+    '"is_etf":false,"note","market","stated_amount"}}\n'
+    'div 股利: {{"kind":"div","account_id","symbol","date",\n'
+    '"type":"CASH|STOCK|DRIP|NET","gross","withholding","net","reinvest_shares",\n'
+    '"reinvest_price","ex_date"}}\n'
+    'cash 資金異動: {{"kind":"cash","account_id","date","cash_kind","ccy","amount",\n'
+    '"acq_home_amount","note"}}\n'
+    "</row_shapes>\n"
     "<accounts>{accounts}</accounts>\n"
     "<today>{today}</today>\n"
+    "<cash_kind_vocabulary>" + _CASH_KIND_VOCAB + "</cash_kind_vocabulary>\n"
     "<example_input>在元大買 10 股 2330 @ 600</example_input>\n"
-    '<example_output>{{"drafts":[{{"account_id":"tw_broker","symbol":"2330","side":"BUY",\n'
-    '"date":"2026-06-01","shares":"10","price":"600"}}]}}</example_output>\n'
-    "<example_input>7/1 嘉信買 AAPL 5股 @210，隔天再買 5 股 @212</example_input>\n"
-    '<example_output>{{"drafts":[{{"account_id":"schwab","symbol":"AAPL","side":"BUY",\n'
-    '"date":"2026-07-01","shares":"5","price":"210"}},{{"account_id":"schwab",\n'
-    '"symbol":"AAPL","side":"BUY","date":"2026-07-02","shares":"5","price":"212"}}]}}\n'
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2330",\n'
+    '"side":"BUY","date":"2026-06-01","shares":"10","price":"600"}}],"unparsed":[]}}\n'
     "</example_output>\n"
+    # DEF-036 (v8): a CONTRASTIVE PAIR for stated_amount. The first total agrees with
+    # shares × price, the second does not (1000 × 52 is 52,000, the text says 5,180) — and
+    # BOTH are copied exactly, with shares and price left as written. The system, not the
+    # model, compares them; an example of only the agreeing case would teach "make it fit".
+    "<example_input>8/20 買 2317 200 股 @105，成交金額 21,000 元；"
+    "8/21 賣出 2303 1000 股 成交價 52，淨收付 5,180 元</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2317",\n'
+    '"side":"BUY","date":"2026-08-20","shares":"200","price":"105",\n'
+    '"stated_amount":"21000"}},{{"kind":"txn","account_id":"tw_broker","symbol":"2303",\n'
+    '"side":"SELL","date":"2026-08-21","shares":"1000","price":"52",\n'
+    '"stated_amount":"5180"}}],"unparsed":[]}}</example_output>\n'
+    # A NEGATIVE one-shot for `daytrade` (2026-08-28). The live corpus measured the PROSE rule
+    # failing on exactly the case it names: a same-day round trip the user never called 當沖
+    # came back with daytrade=1 in BOTH baseline runs. That flag halves the TW sell tax
+    # (0.3% -> 0.15%), so an over-eager true is money the ledger quietly loses. The rule
+    # already said "never infer it from two same-day opposite drafts" and was not enough — so
+    # show the shape that must NOT be produced, which is what a one-shot is for.
+    "<example_input>5/9 上午買 2412 1000 股 @128，下午 @131 賣出</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"txn","account_id":"tw_broker","symbol":"2412",\n'
+    '"side":"BUY","date":"2026-05-09","shares":"1000","price":"128","daytrade":false}},\n'
+    '{{"kind":"txn","account_id":"tw_broker","symbol":"2412","side":"SELL",\n'
+    '"date":"2026-05-09","shares":"1000","price":"131","daytrade":false}}],\n'
+    '"unparsed":[]}}</example_output>\n'
+    # A CONTRASTIVE PAIR, not a single boundary example (owner technique 2,
+    # 2026-08-28). Arm B measured that stating 'STOCK => gross is 0' as PROSE already
+    # drives the model to zero `gross` on OTHER dividend types (div-my-net 11/11 ->
+    # 3/11, a real RM88.50 written as 0). One example of the zero case would deepen
+    # that; two examples where `gross` DIFFERS BY TYPE force the model to read `type`
+    # to decide. Neither instance appears in the corpus, so the cases still have to be
+    # generalised to rather than recognised.
+    "<example_input>3/12 2891 股票股利配股 120 股</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"tw_broker","symbol":"2891",\n'
+    '"date":"2026-03-12","type":"STOCK","gross":"0","reinvest_shares":"120"}}],\n'
+    '"unparsed":[]}}</example_output>\n'
+    "<example_input>4/20 moomoo 馬股 5347 股息淨額入帳 42.75 馬幣</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"moomoo_my","symbol":"5347",\n'
+    '"date":"2026-04-20","type":"NET","gross":"42.75"}}],\n'
+    '"unparsed":[]}}</example_output>\n'
+    # A CONTRASTIVE negative one-shot for option premium (2026-08-28). Measured on the
+    # live demo: an option premium came back as {{"kind":"div","type":"CASH",
+    # "gross":"300"}} -- a dividend that does not exist -- and was caught only because
+    # the model also supplied a `ccy` the schema forbids. The prose rule naming options
+    # already existed and did not hold, exactly as the daytrade rule did not. Both halves
+    # ride in ONE example so the lesson is 'a premium is not a dividend', not 'avoid
+    # dividends': the option goes to unparsed WHILE a real cash dividend is booked.
+    "<example_input>9/14 NVDA 9月 put 權利金收入 180 美元；"
+    "9/14 PG 現金股利 62 美元</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"PG",\n'
+    '"date":"2026-09-14","type":"CASH","gross":"62"}}],\n'
+    '"unparsed":[{{"text":"9/14 NVDA 9月 put 權利金收入 180 美元",\n'
+    '"reason":"option premium is not a dividend"}}]}}</example_output>\n'
+    "<example_input>嘉信 AAPL 股息再投資 0.5 股 @210，毛額 105、扣繳 31.5</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"div","account_id":"schwab","symbol":"AAPL",\n'
+    '"date":"2026-06-01","type":"DRIP","gross":"105","withholding":"31.5",\n'
+    '"reinvest_shares":"0.5","reinvest_price":"210"}}],"unparsed":[]}}</example_output>\n'
+    "<example_input>8/3 從嘉信提領 500 美元，另有一筆 TWD 轉 USD 換匯 31500</example_input>\n"
+    '<example_output>{{"rows":[{{"kind":"cash","account_id":"schwab","date":"2026-08-03",\n'
+    '"cash_kind":"WITHDRAW","ccy":"USD","amount":"500"}}],"unparsed":[{{"text":"TWD 轉 USD 換匯 '
+    '31500","reason":"換匯（兩幣別金額）請改用換匯登錄"}}]}}</example_output>\n'
     "<rules>Return JSON only, no prose. account_id MUST be one of the ids listed in\n"
     "<accounts> (match the user's broker wording to the account name); never invent\n"
-    "an id. symbol MUST be the LOCAL exchange code of the ACCOUNT's market, never a\n"
-    "cross-listed/ADR ticker from another exchange: a TW (TWD) account takes the\n"
-    "TWSE/TPEx numeric code (聯電⇒2303, 台積電⇒2330, 鴻海⇒2317 — NEVER US tickers\n"
-    "like UMC/TSM even if the company also trades as a US ADR); a US (USD) account\n"
-    "takes the US ticker (AAPL); a MY (MYR) account takes the 4-digit Bursa code\n"
-    "(Maybank⇒1155, Tenaga⇒5347, Inari⇒0166 — ACE-market codes KEEP the leading\n"
-    "zero: 0166, never 166; map a brand/mall/subsidiary to its LISTED parent, e.g.\n"
-    "IOI Mall⇒IOI Properties 5249). A Chinese company name on a TW account always\n"
-    "maps to its numeric code. A merged account is listed with MULTIPLE markets (shown\n"
-    "as e.g. USD:US＋MYR:MY): take the ticker format OF THE STOCK'S market (a US stock\n"
-    "its US ticker, an MY stock its 4-digit Bursa code) and set the optional market\n"
-    "field to that market's value (US/TW/MY). Dates resolve against <today>: a month/day\n"
-    "without a\n"
-    "year means the most\n"
-    "recent PAST occurrence (a trade date is never in the future); relative words\n"
-    "(今天/昨天/上週五) resolve from <today>. One draft per transaction — text may\n"
-    "contain several. An attached screenshot is a broker statement that may list\n"
-    "MULTIPLE transactions: read every visible row and emit one draft per row; the\n"
-    "same JSON-only contract applies to text and images alike.</rules>\n"
+    "an id. Classify EVERY ledger line into exactly one kind and emit one object per\n"
+    "line — text and screenshots alike may carry several, of MIXED kinds. symbol MUST\n"
+    "be the LOCAL exchange code of the ACCOUNT's market, never a cross-listed/ADR\n"
+    "ticker from another exchange: a TW (TWD) account takes the TWSE/TPEx numeric code\n"
+    "(聯電⇒2303, 台積電⇒2330, 鴻海⇒2317 — NEVER US tickers like UMC/TSM even if the\n"
+    "company also trades as a US ADR); a US (USD) account takes the US ticker (AAPL);\n"
+    "a MY (MYR) account takes the 4-digit Bursa code (Maybank⇒1155, Tenaga⇒5347,\n"
+    "Inari⇒0166 — ACE-market codes KEEP the leading zero: 0166, never 166; map a\n"
+    "brand/mall/subsidiary to its LISTED parent, e.g. IOI Mall⇒IOI Properties 5249). A\n"
+    "Chinese company name on a TW account always maps to its numeric code. A merged\n"
+    "account is listed with MULTIPLE markets (shown as e.g. USD:US＋MYR:MY): take the\n"
+    "ticker format OF THE STOCK'S market (a US stock its US ticker, an MY stock its\n"
+    "4-digit Bursa code) and set the optional market field to that market's value\n"
+    "(US/TW/MY). Dates resolve against <today>: a month/day without a year means the\n"
+    "most recent PAST occurrence (a trade date is never in the future); relative words\n"
+    "(今天/昨天/上週五) resolve from <today>. Never output fee or tax fields — fees and\n"
+    "taxes are computed by the system, never extracted. daytrade: set true ONLY when the\n"
+    "user explicitly says 當沖 (a same-day round trip they declare); never infer it from\n"
+    "two same-day opposite drafts. short_sale: set true ONLY when the user explicitly\n"
+    "says 放空／融券／short sell — never infer it from a sell larger than the position;\n"
+    "when in doubt, false. stated_amount: when the text states the line's OWN total\n"
+    "(成交金額／應付金額／淨收付／amount), copy that number EXACTLY — digits only, no\n"
+    "thousands separators, unsigned — into stated_amount; when it states none, omit the\n"
+    "field. NEVER compute it from shares × price, and NEVER change shares or price to make\n"
+    "them agree with it: the system compares the two and asks the user when they differ.\n"
+    "Do not put the total in note.\n"
+    "<dividend_rules>\n"
+    "- CASH: 現金股利入帳.\n"
+    "- STOCK: 配股（股票股利，加股數）.\n"
+    '  -> [Rule]: MUST set gross="0". The share count MUST go to reinvest_shares,\n'
+    "     NEVER to gross.\n"
+    "- DRIP: 股息再投資.\n"
+    "  -> [Rule]: MUST extract both reinvest_shares and reinvest_price.\n"
+    "- NET: 淨額入帳（馬股單一層制）.\n"
+    "A div row has NO currency field — the account determines the currency, so never\n"
+    "emit ccy on a div row. An option/warrant/future premium is NEVER a dividend of\n"
+    "any type: it goes to unparsed.\n"
+    "General field rules: gross / withholding / net are copied EXACTLY from the\n"
+    "statement text. Do NOT compute them; never compute a withholding yourself.\n"
+    '[Exception]: type=STOCK distributes no cash, so gross is explicitly "0" and the\n'
+    "number of shares belongs in reinvest_shares.\n"
+    "div date is the PAYMENT date (發放日／入帳日); ex_date is the EX-DIVIDEND date\n"
+    "(除息日／除權日), filled ONLY when the statement states it — never infer or\n"
+    "estimate one: a guessed ex-date moves a 配股 to the wrong day in the ledger,\n"
+    "which is the error it exists to remove.\n"
+    "</dividend_rules>\n"
+    "Cash rows: amount is ALWAYS unsigned\n"
+    "(positive); the direction lives in cash_kind — one of the <cash_kind_vocabulary>\n"
+    "entries (canonical English or the zh label, both accepted). 券商費用／融資利息 are\n"
+    "OUTFLOWS (BROKER_FEE／INTEREST_EXPENSE); 入金／利息收入 are INFLOWS — a mislabelled\n"
+    "kind reverses the cash pool by twice the amount with no error raised, so when the\n"
+    "statement does not make the kind clear, put the row in unparsed instead of\n"
+    "guessing. acq_home_amount: fill ONLY when the statement explicitly states the\n"
+    "home-currency cost of a foreign-currency inflow (e.g. 入金 1000 USD，成本 31500\n"
+    "TWD); never derive it from an exchange rate. ccy is the row's own currency\n"
+    "(TWD/USD/MYR). unparsed: a 換匯 (a currency conversion carrying TWO amounts), a\n"
+    "corporate action (拆股/合併/換股/分拆), an option/future row, or any line you\n"
+    "cannot classify with confidence goes to unparsed with the row's verbatim text and\n"
+    "a short reason — never force it into a kind, never drop it silently. An attached\n"
+    "screenshot is a broker statement that may list MULTIPLE rows: read every visible\n"
+    "row and emit one object per row; the same JSON-only contract applies to text and\n"
+    "images alike.</rules>\n"
     "<user_text>{text}</user_text>"
 )
 
@@ -178,12 +314,16 @@ _GICS_SECTOR_LIST = ", ".join(GICS_SECTOR_KEYS)
 # against the fetched Bursa directory), the ACE-market leading-zero rule (0166, never 166),
 # and the brand/mall/subsidiary → LISTED-parent rule (IOI Mall → IOI Properties). Paired with
 # the baked ``pricing.bursa_registry`` so a valid code now verifies offline → status:"resolved".
-AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v2"
+# v3 (owner 2026-09-30, item 8 「登錄名稱＋中文別名」): the reply also carries ``aliases`` — the
+# common Chinese names the instrument goes by (微軟 for MSFT, 大立光 for 3008). A card may name an
+# instrument by its registered name or an alias, so a registration that came through AI resolve
+# keeps them; the endpoint drops any another instrument already answers to.
+AI_INSTRUMENT_RESOLVE_PROMPT_VERSION = "v3"
 AI_INSTRUMENT_RESOLVE_PROMPT = (
     "<task>你是股票標的判讀助理。使用者輸入了一段可能是公司名稱、俗稱，或某種形式的代號"
     "（可能是錯誤形式，例如把台股打成美股 ADR 代號）。請在『目標市場』中判讀他實際想指的"
-    "股票，並一次回傳：該市場的『當地交易所代號』、正式名稱、GICS 產業類別，以及可選的 "
-    "GICS 產業細分。</task>\n"
+    "股票，並一次回傳：該市場的『當地交易所代號』、正式名稱、GICS 產業類別、可選的 "
+    "GICS 產業細分，以及它常見的中文名稱（別名）。</task>\n"
     "<market_rules>symbol 必須是『目標市場』的當地交易所代號，格式如下，且絕不可回傳其他"
     "交易所的代號：\n"
     "・TW（台股，TWSE/TPEx）：4-6 位數字＋可選英文字尾（如 2330、00878B）。必須輸出當地"
@@ -210,19 +350,51 @@ AI_INSTRUMENT_RESOLVE_PROMPT = (
     "留空陣列，絕不可捏造任何代號。\n"
     "4. 你只輸出識別與分類這類定性資訊，不得輸出任何價格、報酬或數字資料；你的回覆僅是建議，"
     "系統會以真實報價覆核，覆核不通過即不採用。\n"
+    "5. aliases：列出這檔標的在中文新聞與報告中常見、且確實指它的名稱（例：MSFT 為「微軟」、"
+    "3008 為「大立光」、2603 為「長榮」），最多 3 個；不要放代號、不要重複 name 本身，絕不可"
+    "放其他公司的名稱。只在 confidence=\"high\" 時填寫，其餘情況與不確定時一律給空陣列。\n"
     "</rules>\n"
     "<example_output>{{\"symbol\": \"2303\", \"name\": \"聯華電子\", "
     "\"gics_sector\": \"Information Technology\", \"gics_industry\": \"Semiconductors\", "
-    "\"confidence\": \"high\", \"candidates\": [], \"not_found\": false}}</example_output>\n"
+    "\"confidence\": \"high\", \"candidates\": [], \"not_found\": false, "
+    "\"aliases\": [\"聯電\"]}}</example_output>\n"
     "只回傳一個 JSON 物件，不要 Markdown 圍欄、不要額外散文。"
 )
 
 # On-alert insight addendum (llm_insight/generate.py): appended to an assembled insight
 # prompt when a card is risk-alert-triggered, forcing the ≤3-trading-day window (spec 4.10).
-ON_ALERT_NOTE_VERSION = "v1"
+# v2 (DEF-037, 2026-09-23): the addendum now also carries WHICH alert fired —
+# ``ON_ALERT_CONTEXT`` below, rendered from the ``alert_events`` row by generate.py. Until
+# then the prompt said only that an alert had fired, while the 提點 template asked the model
+# to state "what fired (rule and value)": measured on the demo, a ``target_cross`` card for
+# 2884 came back titled 「RSI過熱警示」 and an account-level card invented a broker outage.
+# The values are the rule engine's own computed text, never an LLM number (llm-insight.md).
+ON_ALERT_NOTE_VERSION = "v2"
 ON_ALERT_NOTE = (
     "\n\n[預警解讀守則] 本卡由風險預警觸發，請給出極短期（≤3 個交易日）的觀察與預測，"
     "聚焦此事件的即時影響。"
+)
+# Part of the ``insight_on_alert_note`` prompt (same registry entry, same version tag):
+# ``str.format`` slots, filled by ``generate._alert_note`` from the event's own record.
+ON_ALERT_CONTEXT = (
+    "\n[觸發預警] 規則代碼：{rule}；預警標題：{title}；預警內容：{detail}；觸發日：{fired_on}。"
+    "以上是系統計算的預警事實：說明「觸發了什麼」時只能依此描述，"
+    "不得改寫成其他警示，也不得推測未列出的事件。"
+)
+
+# The naming guardrail every insight card is generated with (owner 2026-09-30, item 8:
+# 「新的名稱代號確保正確不會再錯誤」). ``generate`` appends it with the registry's names and
+# aliases, and ``llm_insight/name_check.py`` checks the reply against the same table — the
+# note makes a right pairing likely, the check makes a wrong one impossible to store.
+INSIGHT_NAMING_NOTE_VERSION = "v1"
+INSIGHT_NAMING_NOTE = (
+    "\n\n[標的名稱守則] 提到標的時一律寫成「名稱 (代號)」或「代號 (名稱)」，名稱只能用下表"
+    "該代號列出的名稱；不在表上的公司不要寫代號，表上的代號不要配別的名稱。\n{table}"
+)
+# The one-shot correction appended when a reply pairs a name with the wrong code: {lines}
+# names each wrong pairing and the names its code goes by.
+INSIGHT_NAMING_RETRY = (
+    "\n\n[名稱修正] 上一版有名稱與代號不符，請改正後重新輸出完整 JSON：\n{lines}"
 )
 
 # Master-role system prompts (llm_insight/master.py): the scoring rubric, the calibration
@@ -303,8 +475,28 @@ _WEEKLY_BODY = """讀者是長期投資人，每週檢視一次組合。請以�
 {{market_sentiment_json}}
 {{index_quotes_json}}
 
+六、基準對照 — 「同一筆錢、同樣的日期，改買該市場的指數，今天會是多少？」這是報酬數字唯一
+的錨：沒有它，XIRR 或總報酬是高是低無從判斷。引用 benchmark_return 與 excess，並說明這是
+與「含匯兌總損益（B）」相比，不是與資產損益（A）相比。
+⚠ 若 coverage_note 存在，表示只有部分資金有基準可對照——此時**一律照抄該說明，且不得使用
+「超額報酬」或「打敗大盤」這類措辭**，因為那個差額只涵蓋部分的錢。unavailable 時直說原因，
+不得以其他指數頂替，也不得省略本節而讓讀者以為組合沒有被對照過。
+{{benchmark_counterfactual_json}}
+
+七、AI 自身戰績與校準 — backtest_json 是本系統全部已評分預測的信心分桶命中率
+（claimed_pct＝我當時聲稱的信心均值，actual_pct＝該桶實際命中率），calibration_gap_json
+是最近 20 筆已評分預測的帶號校準缺口。**方向一律照抄 calibration_gap_json.reading**
+（例：「最近 20 筆平均高估自己 46.6 個百分點」）——不要自己從 gap 的正負號推論方向，
+那個號一旦讀反，就會把「我最近太自信」講成「我太保守」。
+用一句話向讀者誠實報告「我的預測最近準不準、有沒有系統性偏自信或偏保守」；數字逐字
+照抄，缺口帶正負號引用；任一為 unavailable（評分樣本不足）時直說，不得虛構。
+{{backtest_json}}
+{{calibration_gap_json}}
+
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 請在卡首標注基準日；依 {{freshness_json}}
-檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+檢查新鮮度：缺價或過期的標的必須點名並排除於結論之外，其 sources 一欄逐筆列出每個外部
+資料來源的基準日與已幾天，明顯落後或標為 unavailable 的來源同樣點名、不當作現況引用；
+愈近期的資料權重愈高。
 本卡為純敘事回顧，不附預測（prediction 留空）。"""
 
 _CHECKUP_BODY = (
@@ -323,6 +515,11 @@ _CHECKUP_BODY = (
 {{technical_signals_json}}
 {{volatility_json}}
 {{price_history_json}}
+週線視角 — weekly_signals_json 的每一個數字都是「週」（ma10w＝10 週均線），與上面的日線數字
+是兩個時間框，**不可互相比較、不可混寫在同一句**。用它回答日線單獨答不了的那個問題：短期
+轉弱時，較長的結構是否仍完好（例：「日線跌破 20 日線，但週線仍在 40 週均線之上」）。
+weeks 不足時該欄為 null，直說「週線資料不足」，不得以日線數字頂替。
+{{weekly_signals_json}}
 
 三、法則訊號（TechScore 與四法則綜合）— 引用法則引擎的輸出，只詮釋、不重算、不虛構：
 1) TechScore（0-100）與涵蓋度 coverage：一句話定調綜合技術強弱，並說明有幾條法則可評估；
@@ -330,10 +527,19 @@ _CHECKUP_BODY = (
 均線交叉（黃金／死亡與距今天數 days_ago）、12-1 動能（return_12_1）、RSI 情境（rsi14）；
 3) 條件語：照實引述引擎給的情境註記（evaluation_context／context_note），不得改寫其結論；
 4) 法則訊號須與第二節的逐項技術指標相互印證；若 rule_signals_json 為 unavailable，直說
-「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態。
+「法則訊號資料不足」，不得自行計算 TechScore 或杜撰任何法則狀態；
+5) 訊號回測：signal_backtest_json 是這些法則訊號在本標的自身的歷史驗證（法則轉換與
+   TechScore 進出 65/35 狀態帶後 +10/+20/+60/+120 交易日的前向報酬，與同標的基線並陳；
+   +10 是對齊本卡計分窗的那一個）——
+   mean／median／pct_positive 與 baseline 都是**分數不是百分比**（units 欄已註明：
+   0.1336 = +13.36%），寫成 % 要先乘 100；凡引用必帶樣本數 n 與同窗基線；標記
+   insufficient 的格子只說「樣本不足」、不引用任何數字，**也不得改用 baseline 的數字
+   充當該格子的事件報酬**（baseline 是全部交易日的無條件平均，不是這個訊號的表現）；
+   輸入裡沒有的數字一律不得出現；整體 unavailable 時直說「尚無回測歷史」，不得虛構。
 本標的若未持倉（held=false 或 symbol_detail_json 無部位），本節與第八節一律改以「建倉評估」
 視角敘述（此刻是否為進場／觀望時機），而非加碼／減碼。
 {{rule_signals_json}}
+{{signal_backtest_json}}
 
 四、籌碼與基本面（僅台股有值；變數為空時整節跳過，不得虛構）— 法人買賣超與連買賣天數、
 融資融券變化、月營收動能、估值位階（PER/PBR 歷史百分位）、近四季財報摘要；點出籌碼大戶
@@ -372,7 +578,8 @@ unavailable（無分析師覆蓋），必須明講「無分析師覆蓋」，不
 3) confidence＝此預測命中的真實機率估計（0-100，寧可保守）。
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
-標記新鮮度；缺漏資料如實說明；愈近期的資料權重愈高。"""
+標記新鮮度（sources 一欄逐筆列出每個外部資料來源的基準日與已幾天）；缺漏或明顯落後的
+資料如實說明，不當作現況引用；愈近期的資料權重愈高。"""
 )
 
 _MARKET_BODY = (
@@ -399,19 +606,169 @@ _MARKET_BODY = (
 {{market_sentiment_json}}
 
 守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
-檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；愈近期的資料權重愈高。
+檢查新鮮度，缺價或過期的標的必須點名並排除於結論之外；其 sources 一欄逐筆列出每個外部
+資料來源的基準日與已幾天，明顯落後或標為 unavailable 的來源同樣點名；愈近期的資料權重愈高。
 金額一律照輸入數字的原始數值與單位逐字引用，不得自行換算成「萬／百萬」等單位
 （例：輸入 4290.80 就寫 4,290.80，不得寫成 429 萬）。
 匯率換算與換匯損益屬全組合層次，請見全組合週報，本卡不評匯率歸因。
 本卡為純敘事回顧，不附預測（prediction 留空）；tags 請包含市場名稱（台股／美股／馬股）。"""
 )
 
+# The assistant itself (AI-D1/D2/D8, 2026-08-16). Position-advice synthesis: the owner's
+# holding × technicals × rule-signal engine × news × analyst consensus, output as EVALUATION
+# SCENARIOS with trigger conditions — never a position size, never an order (decision H).
+# prediction is left FREE (AI-D10): the card schema already requires confidence whenever a
+# prediction is present (cards.py), so "the data does not support a call" is a legitimate
+# answer the model may give by leaving prediction empty — forcing one would manufacture
+# precision the input does not have.
+# v3 (W7, AI-D33, 2026-08-21): + the 訊號回測 section (signal_backtest_json — the symbol's
+# OWN event study) and the confidence-anchoring law (backtest_json buckets cap the stated
+# confidence; a negative calibration_gap_json lowers it). Citation is prompt law, not
+# schema: InsightCard is untouched, and no code-side clamp rewrites the model's number.
+_ADVICE_BODY = (
+    "讀者是長期投資人，想知道「以我現在的部位，這檔股票現在該怎麼看」。"
+    "請綜合「我的倉位 × 技術面 × 法則引擎 × 近期新聞 × 分析師共識」產出一張「持倉建議與提點」卡"
+    "（title 含標的與一句結論）：\n"
+    + """{{symbol_detail_json}}
+
+〇、一句話結論 — 綜合全部輸入，對「這個部位現在該注意什麼」給出一句可操作的結論，
+放在最前面，並標注資料基準日。
+
+一、部位體質 — 現價相對原始/調整均價的位置、未實現損益與回本進度；同一標的可能分佈於
+多個帳戶，請分帳戶列示或明確標注「合計」，不得把單一帳戶數字當成總計。這是「建議」的
+出發點：同一個價格訊號對深度獲利與深套的意義不同。
+{{price_vs_cost_json}}
+
+二、技術面與法則引擎（兩者併讀，只詮釋、不重算、不虛構）—
+1) 法則引擎輸出：TechScore（0-100）與涵蓋度 coverage、evaluation_context／context_note
+   照實引述；逐一點名四法則狀態與關鍵證據數字（趨勢濾網 price_vs_ma、12-1 動能
+   return_12_1、RSI 情境 rsi14）；
+2) 逐項技術指標：RSI(14) 超買/超賣、52 週位階、趨勢結構、30 日波動與回撤；
+⚠ 「均線交叉」有兩個、視窗不同，引用時務必指明是哪一個：rule_signals_json 的 ma_cross
+   是 **50/200**（法則引擎、較慢）；technical_signals_json 的 ma_cross_short 是 **20/60**
+   （短窗、較快）。兩者可能同時存在且方向不同——請如實並陳快慢兩窗，不得混為一談；
+3) 若 rule_signals_json 為 unavailable，直說「法則訊號資料不足」，不得自行計算 TechScore
+   或杜撰法則狀態。價格序列為「近 30 個交易日逐日＋其餘每 5 日取樣」：以近 30 日為主要
+   判讀窗口，較早取樣點僅作脈絡。
+{{rule_signals_json}}
+{{technical_signals_json}}
+{{ma_signals_json}}
+{{volatility_json}}
+{{price_history_json}}
+
+三、基本面（多來源聯集，sources 下每個鍵是一家資料來源：yfinance／finnhub／alphavantage，
+台股另含 finmind；各塊欄位同義同名：pe_ratio＝本益比、pb_ratio＝股價淨值比、eps_ttm＝
+近四季每股盈餘、market_cap＝市值（以該塊 currency 計）、dividend_yield_pct＝殖利率%、
+beta、roe_pct＝股東權益報酬率%、revenue_growth_yoy_pct＝營收年增率%；各塊自帶 as_of
+與 currency）—
+1) 估值與體質並讀：PE/PB 的高低要搭配 ROE 與營收成長判讀「貴得有沒有道理」，殖利率
+   與 EPS 走向決定股利型部位的持有邏輯；
+2) ⚠ 紅線：不同來源對同一欄位給出不同數字是常態（計算口徑不同）——**如實並陳各家
+   數值與來源名，不得取平均、不得調和、不得自造任何一家都沒報過的數字**；引用任何
+   基本面數字時一律標注來源與基準日（例：「PE 28.4（yfinance，2026-08-17）」）；
+3) 某來源區塊缺席＝該來源無覆蓋或未啟用，明講即可；fundamentals_json 整體為
+   unavailable 時直說「無基本面資料」，不得虛構；台股的 finmind 塊僅 PE／PB／殖利率
+   三欄。
+{{fundamentals_json}}
+
+四、新聞與共識 — 近期經整理個股新聞（標題／日期／摘要）作為催化劑或風險事件背景；分析師
+目標價區間、現價相對均值位置、評級分布與月度變化。新聞僅供背景判讀，不得從新聞取價格或
+報酬等數字；consensus_json 為 unavailable 時明講「無分析師覆蓋」，不得虛構。
+{{symbol_news_json}}
+{{consensus_json}}
+
+五、建議與提點（本卡的核心）— 綜合以上，給出**條件式評估情境**，不是買賣指令：
+對「加碼／持有／減碼／出場觀察」各寫一段「若…則…」的觸發條件與對應方向
+（例：「若 TechScore 維持強勢且價格守住 20 日均線、RSI 未過熱 → 屬偏多持有或小幅加碼的
+評估情境」、「若跌破 200 日均線且趨勢結構轉為下降 → 屬減碼重新評估情境」）。
+明確寫出觸發條件、對應方向、以及觀察視窗（幾個交易日內有效）。
+⚠ 產品紅線（不得越界）：只到條件與方向，**不給部位大小、不給買賣金額、不給停損停利價**；
+未持倉標的改以「建倉／觀望」情境描述。
+
+六、訊號回測（本標的自身的歷史驗證）— signal_backtest_json 是法則訊號在「這檔股票自己
+身上」的事件研究：四法則方向轉換與 TechScore 進出 65/35 狀態帶後 +10/+20/+60/+120 交易日的
+前向報酬分布，與同標的的無條件基線並陳。用它回答「這個訊號在這檔股票上過去靈不靈」，
+作為第五節情境的佐證或反證。引用紀律：
+1) **單位**：mean／median／pct_positive 與 baseline 全部是**分數，不是百分比**
+   （units 欄已註明：0.1336 表示 +13.36%）。寫成 % 必須先乘 100；把 0.1336 寫成
+   「0.1336%」是把真值縮小 100 倍，寫成「0.0640 USD」是把報酬率當成金額。不得年化。
+2) 凡引用必帶樣本數 n 與同窗基線（例：「12-1 動能轉正後 +60 日均值 +38.5%（n=12，
+   基線 +18.4%）」）；n_overlapping>0 或 n_censored>0 時如實說明重疊／右刪失的筆數，
+   並照 events 欄說出事件次數（n 不是「1 次事件」）。
+3) 標記 insufficient 的格子只准說「樣本不足」，**不得引用任何數字**——尤其不得改用同窗
+   baseline 的數字充當該格子的事件報酬：baseline 是這檔股票「全部交易日」的無條件平均，
+   不是這個訊號的表現，兩者混淆會把一個普通的大盤漲幅說成訊號的功勞。
+4) 整體 unavailable 時直說「尚無回測歷史」，不得虛構。
+5) **輸入裡沒有的數字一律不得出現。** 某格沒有 mean 就是沒有 mean — 不得估計、不得由
+   鄰窗或基線推導、不得四捨五入出一個新數字。
+{{signal_backtest_json}}
+
+七、方向判讀與預測 — 綜合給出偏多／偏空／觀望之一。**prediction 由你決定是否給**：
+資料不足或訊號矛盾時可留空（並在內文說明為何不給）；若給，metric 一律 price_change，
+direction 用 up/down/flat，target_pct 僅在有明確依據時提供，且**必須附 confidence**
+（0-100，此預測命中的真實機率估計，寧可保守）。
+⚠ 信心錨定法（硬性上限，依據你自己過去的戰績）：{{backtest_json}} 的
+**confidence_ceiling** 就是本系統依你的分桶命中率算好的上限整數——「所屬區間實際命中率
+＋5；該區間樣本不足或從未計分過時改用整體命中率＋5」已經替你算完，bins 與
+{{calibration_gap_json}}（reading 是同一份戰績的白話版）留著讓你在內文說明理由，
+**不必再自己推算上限**。
+1) confidence 不得超過 confidence_ceiling；照抄它或給更低的值。
+2) confidence_ceiling 偏低（例如 20 以下）時，代表你的戰績目前撐不起有力的方向宣稱：
+   給一個同樣低的 confidence，並在內文明說「依過往戰績本卡以情境與觸發條件為主」。
+   不要為了讓卡片看起來有用而把 confidence 拉高到上限之上。
+3) backtest_json 整體 unavailable（尚無評分歷史）時沒有上限，沿用「寧可保守」。
+
+守則：現在時間 {{now}}、資料基準 {{as_of}} — 在卡首標注基準日；依 {{freshness_json}}
+標記新鮮度，缺價或過期的資料點名排除於結論之外；其 sources 一欄逐筆列出每個外部資料
+來源的基準日與已幾天，明顯落後或標為 unavailable 的來源同樣點名；愈近期的資料權重愈高。
+所有數字照輸入的原始數值與單位逐字引用，不得自行換算單位。"""
+)
+
+# The 提點 card (AI-D5/AI-D11, 2026-08-16): alert-triggered. The bridge's 24h debounce and the
+# ≤3-trading-day horizon addendum (ON_ALERT_NOTE) already apply; this body only has to interpret
+# ONE fired alert against the owner's position. The alert_rules subscription is set on the task,
+# not here.
+_ON_ALERT_ADVICE_BODY = (
+    "讀者是長期投資人，剛收到一則與其持倉相關的風險警示。請產出一張「提點」卡"
+    "（title 含標的與這則警示），用極短期視角（≤3 個交易日）回答「這件事對我的部位意味著"
+    "什麼」：\n"
+    + """{{symbol_detail_json}}
+
+一、這則警示 — 用一句白話說明觸發了什麼（警示規則與觸發數值），放在最前面。
+
+二、部位的暴露 — 這檔（或這個主題）在我組合裡的權重、成本位置與未實現損益：
+這則警示對「我」的實際意義，取決於我持有多少、套得多深。
+{{price_vs_cost_json}}
+
+三、極短期情境 — 綜合技術面與法則引擎（只詮釋不重算；「均線交叉」指明是 50/200 法則的
+ma_cross 還是 20/60 的 ma_cross_short，不得混用），給出 ≤3 個交易日的觀察情境與對應方向
+（若…則…）。**不給部位大小、不給買賣金額**——只到條件與方向。
+{{rule_signals_json}}
+{{technical_signals_json}}
+{{volatility_json}}
+
+四、背景 — 近期新聞與分析師共識作為佐證或反證；無資料時如實說明。
+{{symbol_news_json}}
+{{consensus_json}}
+
+守則：現在時間 {{now}}、資料基準 {{as_of}}；prediction 可留空，若給則 direction
+用 up/down/flat 且必須附 confidence（0-100，寧可保守）。"""
+)
+
 # Strategy templates: (name, version, scope hint, body). ``scope`` is advisory — the
 # composer binds scope on the insight TYPE; the hint tells the UI which tasks fit.
 STRATEGY_TEMPLATES: list[dict[str, str]] = [
-    {"name": "持倉週報策略", "version": "v2.1", "scope": "portfolio", "body": _WEEKLY_BODY},
-    {"name": "個股健檢策略", "version": "v2.5", "scope": "per_symbol", "body": _CHECKUP_BODY},
-    {"name": "市場週報策略", "version": "v1.1", "scope": "per_market", "body": _MARKET_BODY},
+    {"name": "持倉週報策略", "version": "v2.5", "scope": "portfolio", "body": _WEEKLY_BODY},
+    {"name": "個股健檢策略", "version": "v2.9", "scope": "per_symbol", "body": _CHECKUP_BODY},
+    {"name": "市場週報策略", "version": "v1.2", "scope": "per_market", "body": _MARKET_BODY},
+    # W2 (AI-D1, 2026-08-16): the assistant itself. Prediction left free (AI-D10).
+    # v2 (W3, AI-D14/15): +基本面 section — one block per source, never averaged.
+    # v3.1 (W7.1, 2026-08-23): the first live run's output defects — the return unit, the
+    # baseline worn as an event return, and a 3-step ceiling nobody executed — are answered
+    # by stating the unit, forbidding the substitution, and handing over ONE precomputed cap.
+    {"name": "持倉建議與提點策略", "version": "v3.2", "scope": "per_symbol", "body": _ADVICE_BODY},
+    # The 提點 card (AI-D5/AI-D11): alert-triggered, ≤3 trading-day window via ON_ALERT_NOTE.
+    {"name": "持倉提點策略", "version": "v1", "scope": "on_alert", "body": _ON_ALERT_ADVICE_BODY},
 ]
 
 
@@ -428,6 +785,22 @@ class TaskPreset(TypedDict):
     horizon_days: int
     suggested_cron: str  # Asia/Taipei; the pack mounts this on creation
     description: str
+    # Event-driven tasks (scope "on_alert") have no cron and carry their alert subscription
+    # instead. Absent on every scheduled preset.
+    alert_rules: NotRequired[list[str]]
+
+
+# The six risk-alert rules the 提點 card subscribes to (AI-D11). Deliberately NOT "all": the
+# wildcard excludes signal_* transition rules by design (gating.py), and the data-health rules
+# (missing_price / quota_low) carry nothing an LLM can interpret — only cost and noise.
+ON_ALERT_ADVICE_RULES: list[str] = [
+    "target_cross",
+    "single_weight",
+    "fx_drift",
+    "drawdown_from_peak",
+    "vol_spike",
+    "consensus_change",
+]
 
 
 # The official pack (usability decision ①, 2026-07-05): one click creates these tasks
@@ -470,6 +843,37 @@ TASK_PRESETS: list[TaskPreset] = [
         "horizon_days": 14,
         "suggested_cron": "30 9 * * sat",
         "description": "台股／美股／馬股各一張市場部位週報（純敘事，資料自動市場切片）",
+    },
+    # W2 (AI-D1/D6, 2026-08-16): the assistant prototype, scheduled daily after the US close
+    # lands (Tue–Sat in Taipei). Enabled on creation like every other preset (AI-D12).
+    # v3 (W7, AI-D33): the strategy body now cites the backtest + anchors confidence.
+    {
+        "preset_key": "advice",
+        "name": "持倉建議與提點",
+        "version": "v3.2",
+        "scope": "per_symbol",
+        "strategy": "持倉建議與提點策略",
+        "use_system_prompt": True,
+        "self_correct": True,
+        "horizon_days": 14,
+        "suggested_cron": "0 10 * * tue-sat",
+        "description": "逐持倉的「建議與提點」卡（倉位×技術×法則×基本面×新聞×共識；預測自由，帶信心）",  # noqa: E501
+    },
+    # W2 (AI-D5/AI-D11/AI-D12): the 提點 card. Event-driven — no cron; subscribes to the six
+    # risk-alert rules and is ENABLED on creation (the one place the on_alert default-disabled
+    # convention is deliberately overridden; every other on_alert task still defaults off).
+    {
+        "preset_key": "alert_advice",
+        "name": "持倉提點",
+        "version": "v1",
+        "scope": "on_alert",
+        "strategy": "持倉提點策略",
+        "use_system_prompt": True,
+        "self_correct": False,
+        "horizon_days": 3,
+        "suggested_cron": "",  # event-driven; never scheduled
+        "description": "風險警示觸發時，用 ≤3 交易日視角解讀「這件事對我的部位意味著什麼」",
+        "alert_rules": ON_ALERT_ADVICE_RULES,
     },
 ]
 
@@ -522,7 +926,7 @@ class PromptRegistryEntry(TypedDict):
 PROMPT_REGISTRY: list[PromptRegistryEntry] = [
     {
         "key": "ai_input",
-        "feature": "AI 交易輸入解析（文字／截圖 → 交易草稿）",
+        "feature": "AI 輸入解析（文字／截圖 → 交易／股利／資金草稿，判別式聯集）",
         "tier": "code-owned",
         "version": AI_INPUT_PROMPT_VERSION,
         "agent": "ai_agents_input",
@@ -572,11 +976,25 @@ PROMPT_REGISTRY: list[PromptRegistryEntry] = [
     },
     {
         "key": "insight_on_alert_note",
-        "feature": "洞察卡預警附加守則（generate 對 on_alert 卡附加，強制 ≤3 交易日）",
+        "feature": (
+            "洞察卡預警附加守則（generate 對 on_alert 卡附加，強制 ≤3 交易日，附觸發預警事實）"
+        ),
         "tier": "code-owned",
         "version": ON_ALERT_NOTE_VERSION,
         "agent": "insight_generate",
         "default_constant": "ON_ALERT_NOTE",
+        "storage": "",
+        "call_site": "llm_insight/generate.py:run_insight_type",
+    },
+    {
+        "key": "insight_naming_note",
+        "feature": (
+            "洞察卡標的名稱守則（generate 對每張卡附加登錄名稱＋別名對照表；配對不符時重產一次）"
+        ),
+        "tier": "code-owned",
+        "version": INSIGHT_NAMING_NOTE_VERSION,
+        "agent": "insight_generate",
+        "default_constant": "INSIGHT_NAMING_NOTE",
         "storage": "",
         "call_site": "llm_insight/generate.py:run_insight_type",
     },

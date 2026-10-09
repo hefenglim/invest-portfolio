@@ -8,7 +8,7 @@ from portfolio_dash.pricing.refresh import refresh_history
 from portfolio_dash.pricing.refs import InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import PriceRow
-from portfolio_dash.pricing.store import get_price_history, upsert_prices
+from portfolio_dash.pricing.store import _no_factor, get_price_history, upsert_prices
 from portfolio_dash.shared.enums import Market
 
 _NOW = datetime(2026, 6, 8, 12, 0, 0)
@@ -55,6 +55,8 @@ def test_registry_fetch_quote_history_routes(conn: sqlite3.Connection) -> None:
 
 
 def test_refresh_history_stores_and_summarizes(conn: sqlite3.Connection) -> None:
-    summary = refresh_history(conn, _reg(), [_AAPL], date(2026, 1, 1), now=_NOW)
+    summary = refresh_history(
+        conn, _reg(), [_AAPL], date(2026, 1, 1), now=_NOW, factor_of=_no_factor,
+    )
     assert summary.ok == {"AAPL": "hist"} and summary.failed == []
     assert len(get_price_history(conn, "AAPL", date(2026, 6, 1), date(2026, 6, 30))) == 3

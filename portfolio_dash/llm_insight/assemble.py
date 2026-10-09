@@ -20,11 +20,12 @@ composer / system-prompt tables (both pure ``llm_insight`` persistence) but impo
 import sqlite3
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.llm_insight import variables as V
-from portfolio_dash.llm_insight.system_prompt import get_system_prompt
+from portfolio_dash.llm_insight.system_prompt import SystemPromptRef, get_system_prompt
+from portfolio_dash.shared import prompt_versions as pv
 
 LayerKind = Literal["system", "template", "calibration"]
 
@@ -45,11 +46,19 @@ class Assembly(BaseModel):
 
     ``layers`` is for the 07 preview (per-layer inspection); ``prompt`` is what the LLM
     receives; ``tokens_used`` aggregates the registry tokens rendered across all layers.
+    ``strategy_versions`` (DEF-033) names the version of every strategy layer that was
+    rendered — what a card generated from this prompt records. ``system_prompt_ref``
+    (DEF-057) does the same for the system layer: whether one was assembled, and the version
+    of the body that was.
     """
 
     layers: list[Layer]
     prompt: str
     tokens_used: list[str]
+    strategy_versions: list[cs.StrategyVersionRef] = []
+    system_prompt_ref: SystemPromptRef = Field(
+        default_factory=lambda: SystemPromptRef(used=False)
+    )
 
 
 def assemble_layers(
@@ -81,11 +90,16 @@ def assemble_layers(
 
     if it is None:
         return Assembly(layers=[], prompt="", tokens_used=[])
+    versions: list[cs.StrategyVersionRef] = []
+    system_ref = SystemPromptRef(used=False)
 
     # 1) system prompt (optional).
     if it.use_system_prompt:
-        body = get_system_prompt(conn)["body"]
+        body = str(get_system_prompt(conn)["body"])
         layers.append(Layer(kind="system", name="system", rendered=_render(body)))
+        # DEF-057: the version of the body just rendered — looked up BY BODY, exactly as the
+        # strategy layers below, so the card names the text it was built from.
+        system_ref = SystemPromptRef(used=True, version=pv.version_of_body(conn, "system", body))
 
     # 2) strategies in position order, enabled + non-archived only.
     for ref in cs.get_strategies(conn, insight_type_id):
@@ -93,6 +107,12 @@ def assemble_layers(
         if sp is None or not sp.enabled or sp.archived:
             continue
         layers.append(Layer(kind="template", name=sp.name, rendered=_render(sp.body)))
+        # DEF-033: the version of the body just rendered — looked up BY BODY, so what the
+        # card records is the text it was actually built from, never a number read beside it.
+        versions.append(cs.StrategyVersionRef(
+            strategy_id=sp.id, name=sp.name,
+            version=cs.version_of_body(conn, sp.id, sp.body),
+        ))
 
     # 3) calibration (only when self_correct AND a live version is in effect). The shadow
     #    path overrides the active version with the explicit ``calibration_version``.
@@ -119,4 +139,7 @@ def assemble_layers(
             )
 
     prompt = _LAYER_SEP.join(lyr.rendered for lyr in layers)
-    return Assembly(layers=layers, prompt=prompt, tokens_used=tokens_used)
+    return Assembly(
+        layers=layers, prompt=prompt, tokens_used=tokens_used, strategy_versions=versions,
+        system_prompt_ref=system_ref,
+    )

@@ -40,8 +40,11 @@
     if (href.match(/#sym=(.+)$/)) {
       return { href: href, sym: decodeURIComponent(href.match(/#sym=(.+)$/)[1]) };
     }
-    if (href === '/settings') return { href: 'settings.html' };
-    if (href === '/settings#llm') return { href: 'settings.html#llm' };
+    /* I-15: a settings deep link keeps its `#<tab>[/<anchor>]` (settings.html resolves the
+       anchor to its block); a bare legacy '/settings' lands on the 預警 tab, never on the
+       default 帳戶與費率 one. Mirrors notify.py's `_frontend_path`. */
+    const st = href.match(/^\/settings(?:#([\w\/-]+))?$/);
+    if (st) return { href: 'settings.html#' + (st[1] || 'alerts') };
     if (href === '/insights') return { href: 'insights.html' };
     if (href === '/pipeline') return { href: 'pipeline-hub.html' };
     return { href: href };  // already a static page (e.g. settings.html#llm) — pass through
@@ -191,48 +194,78 @@
     return best;
   }
 
-  /* The symbol an alert pertains to: from its href (/symbol/X or #sym=X) or, failing
-     that, the suffix of a "rule:symbol" id. '' when the alert is global (no symbol). */
+  /* I-16: what an alert is ABOUT comes from the wire's `scope` + `subject` (DEF-037), never
+     from the id. The id's `rule:` suffix is a ticker for ten rules, an ACCOUNT for fx_drift,
+     a sector for sector_weight and a currency for currency_weight — and this file used to
+     read all of them as a symbol and count them as 「檔」. A payload without `scope` (an
+     older server) falls back to the href's drawer target only, never to the id. */
+  const SCOPE_ZH = { account: '帳戶', sector: '產業', currency: '幣別' };
   function symbolOf(a) {
-    const mapped = mapAlertHref(a && a.href);
-    if (mapped.sym) return mapped.sym;
-    const id = (a && a.id) || '';
-    const i = id.indexOf(':');
-    return i > -1 ? id.slice(i + 1) : '';
+    if (!a) return '';
+    if (a.scope) return a.scope === 'symbol' ? (a.subject || '') : '';
+    return mapAlertHref(a.href).sym || '';
+  }
+  /* The subject as the page names it: an account through pdNames (the id when names.js is
+     not on the page), everything else as sent. '' for a portfolio-wide alert. */
+  function subjectName(a) {
+    if (!a || !a.subject) return '';
+    if (a.scope === 'account') {
+      return window.pdNames ? window.pdNames.account(a.subject) : a.subject;
+    }
+    return a.subject;
   }
 
-  /* The rule-level noun for a group label: per-symbol titles are "{symbol} {noun}"
-     (e.g. "2330 報價過期"), so strip the leading symbol to get the shared noun; fall
-     back to the whole title when it doesn't start with the symbol. */
+  /* The rule-level noun for a group label: per-subject titles are "{subject} {noun}"
+     (e.g. "2330 報價過期", "嘉信 Schwab 匯率偏離成本" once api.js resolved the account token),
+     so strip the leading subject to get the shared noun; fall back to the whole title when
+     it doesn't start with it. */
   function ruleNoun(a) {
-    const sym = symbolOf(a);
+    const lead = symbolOf(a) || subjectName(a);
     const t = (a && a.title) || '';
-    if (sym && t.indexOf(sym + ' ') === 0) return t.slice(sym.length + 1);
+    if (lead && t.indexOf(lead + ' ') === 0) return t.slice(lead.length + 1);
     return t;
   }
 
-  /* Group a rule's rows into a detail line: up to 4 symbols, then 「等 N 檔」 for the rest. */
+  /* Group a rule's rows into a detail line: up to 4 subjects, then 「等 N 檔」 for symbols —
+     and for any other scope 「帳戶／產業／幣別：…」 with 「等 N 項」, never counted as 檔. */
   function groupDetail(items) {
     const syms = items.map(symbolOf).filter(Boolean);
-    if (!syms.length) return '';
-    if (syms.length <= 4) return syms.join('、');
-    return syms.slice(0, 4).join('、') + ' 等 ' + syms.length + ' 檔';
+    if (syms.length) {
+      if (syms.length <= 4) return syms.join('、');
+      return syms.slice(0, 4).join('、') + ' 等 ' + syms.length + ' 檔';
+    }
+    const scope = items[0] && items[0].scope;
+    const subs = items.map(subjectName).filter(Boolean);
+    if (!subs.length || !SCOPE_ZH[scope]) return '';
+    const shown = subs.length <= 4
+      ? subs.join('、') : subs.slice(0, 4).join('、') + ' 等 ' + subs.length + ' 項';
+    return SCOPE_ZH[scope] + '：' + shown;
   }
 
-  /* A group's target href: the shared href when every row points to the same place,
-     else the dashboard (a multi-symbol group can't open a single drawer). */
+  /* A group's target href: the shared href when every row points to the same place, else
+     null — the group has NO single landing spot. It used to answer `index.html` there, which
+     on the dashboard (where the biggest group lives) reloaded the page the user was already
+     on, and the 18 member alerts were unreachable in the UI (M1-04). A group with no shared
+     href is now rendered as an EXPANDER instead (see makeGroupRow); the members themselves
+     each carry a perfectly good per-symbol href. */
   function groupHref(items) {
     const first = items[0] && items[0].href;
-    return items.every((a) => a && a.href === first) ? first : 'index.html';
+    return items.every((a) => a && a.href === first) ? first : null;
   }
 
   /* Build one bell row (single alert OR a grouped rule). Symbol rows open the drawer
      in place; others navigate via the href (kept for middle-click / a11y). */
   function makeItemRow(sev, titleText, detailText, href) {
     const mapped = mapAlertHref(href);
-    const item = el('a', 'bell-item sev-' + sev);
-    item.href = mapped.href || '#';
-    if (mapped.sym && window.pdOpenSymbol) {
+    /* F-10: an alert with no landing spot is rendered as a DIV, not an <a href="#">. The
+       old form gave a pointer cursor, a hover underline and a keyboard tab stop to a row
+       that navigates to the top of the page you are already on — the cursor was making a
+       promise the row could not keep. All sixteen rules now carry an href (alerts.py has an
+       AST guard), so this is defence for the seventeenth. */
+    const dead = !mapped.href || mapped.href === '#';
+    const item = el(dead ? 'div' : 'a', 'bell-item sev-' + sev);
+    if (!dead) item.href = mapped.href;
+    if (!dead && mapped.sym && window.pdOpenSymbol) {
       item.addEventListener('click', (ev) => {
         ev.preventDefault();
         panel.hidden = true;
@@ -245,6 +278,48 @@
     txt.appendChild(el('div', 'bell-detail', detailText));
     item.appendChild(txt);
     return item;
+  }
+
+  /* A grouped rule whose members land in DIFFERENT places (the 18-symbol 自高點回撤 group):
+     an expander row, not a link. Clicking toggles the member rows in place — each built by
+     the SAME makeItemRow as an ungrouped alert, so every member keeps its own title, detail,
+     severity dot and drawer-opening click. Collapsed by default: the grouping exists to keep
+     the panel short (FU-D26), and this only restores a way to READ the rows it folds away. */
+  function makeGroupRow(sev, titleText, detailText, items) {
+    const wrap = el('div', 'bell-group');
+    const row = el('button', 'bell-item bell-group-head sev-' + sev);
+    row.type = 'button';
+    row.setAttribute('aria-expanded', 'false');
+    row.style.cssText = 'width:100%;text-align:left;background:none;border:0;font:inherit;cursor:pointer';
+    row.appendChild(el('span', 'sev-dot'));
+    const txt = el('div', 'bell-txt');
+    txt.appendChild(el('div', 'bell-title', titleText));
+    txt.appendChild(el('div', 'bell-detail', detailText));
+    row.appendChild(txt);
+    const caret = el('span', 'bell-group-caret', '▸');
+    caret.style.cssText = 'margin-left:auto;align-self:center;color:var(--text-3);font-size:11px';
+    row.appendChild(caret);
+
+    const kids = el('div', 'bell-group-items');
+    kids.hidden = true;
+    kids.style.cssText = 'border-left:2px solid var(--border);margin-left:14px';
+    items.forEach((a) => {
+      kids.appendChild(makeItemRow(a.sev, a.title, a.detail, a.href));
+    });
+
+    row.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const open = kids.hidden;
+      kids.hidden = !open;
+      row.setAttribute('aria-expanded', open ? 'true' : 'false');
+      caret.textContent = open ? '▾' : '▸';
+      positionPanel();          // the panel grew/shrank — re-anchor to the bell
+    });
+
+    wrap.appendChild(row);
+    wrap.appendChild(kids);
+    return wrap;
   }
 
   /* Group the flat alert list by `rule`, preserving first-appearance order. */
@@ -278,12 +353,14 @@
        summary); singleton rules render exactly as before. */
     groupByRule(alerts).forEach((g) => {
       if (g.rule && g.items.length >= 2) {
-        panel.appendChild(makeItemRow(
-          maxSev(g.items),
-          ruleNoun(g.items[0]) + ' ×' + g.items.length,
-          groupDetail(g.items),
-          groupHref(g.items),
-        ));
+        const href = groupHref(g.items);
+        const title = ruleNoun(g.items[0]) + ' ×' + g.items.length;
+        const detail = groupDetail(g.items);
+        /* One shared destination → a link, exactly as before. No shared destination → an
+           expander, so the folded rows stay reachable (M1-04). */
+        panel.appendChild(href
+          ? makeItemRow(maxSev(g.items), title, detail, href)
+          : makeGroupRow(maxSev(g.items), title, detail, g.items));
       } else {
         g.items.forEach((a) => {
           panel.appendChild(makeItemRow(a.sev, a.title, a.detail, a.href));

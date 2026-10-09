@@ -28,6 +28,12 @@ _FIFTY = Decimal("50")
 _HUNDRED = Decimal("100")
 _BAND_HIGH = Decimal("65")
 _BAND_LOW = Decimal("35")
+# Public aliases (W6 / AI-D32): the event study in ``portfolio/backtest.py`` detects
+# tech_score ZONE ENTRIES on exactly these bands — one vocabulary across the engine, the
+# context labels, and the backtest. The bands are DEFINED here; ``backtest`` receives them
+# as required arguments from the api caller (portfolio must not import strategy).
+BAND_HIGH = _BAND_HIGH
+BAND_LOW = _BAND_LOW
 
 # Fixed evaluation order; also the total for the coverage fraction.
 RULE_ORDER: tuple[str, ...] = ("trend_filter", "ma_cross", "momentum_12_1", "rsi_regime")

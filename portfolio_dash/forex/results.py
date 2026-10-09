@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.enums import Currency
 
@@ -81,9 +81,26 @@ class FXSummary(BaseModel):
     """All per-account results plus a reporting-currency rollup.
 
     Money figures are full-precision (not quantized); quantize at display/settlement.
+
+    ⚠ The rollup is BEST-EFFORT and says so (QA-01 / QA-02, 2026-08-29). An account whose
+    money cannot be expressed in the reporting currency — no ``foreign -> home`` spot, or
+    no ``home -> reporting`` rate — is excluded from the two totals below and named in
+    ``excluded_accounts``, instead of (a) raising and voiding the whole section or (b)
+    being dropped in silence so a partial total reads as complete. Same shape and same
+    reasoning as ``GET /api/cash``'s ``reporting_total_excluded`` /
+    ``reporting_total_unavailable_reason`` (audit C6).
     """
 
     by_account: dict[str, AccountFXResult]
     reporting_currency: Currency
     reporting_realized_fx: Decimal
     reporting_unrealized_fx: Decimal
+    # Accounts whose figures could NOT be rolled up, sorted (deterministic wire order).
+    # Additive with a default that means COMPLETE, so every pre-existing FXSummary
+    # construction still validates and still reads as a complete total.
+    excluded_accounts: list[str] = Field(default_factory=list)
+    # zh disclosure naming each excluded account, the FX pair that is missing for it, and
+    # WHICH of the two totals is therefore partial (realized and unrealized are excluded
+    # independently — a missing spot withholds only the unrealized side). Server-authored
+    # and rendered verbatim; the web layer never composes it. None == nothing excluded.
+    reporting_unavailable_reason: str | None = None

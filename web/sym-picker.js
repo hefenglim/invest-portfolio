@@ -143,7 +143,11 @@
           b.appendChild(tag);
         }
         /* mousedown+preventDefault so the value lands BEFORE the input's focusout (which would
-           otherwise race the close and swallow the click). */
+           otherwise race the close and swallow the click). KEPT — that race is real. But
+           `mousedown` is not what Enter or Space fires, so binding ONLY it left the list
+           reachable by pointer alone (F-05, 2026-08-27): typing filtered the rows and then
+           nothing could choose one. The keyboard path below is additive. */
+        b.dataset.symbol = row.symbol;
         b.addEventListener('mousedown', (e) => { e.preventDefault(); select(row.symbol); });
         return b;
       }
@@ -223,6 +227,7 @@
       function renderGroups(data, q) {
         if (!list) return;
         list.replaceChildren();
+        activeIdx = -1;      // the rows this pointed at no longer exist
         const a = accountOf();
         if (!a) {
           if (empty) { empty.hidden = false; empty.textContent = '請先選擇帳戶'; }
@@ -265,6 +270,44 @@
         }).catch(() => {});
       }
 
+      /* ---- keyboard selection (F-05) -------------------------------------------------
+         Rows are plain <button>s inside `list`; the ＋新增標的 footer lives in `foot`, so
+         querying `list` alone cannot land the highlight on it. Highlighting is inline-styled
+         because this whole component is — a class would be the only one in the file. */
+      let activeIdx = -1;
+      function rowButtons() {
+        return list ? Array.prototype.slice.call(list.querySelectorAll('button')) : [];
+      }
+      function paintActive(btns) {
+        btns.forEach((b, i) => {
+          const on = i === activeIdx;
+          // Slightly stronger than the mouseenter tint so the two are distinguishable when
+          // the pointer happens to rest on a different row.
+          b.style.background = on ? 'rgba(255,255,255,.12)' : 'none';
+          b.setAttribute('aria-selected', on ? 'true' : 'false');
+          if (on && b.scrollIntoView) b.scrollIntoView({ block: 'nearest' });
+        });
+      }
+      function moveActive(delta) {
+        // ensureOpen(), NOT open(): open() clears `queryActive` and would throw away the
+        // filter the user just typed — arrowing through 「23」's matches would silently
+        // become arrowing through all 21 symbols.
+        if (!isOpen) { ensureOpen(); paintAndRefresh(); }
+        const btns = rowButtons();
+        if (!btns.length) { activeIdx = -1; return; }
+        if (delta === Infinity) activeIdx = btns.length - 1;
+        else if (delta === -Infinity) activeIdx = 0;
+        else if (activeIdx < 0) activeIdx = delta > 0 ? 0 : btns.length - 1;
+        else activeIdx = (activeIdx + delta + btns.length) % btns.length;
+        paintActive(btns);
+      }
+      function pickActive() {
+        const b = activeIdx >= 0 ? rowButtons()[activeIdx] : null;
+        if (!b || !b.dataset.symbol) return false;
+        select(b.dataset.symbol);
+        return true;
+      }
+
       function ensureOpen() {
         if (panel) panel.hidden = false;
         isOpen = true;
@@ -302,7 +345,17 @@
         input.addEventListener('focus', open);
         input.addEventListener('click', open);
         input.addEventListener('input', typeFilter);
-        input.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') { close(); return; }
+          if (e.key === 'ArrowDown') { e.preventDefault(); moveActive(1); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); moveActive(-1); return; }
+          if (e.key === 'Home' && isOpen) { e.preventDefault(); moveActive(-Infinity); return; }
+          if (e.key === 'End' && isOpen) { e.preventDefault(); moveActive(Infinity); return; }
+          // Enter picks ONLY when a row is highlighted. With none, the keystroke falls through
+          // to the form exactly as before — typing a symbol the list does not offer and
+          // submitting has always been legal here.
+          if (e.key === 'Enter' && activeIdx >= 0) { if (pickActive()) e.preventDefault(); }
+        });
       }
       if (field) {
         field.addEventListener('focusout', (e) => {

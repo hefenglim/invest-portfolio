@@ -14,8 +14,10 @@ understanding before implementing**. No implementation ahead of an acknowledged 
 - Pure calculation (`portfolio/`, `strategy/`) must have fixed-fixture unit tests.
 - External boundaries (`pricing/`, `llm_insight/`) are tested against mocks: parsing,
   idempotency, caching, graceful degradation.
-- Route layer (`web_ui/`) tested with httpx, including HTML-fragment assertions for
-  HTMX endpoints.
+- Route layer (`api/`) tested with httpx `TestClient` JSON-contract tests (`tests/contract`:
+  shape, status codes, zh messages, the golden payload); the static frontend (`web/`) with
+  Playwright e2e (`tests/e2e`, one session at a time). *(Said `web_ui/` + HTMX fragments
+  until 2026-09-10 — a layer decision (B) retired on 2026-06-13.)*
 
 ## Type safety gate
 

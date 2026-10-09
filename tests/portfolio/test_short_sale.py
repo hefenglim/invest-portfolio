@@ -20,7 +20,7 @@ from portfolio_dash.portfolio.results import Book
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
-from portfolio_dash.shared.models.ledger import Dividend, Transaction
+from portfolio_dash.shared.models.ledger import Dividend, LedgerBundle, Transaction
 
 TSLA = Instrument(symbol="TSLA", market=Market.US, quote_ccy=Currency.USD,
                   sector="Auto", name="Tesla")
@@ -35,7 +35,7 @@ def _tx(side: Side, qty: str, price: str, d: date, *, short: bool = False) -> Tr
 
 
 def _book(txs: list[Transaction]) -> Book:
-    return build_book(txs, [], [], INSTR, allow_oversell=True)
+    return build_book(LedgerBundle(txs, instruments=INSTR), allow_oversell=True)
 
 
 def test_declared_short_then_cover_settles_at_the_cover_price() -> None:
@@ -96,7 +96,7 @@ def test_undeclared_oversell_is_still_blocked_and_never_becomes_a_short() -> Non
         _tx(Side.SELL, "100", "260", date(2026, 6, 10)),   # NOT declared
     ]
     with pytest.raises(OversellError):
-        build_book(txs, [], [], INSTR)
+        build_book(LedgerBundle(txs, instruments=INSTR))
     book = _book(txs)                                       # acked path
     assert not [r for r in book.realized.rows if r.kind == "short_cover"]
 
@@ -145,8 +145,10 @@ def test_F1_cash_dividend_during_a_short_is_never_booked_as_income() -> None:
     """A short seller PAYS the dividend in lieu. The audit-H2 post-close branch fires on
     `shares == 0`, which is also an open short's long lot — it credited the payout."""
     txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
-    book = build_book(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))], [], INSTR,
-                      allow_oversell=True)
+    book = build_book(
+        LedgerBundle(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))],
+                     instruments=INSTR),
+        allow_oversell=True)
     assert book.realized.rows == []
     held = book.holdings[0]
     assert held.shares == D("-10") and held.original_avg == D("260")
@@ -157,8 +159,10 @@ def test_F2_drip_during_a_short_never_adds_long_shares() -> None:
     """The killer case: a DRIP equal to the short netted the position to zero, and the
     holding — with its −2,600 of proceeds — disappeared from the report entirely."""
     txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
-    book = build_book(txs, [_div(DividendType.DRIP, "0", date(2026, 6, 20), shares="10")],
-                      [], INSTR, allow_oversell=True)
+    book = build_book(
+        LedgerBundle(txs, [_div(DividendType.DRIP, "0", date(2026, 6, 20), shares="10")],
+                     instruments=INSTR),
+        allow_oversell=True)
     assert len(book.holdings) == 1, "the short must not vanish"
     held = book.holdings[0]
     assert held.shares == D("-10")
@@ -173,7 +177,8 @@ def test_F1_F2_strict_path_fails_loud() -> None:
     of letting it escape as a 500 (found by the 2026-07-31 phase-2 audit)."""
     txs = [_tx(Side.SELL, "10", "260", date(2026, 6, 10), short=True)]
     with pytest.raises(UnbookableLedgerError, match="放空部位") as exc:
-        build_book(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))], [], INSTR)
+        build_book(LedgerBundle(txs, [_div(DividendType.CASH, "50", date(2026, 6, 20))],
+                                instruments=INSTR))
     assert isinstance(exc.value, ValueError)
     assert "2026-06-20" in str(exc.value)      # names the offending row's date
 

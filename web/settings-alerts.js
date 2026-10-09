@@ -15,35 +15,47 @@
 
   /* ============ E1: 預警規則 ============ */
   /* Display metadata keyed on the BACKEND rule id (strategy/rules_config.py RULE_META).
-     The wire supplies enabled/value/unit/min/max; name/desc/sev are presentation-only.
-     `step` is a UI hint per unit (ratio rules are edited in % for UX continuity). */
+     The wire supplies name/enabled/value/unit/min/max; desc/sev are presentation-only.
+     `step` is a UI hint per unit (ratio rules are edited in % for UX continuity).
+     DEF-062: the rule's NAME is not kept here any more — it is the wire's `name`, from the
+     ONE table (portfolio_dash/shared/alert_rule_names.py) the 新增洞察任務 wizard, the push,
+     the digest and the card chip read too. This page's wording is the one that table kept. */
   const META = {
-    single_weight: { name: '單一標的集中度', sev: 'risk', step: 1,
+    single_weight: { sev: 'risk', step: 1,
       desc: '任一持倉權重（報告幣別市值）超過此比例時警示。' },
-    sector_weight: { name: '產業集中度', sev: 'risk', step: 5,
+    sector_weight: { sev: 'risk', step: 5,
       desc: '任一產業合計權重超過此比例時警示。' },
-    stale_price: { name: '價格過期', sev: 'warn',
+    stale_price: { sev: 'warn',
       desc: '任一標的報價過期即警示（不可調門檻，僅可停用）。' },
-    missing_price: { name: '缺價', sev: 'warn',
+    missing_price: { sev: 'warn',
       desc: '任一標的無任何儲存價格即警示（不可調門檻，僅可停用）。' },
-    fx_drift: { name: '匯率漂移', sev: 'info', step: 0.5,
+    fx_drift: { sev: 'info', step: 0.5,
       desc: '外幣池取得均價與現匯偏離超過此幅度時提示（順風/逆風）。' },
-    exdiv_upcoming: { name: '即將除息提醒', sev: 'info', step: 1,
+    exdiv_upcoming: { sev: 'info', step: 1,
       desc: '持倉標的除息日落在未來 N 天內時提示。' },
-    quota_low: { name: 'AI 額度偏低', sev: 'warn',
+    quota_low: { sev: 'warn',
       desc: '剩餘額度低於閾值時警示（閾值在 AI 額度設定調整，此處僅可停用）。' },
-    calib_gap: { name: 'AI 校準誤差', sev: 'warn', step: 1,
+    calib_gap: { sev: 'warn', step: 1,
       desc: 'AI 預測信心與實際命中率偏差超過此值時警示（資料來源：AI 戰績自我回測）。' },
-    drawdown_from_peak: { name: '高點回撤', sev: 'risk', step: 1,
+    drawdown_from_peak: { sev: 'risk', step: 1,
       desc: '持股／觀察股現價自 52 週高點回撤達此幅度時警示（risk）；達一半幅度先給 warn。' },
-    vol_spike: { name: '波動突升', sev: 'warn', step: 0.1,
+    vol_spike: { sev: 'warn', step: 0.1,
       desc: '持股 30 日年化波動達 90 日基準的此倍數時警示（「最近不對勁」的早期訊號）。' },
-    rebalance_drift: { name: '配置漂移', sev: 'risk', step: 1,
+    rebalance_drift: { sev: 'risk', step: 1,
       desc: '有設目標的持股，現權重偏離目標超過此絕對帶寬或目標的 25%（Swedroe 5/25）時警示。' },
-    consensus_change: { name: '分析師共識轉弱', sev: 'info', step: 0.1,
+    consensus_change: { sev: 'info', step: 0.1,
       desc: '評級分數惡化達此值（1→5 制）或均值目標價下修逾 10%（對比 7 日前）時提示。' },
-    target_cross: { name: '目標價穿越', sev: 'warn',
-      desc: '個股現價跌破目標下限或突破目標上限時警示。目標價在「觀察清單」逐檔設定，此處僅可停用。' }
+    target_cross: { sev: 'warn',
+      desc: '個股現價跌破目標下限或突破目標上限時警示。目標價在「觀察清單」逐檔設定，此處僅可停用。' },
+    /* R5. ⚠ The name must NOT collapse into 「回撤」: 高點回撤 above is PER-SYMBOL against each
+       name's own 52-week high, this one is the whole book against its own peak. Two switches
+       reading the same is the AI-D2 two-definitions defect on the settings page. */
+    portfolio_drawdown: { sev: 'risk', step: 1,
+      desc: '整個投資組合的每日總市值自歷史高點回撤達此幅度時警示（risk）；達一半幅度先給 warn。'
+        + '與上面的「高點回撤」不同：那是逐檔比各自的 52 週高點，分散的組合可能整體跌兩成而沒有任何一檔觸發。' },
+    currency_weight: { sev: 'risk', step: 5,
+      desc: '任一幣別合計權重（換算報告幣後）超過此比例時警示。三幣別的帳本最大的未分散賭注常常是幣別配置，'
+        + '而非任何單一持股。預設比產業集中度寬鬆，因為幣別天然集中。' }
   };
 
   /* Unit conversion between the WIRE (backend native units) and the EDITOR input.
@@ -85,14 +97,17 @@
     wrap.replaceChildren();
     const list = el('div', 'ar-list');
     WIRE.forEach((w) => {
-      const m = META[w.id] || { name: w.id, sev: 'info', desc: '' };
+      const m = META[w.id] || { sev: 'info', desc: '' };
+      /* DEF-062: the name is the wire's; a rule without one reads 「未命名規則」, never its id. */
+      if (!w.name && window.console) console.warn('[DEF-062] alert rule without a name:', w.id);
+      const name = w.name || '未命名規則';
       const fixed = w.value === null || w.value === undefined;  // toggle-only rules
       const row = el('div', 'ar-row');
       const sev = el('span', 'ar-sev sev-' + m.sev);
       sev.title = m.sev === 'risk' ? '紅色警示' : m.sev === 'warn' ? '琥珀警示' : '資訊提示';
       row.appendChild(sev);
       const main = el('div', 'ar-main');
-      main.appendChild(el('div', 'ar-name', m.name));
+      main.appendChild(el('div', 'ar-name', name));
       main.appendChild(el('div', 'ar-desc', m.desc));
       /* 對應的 AI 解讀組合（與洞察類型組合器的「觸發」設定互通） */
       const combos = (window.PD_COMPOSERS || [{ name: '預警解讀', scope: '預警事件觸發時', alert_rules: 'all', enabled: true }])
@@ -176,20 +191,39 @@
     return out;
   }
 
+  /* M9-03: PUT /api/alert-rules recomputes EVERY alert before it answers — measured 5.3s to
+     38.3s. Both buttons used to stay enabled and unlabelled for that whole window, so the
+     user got no feedback at all and a second click fired a second full recompute. `pdBusy`
+     is the house pattern already used by 資料來源「測試」 / 匯出 / 寫入 buttons: it disables
+     the button (double-click guard by construction) and swaps in a spinner + label. */
   async function saveRules() {
     if (!window.pdApi) return;
+    const restore = window.pdBusy ? window.pdBusy(saveBtn, '儲存中…') : function () {};
     try {
       const res = await window.pdApi.put('/api/alert-rules', { rules: collectRuleBody() });
       if (res && res.rules) renderRulesFrom(res.rules);
       if (window.toast) window.toast('預警規則已儲存', 'ok', '頂欄鈴鐺與儀表板於下次載入時生效');
     } catch (err) {
       if (window.toast) window.toast(err.message, 'fail', err.code);
+    } finally {
+      restore();
     }
   }
 
   /* 還原預設值 — PUT the backend default thresholds (rules_config.py RULE_META):
      all rules enabled; ratio defaults as ratio strings; pp/days as native; toggle-only
-     rules value:null. No dedicated reset endpoint exists, so we PUT the known contract. */
+     rules value:null. No dedicated reset endpoint exists, so we PUT the known contract.
+
+     ⚠ THIS TABLE MUST LIST EVERY BACKEND RULE. `PUT /api/alert-rules` is a SUBSET MERGE —
+     a rule absent from the body keeps its CURRENT value — so an id missing here is silently
+     NOT restored while the button still reports 「已還原預設值」. That is exactly what
+     happened to `portfolio_drawdown` / `currency_weight` (R5): added to RULE_META, never
+     added here, so 還原 sent 13 of 15 ids and left both thresholds at whatever the user had
+     typed — thresholds that decide whether the bell fires at all.
+     RULE_META stays the single authority for the numbers; this is a MIRROR, and it is
+     allowed to exist only while it is provably equal:
+     `tests/contract/test_m9_alert_reset_covers_every_rule.py` fails the build on the next
+     rule added to RULE_META without a line here. */
   const DEFAULTS_WIRE = [
     { id: 'single_weight', enabled: true, value: '0.30' },
     { id: 'sector_weight', enabled: true, value: '0.60' },
@@ -203,17 +237,22 @@
     { id: 'vol_spike', enabled: true, value: '1.8' },
     { id: 'rebalance_drift', enabled: true, value: '0.05' },
     { id: 'consensus_change', enabled: true, value: '0.5' },
+    { id: 'portfolio_drawdown', enabled: true, value: '0.20' },
+    { id: 'currency_weight', enabled: true, value: '0.70' },
     { id: 'target_cross', enabled: true, value: null }
   ];
 
   async function resetRules() {
     if (!window.pdApi) return;
+    const restore = window.pdBusy ? window.pdBusy(resetBtn, '還原中…') : function () {};
     try {
       const res = await window.pdApi.put('/api/alert-rules', { rules: DEFAULTS_WIRE });
       if (res && res.rules) renderRulesFrom(res.rules);
       if (window.toast) window.toast('已還原預設值', 'ok');
     } catch (err) {
       if (window.toast) window.toast(err.message, 'fail', err.code);
+    } finally {
+      restore();
     }
   }
 
@@ -328,13 +367,23 @@
   /* ============ E7: 匯出中心 ============ */
   const EXPORTS = [
     { group: '對帳與核對', items: [
-      { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', backend: true },
-      { name: '全帳本匯出（zip）', desc: '四帳本（期初/交易/股利/換匯）各一份 CSV ＋ 費率規則快照，打包下載。', backend: true },
-      { name: 'AI 用量明細 CSV', desc: 'llm_usage 全表：每次呼叫的模型、tokens、成本。', backend: true },
-      { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', backend: true }
+      { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', path: '/api/export/holdings' },
+      /* `ledgers: true` -> the desc is completed from GET /api/export/ledgers after render.
+         The literal below is the FALLBACK, and it deliberately names nothing: this line read
+         「四帳本（期初/交易/股利/換匯）」 (ledger-count-ok: historical quote) until
+         2026-08-16, and had been wrong since corporate
+         actions joined the zip — it told the owner they were about to download four CSVs when
+         the file held five. A count typed here cannot be checked by anything, so it is not
+         typed here any more. */
+      { name: '全帳本匯出（zip）', desc: '各帳本各一份 CSV ＋ 費率規則快照，打包下載。', path: '/api/export/ledgers', ledgers: true },
+      { name: 'AI 用量明細 CSV', desc: 'llm_usage 全表：每次呼叫的模型、tokens、成本。', path: '/api/export/llm-usage' },
+      { name: '排程執行記錄 CSV', desc: 'job_runs 全表：時間、狀態、摘要、耗時。', path: '/api/export/job-runs' },
+      /* Post-closure item 10 (owner 2026-09-30): the audit trail's file, beside the other
+         logs; the 資料中心 「帳本操作稽核」 list is its on-screen reader. */
+      { name: '帳本操作稽核 CSV', desc: 'ledger_audit 全表：每一次編輯或刪除帳本資料的時間、帳本、動作與變更前內容。', path: '/api/export/ledger-audit' }
     ]},
     { group: '報稅', items: [
-      { name: '年度報稅包', desc: '指定年度的已實現損益＋股利收入（含預扣稅）＋匯損益實現明細，各幣別分列。', backend: true, year: true }
+      { name: '年度報稅包', desc: '指定年度的已實現損益＋股利收入（含預扣稅）＋匯損益實現明細，各幣別分列。', path: '/api/export/tax-package', year: true }
     ]}
   ];
 
@@ -352,28 +401,51 @@
         head.appendChild(el('span', 'ec-name', item.name));
         head.appendChild(el('span', 'ec-glyph', '⬇'));
         card.appendChild(head);
-        card.appendChild(el('p', 'ec-desc', item.desc));
+        const desc = el('p', 'ec-desc', item.desc);
+        if (item.ledgers) desc.dataset.ledgers = '1';
+        card.appendChild(desc);
         const foot = el('div', 'ec-foot');
+        let sel = null;
         if (item.year) {
-          const sel = el('select', 'select ec-year');
-          ['2026', '2025', '2024'].forEach((y) => {
-            const o = el('option', null, y + ' 年度');
-            o.value = y;
-            sel.appendChild(o);
-          });
+          sel = el('select', 'select ec-year');
+          /* Derived, never typed. This select held a literal ['2026','2025','2024'] until
+             2026-08-27 — wrong in both directions the moment a ledger starts earlier or the
+             year rolls over. `fillTaxYearSelect` is shared with the 帳本頁 control so the two
+             menus cannot disagree. */
+          if (window.pdExport && window.pdExport.fillTaxYearSelect) {
+            window.pdExport.fillTaxYearSelect(sel);
+          }
           foot.appendChild(sel);
         }
         const btn = el('button', 'btn btn-primary', '產生並下載');
         btn.type = 'button';
-        btn.addEventListener('click', () => {
-          if (window.toast) window.toast('已排入產生佇列', 'ok', item.name + ' — 由後端以 raw Decimal 產生（設計預覽，等待 export endpoint）');
+        /* 2026-08-27: this handler used to fire a SUCCESS toast (「已排入產生佇列」) and do
+           nothing — a Design-preview stub whose tooltip said 「等待 export endpoint」 while
+           all five endpoints had existed for months. Every card now goes through the same
+           backend reconciliation channel as the per-page 匯出 CSV buttons: raw Decimal from
+           the calculation core, filename from Content-Disposition, silent on success. */
+        btn.addEventListener('click', async () => {
+          const restore = window.pdBusy ? window.pdBusy(btn, '產生中…') : function () {};
+          try {
+            const body = {};
+            if (sel) {
+              const year = parseInt(sel.value, 10);
+              body.year = isFinite(year) ? year : new Date().getFullYear() - 1;
+            }
+            await window.pdApi.download(item.path, body);
+          } catch (err) {
+            if (window.toast) {
+              window.toast(err && err.message ? err.message : (item.name + ' 產生失敗'),
+                           'fail', err && err.code);
+            }
+          } finally {
+            restore();
+          }
         });
         foot.appendChild(btn);
-        if (item.backend) {
-          const tag = el('span', 'ec-tag', '後端產生');
-          tag.title = '此匯出需要後端 export endpoint（見 specs/）；頁面上各表格的「匯出 CSV」則立即可用（顯示值精度）。';
-          foot.appendChild(tag);
-        }
+        const tag = el('span', 'ec-tag', '後端產生');
+        tag.title = '數字直接出自後端 Decimal 計算核心；頁面上各表格的「匯出 CSV」為同一條通道。';
+        foot.appendChild(tag);
         card.appendChild(foot);
         grid.appendChild(card);
       });
@@ -381,7 +453,27 @@
       wrap.appendChild(sec);
     });
     wrap.appendChild(el('div', 'ec-note',
-      '提示：各頁面表格右上角的「⬇ 匯出 CSV」可立即匯出目前篩選結果（顯示值精度）。本頁項目為對帳級匯出，數字直接出自後端 Decimal 計算核心，不經前端格式化。'));
+      '提示：本頁與各頁面表格右上角的「⬇ 匯出 CSV」走同一條後端通道，數字直接出自 Decimal 計算核心，不經前端格式化。'));
   }
+  /* The zip's contents, named by the server that builds it.
+
+     The list is the registry's (`EXPORT_KINDS`), so adding a ledger updates this sentence
+     with no edit here — which is the whole point, because the hand-written version went
+     stale silently and no test could have seen it. On failure the fallback desc stands: a
+     card that says less is better than one that names the wrong ledgers, and this is a
+     settings page, not a number of record. */
+  async function nameExportLedgers() {
+    const node = $('#export-center-wrap .ec-desc[data-ledgers]');
+    if (!node) return;
+    try {
+      const res = await window.pdApi.get('/api/export/ledgers');
+      const names = (res && res.ledgers || []).map((l) => l.label).filter(Boolean);
+      if (names.length) {
+        node.textContent = names.join('・') + ' 各一份 CSV ＋ 費率規則快照，打包下載。';
+      }
+    } catch (e) { /* fallback text stays */ }
+  }
+
   renderExports();
+  nameExportLedgers();
 })();

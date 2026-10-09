@@ -1,0 +1,573 @@
+"""Read-time figure check for a stored insight card (M9, owner audit 2026-09-16).
+
+**What this is.** A PURE, read-time post-check that compares the figures a card PRINTS
+against the numbers the model was FED — ``insights.prompt_figures``, every numeric token of
+the exact prompt text that produced the card, recorded at generation time. It never
+blocks, never rewrites and never hides a card; it returns two capped lists plus a
+``snapshot`` state the API attaches to the card so the page can mark it 「數值待核」.
+
+**Why the population is the prompt's numbers, not ``input_snapshot``** (re-verification
+2026-09-17, the audit author's ❌ on M9). The first version compared against
+``insights.input_snapshot``, documented here as "the exact JSON fed into the prompt". It
+never was: ``generate.RunInputs.input_snapshots`` is a seam no caller feeds, so every stored
+row holds the fallback fingerprint tag (``"2026-07-05|US"``, 13–20 characters) — measured
+on the demo database, 149 of 149 cards, the newest from 2026-08-25. The unit tests passed
+because they supplied a synthetic JSON snapshot; the check had never run against a real
+card and ``unverified_figures`` had fired 0 times on 148 cards, the audit's ×1000 card
+included. The population is now extracted from the prompt string at the single generation
+site (:func:`prompt_figures_json`), stored in its own additive column, and read here.
+``input_snapshot`` is untouched: it feeds the cache fingerprint and the Loop-2 master
+prompt, and changing it would have moved cache semantics to fix a display flag.
+
+**The third state.** A card generated before the column existed has no population, and
+"cannot check" must not read as "clean" — the audit's #37 card carried no pill for exactly
+that reason. ``snapshot == "none"`` means: this card prints at least one figure and there is
+nothing to check it against. A legacy card that prints no figure at all is vacuously
+``"checked"``, so the state appears exactly where it carries information.
+
+**Two more numbers the population must hold** (second re-verification 2026-09-17, the
+audit author's ⚠️ on M9: 3 of the 4 flags on 14 freshly generated cards were false):
+
+* **the card's OWN declared prediction.** A body that prints 「target_pct: 0.05」 is
+  echoing the ``prediction`` the model returned in the same JSON, and a forecast is not a
+  number of record — it is the one number the model is *supposed* to originate (Loop 2
+  scores it later). The router passes the stored ``prediction`` and ``confidence`` through
+  :func:`card_own_figures` and they join the population. Tied to the STORED fields, not
+  to the word: a card with no prediction that prints one is still flagged.
+* **the symbol's cross-account totals.** 「總計 95.0457 股，總成本約為 15,916.00 USD」 was
+  the model's correct sum of two per-account rows the prompt had handed it separately.
+  The checker was right that no fed number said 95.0457; the prompt was wrong to make
+  the model add. The per-symbol prompt now carries the combined position (``variables.
+  _combined_block``, from ``portfolio/position_aggregate.py`` — the drawer's definition),
+  so the totals are in the prompt and therefore in ``prompt_figures``. The fix is
+  upstream, not a tolerance here: pairwise sums over the population were rejected because
+  ~200 fed numbers give ~20,000 sums, and a check that accepts any of them within 0.5%
+  stops catching much.
+
+The fourth flag on those cards, 「近 20 日淨買超 497.43 萬」 against a fed ``497427``, is a
+×10 error and stays flagged — the check's first real catch on a freshly generated card.
+
+**The unit grammar** (third re-verification 2026-09-21, M9-a: 4 of 6 market-cap flags on
+13 regenerated cards were false). 「4.51 兆 USD」 was read as the bare 4.51 because the
+scale table stopped at 億. The fix is the class, not the row — see ``_ZH_UNITS`` and
+:func:`_scan_numbers`: compound zh magnitudes multiply, a numeral in descending parts is
+one figure, and the card and the prompt are read by the same scanner. The two other flags
+on those cards (「5,200 億」 for 5.2 兆, 「458.92 億」 for 4,589 億) are ×10 errors like
+#172's and stay flagged.
+
+**Why it exists.** Measured on cached cards: one card said 「未實現獲利 429.1 萬美元」 while
+its sibling from the SAME batch said 「未實現收益 4,290.80 美元，部位規模共 11,951 美元成本」 —
+a ×1000 scale error — and another named 「LRDIM (6883)」, a code that exists in neither the
+holdings nor the watchlist. The system's own 「AI 戰績」 page measures a 13.33% quantitative
+hit rate, so this is a known failure mode, not a one-off. ``llm-insight.md``'s rule is that
+the LLM never emits numbers of record; this is the read-side check that the rule held.
+
+**Why a post-check and not a gate.** Blocking would mean deleting the qualitative content
+over a number the checker could not align — and the checker is deliberately the weaker
+party here (see the conservatism rules below). Flagging matches the house posture for an
+uncertain value everywhere else in this repo: disclosed, never guessed, never silently
+dropped (a stale price is labelled; an unknown ETF flag raises a soft issue).
+
+**Conservative by construction** — a false "待核" pill on a correct card costs the owner
+trust in the flag, so every rule below errs towards NOT flagging:
+
+* a figure is VERIFIED when ANY snapshot number matches it at ANY plausible scale, within
+  0.5% relative or 0.005 absolute;
+* percent forms additionally try ×100 / ÷100 (a snapshot stores ``0.1249`` for 「12.49%」);
+* bare integers < 100 (counts: 5 天, 3 個帳戶), 4-digit years and date-like tokens are not
+  figures and are skipped;
+* a parenthesised 4–6-digit code is read as a TICKER, not as a figure (it is the symbol
+  check's business — and 「（00878）」 read as the number 878 would be a flag on every
+  five-digit TW ETF), and common uppercase abbreviations (PE / ETF / USD …) plus every
+  period-suffixed indicator (MA20 / MA200 / RSI14 …) are never read as tickers — measured
+  2026-09-17: 47 of 48 ``unknown_symbols`` hits on the demo were PBR / MA20 / MA60 / MA120 /
+  MA200 / MA50 / RSI14 / BUY / HOLD / KLCI / TAIEX, and one was the real 6883;
+* a registered instrument's NAME in parentheses is not a code (DEF-082, functional-test
+  R8, 2026-09-27): card #209 wrote 「3008 (LARGAN)」 — 3008's registered name — and was told
+  「未知代碼：LARGAN…可能是模型幻覺」, because the check compared the token against symbols
+  only. Names are compared case-insensitively, whole and word by word (owner ruling
+  2026-09-27: 「5225 (IHH)」 for ``IHH Healthcare`` is the same writing) — see
+  :func:`_name_forms`. An all-digit token is never a name form, so 「LRDIM (6883)」 stays
+  flagged;
+* a population with NO number at all yields NO figure flags — it yields the ``"none"``
+  state instead, because an empty population is not evidence of a wrong number, and a
+  silent ``[]`` is not evidence of a right one.
+
+Pure: no connection, no clock, no LLM. ``llm_insight`` may import ``portfolio``/``shared``
+only (architecture.md), and this module imports neither — it is a leaf.
+"""
+
+import json
+import re
+from collections.abc import Iterable
+from decimal import Decimal, InvalidOperation
+from typing import Any, Literal, NamedTuple
+
+from pydantic import BaseModel, Field
+
+#: Each list is capped so a badly-formatted card cannot produce an unreadable tooltip.
+MAX_FLAGS = 5
+
+#: Relative / absolute tolerance for "the card's figure IS this snapshot number".
+#: 0.5% absorbs the rounding a prompt does on the way in (a 2-dp render of a 6-dp Decimal)
+#: without absorbing a scale error — the audit's ×1000 is 5 orders of magnitude past it.
+_REL_TOL = Decimal("0.005")
+_ABS_TOL = Decimal("0.005")
+
+#: Magnitudes a card may apply to a figure. The zh ones are the whole point of M9: 「429.1
+#: 萬」 IS 4,291,000 and must be compared as such, or the scale error reads as a match.
+#:
+#: A zh magnitude COMPOSES — a prefix (十 / 百 / 千) times a base (萬 / 億 / 兆), and 萬億 is
+#: 兆 — so the table holds characters and :func:`_multiplier` takes the product. It held
+#: 千 / 萬 / 億 as whole units until the third re-verification (2026-09-21, M9-a): 13
+#: regenerated cards printed six market caps, and the four written in 兆 (「4.51 兆 USD」,
+#: all correct) were read as the bare 4.51 and flagged. The demo's older cards show the rest
+#: of the class — 「3.66 百萬」 read as 3.66, 「1.38 千萬」 read as 1,380. 百 is a prefix
+#: ONLY: alone after a number it is 百分位 / 百分點, and the unit pattern never admits it.
+_ZH_UNITS: dict[str, Decimal] = {
+    "十": Decimal("10"),
+    "百": Decimal("100"),
+    "千": Decimal("1000"),
+    "萬": Decimal("10000"),
+    "億": Decimal("100000000"),
+    "兆": Decimal("1000000000000"),
+}
+#: Latin magnitude letters. K / M in either case; B / T upper-case only (the audit author's
+#: 「4.51T」 / 「520B」) — a lower-case b / t after a number is bits or tonnes. The pattern's
+#: lookahead keeps every letter off a word (「5 TWD」) and an ISO timestamp (「06T00:12」).
+_LATIN_UNITS: dict[str, Decimal] = {
+    "K": Decimal("1000"),
+    "k": Decimal("1000"),
+    "M": Decimal("1000000"),
+    "m": Decimal("1000000"),
+    "B": Decimal("1000000000"),
+    "T": Decimal("1000000000000"),
+}
+_PERCENT_SUFFIXES = ("%", "％")
+
+#: Date-like tokens are masked out BEFORE the number scan: 2026-09-16 / 2026年9月16日 /
+#: 9/16 are not figures, and their parts would otherwise be flagged as unverified numbers.
+_DATE_RE = re.compile(
+    r"\d{4}\s*[-/年]\s*\d{1,2}\s*(?:[-/月]\s*\d{1,2}\s*日?)?"
+    r"|\d{1,2}\s*[/月]\s*\d{1,2}\s*日?"
+)
+
+#: A parenthesised ticker: a 4–6-digit TW/MY-style code (0050 / 00878 / 006208 / 5225), or
+#: an uppercase US-style symbol. Masked out of the number scan (a code is not a figure) and
+#: fed to the symbol check.
+_CODE_RE = re.compile(r"[(（]\s*(\d{4,6}|[A-Z][A-Z0-9]{0,5}(?:\.[A-Z]{1,3})?)\s*[)）]")
+
+#: Uppercase tokens a card legitimately writes in parentheses that are NOT tickers. Without
+#: this, 「本益比（PE）」 and 「單位：USD」 would each raise a hallucinated-symbol flag.
+#: Grouped by what they are so the next addition lands in the right row; a registered
+#: symbol is never flagged regardless of this set (the registry check runs first), so the
+#: only cost of a name here is a missed flag on an unregistered code of the same spelling.
+_NOT_A_TICKER = frozenset({
+    # markets / currencies / units
+    "AI", "LLM", "US", "TW", "MY", "KL", "OTC", "USD", "TWD", "MYR", "NTD", "RM",
+    "CNY", "RMB", "JPY", "EUR", "GBP", "HKD", "SGD", "AUD",
+    # instrument kinds / corporate terms
+    "ETF", "ETN", "REIT", "ADR", "DRIP", "IPO", "ESG", "NAV", "TTM", "GAAP", "EBITDA",
+    # valuation ratios and return measures
+    "EPS", "DPS", "BPS", "SPS", "PE", "PER", "PB", "PBR", "PEG", "PS", "PSR", "PCF",
+    "ROE", "ROA", "ROI", "ROIC", "EV", "FCF", "DCF", "WACC", "NPV", "YTM", "APY", "APR",
+    "CAGR", "XIRR", "TWR", "IRR", "YOY", "QOQ", "MOM", "YTD", "MTD", "QTD",
+    # macro / regulators / fee names
+    "GDP", "CPI", "PPI", "PMI", "FED", "FOMC", "SEC", "TAF", "CAT", "SST", "GST",
+    # bare indicators (period-suffixed forms are matched by _INDICATOR_RE below)
+    "MA", "EMA", "SMA", "WMA", "RSI", "MACD", "KD", "KDJ", "ATR", "ADX", "CCI", "OBV",
+    "DMI", "SAR", "MFI", "VWAP", "BOLL", "BB", "VIX", "BETA", "SD",
+    # index names a card writes as 「（TAIEX）」 / 「（KLCI）」
+    "TAIEX", "TWII", "TPEX", "KLCI", "SPX", "NDX", "DJI", "DJIA", "SOX",
+    # ratings / stances
+    "BUY", "SELL", "HOLD", "LONG", "SHORT", "BULL", "BEAR", "OW", "UW", "EW",
+    # period / misc tokens
+    "Q1", "Q2", "Q3", "Q4", "H1", "H2", "FY", "OK", "NA", "N", "A",
+})
+
+#: An indicator with its period — 「MA20 / MA200 / RSI14 / EMA12 / KD9」. A name-only set
+#: cannot enumerate these (the period is free text), so the rule matches the shape: one of
+#: the indicator stems above followed by digits. No real ticker on the three markets has
+#: this shape — TW/MY codes are all-digit, US symbols are all-letter (plus a dotted class).
+_INDICATOR_RE = re.compile(
+    r"^(?:MA|EMA|SMA|WMA|DMA|RSI|KD|KDJ|ATR|ADX|CCI|OBV|DMI|SAR|MFI|ROC|MACD|BOLL|BB)\d+$"
+)
+
+#: A word of an upper-cased registered name, in the letter-first shape :data:`_CODE_RE`
+#: reads as a ticker (DEF-082) — see :func:`_name_forms`.
+_NAME_WORD_RE = re.compile(r"[A-Z][A-Z0-9]*")
+
+#: A number, optionally grouped with thousands separators, plus an optional unit suffix.
+#: The lookbehind keeps the scan off the tail of a longer token (a version string, an id).
+#: Alternation order matters: 萬億 before the prefixed base (else it stops at 萬), and the
+#: prefixed base before a lone 千 (else 千萬 stops at 千).
+_NUM_RE = re.compile(
+    r"(?<![\d.A-Za-z])"
+    r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"\s*(%|％|萬億|[十百千]?[萬億兆]|千|[KkMm](?![A-Za-z0-9])|[BT](?![A-Za-z0-9]))?"
+)
+
+#: What may sit between the parts of one zh numeral (「1兆 1,300億」): spaces, never a line
+#: break — two figures on consecutive lines are two figures.
+_PART_GAP_RE = re.compile(r"[ \t\u3000]*")
+
+
+SnapshotState = Literal["checked", "none"]
+
+
+class FigureFlags(BaseModel):
+    """The read-time check's verdict for ONE card.
+
+    Both lists empty AND ``snapshot == "checked"`` = nothing to disclose. ``"none"`` = the
+    card prints figures and no population was recorded to check them against (a card
+    generated before ``prompt_figures`` existed) — disclosed as its own state, never as a
+    clean ``[]``.
+    """
+
+    #: Figures printed by the card that match no fed number at any plausible scale.
+    unverified_figures: list[str] = Field(default_factory=list)
+    #: Parenthesised ticker-shaped codes in the card text that are neither registered
+    #: symbols nor forms of a registered instrument's name.
+    unknown_symbols: list[str] = Field(default_factory=list)
+    #: Whether the figure comparison could run at all (see the class docstring).
+    snapshot: SnapshotState = "checked"
+
+
+def _decimal_or_none(text: str) -> Decimal | None:
+    """Parse a numeric token (thousands separators allowed) as Decimal, else None."""
+    try:
+        return Decimal(text.replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _collect_numbers(node: Any, out: list[Decimal]) -> None:
+    """Walk a decoded JSON tree and collect EVERY numeric leaf, numeric strings included.
+
+    Numeric strings matter more than JSON numbers here: this repo puts money on the wire as
+    Decimal STRINGS, so a snapshot's holdings block carries ``"4290.80"``, not ``4290.8``.
+    ``bool`` is excluded explicitly — it is an ``int`` subclass in Python, and ``True``
+    would otherwise enter the comparison population as the number 1.
+    """
+    if isinstance(node, bool):
+        return
+    if isinstance(node, int):
+        out.append(Decimal(node))
+        return
+    if isinstance(node, float):
+        # A float only ever reaches here from a provider-shaped JSON leaf; str() first so the
+        # binary tail does not enter the comparison (the repo's float-noise discipline).
+        out.append(Decimal(str(node)))
+        return
+    if isinstance(node, str):
+        token = node.strip()
+        pct = token.endswith(_PERCENT_SUFFIXES)
+        value = _decimal_or_none(token[:-1] if pct else token)
+        if value is not None:
+            out.append(value)
+            if pct:
+                # A snapshot that itself writes "12.49%" also stands for the ratio 0.1249.
+                out.append(value / Decimal("100"))
+        return
+    if isinstance(node, dict):
+        for item in node.values():
+            _collect_numbers(item, out)
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_numbers(item, out)
+
+
+def snapshot_numbers(snapshot_json: str) -> list[Decimal]:
+    """Every numeric leaf in the stored input snapshot, de-duplicated.
+
+    An unparseable / empty snapshot yields ``[]``, which the caller reads as "cannot check"
+    — NOT as "every figure is wrong".
+    """
+    try:
+        payload = json.loads(snapshot_json) if snapshot_json.strip() else None
+    except (json.JSONDecodeError, ValueError):
+        return []
+    out: list[Decimal] = []
+    _collect_numbers(payload, out)
+    return list(dict.fromkeys(out))
+
+
+def _matches(figure: Decimal, snapshot: Decimal) -> bool:
+    """True when the two numbers have the same MAGNITUDE, within the tolerance.
+
+    Compared on absolute value deliberately: this checker is about SCALE (the audit's
+    ×1000) and invented numbers, not about sign. A card writing 「虧損 3,200 美元」 or
+    「−12.5%」 against a snapshot holding ``-3200`` / ``-0.125`` is correct, and flagging it
+    would be precisely the false positive that would teach the owner to ignore the pill.
+    """
+    lhs, rhs = abs(figure), abs(snapshot)
+    diff = abs(lhs - rhs)
+    if diff <= _ABS_TOL:
+        return True
+    scale = max(lhs, rhs)
+    return scale > 0 and diff <= _REL_TOL * scale
+
+
+def _candidates(value: Decimal, *, is_percent: bool) -> list[Decimal]:
+    """The scales a printed figure may legitimately have been stored at.
+
+    A percent form is the only ambiguous one: the snapshot may hold the ratio (0.1249) or
+    the percentage (12.49). Everything else is compared at exactly the scale it was printed
+    at — which is precisely what makes the audit's 「429.1 萬」 vs ``4290.80`` a flag.
+    """
+    if is_percent:
+        return [value, value / Decimal("100"), value * Decimal("100")]
+    return [value]
+
+
+def _is_not_a_figure(raw: str, suffix: str, value: Decimal) -> bool:
+    """True for tokens that are counts or years rather than figures (never flagged)."""
+    if suffix or "." in raw or "," in raw:
+        return False
+    if value < 100:
+        return True  # a count: 5 天 / 3 個帳戶 / 14 日
+    return len(raw) == 4 and Decimal(1990) <= value <= Decimal(2099)  # a year
+
+
+def _mask(text: str) -> str:
+    """Blank out date-like tokens and parenthesised ticker codes before the number scan."""
+    masked = _DATE_RE.sub(lambda m: " " * len(m.group(0)), text)
+    return _CODE_RE.sub(lambda m: " " * len(m.group(0)), masked)
+
+
+def _multiplier(suffix: str) -> Decimal:
+    """The magnitude a unit suffix applies: a Latin letter's value, or the PRODUCT of a zh
+    unit's characters (千萬 = 千 × 萬). A percent sign or no suffix is 1."""
+    if suffix in _LATIN_UNITS:
+        return _LATIN_UNITS[suffix]
+    out = Decimal(1)
+    for char in suffix:
+        out *= _ZH_UNITS.get(char, Decimal(1))
+    return out
+
+
+class _Number(NamedTuple):
+    """One number as printed: its span, the digits of its first part, its (last) unit, and
+    its value at the printed scale."""
+
+    start: int
+    end: int
+    raw: str
+    suffix: str
+    value: Decimal
+
+
+def _scan_numbers(text: str) -> list[_Number]:
+    """Every number in *text* at its printed scale — the ONE grammar both sides use.
+
+    The card is read with it (:func:`_card_figures`) and so is the prompt that produced the
+    card (:func:`prompt_figures_json`); two grammars would store 「營收 3.82 兆元」 from a news
+    line as 3.82 and then flag the card that quotes it.
+
+    A zh numeral written in descending parts — 「市值突破 1兆1,300億元」 (a stored demo card),
+    「3億5,000萬」 — is ONE value, the sum of its parts: each later part follows the one
+    before with only spaces between and carries a strictly smaller zh magnitude. Read as
+    two figures, neither 1 兆 nor 1,300 億 is a number any prompt held.
+    """
+    out: list[_Number] = []
+    prev_zh: Decimal | None = None  # the zh magnitude of the part just read, if any
+    for match in _NUM_RE.finditer(text):
+        raw, suffix = match.group(1), (match.group(2) or "")
+        value = _decimal_or_none(raw)
+        if value is None:
+            prev_zh = None
+            continue
+        mult = _multiplier(suffix)
+        end = match.end(2) if suffix else match.end(1)
+        zh = mult if suffix and all(char in _ZH_UNITS for char in suffix) else None
+        if (
+            zh is not None
+            and prev_zh is not None
+            and zh < prev_zh
+            and _PART_GAP_RE.fullmatch(text, out[-1].end, match.start(1))
+        ):
+            head = out[-1]
+            out[-1] = _Number(head.start, end, head.raw, suffix, head.value + value * mult)
+        else:
+            out.append(_Number(match.start(1), end, raw, suffix, value * mult))
+        prev_zh = zh
+    return out
+
+
+def _card_figures(card_text: str, known_forms: set[str]) -> list[tuple[str, Decimal, bool]]:
+    """Every figure the card prints: ``(token as printed, value at its printed scale,
+    is_percent)``. Counts, years, dates and parenthesised codes are not figures — and
+    neither is a registered all-digit symbol written bare (「2330 量縮整理」, the anomaly
+    card's own 「2330 資料異常」 title): it is a name, and reading it as the number 2,330
+    would demand that every population contain it."""
+    masked = _mask(card_text)
+    figures: list[tuple[str, Decimal, bool]] = []
+    for number in _scan_numbers(masked):
+        if _is_not_a_figure(number.raw, number.suffix, number.value):
+            continue
+        if not number.suffix and number.raw in known_forms:
+            continue  # a bare registered code, not a figure
+        token = masked[number.start:number.end]
+        figures.append((token, number.value, number.suffix in _PERCENT_SUFFIXES))
+    return figures
+
+
+def _unverified_figures(
+    figures: list[tuple[str, Decimal, bool]], population: list[Decimal]
+) -> list[str]:
+    """The printed figures that match no fed number at any plausible scale (capped)."""
+    flagged: list[str] = []
+    for token, scaled, is_percent in figures:
+        if any(
+            _matches(candidate, known)
+            for candidate in _candidates(scaled, is_percent=is_percent)
+            for known in population
+        ):
+            continue
+        if token not in flagged:
+            flagged.append(token)
+        if len(flagged) >= MAX_FLAGS:
+            break
+    return flagged
+
+
+def prompt_figures_json(prompt: str) -> str:
+    """The comparison population for a card, extracted from the prompt that produced it.
+
+    Called ONCE at the generation site with the exact string handed to the model, and
+    stored as ``insights.prompt_figures``. Every numeric token is kept at the scale the
+    model saw it, de-duplicated, as a JSON list of strings: ``"4,290.80"`` → ``"4290.80"``,
+    ``"12.49%"`` stays a percent form (the reader expands it to the ratio too), ``"120 億"``
+    is stored scaled. Deliberately PERMISSIVE — years, dates and counts all stay in — because
+    a population that is too small produces false 待核 pills, and the reader's own filters
+    already keep those tokens off the card side. Nothing is capped: a truncated population
+    would silently turn correct figures into flags.
+    """
+    seen: dict[str, None] = {}
+    for number in _scan_numbers(prompt):
+        if number.suffix in _PERCENT_SUFFIXES:
+            seen[f"{number.value}%"] = None
+        else:
+            seen[str(number.value)] = None
+    return json.dumps(list(seen))
+
+
+def _known_forms(known_symbols: set[str]) -> set[str]:
+    """Known symbols, upper-cased, plus each one's pre-suffix base ("1155.KL" → "1155").
+
+    A card writes 「（1155）」 for a symbol the ledger stores as ``1155.KL``; treating that as
+    a hallucination would be exactly the false positive this module must not produce.
+    """
+    forms: set[str] = set()
+    for symbol in known_symbols:
+        upper = symbol.strip().upper()
+        if not upper:
+            continue
+        forms.add(upper)
+        forms.add(upper.split(".")[0])
+    return forms
+
+
+def _name_forms(known_names: Iterable[str]) -> set[str]:
+    """Registered instrument names in the forms a card writes them in parentheses: the
+    whole name and every word of it that starts with a letter, all upper-cased.
+
+    A card names a company the way the registry does, but not in the registry's case
+    (「(TESLA)」 for ``Tesla``) and often by one word of a longer name (「5225 (IHH)」 for
+    ``IHH Healthcare``, 「(MICRO)」 for ``Advanced Micro Devices, Inc.``). Measured on the
+    demo (R8, 26 registered instruments): 4 whole names and 6 words of 4 longer names have
+    the shape :data:`_CODE_RE` reads as a ticker. Two shapes are never a name form, whole or
+    word, because each would hide a real flag: all digits (a name like 「Fund 6883」 must not
+    clear 「LRDIM (6883)」, and TW/MY codes are digits) and one letter (F / T / X are US
+    tickers; no card names a company by one letter). The cost of a form is the cost of an
+    entry in :data:`_NOT_A_TICKER`: a missed flag on an unregistered code of that spelling.
+    """
+    forms: set[str] = set()
+    for name in known_names:
+        upper = name.strip().upper()
+        for form in (upper, *_NAME_WORD_RE.findall(upper)):
+            if len(form) > 1 and not form.isdigit():
+                forms.add(form)
+    return forms
+
+
+def _unknown_symbols(
+    card_text: str, known_symbols: set[str], known_names: Iterable[str] = ()
+) -> list[str]:
+    """Parenthesised ticker-shaped codes in the text that are neither registered symbols
+    nor forms of a registered instrument's name."""
+    forms = _known_forms(known_symbols)
+    names = _name_forms(known_names)
+    flagged: list[str] = []
+    for match in _CODE_RE.finditer(card_text):
+        code = match.group(1).upper()
+        if code in forms or code.split(".")[0] in forms:
+            continue  # registered — never a hallucination, whatever it looks like
+        if code in names:
+            continue  # a registered NAME, not a code: 「3008 (LARGAN)」 (DEF-082)
+        if code in _NOT_A_TICKER or _INDICATOR_RE.match(code):
+            continue  # an abbreviation / indicator the card wrote in parentheses
+        if code not in flagged:
+            flagged.append(code)
+        if len(flagged) >= MAX_FLAGS:
+            break
+    return flagged
+
+
+def card_own_figures(
+    *, target_pct: Decimal | None, horizon_days: int | None, confidence: int | None
+) -> list[Decimal]:
+    """The card's OWN declared numbers, to join the population: its prediction's
+    ``target_pct`` and ``horizon_days``, and its ``confidence``.
+
+    A forecast is the one number a card legitimately originates (llm-insight.md's rule
+    is about numbers OF RECORD) and Loop 2 scores it later, so a body echoing it must not
+    read as a hallucination. Only the STORED fields count — a body that prints a
+    prediction the card did not declare is still flagged. ``horizon_days`` and
+    ``confidence`` are usually counts (< 100, never figures), but 「120 天」 and 「信心
+    100」 are not.
+    """
+    own: list[Decimal] = []
+    if target_pct is not None:
+        own.append(target_pct)
+    if horizon_days is not None:
+        own.append(Decimal(horizon_days))
+    if confidence is not None:
+        own.append(Decimal(confidence))
+    return own
+
+
+def check_figures(
+    card_text: str,
+    snapshot_json: str,
+    known_symbols: set[str],
+    *,
+    known_names: Iterable[str] = (),
+    own_figures: Iterable[Decimal] = (),
+) -> FigureFlags:
+    """Post-check ONE card's text against the numbers it was fed (pure; see module docstring).
+
+    *card_text* is the card as the owner reads it (``title + summary + body_md``),
+    *snapshot_json* the stored population — ``insights.prompt_figures`` (a JSON list from
+    :func:`prompt_figures_json`) or any JSON whose numeric leaves are the fed values —
+    *known_symbols* the registered instrument symbols, *known_names* their registered
+    names (DEF-082: a name in parentheses is not an unknown code), *own_figures* the card's own
+    declared numbers (:func:`card_own_figures`) — they join the population only when
+    there IS one, so a legacy card stays ``"none"``. Returns the two capped lists and the
+    ``snapshot`` state: ``"none"`` when the card prints a figure and the population holds
+    no number (blank, not JSON, or JSON without a numeric leaf — the legacy
+    ``"2026-07-05|US"`` fingerprint tag is all three at once).
+    """
+    figures = _card_figures(card_text, _known_forms(known_symbols))
+    unknown = _unknown_symbols(card_text, known_symbols, known_names)
+    population = snapshot_numbers(snapshot_json)
+    if not population:
+        return FigureFlags(
+            unknown_symbols=unknown, snapshot="none" if figures else "checked",
+        )
+    population = list(dict.fromkeys([*population, *own_figures]))
+    return FigureFlags(
+        unverified_figures=_unverified_figures(figures, population),
+        unknown_symbols=unknown,
+    )

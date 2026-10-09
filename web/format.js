@@ -138,6 +138,18 @@ window.fmt = (function () {
    * without it "10" would lose its trailing zero and render as "1".
    */
   function shares(v) {
+    return exact(v);
+  }
+
+  /** A Decimal string shown AS SENT: grouped, up to 6 dp, trailing zeros stripped.
+
+      For any value where a display rounding would contradict what actually gets stored.
+      `price(v, 'USD')` renders 28.5714 as "28.57" — correct for a quote the owner only
+      reads, and wrong for D44's restated target level, which the owner is deciding whether
+      to SAVE: they would tick a box labelled 28.57 and the ledger would receive 28.5714.
+      Same reason `shares` (which is this function, named for its first caller) never
+      rounded a fractional DRIP share count. */
+  function exact(v) {
     const s = num(v, 6);
     if (s === NULL_GLYPH) return s;
     return s.indexOf('.') < 0 ? s : s.replace(/\.?0+$/, '');
@@ -208,6 +220,16 @@ window.fmt = (function () {
     return num(v, Number(v) < 10 ? 4 : 2);
   }
 
+  /** FX rate at a FIXED precision (default 4 dp) — the 換匯 ledgers' 隱含匯率 columns
+      (M3-08, 2026-09-06). `rate()`'s magnitude switch printed one column in two precisions
+      (4.6000 beside 28.00), and 28.00 is a rate rounded like money: rates are NOT money
+      (data-and-pricing.md — 4–6 dp). `rate()` itself is unchanged; the dashboard's 換匯損益
+      card keeps its 2 dp by owner ruling. */
+  function rateExact(v, dp) {
+    if (isNil(v)) return NULL_GLYPH;
+    return num(v, dp === undefined ? 4 : dp);
+  }
+
   /** ISO date/datetime -> YYYY-MM-DD. */
   function date(iso) {
     if (isNil(iso)) return NULL_GLYPH;
@@ -243,6 +265,51 @@ window.fmt = (function () {
     return parts.join(' · ');
   }
 
-  return { num, shares, money, price, signed, signedNum, pct, signedPct, rate, date, datetime,
-           signClass, aiAttrib, NULL_GLYPH };
+  return { num, shares, exact, money, price, signed, signedNum, pct, signedPct, rate, rateExact,
+           date, datetime, signClass, aiAttrib, NULL_GLYPH };
+})();
+
+/* ---- DEF-007 / I-12: THE ONE WAY A VALUE THAT ARRIVES AFTER AN AWAIT MAY LAND IN AN
+   EDITABLE FIELD (input, textarea or select), shared by every page. -------------------------
+   Born in web/cash.js (DEF-007, 2026-09-23): the 取得成本 prefill came back after the owner
+   had typed 31.5 and overwrote it with 31.698999, and 確認 then booked the wrong amount. The
+   same shape was found on 11 more fields in 5 files (the settings page's page-size select,
+   the tax-year menu, the AI model picker, the new-user form's post-commit clear, the prompt
+   editor's textareas), so the rule moved HERE — format.js is loaded by every page that has
+   an editable field — and cash.js reads it from here like the rest.
+
+   The rule: a late write may only replace what the PAGE knows is in the field — nothing (an
+   empty field destroys nothing when filled), or `expected`, the value the page itself put
+   there or read there when the request left (a select's selection at request time; the value
+   just submitted, for a post-commit clear). Anything else was typed or picked during the
+   round trip and is the owner's.
+   tests/contract/test_def007_async_field_writes.py scans EVERY web/*.js for a late raw
+   `.value =` that does not go through here. */
+window.pdField = (function () {
+  'use strict';
+  function writeIfUntouched(input, expected, next) {
+    if (!input) return false;
+    const cur = input.value;
+    if (cur !== '' && cur !== expected) return false;   // typed while we waited — theirs
+    input.value = next;
+    if (input.dataset) delete input.dataset.pdAuto;
+    return true;
+  }
+  /* An auto-fill (prefill / estimate): writes through the guard, and records what it wrote
+     so the NEXT auto-fill may replace it — the page's own hint is the page's to retract. */
+  function autoFill(input, next) {
+    const mine = input && input.dataset ? input.dataset.pdAuto : undefined;
+    if (!writeIfUntouched(input, mine === undefined ? '' : mine, next)) return false;
+    if (input.dataset && input.value !== '') input.dataset.pdAuto = input.value;
+    return true;
+  }
+  /* A synchronous, user-initiated reset (account / currency switch): the old value is stale,
+     and so is the record of who wrote it. */
+  function resetField(input) {
+    if (!input) return;
+    input.value = '';
+    if (input.dataset) delete input.dataset.pdAuto;
+  }
+  return Object.freeze({ writeIfUntouched: writeIfUntouched, autoFill: autoFill,
+                         resetField: resetField });
 })();

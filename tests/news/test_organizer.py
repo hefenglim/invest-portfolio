@@ -60,7 +60,8 @@ def test_organize_builds_row_from_llm(
     _patch(monkeypatch, '{"title":"台積電法說","news_date":"2026-07-05",'
                         '"body_summary":"台積電將於 7/16 法說。","related_stocks":["2330","2454"]}')
     link = NewsLink(title="原標題", link="http://a", source="CM", date="2026-07-04", lang="zh")
-    out = org.organize(link, "文章正文…", get_news_prompt(conn)["body"], conn=conn, now=NOW)
+    out = org.organize(link, "文章正文…", get_news_prompt(conn)["body"],
+                       prompt_version=1, conn=conn, now=NOW)
     assert out.title == "台積電法說" and out.news_date == "2026-07-05"
     assert out.related_stocks == ["2330", "2454"] and out.source == "CM" and out.lang == "zh"
     assert out.body_summary.startswith("台積電")
@@ -72,7 +73,8 @@ def test_organize_falls_back_on_blank_fields(
     # model returns a blank title + invalid date -> use the discovery link's fallbacks.
     _patch(monkeypatch, '{"title":"","news_date":"n/a","body_summary":"摘要","related_stocks":[]}')
     link = NewsLink(title="探索標題", link="http://b", source="src", date="2026-07-03", lang="en")
-    out = org.organize(link, "text", get_news_prompt(conn)["body"], conn=conn, now=NOW)
+    out = org.organize(link, "text", get_news_prompt(conn)["body"],
+                       prompt_version=1, conn=conn, now=NOW)
     assert out.title == "探索標題"       # fell back to link title
     assert out.news_date == "2026-07-03"  # fell back to link date
     assert out.related_stocks == []
@@ -83,7 +85,8 @@ def test_organize_uses_now_when_no_date_anywhere(
 ) -> None:
     _patch(monkeypatch, '{"title":"T","news_date":"","body_summary":"s","related_stocks":[]}')
     link = NewsLink(title="T", link="http://c")  # no date on the link either
-    out = org.organize(link, "text", get_news_prompt(conn)["body"], conn=conn, now=NOW)
+    out = org.organize(link, "text", get_news_prompt(conn)["body"],
+                       prompt_version=1, conn=conn, now=NOW)
     assert out.news_date == "2026-07-06"  # today
 
 

@@ -1,9 +1,12 @@
 """Contract tests for POST /api/export/ledgers-report.
 
-The route builds a print-optimized, self-contained 帳本報告 covering the four ledgers over
-an optional {from, to} range — the SAME RangeBody + 400 validation as the other range
+The route builds a print-optimized, self-contained 帳本報告 covering the exportable ledgers
+over an optional {from, to} range — the SAME RangeBody + 400 validation as the other range
 exports (from > to -> validation_error / field=from). Exports are user actions -> audited by
 the 系統操作記錄 middleware (匯出報表).
+
+How many sections that is, and that it tracks the registry, is asserted in
+`test_export_ledger_list.py`. This line named a count until 2026-08-16 and was wrong by one.
 """
 
 from fastapi.testclient import TestClient
