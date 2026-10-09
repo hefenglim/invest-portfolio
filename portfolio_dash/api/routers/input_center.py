@@ -129,6 +129,7 @@ from portfolio_dash.data_ingestion.validate import (
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
+from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
 from portfolio_dash.shared.image_types import is_supported_image
 from portfolio_dash.shared.ledger_events import EventPriority
@@ -448,6 +449,16 @@ def input_holdings(
         "SELECT DISTINCT symbol FROM dividends WHERE account_id=? AND date<=?", (account, day)
     ):
         symbols.add(row["symbol"])
+    # Options spec §4.3 (W7b cross test): an OPTION_ADJUST hands the position to a contract
+    # that may have no row of its own yet — the adjusted short is exactly what the owner closes
+    # next, so it must be in the picker with its direction and 口數. Scoped to OPTION_ADJUST so
+    # a stock ledger's payload is unchanged (invariant 1).
+    for row in conn.execute(
+        "SELECT DISTINCT to_symbol FROM corporate_actions "
+        "WHERE account_id=? AND date<=? AND kind=?",
+        (account, day, CorporateActionKind.OPTION_ADJUST.value),
+    ):
+        symbols.add(row["to_symbol"])
     registry = {i.symbol: i for i in list_instruments(conn)}
     names = {s: i.name for s, i in registry.items()}
     avg_map: dict[tuple[str, str], Decimal] | None = None  # built once, on first held row
