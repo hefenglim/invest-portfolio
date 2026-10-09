@@ -18,6 +18,13 @@ X1 (owner ruling 2026-10-05): a dividend the replay refused is listed in 股利�
 「未入帳（待釐清）」, its reason (the replay's own sentence) printed under the table, and it is
 LEFT OUT of 淨額合計 — it is in the ledger, but in no balance, return or total. One replay per
 report (``portfolio.returns.replay_dividend_refusals``) over the rows the report already read.
+
+Options (spec §9, §6.1): an option trade row prints its 口數 beside the share-equivalents
+(「200（2 口）」) and its §6.1 side chip (賣出開倉 / 買進平倉 / 到期作廢 …) in place of the bare
+買／賣 — the ONE classifier walk per report (``portfolio.cash.option_sides_of``), never per row.
+A close the replay refuses (§4.4) reads 「未入帳（待釐清）」, with the remedy listed under the
+table. ``OPTION_ADJUST`` rows are in 公司行動 as 「選擇權合約調整」 (``KIND_ZH``). A stock row is
+printed exactly as before.
 """
 
 import sqlite3
@@ -52,7 +59,7 @@ from portfolio_dash.export.report_html import (
     _page_header,
     _version_line,
 )
-from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE, option_sides_of
 from portfolio_dash.portfolio.returns import DividendRefusals, replay_dividend_refusals
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH, movement_sign
@@ -60,6 +67,13 @@ from portfolio_dash.shared.corporate_actions import KIND_ZH
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.ledger import dividend_effective_date, pending_from
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import (
+    REFUSED_CLOSE_REMEDY,
+    UNIT_CONTRACT,
+    OptionSide,
+    shares_to_contracts,
+)
+from portfolio_dash.shared.wire import decimal_str
 
 _ZERO = Decimal("0")
 _DIV_TYPE_ZH = {"CASH": "現金", "STOCK": "配股", "DRIP": "DRIP", "NET": "淨額"}
@@ -119,6 +133,15 @@ def _side_chip(side_value: str, *, daytrade: bool = False, short_sale: bool = Fa
     if short_sale:
         out += ' <span class="chip">放空</span>'
     return out
+
+
+def _option_side_chip(side_value: str, option_side: str) -> str:
+    """An option row's §6.1 chip — the server label IS the text (OPT-D15); the 放空 chip is
+    not repeated, because 賣出開倉 already says it. A refused close takes no 買/賣 colour."""
+    if option_side == OptionSide.UNBOOKED.value:
+        return f'<span class="chip unbooked">{_esc(option_side)}</span>'
+    cls = "buy" if side_value.upper() == "BUY" else "sell"
+    return f'<span class="chip {cls}">{_esc(option_side)}</span>'
 
 
 def _totals_line(label: str, totals: dict[str, Decimal]) -> str:
@@ -189,10 +212,15 @@ def _transactions_section(
     frm: str | None,
     to: str | None,
     today: date,
+    option_side_of: dict[int, str] | None = None,
 ) -> str:
+    """*option_side_of*: the §6.1 label of every option row, by ``transactions.id`` — one
+    classifier walk per report; empty (no walk) on a ledger with no option."""
+    sides = option_side_of or {}
     rows: list[str] = []
     net_totals: dict[str, Decimal] = {}
     count = 0
+    unbooked: list[str] = []
     for t in txs:
         if not _in_range(t.trade_date, frm, to):
             continue
@@ -204,14 +232,27 @@ def _transactions_section(
                  else t.quantity * t.price)
         net = -(gross + t.fees + t.tax) if t.side.value == "BUY" else (gross - t.fees - t.tax)
         _add(net_totals, ccy, net)
-        side = _side_chip(t.side.value, daytrade=t.daytrade, short_sale=t.short_sale)
+        option_side = sides.get(t.id)
+        shares = _fmt_shares(t.quantity)
+        opening = "<tr>"
+        if option_side is None:
+            side = _side_chip(t.side.value, daytrade=t.daytrade, short_sale=t.short_sale)
+        else:
+            side = _option_side_chip(t.side.value, option_side)
+            shares += (f"（{_esc(decimal_str(shares_to_contracts(t.quantity)))} "
+                       f"{_esc(UNIT_CONTRACT)}）")
+            if option_side == OptionSide.UNBOOKED.value:
+                opening = '<tr class="unbooked">'
+                unbooked.append(
+                    f'<p class="note">{_esc(t.trade_date.isoformat())}・{_esc(t.symbol)}・'
+                    f"{_esc(option_side)}：{_esc(REFUSED_CLOSE_REMEDY)}</p>")
         rows.append(
-            "<tr>"
-            f"{_date_cell(t.trade_date, today)}"
+            opening
+            + f"{_date_cell(t.trade_date, today)}"
             f'<td class="l">{_acct_label(t.account_id)}</td>'
             f"{_sym_cell(t.symbol, names.get(t.symbol, ''))}"
             f'<td class="l">{side}</td>'
-            f'<td class="num">{_fmt_shares(t.quantity)}</td>'
+            f'<td class="num">{shares}</td>'
             f'<td class="num">{_fmt_amount(t.price, ccy)}</td>'
             f'<td class="num">{_fmt_amount(t.fees, ccy)}</td>'
             f'<td class="num">{_fmt_amount(t.tax, ccy)}</td>'
@@ -225,9 +266,13 @@ def _transactions_section(
         '<th class="l">買賣</th><th>股數</th><th>價格</th><th>手續費</th>'
         "<th>交易稅</th><th>淨額</th></tr>"
     )
-    return _section(
-        "交易紀錄", count, head, "".join(rows), [_totals_line("淨現金流合計", net_totals)]
-    )
+    notes = [_totals_line("淨現金流合計", net_totals)]
+    if unbooked:
+        # §4.4: the replay booked nothing for these rows (price 0, so no cash either).
+        notes.append(f'<p class="note">其中 {len(unbooked)} 筆選擇權結算列標示「'
+                     f"{_esc(OptionSide.UNBOOKED.value)}」，帳本重算時無法入帳：</p>")
+        notes.extend(unbooked)
+    return _section("交易紀錄", count, head, "".join(rows), notes)
 
 
 def _dividends_section(
@@ -530,16 +575,21 @@ def build_ledgers_report_html(
     # Each ledger read ONCE: the sections list them, and X1's replay books them.
     txs, divs, opening = list_transactions(conn), list_dividends(conn), list_opening(conn)
     actions = list_corporate_actions(conn)
+    by_symbol = {i.symbol: i for i in insts}
     refusals = replay_dividend_refusals(load_ledger_bundle(
         conn, transactions=txs, dividends=divs, opening=opening, actions=actions,
-        instruments={i.symbol: i for i in insts}))
+        instruments=by_symbol))
+    # Options spec §6.1: ONE classifier walk over the whole stored ledger (the range filter
+    # applies to what is PRINTED, never to the walk); {} without an option, at no cost.
+    option_side_of = option_sides_of(txs, actions, by_symbol)
     # DEF-056: the report's valuation day — the SERVER clock, as the ledger lists' counts_from.
     today = now.date()
 
     body = "\n".join(
         [
             _header_html(now, frm, to),
-            _transactions_section(txs, names, ccys, frm, to, today),
+            _transactions_section(txs, names, ccys, frm, to, today,
+                                  option_side_of=option_side_of),
             _dividends_section(divs, names, ccys, frm, to, today, refusals=refusals),
             _fx_section(list_fx_conversions(conn), frm, to, today),
             _openings_section(opening, names, ccys, frm, to, today),

@@ -12,7 +12,15 @@ stylesheet is inline (zero external assets) so the file opens offline and prints
 (A4, page-break-safe).
 
 Document sections: header (nature statement + version) → KPI 摘要 → 持倉明細表 (one row per
-account×symbol, weight desc, TOTAL row) → 配置 (sector + currency allocation) → footer.
+account×symbol, weight desc, TOTAL row) → [選擇權] → 配置 (sector + currency allocation) →
+footer.
+
+Options (spec §9, §7.1): ONLY when ``data.options`` is present, the KPI cards that include the
+open contracts (總市值 / 未實現 / 已實現 — OPT-D5) each print a 「其中選擇權」 line, and a 選擇權
+section follows the 持倉明細表: 未平倉 (sorted by days to expiry, as the block is),
+「履約義務合計」, the refused closes marked 「未入帳（待釐清）」 with the remedy, 已實現 by
+contract, and the R3 / OPT-D20 notes — every figure the block's own. The 持倉明細表 and 配置
+stay stock-only, as on the dashboard. A stock ledger's report is byte-identical (spec §10).
 """
 
 import sqlite3
@@ -20,6 +28,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from portfolio_dash.export.artifact import ExportArtifact
+from portfolio_dash.export.holdings import option_contracts, option_rows_matching
 from portfolio_dash.export.report_html import (
     _NULL,
     _amount_ccy,
@@ -37,10 +46,23 @@ from portfolio_dash.portfolio.dashboard_models import (
     DashboardData,
     HoldingRow,
     HoldingSubtotal,
+    OptionMoney,
+    OptionOpenRow,
+    OptionsBlock,
 )
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
+from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.options import (
+    DIRECTION_ZH,
+    OBLIGATION_ZH,
+    REFUSED_CLOSE_REMEDY,
+    RIGHT_ZH,
+    STRIKE_ZH,
+    OptionSide,
+)
+from portfolio_dash.shared.wire import decimal_str
 
 _ZERO = Decimal("0")
 
@@ -143,9 +165,14 @@ def _kpi_html(data: DashboardData, reporting_ccy: str, *, filtered: bool = False
     「（全組合）」 to make clear this section is NOT filtered (only the 持倉明細表 below is)."""
     heading = "KPI 摘要（全組合）" if filtered else "KPI 摘要"
     k = data.kpis
-    cards: list[tuple[str, str]] = []
+    opts = data.options
+    # (label, value, 「其中選擇權」 part or None). The part is set ONLY on an option ledger and
+    # only on the three totals that include the open contracts (OPT-D5), so a stock ledger's
+    # cards render exactly as before.
+    cards: list[tuple[str, str, OptionMoney | None]] = []
     if k.total_market_value is not None:
-        cards.append(("總市值", _amount_ccy(k.total_market_value, reporting_ccy)))
+        cards.append(("總市值", _amount_ccy(k.total_market_value, reporting_ccy),
+                      opts.market_value if opts is not None else None))
     if k.total_return is not None:
         rate = _fmt_pct(k.total_return_rate) if k.total_return_rate is not None else _NULL
         # AI-D41 (owner ruling 2026-08-24): ``total_return`` is figure A — each currency's
@@ -153,20 +180,25 @@ def _kpi_html(data: DashboardData, reporting_ccy: str, *, filtered: bool = False
         # 「總報酬」 read as one grand total and invited the reader to add the 換匯損益 card
         # to it, which double-counts the cross term. The honest name says what it excludes.
         cards.append((_TOTAL_RETURN_LABEL,
-                      f"{_amount_ccy(k.total_return, reporting_ccy)}（{rate}）"))
+                      f"{_amount_ccy(k.total_return, reporting_ccy)}（{rate}）", None))
     if k.xirr is not None:
-        cards.append(("年化 XIRR", _fmt_pct(k.xirr)))
+        cards.append(("年化 XIRR", _fmt_pct(k.xirr), None))
     if k.unrealized_total is not None:
-        cards.append(("未實現損益", _amount_ccy(k.unrealized_total, reporting_ccy)))
+        cards.append(("未實現損益", _amount_ccy(k.unrealized_total, reporting_ccy),
+                      opts.unrealized if opts is not None else None))
     if k.realized_total is not None:
-        cards.append(("已實現損益", _amount_ccy(k.realized_total, reporting_ccy)))
+        cards.append(("已實現損益", _amount_ccy(k.realized_total, reporting_ccy),
+                      opts.realized.realized_total if opts is not None else None))
     if not cards:
         return (f'<section><h2>{_esc(heading)}</h2>'
                 '<p class="note">目前無可用的績效指標。</p></section>')
     grid = "".join(
         f'<div class="kv"><span class="k">{_esc(label)}</span>'
-        f'<span class="v num">{value}</span></div>'
-        for label, value in cards
+        f'<span class="v num">{value}</span>'
+        + ("" if part is None else
+           f'<span class="k">其中選擇權 {_amount_ccy(part.reporting, reporting_ccy)}</span>')
+        + "</div>"
+        for label, value, part in cards
     )
     note = f'<p class="note">{_esc(_FIGURE_A_NOTE)}</p>' if k.total_return is not None else ""
     return (f'<section><h2>{_esc(heading)}</h2>'
@@ -265,6 +297,135 @@ def _holdings_table_html(
         '<p class="note">市值（報告幣）依生成當下匯率換算；缺價或缺匯率的欄位以「—」標示，'
         "並排除於合計之外。</p></section>"
     )
+
+
+# --- 選擇權 (options spec §7.1 / §9) -------------------------------------------------------
+
+#: The badge of a contract held open past its expiry (§7.1) — the inbox prompts it (§7.2).
+_PAST_EXPIRY_BADGE = "已過到期日・待登錄"
+
+
+def _open_row_html(r: OptionOpenRow, ccy: str) -> str:
+    badges: list[str] = []
+    if r.past_expiry:
+        badges.append(_PAST_EXPIRY_BADGE)
+    if r.unbookable_close:
+        badges.append(OptionSide.UNBOOKED.value)
+    if r.oversold:
+        badges.append(OptionSide.STC_OVERSOLD.value)
+    chips = "".join(f'<br><span class="chip">{_esc(b)}</span>' for b in badges)
+    strike = _fmt_amount(r.strike, ccy)
+    if r.underlying_price is not None:
+        when = (f" · {_esc(r.underlying_price_date.isoformat())}"
+                if r.underlying_price_date is not None else "")
+        strike += f"（{_fmt_amount(r.underlying_price, ccy)}{when}）"
+    return (
+        "<tr>"
+        f'<td class="l"><span class="sym-code">{_esc(r.contract)}</span>'
+        f'<span class="sym-name">{_esc(RIGHT_ZH.get(r.right, r.right))}</span>{chips}</td>'
+        f'<td class="l">{_esc(account_ref(r.account_id))}</td>'
+        f'<td class="l">{_esc(DIRECTION_ZH.get(r.direction, r.direction))} '
+        f"{_esc(decimal_str(r.contracts))} 口</td>"
+        f'<td class="num">{_esc(r.days_to_expiry)}</td>'
+        f'<td class="num">{strike}</td>'
+        f'<td class="num">{_fmt_amount(r.premium_total, ccy)}</td>'
+        f'<td class="num">{_amount_ccy(r.unrealized, ccy)}</td>'
+        f'<td class="num">{_fmt_amount(r.obligation, ccy)}</td>'
+        "</tr>"
+    )
+
+
+def _money_parts(money: OptionMoney, reporting_ccy: str) -> str:
+    """「−400.00 USD（−12,800 TWD）」 — each currency, then the reporting total when formed."""
+    parts = "　·　".join(_amount_ccy(v, c.value) for c, v in money.by_currency.items())
+    if not parts:
+        return _NULL
+    if money.by_currency and list(money.by_currency) != [Currency(reporting_ccy)]:
+        parts += f"（{_amount_ccy(money.reporting, reporting_ccy)}）"
+    return parts
+
+
+def _options_html(
+    block: OptionsBlock,
+    contracts: dict[str, Instrument],
+    reporting_ccy: str,
+    *,
+    account: str | None,
+    market: Market | None,
+) -> str:
+    """The 選擇權 section — the block's own figures, filtered like the 持倉明細表.
+
+    The block's totals (市值 / 未實現 / 已實現) are whole-portfolio, so under a filter they are
+    annotated 「（全組合）」 exactly like the KPI section; 「履約義務合計」 is per account and
+    follows the account filter."""
+    filtered = account is not None or market is not None
+    whole = "（全組合）" if filtered else ""
+    ccy_of = {s: i.quote_ccy.value for s, i in contracts.items()}
+    rows = option_rows_matching(block, contracts, account, market)
+    parts: list[str] = ["<section><h2>選擇權</h2>"]
+    if rows:
+        head = (
+            '<tr><th class="l">合約</th><th class="l">帳戶</th><th class="l">方向／口數</th>'
+            f"<th>剩餘天數</th><th>{_esc(STRIKE_ZH)}（標的現價）</th><th>已收權利金</th>"
+            f"<th>未實現</th><th>{_esc(OBLIGATION_ZH)}</th></tr>"
+        )
+        body = "".join(_open_row_html(r, ccy_of.get(r.symbol, "USD")) for r in rows)
+        parts.append(f"<h3 style=\"font-size:13px;margin:14px 0 4px\">未平倉</h3>"
+                     f"<table><thead>{head}</thead><tbody>{body}</tbody></table>")
+    else:
+        empty = "篩選範圍內無未平倉合約" if filtered else "目前無未平倉合約"
+        parts.append(f'<p class="note">{_esc(empty)}</p>')
+    obligations = [s for s in block.obligation_subtotals
+                   if account is None or s.account_id == account]
+    if rows and obligations:
+        listed = "　·　".join(
+            f"{_esc(account_ref(s.account_id))} {_amount_ccy(s.amount, s.ccy.value)}"
+            for s in obligations)
+        parts.append(f'<p class="note">{_esc(OBLIGATION_ZH)}合計：{listed}</p>')
+    parts.append(
+        f'<p class="note">選擇權市值{whole}：{_money_parts(block.market_value, reporting_ccy)}'
+        f"　·　未實現{whole}：{_money_parts(block.unrealized, reporting_ccy)}</p>")
+    refused = [c for c in block.refused_closes
+               if (account is None or c.account_id == account)
+               and (market is None or (c.symbol in contracts
+                                       and contracts[c.symbol].market == market))]
+    for c in refused:
+        parts.append(
+            f'<p class="warn">{_esc(OptionSide.UNBOOKED.value)}：{_esc(c.date.isoformat())}・'
+            f"{_esc(account_ref(c.account_id))}・{_esc(c.symbol)}・{_esc(c.reason)}"
+            f"（{_esc(c.remedy or REFUSED_CLOSE_REMEDY)}）</p>")
+    realized = [r for r in block.realized.by_contract
+                if (account is None or r.account_id == account)
+                and (market is None or (r.symbol in contracts
+                                        and contracts[r.symbol].market == market))]
+    if realized:
+        head = (
+            '<tr><th class="l">合約</th><th class="l">帳戶</th><th>開倉</th><th>平倉</th>'
+            '<th class="l">方式</th><th>權利金收入</th><th>權利金支出</th><th>已實現</th></tr>'
+        )
+        body = "".join(
+            "<tr>"
+            f'<td class="l">{_esc(r.contract)}</td>'
+            f'<td class="l">{_esc(account_ref(r.account_id))}</td>'
+            f'<td class="num">{_esc(r.opened.isoformat()) if r.opened else _NULL}</td>'
+            f'<td class="num">{_esc(r.closed.isoformat()) if r.closed else _NULL}</td>'
+            f'<td class="l">{_esc(r.closed_how or "未平倉")}</td>'
+            f'<td class="num">{_fmt_amount(r.premium_in, r.ccy.value)}</td>'
+            f'<td class="num">{_fmt_amount(r.premium_out, r.ccy.value)}</td>'
+            f'<td class="num">{_amount_ccy(r.realized, r.ccy.value)}</td>'
+            "</tr>"
+            for r in realized)
+        parts.append(f"<h3 style=\"font-size:13px;margin:16px 0 4px\">已實現（依合約）</h3>"
+                     f"<table><thead>{head}</thead><tbody>{body}</tbody></table>")
+    parts.append(
+        f'<p class="note">選擇權已實現合計{whole}：'
+        f"{_money_parts(block.realized.realized_total, reporting_ccy)}"
+        "（不計入上方持倉明細表，已含於 KPI 已實現損益）</p>")
+    for note in (block.note, block.principal_fx_note):
+        if note:
+            parts.append(f'<p class="note">{_esc(note)}</p>')
+    parts.append("</section>")
+    return "".join(parts)
 
 
 # --- 配置 ---------------------------------------------------------------------------------
@@ -376,16 +537,22 @@ def build_holdings_report_html(
     else:
         header_total = data.kpis.total_market_value
 
-    body = "\n".join(
-        [
-            _header_html(now, reporting_ccy, header_total, filter_label),
-            _kpi_html(data, reporting_ccy, filtered=filtered),
-            _holdings_table_html(data, resolver, reporting, reporting_ccy,
-                                 account=account, market=market),
-            _allocation_html(data, reporting_ccy, filtered=filtered),
-            _footer_html(),
-        ]
-    )
+    sections = [
+        _header_html(now, reporting_ccy, header_total, filter_label),
+        _kpi_html(data, reporting_ccy, filtered=filtered),
+        _holdings_table_html(data, resolver, reporting, reporting_ccy,
+                             account=account, market=market),
+    ]
+    if data.options is not None:
+        # Options spec §7.1: the section sits after 持倉明細; on a stock ledger it does not
+        # exist at all (no empty section, no extra newline) — spec §10's byte identity.
+        sections.append(_options_html(data.options, option_contracts(conn), reporting_ccy,
+                                      account=account, market=market))
+    sections += [
+        _allocation_html(data, reporting_ccy, filtered=filtered),
+        _footer_html(),
+    ]
+    body = "\n".join(sections)
     filename = f"holdings-report-{now.strftime('%Y%m%d-%H%M')}.html"
     return ExportArtifact(
         filename, "text/html; charset=utf-8", _document("持倉報告", body).encode("utf-8")

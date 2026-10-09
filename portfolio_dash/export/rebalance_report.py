@@ -13,6 +13,12 @@ there are zero external assets/fonts/scripts, so the file opens offline and prin
 Document sections: header (nature statement + version) → 摘要表（依標的）→ 執行清單（依帳戶）
 → 彙總 → footer. Empty/on-target previews still render a valid document with a
 「目前無需任何交易」notice.
+
+Options (spec §9, OPT-D10): the report excludes options. The preview rows already do
+(``strategy.rebalance`` sizes against stocks only and refuses a contract target), and the
+header's total is the one the weights are sized against — the STOCK market value
+(``strategy.stock_scope.stock_market_value``), which on a ledger with no option IS the KPI
+總市值; on an option ledger the line says 「（不含選擇權）」.
 """
 
 import sqlite3
@@ -36,6 +42,7 @@ from portfolio_dash.export.report_html import (
 from portfolio_dash.portfolio.dashboard import build_dashboard
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.strategy.rebalance import compute_rebalance
+from portfolio_dash.strategy.stock_scope import stock_market_value
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -139,15 +146,17 @@ def _parse_rows(
 # --- HTML sections ------------------------------------------------------------------------
 
 
-def _header_html(now: datetime, reporting_ccy: str, total_mv: Decimal | None) -> str:
+def _header_html(now: datetime, reporting_ccy: str, total_mv: Decimal | None,
+                 *, excludes_options: bool = False) -> str:
     gen = now.strftime("%Y-%m-%d %H:%M")  # minute precision, generation wall-clock
     nature = (
         "本報告為試算結果，不寫入帳本；股數、金額與費稅以生成當下之市價與匯率計算，"
         "實際成交將隨市場變動。"
     )
+    label = "投資組合總市值（不含選擇權）" if excludes_options else "投資組合總市值"
     meta = [
         f"生成時間 {_esc(gen)}",
-        f"報告幣別 {_esc(reporting_ccy)}　·　投資組合總市值 "
+        f"報告幣別 {_esc(reporting_ccy)}　·　{label} "
         f"{_amount_ccy(total_mv, reporting_ccy)}",
         _version_line(),
     ]
@@ -334,7 +343,10 @@ def build_rebalance_report_html(
 
     body = "\n".join(
         [
-            _header_html(now, reporting_ccy, data.kpis.total_market_value),
+            # OPT-D10: the total the weights are sized against — the stock MV (the KPI 總市值
+            # on a ledger with no option, byte for byte).
+            _header_html(now, reporting_ccy, stock_market_value(data),
+                         excludes_options=data.options is not None),
             _summary_table_html(rows),
             _execution_html(rows),
             _totals_html(
