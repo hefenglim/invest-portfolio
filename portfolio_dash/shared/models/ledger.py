@@ -324,7 +324,10 @@ class LedgerBundle:
         deciding a refusal needs the replay; the replay then refuses the dividend on the book.
         Pinned by ``tests/contract/test_r5_r9_orphan_per_dividend.py``.
         """
-        opened_by = (CorporateActionKind.EXCHANGE, CorporateActionKind.SPINOFF)
+        # OPTION_ADJUST (options spec §4.3) lands the source's lots on its destination, as an
+        # EXCHANGE does — the replay's rule, and `holdings.position_exists_by`'s.
+        opened_by = (CorporateActionKind.EXCHANGE, CorporateActionKind.SPINOFF,
+                     CorporateActionKind.OPTION_ADJUST)
         known = self.instruments.keys()
         return (any(o.account_id == account_id and o.symbol == symbol and o.build_date <= day
                     for o in self.opening)

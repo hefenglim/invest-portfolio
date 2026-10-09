@@ -137,38 +137,5 @@ def test_cash_lines_carry_the_trade_id_and_no_label() -> None:
     assert plain.txn_id is None and plain.option_side is None
 
 
-def _adjust_bundle() -> object:
-    from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
-    from portfolio_dash.shared.enums import Market
-    from portfolio_dash.shared.models.assets import Instrument
-    from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
-
-    src, dst = "XYZ261218P00060000", "XYZ261218P00020000"
-    insts = {s: Instrument(symbol=s, market=Market.US, quote_ccy=Currency.USD, sector="",
-                           name=s, asset_type="option") for s in (src, dst)}
-    sto = Transaction(id=1, account_id="schwab", symbol=src, side=Side.SELL,
-                      quantity=Decimal(100), price=Decimal(2), fees=Decimal("0.65"),
-                      tax=Decimal(0), trade_date=date(2026, 3, 2), short_sale=True)
-    adj = CorporateAction(account_id="schwab", date=date(2026, 6, 1),
-                          kind=CorporateActionKind.OPTION_ADJUST, from_symbol=src,
-                          to_symbol=dst, ratio_to=Decimal(3), ratio_from=Decimal(1), id=5)
-    return LedgerBundle(transactions=[sto], instruments=insts, actions=[adj])
-
-
-def test_until_w2_the_replay_refuses_an_option_adjust() -> None:
-    """W1 placeholder: the kind exists, the replay refuses it like any unapplicable action —
-    never a silent EXCHANGE-style move (W2 replaces this with the §4.3 transfer)."""
-    import pytest
-
-    from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
-    from portfolio_dash.shared.models.ledger import LedgerBundle
-
-    bundle = _adjust_bundle()
-    assert isinstance(bundle, LedgerBundle)
-    book = build_book(bundle, allow_oversell=True)
-    (ua,) = book.unapplied_actions
-    assert ua.action_id == 5 and "尚未支援" in ua.reason
-    assert [(h.symbol, h.shares) for h in book.holdings] == [
-        ("XYZ261218P00060000", Decimal(-100))]
-    with pytest.raises(UnbookableLedgerError, match="尚未支援"):
-        build_book(bundle)
+# The W1 placeholder test (the replay refused OPTION_ADJUST with 「尚未支援」) was replaced by the
+# real §4.3 tests in ``tests/portfolio/test_options_w2_replay.py`` (W2).

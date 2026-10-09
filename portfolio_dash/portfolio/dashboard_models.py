@@ -230,6 +230,11 @@ class TrendSeries(BaseModel):
     points: list[TrendPoint]
     reporting_currency: Currency
     available: bool = True
+    # Options spec §5 / R3: True when at least one day skipped an open option contract's value
+    # (the trend excludes it WITHOUT marking the day incomplete). ``exclude=True`` — never on
+    # the wire (the golden payload is unchanged); the dashboard copies it into
+    # ``options.trend_excludes_value``, the one place the note is published.
+    options_value_excluded: bool = Field(default=False, exclude=True)
 
 
 class PriceFreshness(BaseModel):
@@ -410,10 +415,13 @@ class OptionOpenRow(BaseModel):
     average_premium: Decimal
     premium_total: Decimal
     #: R2: the last ordinary trade's price (never a quote, never written to ``prices``).
-    last_price: Decimal
-    last_price_date: date
-    market_value: Decimal
-    unrealized: Decimal
+    #: ``None`` only on a degenerate ledger with no ordinary trade behind the position.
+    last_price: Decimal | None = None
+    last_price_date: date | None = None
+    #: ``None`` when the position is 待釐清 (賣超 / a refused close — ``pnl.value_holdings``
+    #: suppresses it exactly as it does a stock) or has no last price.
+    market_value: Decimal | None = None
+    unrealized: Decimal | None = None
     #: A sold put's strike × 100 × contracts; ``None`` otherwise.
     obligation: Decimal | None = None
     #: OPT-D17 — the registered underlying's latest price and its date; both keys are
@@ -422,6 +430,10 @@ class OptionOpenRow(BaseModel):
     underlying_price_date: date | None = None
     past_expiry: bool = False
     unbookable_close: bool = False
+    #: 賣超 (an undeclared sell beyond the long lot — ``Holding.oversold``): the count is
+    #: negative but this is NOT a sold contract, and its value is 待釐清. Added in W2 beyond the
+    #: §7.1 list because a contract has no ``holdings`` row to wear the stock 賣超 badge.
+    oversold: bool = False
 
     @model_serializer(mode="wrap")
     def _omit_unpriced_underlying(self, handler: SerializerFunctionWrapHandler) -> Any:

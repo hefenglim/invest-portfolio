@@ -44,16 +44,28 @@ from portfolio_dash.portfolio.dashboard_models import (
     HoldingRow,
     HoldingSubtotal,
     KpiSummary,
+    OptionsBlock,
     PriceFreshness,
     TrendSeries,
 )
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
+from portfolio_dash.portfolio.options import (
+    has_open_option,
+    last_trade_prices,
+    ledger_has_options,
+    option_summary,
+    option_symbols,
+    split_holdings,
+    stock_realized,
+)
 from portfolio_dash.portfolio.pnl import value_holdings
 from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.results import (
+    Book,
     CombinedView,
     OversoldPosition,
+    RefusedClose,
     ReturnSummary,
     SectorAllocation,
     UnappliedAction,
@@ -89,6 +101,7 @@ from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import (
     Dividend,
@@ -96,6 +109,7 @@ from portfolio_dash.shared.models.ledger import (
     LedgerBundle,
     valued_rows_as_of,
 )
+from portfolio_dash.shared.options import contract_name
 from portfolio_dash.shared.sectors import canonical_sector
 
 _ZERO = Decimal("0")
@@ -453,6 +467,21 @@ def _orphan_dividend_reason(dividends: list[Dividend]) -> str:
             " — 該帳戶在股利日之前沒有買進或期初庫存，股利未入帳，無法計算 XIRR")
 
 
+def _refused_close_reason(closes: Sequence[RefusedClose]) -> str:
+    """The XIRR badge's zh explanation when the book refused option close rows (options spec
+    §4.4): the contract, account and date of each row, capped by :func:`_named_capped`.
+
+    XIRR is withheld rather than computed without them for the orphan-dividend reason: a close
+    the replay cannot book means the ledger is missing the trade it closes (or carries a close
+    against the wrong side), so a figure over the rest is the return of a DIFFERENT ledger."""
+    named = _named_capped(
+        closes,
+        lambda c: (f"{contract_name(c.symbol) or c.symbol}（{account_ref(c.account_id)}・"
+                   f"{c.date.isoformat()}）"))
+    return (f"帳本中有 {len(closes)} 筆選擇權到期作廢／被指派／履約列無法入帳（待釐清）：{named}"
+            " — 該列沒有可結清的部位，無法計算 XIRR")
+
+
 #: The cause word each ``UnbookableDividend.cause`` reads as inside a reason sentence.
 _UNBOOKABLE_CAUSE_ZH = {"short": "放空中", "vacated": "已換股"}
 
@@ -490,6 +519,7 @@ def fx_complete_return(
     trend: TrendSeries, *, has_oversold: bool, has_unapplied_action: bool,
     has_orphan_dividend: bool = False,
     unbookable_dividends: Sequence[UnbookableDividend] = (),
+    refused_closes: Sequence[RefusedClose] = (),
 ) -> FxCompleteOutcome:
     """B of the A · B · B−A decomposition — the FX-COMPLETE lifetime result (AI-D41).
 
@@ -507,7 +537,9 @@ def fx_complete_return(
     if not trend.available or not trend.points:
         return FxCompleteOutcome(None, "尚無趨勢資料，無法計算含匯兌損益")
     last = trend.points[-1]
-    if last.incomplete:
+    # Options spec §4.4: a refused close withholds B like XIRR — from the BOOK's record, so it
+    # holds even if the trend's last day were somehow complete. Empty on a ledger without one.
+    if last.incomplete or refused_closes:
         # WHICH kind of incomplete (F-13, 2026-08-27). `TrendPoint.incomplete` is set by five
         # different causes — a missing price, a 賣超 position, an unbookable dividend, an
         # unapplied corporate action, a whole-book action failure — and this reason named only
@@ -525,6 +557,7 @@ def fx_complete_return(
         why = ("帳本中有賣超部位待釐清" if has_oversold
                else "帳本中有公司行動無法套用（待釐清）" if has_unapplied_action
                else "帳本中有股利沒有對應持倉（待釐清）" if has_orphan_dividend
+               else "帳本中有選擇權到期作廢／被指派／履約列無法入帳（待釐清）" if refused_closes
                else _unbookable_dividend_why(unbookable_dividends) if unbookable_dividends
                else "最新一日有標的缺價")
         return FxCompleteOutcome(
@@ -656,6 +689,12 @@ def build_dashboard(
     unregistered = bundle.unregistered_symbols
     if unregistered:
         bundle = bundle.without_unregistered()
+    # Options spec §7.1: the 選擇權 block exists iff the UNCUT ledger carries a trade or an
+    # action on an option contract — decided BEFORE the valuation cut below, so a contract
+    # traded after the valuation day still shows its (empty) section. On every other ledger
+    # `has_options` is False and every option branch below is skipped outright (invariant 1:
+    # no `+ Decimal(0)`, the stock path runs untouched).
+    has_options = ledger_has_options(bundle)
     # 1c. Every row counts from its OWN date (DEF-016 for dividends, widened to trades,
     # openings, FX conversions and corporate actions by DEF-056 — owner rulings 2026-09-24).
     # A confirmed payout is stored on its payment date and a trade may be entered ahead of
@@ -710,7 +749,11 @@ def build_dashboard(
     # (nothing is flagged at all). `any(h.unbookable_action ...)` is False in both, and the
     # XIRR terminal value is wrong in all three. See Book.unapplied_actions (audit F-47/F-49).
     unapplied_actions = book.unapplied_actions
-    held_symbols = sorted({h.symbol for h in book.holdings})
+    # Options spec §5: a contract is never quoted, so it never enters `price_reads` — nor,
+    # therefore, `freshness.prices`, `missing_prices` or `any_stale` — nor the ex-dividend
+    # calendar below (OPT-D10). Empty without an option, so `held_symbols` is unchanged.
+    opt_syms = option_symbols(instruments) if has_options else frozenset()
+    held_symbols = sorted({h.symbol for h in book.holdings if h.symbol not in opt_syms})
     price_reads: dict[str, PriceRead | None] = {
         sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
     }
@@ -733,7 +776,19 @@ def build_dashboard(
         sym: price_in(actions, sym, pr.value, priced_on=pr.as_of, valued_on=as_of)
         for sym, pr in price_reads.items() if pr is not None
     }
+    # R2 (options spec §5): an open contract is valued at its last ordinary trade. It joins
+    # `price_map` — the ONE dict both `value_holdings` and XIRR's terminal value read, so the
+    # open liability is in both — and never `price_reads` (no freshness) nor `prices`.
+    last_trades = last_trade_prices(bundle, as_of) if has_options else {}
+    for h in book.holdings:
+        if h.symbol in opt_syms and h.symbol in last_trades:
+            price_map[h.symbol] = last_trades[h.symbol].price
     valued = value_holdings(book.holdings, price_map)
+    # OPT-D5: holdings, weights, allocation, subtotals, the ex-dividend projection and the
+    # `realized` section are STOCK-ONLY, fed to the SAME functions as before; the KPI totals,
+    # total return A, XIRR and the FX pool's exposure read every position. Without an option
+    # the stock list IS `valued` — the same object, not an equal copy.
+    valued_stocks = split_holdings(valued, opt_syms)[0] if has_options else valued
 
     resolver = RateResolver(conn, now=now)
 
@@ -759,12 +814,13 @@ def build_dashboard(
         for sym, inst in instruments.items()
     }
     try:
-        allocation = sector_allocation(valued, alloc_instruments, resolver.rate, reporting)
+        allocation = sector_allocation(valued_stocks, alloc_instruments, resolver.rate,
+                                       reporting)
     except KeyError:
         allocation = None
     view: CombinedView | None
     try:
-        view = combined_view(valued, resolver.rate, reporting)
+        view = combined_view(valued_stocks, resolver.rate, reporting)
     except KeyError:
         view = None
 
@@ -819,6 +875,10 @@ def build_dashboard(
         # unapplied-action reasoning directly above — so the figure is withheld and the rows
         # are named, rather than computed with the payout silently left out.
         xirr_reason = _orphan_dividend_reason(orphan_dividends)
+    elif book.refused_closes:
+        # Options spec §4.4: a close row the replay refused — the record, like the orphan
+        # dividends above (it may have no position to flag). Named per row.
+        xirr_reason = _refused_close_reason(book.refused_closes)
     else:
         try:
             outcome = xirr_reporting(
@@ -953,14 +1013,14 @@ def build_dashboard(
     # 7b. Dividend projection (spec 05) — current-year declared cash flow, per-account
     # net (withholding only), per currency, never summed across currencies.
     dividend_projection: DividendProjection = project_dividends(
-        valued, calendar, accounts, instruments, year=as_of.year
+        valued_stocks, calendar, accounts, instruments, year=as_of.year
     )
 
     # 8. Holding rows — enrichment + weight; age-based staleness overrides
     # value_holdings' presence-based flag.
     total_value = view.reporting_total_value if view is not None else None
     holding_rows: list[HoldingRow] = []
-    for h in valued:
+    for h in valued_stocks:
         inst = instruments[h.symbol]
         acct = accounts[h.account_id]
         pr = price_reads.get(h.symbol)
@@ -1096,16 +1156,39 @@ def build_dashboard(
         trend, has_oversold=has_oversold,
         has_unapplied_action=bool(unapplied_actions),
         has_orphan_dividend=bool(orphan_dividends),
-        unbookable_dividends=book.unbookable_dividends)
+        unbookable_dividends=book.unbookable_dividends,
+        refused_closes=book.refused_closes)
     fx_complete = fx_outcome.value
     # AI-D48 made B − A a TWO-term difference, so the third term is subtracted out rather
     # than left inside 「本金匯率效果」 — a residual that quietly absorbs whatever joins B next
     # is the same mislabelling AI-D48 removed, one field over. B = A + 本金匯率 + 交易與融資成本.
     trading_cost = trading_financing_cost(cash_movements, trend_fx_history, reporting)
+    # OPT-D20: while an option is open, B (trend-derived) excludes its value and A includes its
+    # unrealized, so B − A would absorb the option's value as "FX effect" — withheld, with the
+    # reason in `options.principal_fx_note`. Never reached without an option.
+    option_open = has_options and has_open_option(book.holdings, opt_syms)
     principal_fx = (
-        None if fx_complete is None or total_return_blended is None or trading_cost is None
+        None if (fx_complete is None or total_return_blended is None or trading_cost is None
+                 or option_open)
         else fx_complete - total_return_blended - trading_cost
     )
+    # Options spec §7.1: the block, from this request's ONE replay and ONE valuation.
+    options_block: OptionsBlock | None = None
+    if has_options:
+        options_block = option_summary(
+            book=book, valued=valued, bundle=bundle, last_trades=last_trades,
+            underlying_prices=_underlying_prices(conn, book, opt_syms, instruments, actions,
+                                                 now=now, as_of=as_of),
+            fx_rate=resolver.rate, reporting=reporting, as_of=as_of,
+            trend_excludes_value=trend.options_value_excluded)
+    # KPI 總市值 (OPT-D5): the stock grand subtotal plus the options' reporting value — the
+    # addition is SKIPPED (not `+ 0`) on a ledger without an option, and degrades to None when
+    # either half cannot be formed (the all-or-nothing FX rule).
+    kpi_market_value = total_value
+    if options_block is not None:
+        option_mv = options_block.market_value.reporting
+        kpi_market_value = (None if total_value is None or option_mv is None
+                            else total_value + option_mv)
     # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
     benchmark = _benchmark_comparison(
         conn, bundle, trend_fx_history, reporting,
@@ -1118,7 +1201,7 @@ def build_dashboard(
     )
     kpis = KpiSummary(
         reporting_currency=reporting,
-        total_market_value=total_value,
+        total_market_value=kpi_market_value,
         total_return=total_return_blended,
         total_return_fx_complete=fx_complete,
         principal_fx_effect=principal_fx,
@@ -1190,7 +1273,10 @@ def build_dashboard(
         kpis=kpis,
         holdings=holding_rows,
         holdings_subtotals=holdings_subtotals,
-        realized=book.realized,
+        # OPT-D5: the option rows live in `options.realized`, never summed in here. Without an
+        # option this is the book's own object, unchanged.
+        realized=(stock_realized(book.realized, opt_syms) if has_options
+                  else book.realized),
         returns=returns,
         allocation=allocation,
         currency_view=view,
@@ -1210,4 +1296,33 @@ def build_dashboard(
         orphan_dividends=orphan_dividends,
         opened_positions=book.opened_positions,
         unbookable_dividends=book.unbookable_dividends,
+        options=options_block,
     )
+
+
+def _underlying_prices(
+    conn: sqlite3.Connection, book: Book, opt_syms: frozenset[str],
+    instruments: dict[str, Instrument], actions: ActionIndex, *, now: datetime, as_of: date,
+) -> dict[str, tuple[Decimal, date]]:
+    """OPT-D17: the latest stored price of every REGISTERED underlying of an open contract —
+    ONE read per distinct underlying, re-expressed across splits like every held price
+    (``price_in``), and never added to ``price_reads`` (so never in freshness). An unregistered
+    or unpriced underlying is simply absent (the block omits the two keys)."""
+    out: dict[str, tuple[Decimal, date]] = {}
+    seen: set[str] = set()
+    for h in book.holdings:
+        if h.symbol not in opt_syms or h.shares == _ZERO:
+            continue
+        terms = instruments[h.symbol].option
+        if terms is None or terms.underlying in seen:
+            continue
+        seen.add(terms.underlying)
+        und = instruments.get(terms.underlying)
+        if und is None or und.is_option:
+            continue
+        pr = get_latest_price(conn, terms.underlying, now=now)
+        if pr is not None:
+            out[terms.underlying] = (
+                price_in(actions, terms.underlying, pr.value, priced_on=pr.as_of,
+                         valued_on=as_of), pr.as_of)
+    return out

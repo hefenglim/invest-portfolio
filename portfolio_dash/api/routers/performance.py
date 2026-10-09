@@ -90,6 +90,11 @@ def performance_twr(
 
     # Portfolio TWR from the same daily NAV series the dashboard trend card uses.
     data = build_dashboard(conn, now=now, reporting=reporting)
+    # Options spec §5 / R3: that series leaves out an open contract's value, so the TWR built
+    # on it does too — said with the dashboard's own note, on every answer (available or not).
+    # ADDITIVE and only then: a ledger that never skipped a contract keeps its payload exactly.
+    if data.options is not None and data.options.trend_excludes_value:
+        base["options_note"] = data.options.note
     port_index = twr_index(data.trend.points) if data.trend.available else []
     if not port_index:
         return {

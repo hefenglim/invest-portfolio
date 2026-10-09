@@ -532,7 +532,7 @@ defaulted**. A SPINOFF row without it is rejected at validation — the same pos
 ### 4.4 Complete `_Position` field transfer table — NORMATIVE
 
 The formulas above name only the fields they change, which leaves the rest to inference. `_Position`
-has **seventeen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
+has **eighteen** fields (`cost_basis.py`, the `_Position` dataclass); every one of them gets an
 explicit rule here, because "the formula didn't mention it" is not a specification.
 
 > **Count corrected 2026-08-10 (F-37), and the guard has since paid for itself.** This paragraph
@@ -566,6 +566,7 @@ explicit rule here, because "the formula didn't mention it" is not a specificati
 | `oversold_held` *(added 2026-08-27, **F-16**)* | unchanged | same as above, and the same PRE-action-terms warning | same |
 | `unbookable_dividend` | unchanged | OR-ed into Q: `Q.unbookable_dividend \|= P.unbookable_dividend` (E19) | same OR into the child (E19); `P` keeps its own |
 | `unbookable_action` *(added 2026-08-10)* | unchanged | OR-ed into Q: `Q.unbookable_action \|= P.unbookable_action` (the propagation line in the EXCHANGE branch) | same OR into the child (the SPINOFF branch's line); `P` keeps its own |
+| `unbookable_close` *(added 2026-10-09, **options spec §4.4**)* | unchanged | OR-ed into Q: `Q.unbookable_close \|= P.unbookable_close` — exactly like `unbookable_action` (a refused expiry / assignment / exercise row leaves the position 待釐清, and an action must not launder that onto a successor) | same OR into the child; `P` keeps its own. (`OPTION_ADJUST` ORs it into Q as well — its own table is options spec §4.3) |
 | `revived_by_dividend` *(added 2026-09-01, **QA-06**)* | unchanged | OR-ed into Q: `Q.revived_by_dividend \|= P.revived_by_dividend` — an EXCHANGE moves the zero-basis shares to Q and zeroes `P`, so leaving the flag behind would launder it onto a position nobody looks at again | same OR into the child: the carve `× c` of a zero basis is zero, so the child inherits the same zero-basis doubt; `P` keeps its own |
 | `vacated_to` *(added 2026-08-11, **E24 / D32**)* | unchanged (`None`) | **`P.vacated_to := to_symbol`** — the field's only writer | unchanged (`None`): a SPINOFF does **not** vacate its parent |
 | `payback_from` *(added 2026-09-06, **D21 / M1-03**)* | unchanged | moved onto Q (`Q.payback_from := P.payback_from` **if Q has none** — first writer wins); `P := None` — a rename must not launder 「承接自」 off the lot it describes | **`Q.payback_from := P`** if Q has none (the DIRECT parent, never recursed — a grandchild names the child it was carved from); `P` keeps its own |
