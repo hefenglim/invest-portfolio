@@ -18,7 +18,7 @@ app's Schwab USD cash ends at the broker's figure once the whole real history is
 1. **Blast radius (D38, spec §10).** A ledger with no option is byte-identical in every API payload
    and export **except the additive changes the spec §10 names** — raw transactions `close_reason`,
    the transaction template's `close_reason（選填）`, the realized CSV's `asset_type` / `contract`,
-   and the wire keys (null / false on a stock ledger) of cash statement rows (`short_sale`,
+   and the wire keys (null / false / `"stock"` on a stock ledger) of cash statement rows (`short_sale`,
    `close_reason`), `/api/ledgers/transactions` rows (`close_reason`, `contracts`) and the instrument
    elements of `/api/instruments` and `/api/input/context` (`asset_type`) — each re-pinned in the
    same commit wherever a test pins it. The golden payload
@@ -101,7 +101,9 @@ the worktrees by cherry-pick and re-run the seam tests after each.
   "exercised"] | None = None`.
 - [ ] Result / wire types with defaults (no behaviour): `portfolio/results.py` `RefusedClose` (row
   id, account, symbol, date, reason), `Book.refused_closes = []`, `Book.realized_close_reasons:
-  dict[int, str] = {}` (index into `realized.rows` → `close_reason`; `RealizedRow` unchanged),
+  dict[int, str] = {}` (index into **`Book.realized.rows`** — the replay's full list in emission order —
+  → `close_reason`; read only by `option_summary` before any filtering or sorting; `RealizedRow`
+  unchanged, it carries no row id),
   `OpenedPosition.unbookable_close = False`, `Holding.unbookable_close = False`; `portfolio/dashboard_models.py` `OptionsBlock` (spec §7 fields) and
   `DashboardData.options: OptionsBlock | None = None`, and in the same commit
   `api/routers/dashboard.py` drops the `options` key from the wire when it is `None` — without the
@@ -143,8 +145,9 @@ block), `data_ingestion/holdings.py` (`_delta_of`, `created_by`), `shared/models
 - [ ] **Price-0 closes**: prove with tests that the existing arithmetic books spec §4.1's rows (short
   expiry → `short_cover` = remaining premium; long expiry → `sale` = −basis; same-day BTC then expiry
   in write order; partial assignment).
-- [ ] **§4.4 refusal**: in `build_book`, a `close_reason` row that does not exactly close existing
-  exposure books nothing, appends a `RefusedClose`, sets `_Position.unbookable_close` (new field,
+- [ ] **§4.4 refusal**: in `build_book`, a `close_reason` row that would open or extend a lot (a BUY
+  beyond the short lot, a SELL beyond the long lot, or a close against the opposite direction)
+  books nothing, appends a `RefusedClose`, sets `_Position.unbookable_close` (new field,
   sticky, only when the position exists — the `RefusedClose` record is unconditional), the
   `OpenedPosition` and `Holding` flags; strict path raises `UnbookableLedgerError`. A partial
   `assigned` / `exercised` within the open lot is booked normally. The replay also fills
@@ -166,10 +169,10 @@ block), `data_ingestion/holdings.py` (`_delta_of`, `created_by`), `shared/models
 - [ ] **`portfolio/options.py`**: `last_trade_prices(transactions, actions, as_of)` — per symbol
   across accounts, ordinary trades only, `trade_date ≤ as_of`, predecessor price × `ratio_from /
   ratio_to` across an `OPTION_ADJUST`; `option_summary(...) -> OptionsBlock` per spec §7 (open rows
-  incl. 履約義務; realized rows per closed contract with how it closed; totals by year / by
-  underlying; `realized.rows` = the replay's option `RealizedRow`s, same shape as
-  `realized.rows`, plus `close_reason` (from `Book.realized_close_reasons`) and `contract`;
-  `by_contract` / `by_year` / `by_underlying` aggregates; open rows carry `unbookable_close`;
+  incl. 履約義務 and `unbookable_close`; `realized.rows` = the replay's option `RealizedRow`s, one per
+  closing event, same shape as the stock `realized.rows`, plus `close_reason` (from
+  `Book.realized_close_reasons`) and `contract`; aggregates `by_contract` (how each contract
+  closed) / `by_year` / `by_underlying`; `realized_total`;
   `market_value` / `unrealized` per currency and in the reporting currency;
   `trend_excludes_value`, `note`). Add the block's row models to
   `tests/contract/test_frontend_never_computes_money.py`'s model scan. Name its money products so `tests/portfolio/
@@ -182,7 +185,10 @@ block), `data_ingestion/holdings.py` (`_delta_of`, `created_by`), `shared/models
   sector allocation, weights (`weight = stock MV / Σ stock MV`), `holdings_subtotals`, the
   ex-dividend calendar and dividend projection — stock rows only. KPI 總市值 / 總報酬 / unrealized,
   XIRR's final value, the FX pool's `foreign_stock_value` — stocks + options. 月度成績 needs no change
-  (it stores the KPI; OPT-D12).
+  (it stores the KPI; OPT-D12). **Compute every stock-only aggregate by feeding the SAME functions
+  (`combined_view`, `_holdings_subtotals`, `sector_allocation`) the stock-only `valued` list — never a
+  second summation** — so a stock-only ledger takes the byte-identical path (D38: a short-circuit,
+  not an equal-answer computation; `Decimal` text can differ where values are equal).
 - [ ] **Trend** (`timeseries.py`): skip `is_option` holdings without setting `incomplete`; set
   `options.trend_excludes_value` when an option position existed in the window. TWR
   (`api/routers/performance.py`) and the benchmark comparison read the same flag from `options`.

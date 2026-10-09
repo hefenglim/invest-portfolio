@@ -16,6 +16,7 @@ hold and are the starting point here.
 | --- | --- |
 | 2026-10-09 | First draft; owner rulings R1–R7; OPT-D1..D10 confirmed as recommended |
 | 2026-10-09 | **Review round 1** (independent reviewer, Fable 5.1, max effort; verdict NOT READY, all fixes document-level). Folded in: B1 → OPT-D11 (owner: standard adjustments only); B2 → the replay refuses a close that would open a lot (§4.4); M1 → every new wire field lives in the `options` block, omitted when absent (§7); M2 / M10 → `holdings`, `realized.rows`, weights and subtotals are stock-only, KPI totals include options (§6); M3 / M4 → the `OPTION_ADJUST` branch placement and its complete field table (§4.3); M5 → invariant 1 names its three additive columns (§10); M6 → OPT-D12 (owner: 月度成績 includes options); M7 / M8 / M12 → exact close rules, side derivation and the over-cover finding (§4.2); M9 → file ownership (plan); M11 → the share walker skips an opposite-direction adjustment (§4.3); m5–m18 → wording, defaults and the oracle's fee branch |
+| 2026-10-09 | **Review round 3** (same reviewer; verdict **READY**; N1–N13 resolved). Three wording fixes folded: N14 (the realized-reason index points into `Book.realized.rows`), N15 (the plan's §4.4 wording; `asset_type` reads `"stock"`), N16 (stock-only aggregates reuse the same functions, plan W2) |
 | 2026-10-09 | **Review round 2** (same reviewer; verdict READY-WITH-FIXES, no blocker; round-1 B2 / M5 partial, the rest resolved). Folded in: N1 → invariant 1 names its additive wire keys (§10) and the doors that produce them (§6, §8); N2 → `Holding.unbookable_close` so every per-holding reader can read it (§3, §4.4); N3 → the drawer's reconciliation reads `options.open` (§6); N4 → `options.realized.rows` are the replay's own realized rows (§7); N5 → option-mode closing sides refuse when there is nothing to close (§4.2); N6 → OPT-D11 also requires the same right and expiry; N7 → the assignment's stock leg registers through the existing path (§4.2); N8 / N11 → §4.4 / §4.3 wording; N10 → options leave `freshness.prices` (§5) |
 
 **Why now.** A real broker history cannot reconcile without its option legs: the premiums are cash
@@ -291,7 +292,7 @@ field lives inside this block** — no existing model (`TrendPoint`, `KpiSummary
   and export **except these additive changes**, each re-pinned in the same commit wherever a test
   pins it: (1) the raw transactions dump / per-tab CSV gains `close_reason` (empty); (2) the
   transaction import template gains `close_reason（選填）`; (3) the realized CSV gains `asset_type`
-  and `contract`; (4) additive **wire keys**, null / false on a stock ledger: cash statement rows
+  and `contract`; (4) additive **wire keys**, null / false / `"stock"` on a stock ledger: cash statement rows
   `short_sale` / `close_reason`; `/api/ledgers/transactions` rows `close_reason` / `contracts`; the
   instrument elements of `/api/instruments` and `/api/input/context` `asset_type`. The dashboard
   payload — the golden — does not change at all (`options` is popped when `None`;
