@@ -50,10 +50,22 @@ the §4.4 field-transfer table and the §5 refusal matrix (:func:`_apply_action`
 formula below is derived from the SPEC — §4.1/§4.2/§4.3 for the three kinds, §4.4 for the
 complete field table, §5 for the rejection rows — never from ``portfolio/cost_basis.py``.
 Duplication here is the *mechanism of the check*, not an oversight.
+
+US EQUITY OPTIONS — TRANSCRIBED FROM ``docs/spec/2026-10-09-options-ledger.md``
+-----------------------------------------------------------------------------
+The same suspension, for the same reason. ``shared/options.py`` owns the OCC parse, the
+multiplier and the §6.1 classifier inside the app; this file carries its OWN parser
+(:func:`parse_occ` — letters-only root, ``YYMMDD``, ``C``/``P``, strike × 1000 as 8 digits),
+its OWN multiplier, its own §4.1 price-0 close rows, the §4.4 refusal (a close that would
+open or extend a lot books nothing), the §4.3 ``OPTION_ADJUST`` field table with
+``ratio_from == 1`` (OPT-D11 / D16), the OPT-D6 fee branch and the §5 last-trade valuation.
+An oracle that imported the app's parser would agree with a mis-parsed strike by
+construction.
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Collection
 from dataclasses import dataclass, field
@@ -116,15 +128,19 @@ FEE_RULES = {
     "tw": dict(brokerage=D("0.001425"), discount=D("1"), min_fee=D("20"),
                tax_normal=D("0.003"), tax_etf=D("0.001"), tax_daytrade=D("0.0015"),
                rounding="floor", ccy="TWD"),
+    # OPT-D6 (options spec §2): ``option_per_contract`` is per RULE SET — schwab 0.65, moomoo_us
+    # UNSET (None, never 0: an unset rate makes the fee required, the engine must not guess);
+    # ``option_reg_per_contract`` defaults to 0.
     "schwab": dict(sec_rate=D("0.0000206"), sec_min=D("0.01"), taf_per_share=D("0.000195"),
-                   taf_min=D("0.01"), taf_cap=D("9.79"), ccy="USD"),
+                   taf_min=D("0.01"), taf_cap=D("9.79"), ccy="USD",
+                   option_per_contract=D("0.65"), option_reg_per_contract=D("0")),
     "moomoo_us": dict(commission_rate=D("0.0003"), commission_min=D("0.01"),
                       platform=D("0.99"), settlement_per_share=D("0.003"),
                       settlement_cap_rate=D("0.01"), cat_per_share=D("0.000003"),
                       sec_rate=D("0.0000206"), sec_min=D("0.01"), taf_per_share=D("0.000195"),
                       taf_min=D("0.01"), taf_cap=D("9.79"), stamp_unit=D("1000"),
                       stamp_per_unit=D("1"), stamp_cap_stock=D("1000"), stamp_cap_etf=D("200"),
-                      ccy="USD"),
+                      ccy="USD", option_per_contract=None, option_reg_per_contract=D("0")),
     "moomoo_my": dict(commission_rate=D("0.0003"), commission_min=D("0.01"),
                       platform=D("3.00"), clearing_rate=D("0.0003"), clearing_cap=D("1000"),
                       sst_rate=D("0.08"), stamp_unit=D("1000"), stamp_per_unit=D("1"),
@@ -144,6 +160,8 @@ _EFFECTIVE_KEYS = {
     "clearing_cap": "clearing_cap", "sst_rate": "sst_rate",
     "stamp_unit": "stamp_unit", "stamp_per_unit": "stamp_per_unit",
     "stamp_cap_stock": "stamp_cap_stock", "stamp_cap_etf": "stamp_cap_etf",
+    "option_per_contract": "option_per_contract",
+    "option_reg_per_contract": "option_reg_per_contract",
 }
 
 
@@ -194,6 +212,58 @@ def _ceil_int(value: Decimal) -> Decimal:
     return value.quantize(ONE, rounding=ROUND_CEILING)
 
 
+# ===================================================================================
+# US EQUITY OPTIONS — the oracle's OWN contract terms (options spec §3, OPT-D1 / D22)
+# ===================================================================================
+#: OPT-D1: one contract = 100 share-equivalents; the ledger's quantity IS share-equivalents
+#: and its price is the premium PER SHARE, so every ``qty × price`` stays a money figure.
+OPTION_MULTIPLIER = D("100")
+
+#: Spec §3: "OCC without root padding: letters-only root, YYMMDD, C/P, strike × 1000 as 8
+#: digits — ^[A-Z]{1,6}\d{6}[CP]\d{8}$". Written here from that sentence, not imported.
+_OCC = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+
+#: The three §4.1 price-0 closing rows (OPT-D2).
+CLOSE_REASONS = frozenset({"expired", "assigned", "exercised"})
+
+
+@dataclass(frozen=True)
+class OptionTerms:
+    underlying: str
+    expiry: date
+    right: str          # "C" | "P"
+    strike: Decimal
+
+    @property
+    def name(self) -> str:
+        """The display name 「XYZ 2026-12-18 50 Put」 (spec §3) — the oracle's own spelling.
+        A whole-number strike prints without decimals; a fractional one as written."""
+        strike = format(self.strike.normalize(), "f")
+        return (f"{self.underlying} {self.expiry.isoformat()} {strike} "
+                f"{'Put' if self.right == 'P' else 'Call'}")
+
+
+def parse_occ(symbol: str) -> OptionTerms | None:
+    """The contract terms of an OCC symbol, or ``None`` when *symbol* is not one.
+
+    OPT-D22: there is no contract table — the symbol carries every term, so the oracle reads
+    them from the symbol with its OWN parser. A malformed calendar date is not a contract.
+    """
+    m = _OCC.match(symbol or "")
+    if m is None:
+        return None
+    root, yy, mm, dd, right, strike = m.groups()
+    try:
+        expiry = date(2000 + int(yy), int(mm), int(dd))
+    except ValueError:
+        return None
+    return OptionTerms(root, expiry, right, D(int(strike)) / D(1000))
+
+
+def is_option(symbol: str) -> bool:
+    return parse_occ(symbol) is not None
+
+
 def fee_rule_for(account_id: str, market: str | None) -> str:
     """Resolve the fee-rule-set name for a trade, per-market (Batch B dual-market merge).
 
@@ -218,8 +288,18 @@ def fee_rule_for(account_id: str, market: str | None) -> str:
 def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
             is_etf: bool, daytrade: bool = False,
             stamp_fx: Decimal | None = None,
-            market: str | None = None) -> tuple[Decimal, Decimal, list[str]]:
+            market: str | None = None, *, is_option: bool = False,
+            close_reason: str | None = None) -> tuple[Decimal | None, Decimal, list[str]]:
     """Return (fee, tax, notes[]) expected from the fee-engine v2 spec (independent derive).
+
+    OPTIONS (options spec OPT-D6 / §4.2, transcribed): a ``close_reason`` row (expiry /
+    assignment / exercise) carries NO fee and NO tax — every door sets 0 / 0 without the
+    engine. An ordinary option trade is ``option_per_contract × contracts`` (+ the optional
+    ``option_reg_per_contract × contracts``) + SEC on a SELL over the premium notional (the
+    stock SEC formula), each component cent-quantized; no TAF, no transaction tax, no MY stamp
+    in v1. On a rule set whose per-contract rate is UNSET the engine has no answer: ``fee`` is
+    returned as ``None`` and the caller must supply the statement's fee (the door refuses the
+    row otherwise — ``option_fee_unset``).
 
     ``side`` in {"BUY","SELL"}. Logic is re-derived from the mini-spec + reference doc
     (NOT imported from fees.py); parameters are transcribed above. ``notes`` records the
@@ -239,8 +319,25 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
     fee = ZERO
     tax = ZERO
     notes: list[str] = []
+    if close_reason is not None:
+        return ZERO, ZERO, [f"option close row ({close_reason}): fee = tax = 0, no engine"]
     if notional <= ZERO:
         return fee, tax, ["zero/negative notional -> no fee/tax"]
+    if is_option:
+        per = r.get("option_per_contract")
+        if per is None:
+            return None, ZERO, [f"{rule_name}: option_per_contract unset -> fee must be "
+                                "supplied (OPT-D6)"]
+        contracts = qty / OPTION_MULTIPLIER
+        fee = _cent(per * contracts)
+        reg = r.get("option_reg_per_contract") or ZERO
+        if reg > ZERO:
+            fee += _cent(reg * contracts)
+        if side == "SELL":
+            fee += _cent(max(notional * r["sec_rate"], r["sec_min"]))
+        notes.append(f"{rule_name} option: {per}/contract x {contracts} + reg {reg}"
+                     " + SEC on a sell; tax 0, no stamp (OPT-D6)")
+        return fee, ZERO, notes
 
     if rule_name == "tw":
         floored = _floor_int(notional * r["brokerage"] * r["discount"])
@@ -320,6 +417,9 @@ class TxFact:
     # row, exactly like qty/price — it changes which accounting branch the replay takes.
     # Never inferred: an oversell without this flag stays an oversell (sticky 賣超).
     short_sale: bool = False
+    # Options spec §4.1 (OPT-D2): ``expired`` / ``assigned`` / ``exercised`` marks a price-0
+    # CLOSING row of an option contract. A ledger fact, read back like ``short_sale``.
+    close_reason: str | None = None
 
 
 @dataclass
@@ -431,6 +531,9 @@ class Instrument:
     quote_ccy: str
     is_etf: bool
     sector: str = ""
+    # Options spec §3: 'stock' | 'option'. A registry FACT — the oracle derives the terms from
+    # the symbol itself (parse_occ) and only CHECKS that the two agree.
+    asset_type: str = "stock"
 
 
 @dataclass
@@ -487,6 +590,9 @@ class Holding:
     # every valued figure on this position is wrong by the ratio — a different failure
     # from 賣超 (a discarded basis) and from an unbookable dividend (a missing event).
     unbookable_action: bool = False
+    # Options spec §4.4: a close row on this position could not be booked (it would have
+    # opened or extended a lot). STICKY, like 賣超; never on the stock holdings wire.
+    unbookable_close: bool = False
 
     @property
     def original_avg(self) -> Decimal:
@@ -520,6 +626,25 @@ class RealizedRow:
     # COVER date: proceeds_net is the short's weighted-average sale value for the covered
     # shares, *_cost_removed is the covering buy's all-in cost for them.
     kind: str = "sale"
+    # Options spec §7.1: the close row's reason (expired / assigned / exercised) when the
+    # realized row came from one; None for an ordinary trade or a dividend.
+    close_reason: str | None = None
+
+
+@dataclass
+class RefusedClose:
+    """A §4.4 close the replay could NOT book: it would have opened or extended a lot (a BUY
+    beyond the short lot, a SELL beyond the long lot, or a close against the opposite
+    direction). Booked nowhere — no realized row, no position created — and always recorded.
+    """
+
+    txn_id: int
+    account_id: str
+    symbol: str
+    d: date
+    side: str
+    quantity: Decimal
+    close_reason: str
 
 
 @dataclass
@@ -554,6 +679,9 @@ class OracleResult:
     # WITHHOLDS XIRR ("named, and withholds XIRR", domain-ledger.md): the ledger is missing the
     # position that earned it, so a money-weighted return over it is a different ledger's.
     orphan_dividends: list[tuple[str, str, date]] = field(default_factory=list)
+    # Options spec §4.4: every close row the replay refused, in replay order. Like an orphan
+    # dividend it is a RECORD, not a flag: XIRR and B are withheld while it is non-empty.
+    refused_closes: list[RefusedClose] = field(default_factory=list)
 
 
 class EventPriority(IntEnum):
@@ -604,6 +732,9 @@ class _Pos:
     # successor." Set by an APPLIED exchange only — a ticker sold down to zero is not vacated,
     # and its payout books as post-close income (audit H2).
     vacated_to: str | None = None
+    # Options spec §4.4 + §4.3's field table: a close on this position was refused. Sticky;
+    # OR-ed into the destination by EXCHANGE / SPINOFF / OPTION_ADJUST like unbookable_action.
+    unbookable_close: bool = False
 
 
 def _reopen(pos: _Pos) -> None:
@@ -631,7 +762,41 @@ def _live_successor(positions: dict[tuple[str, str], _Pos], account_id: str,
 
 
 SPLIT, EXCHANGE, SPINOFF = "SPLIT", "EXCHANGE", "SPINOFF"
-_KINDS = {SPLIT, EXCHANGE, SPINOFF}
+#: Options spec §4.3 (OPT-D3): a standard contract adjustment, option -> option, carrying the
+#: long AND the short lot. A fourth kind, so the three equity kinds stay byte-identical (D38).
+OPTION_ADJUST = "OPTION_ADJUST"
+_KINDS = {SPLIT, EXCHANGE, SPINOFF, OPTION_ADJUST}
+
+
+def _close_refused(pos: _Pos | None, t: TxFact) -> bool:
+    """Options spec §4.4, transcribed: does this ``close_reason`` row OPEN OR EXTEND a lot?
+
+    A close can only take shares out of the lot it closes: a BUY close (an expired / assigned
+    short) covers the SHORT lot, a SELL close (an expired / exercised long) sells the LONG lot.
+    Anything beyond that lot — including a close against the opposite direction, where the
+    lot it would close is empty — would open or extend a position, so the replay books
+    nothing for it. A partial assignment / exercise within the lot books normally. Evaluated
+    BEFORE the position is created or reopened, so a refused close never creates a position.
+    """
+    if t.close_reason is None:
+        return False
+    if t.side.upper() == "BUY":
+        lot = pos.short_shares if pos is not None else ZERO
+    else:
+        lot = (pos.shares if pos is not None and pos.shares > ZERO else ZERO)
+    return t.qty > lot
+
+
+def _standard_adjustment(act: CorpFact) -> bool:
+    """OPT-D11 / OPT-D16, transcribed: both contracts parse (multiplier 100, letters-only
+    root), same right, same expiry, ``ratio_from == 1`` and the strike is conserved —
+    ``strike_from × ratio_from == strike_to × ratio_to``. Anything else has no deliverable
+    model in v1 and is refused (the doors reject it first; the replay re-checks)."""
+    a, b = parse_occ(act.from_symbol), parse_occ(act.to_symbol)
+    if a is None or b is None:
+        return False
+    return (a.right == b.right and a.expiry == b.expiry and act.ratio_from == ONE
+            and a.strike * act.ratio_from == b.strike * act.ratio_to)
 
 
 def ratio_shares(qty: Decimal, ratio_to: Decimal, ratio_from: Decimal) -> Decimal:
@@ -779,6 +944,8 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
         return refuse("E8")
     if act.kind != SPLIT and insts[act.from_symbol].quote_ccy != insts[act.to_symbol].quote_ccy:
         return refuse("E11")
+    if act.kind == OPTION_ADJUST and not _standard_adjustment(act):
+        return refuse("E-option-nonstandard")     # OPT-D11 / D16
 
     # -- E1: no prior position. Fabricating one would invent a $0-cost ghost, so nothing
     # is created and nothing can be flagged (there is no position to carry the flag).
@@ -794,6 +961,40 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
     if (src.shares == ZERO and src.short_shares == ZERO
             and src.original_total == ZERO and src.adjusted_total == ZERO):
         return refuse("E2")
+
+    if act.kind == OPTION_ADJUST:
+        # Options spec §4.3 — placed after SPLIT's checks and BEFORE the E5 block, because
+        # an option adjustment carries the SHORT lot too: E5 (short source) and E18 (short
+        # destination) are bypassed and replaced by the same-direction rule. Its own
+        # destination lookup: E22 (Q ever oversold), the opposite-direction refusal, then the
+        # §4.3 field transfer, then Q reopened.
+        dst = positions.get(dst_key)
+        if dst is not None and dst.ever_oversold:
+            return refuse("E22")
+        if dst is not None and ((src.short_shares > ZERO and dst.shares > ZERO)
+                                or (src.shares > ZERO and dst.short_shares > ZERO)):
+            return refuse("E-option-direction")
+        if dst is None:
+            dst = positions.setdefault(
+                dst_key, _Pos(act.account_id, act.to_symbol, insts[act.to_symbol].quote_ccy))
+        # §4.3 table, P = source, Q = destination, every field explicitly:
+        dst.shares += ratio_shares(src.shares, act.ratio_to, act.ratio_from)
+        dst.original_total += src.original_total
+        dst.adjusted_total += src.adjusted_total
+        dst.short_shares += ratio_shares(src.short_shares, act.ratio_to, act.ratio_from)
+        dst.short_proceeds += src.short_proceeds       # residue included
+        dst.unbookable_dividend |= src.unbookable_dividend
+        dst.unbookable_action |= src.unbookable_action
+        dst.unbookable_close |= src.unbookable_close
+        src.shares = ZERO
+        src.original_total = ZERO
+        src.adjusted_total = ZERO
+        src.short_shares = ZERO
+        src.short_proceeds = ZERO
+        src.vacated_to = act.to_symbol
+        _reopen(dst)
+        return None
+
     # -- E5: EXCHANGE/SPINOFF on an OPEN declared short has no honest booking (precedent:
     # dividend-on-short). A SPLIT is supported (E4) and is handled below.
     if act.kind != SPLIT and src.short_shares > ZERO:
@@ -834,6 +1035,7 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
         dst.adjusted_total += src.adjusted_total
         dst.unbookable_dividend |= src.unbookable_dividend   # E19
         dst.unbookable_action |= src.unbookable_action       # F-37
+        dst.unbookable_close |= src.unbookable_close         # options spec §4.3
         src.shares = ZERO
         src.original_total = ZERO
         src.adjusted_total = ZERO
@@ -852,6 +1054,7 @@ def _apply_action(positions: dict[tuple[str, str], _Pos], act: CorpFact,
     dst.adjusted_total += carved_adj
     dst.unbookable_dividend |= src.unbookable_dividend       # E19 — the child inherits
     dst.unbookable_action |= src.unbookable_action           # F-37
+    dst.unbookable_close |= src.unbookable_close             # options spec §4.3
     # The parent is `total − carved`, NOT `total × (1 − c)`: algebraically identical,
     # numerically not (1−c rounds once and ×(1−c) rounds again), so subtracting the exact
     # amount added to the child conserves Σ original_total BY CONSTRUCTION (§2.1).
@@ -890,6 +1093,13 @@ def replay(facts: Facts) -> OracleResult:
       * a dividend landing while the short lot is open is NOT representable (a short pays
         the dividend in lieu): it is skipped and the position flagged
         ``unbookable_dividend`` — never booked as income or shares.
+
+    Options (spec 2026-10-09 §4, transcribed): a contract is a position in share-
+    equivalents and goes through the SAME branches — sell-to-open IS the declared short,
+    buy-to-close covers it. The §4.1 price-0 close rows need no branch of their own: a BUY
+    at 0 covering the short realizes the whole remaining premium, a SELL at 0 of the long
+    realizes ``−basis``. What IS new is the §4.4 refusal (:func:`_close_refused`), tested
+    before the position is created, and ``OPTION_ADJUST`` in :func:`_apply_action`.
     """
     insts = facts.instruments
 
@@ -916,6 +1126,7 @@ def replay(facts: Facts) -> OracleResult:
     refused_dividends: list[tuple[str, str, date]] = []   # K3 / YQ3 — see OracleResult
     refused_divs: set[int] = set()   # ⑪: the payouts this replay refused, by fact id
     orphan_dividends: list[tuple[str, str, date]] = []    # CR-02 — see OracleResult
+    refused_closes: list[RefusedClose] = []               # options spec §4.4
 
     def refuse_dividend(dv: DivFact) -> None:
         refused_dividends.append((dv.account_id, dv.symbol, dv.d))
@@ -940,6 +1151,17 @@ def replay(facts: Facts) -> OracleResult:
         elif kind == "tx":
             assert isinstance(ev, TxFact)
             key = (ev.account_id, ev.symbol)
+            if _close_refused(positions.get(key), ev):
+                # Options spec §4.4: a close that would open or extend a lot books NOTHING —
+                # no realized row, no lot, no position created, ``vacated_to`` untouched —
+                # and is always recorded; an existing position carries the sticky flag.
+                refused_closes.append(RefusedClose(
+                    ev.id, ev.account_id, ev.symbol, ev.trade_date, ev.side.upper(), ev.qty,
+                    str(ev.close_reason)))
+                existing = positions.get(key)
+                if existing is not None:
+                    existing.unbookable_close = True
+                continue
             pos = positions.setdefault(key, _Pos(ev.account_id, ev.symbol, qccy(ev.symbol)))
             if ev.qty != ZERO:
                 _reopen(pos)       # CR-06: a trade that moves shares puts it back in play
@@ -955,7 +1177,8 @@ def replay(facts: Facts) -> OracleResult:
                     realized_rows.append(RealizedRow(
                         ev.account_id, ev.symbol, qccy(ev.symbol), ev.trade_date, cover,
                         short_avg * cover, per_share * cover, per_share * cover,
-                        (short_avg - per_share) * cover, "short_cover"))
+                        (short_avg - per_share) * cover, "short_cover",
+                        close_reason=ev.close_reason))
                     pos.short_proceeds -= short_avg * cover
                     pos.short_shares -= cover
                 to_long = ev.qty - cover
@@ -1007,7 +1230,8 @@ def replay(facts: Facts) -> OracleResult:
                 proceeds_net = settled(ev.qty, ev.price, qccy(ev.symbol)) - ev.fee - ev.tax
                 realized_rows.append(RealizedRow(
                     ev.account_id, ev.symbol, qccy(ev.symbol), ev.trade_date, ev.qty,
-                    proceeds_net, orig_removed, adj_removed, proceeds_net - adj_removed))
+                    proceeds_net, orig_removed, adj_removed, proceeds_net - adj_removed,
+                    close_reason=ev.close_reason))
                 pos.shares -= ev.qty
                 pos.original_total -= orig_removed
                 pos.adjusted_total -= adj_removed
@@ -1069,7 +1293,8 @@ def replay(facts: Facts) -> OracleResult:
             oversold=p.ever_oversold or p.shares < ZERO,
             short_open=p.short_shares > ZERO,
             unbookable_dividend=p.unbookable_dividend,
-            unbookable_action=p.unbookable_action)
+            unbookable_action=p.unbookable_action,
+            unbookable_close=p.unbookable_close)
 
     realized_by_ccy: dict[str, Decimal] = defaultdict(lambda: ZERO)
     for rr in realized_rows:
@@ -1082,7 +1307,8 @@ def replay(facts: Facts) -> OracleResult:
                         fx_avg, fx_real, fx_fcash, fx_cov, refusals,
                         refused_dividends=refused_dividends,
                         refused_dividend_ids=frozenset(refused_divs),
-                        orphan_dividends=orphan_dividends)
+                        orphan_dividends=orphan_dividends,
+                        refused_closes=refused_closes)
 
 
 def facts_through(facts: Facts, day: date) -> Facts:
@@ -1123,6 +1349,67 @@ def facts_valued_as_of(facts: Facts, day: date) -> Facts:
     the ex-date, R6; cash / DRIP / NET from the payment date).
     """
     return facts_through(facts, day)
+
+
+# ---- options: last-trade valuation (spec §5, R2) ------------------------------------
+def option_price_on(facts: Facts, symbol: str, day: date) -> tuple[Decimal, date] | None:
+    """The price an open contract is valued at on *day*, and the date it is dated.
+
+    Transcribed from spec §5 (R2): the price of the contract's LAST ORDINARY TRADE —
+    ``close_reason`` rows excluded (a price-0 expiry is not a market price) — per symbol
+    ACROSS accounts, ``trade_date <= day``, dated that trade's date. With no trade since an
+    ``OPTION_ADJUST`` into it, the PREDECESSOR's last price ÷ ``ratio_to`` (× ``ratio_from``,
+    which OPT-D16 fixes at 1), dated the predecessor's trade. An adjustment is effective at
+    the start of its date, so a same-day trade on the destination counts as "since".
+
+    Recursive over a chain of adjustments; ``None`` when nothing priced the contract.
+    Never a provider quote: an option is never quoted (spec §5), so this is the ONLY price.
+    """
+    trades = [t for t in facts.txs if t.symbol == symbol and t.close_reason is None
+              and t.trade_date <= day]
+    last_t = max(trades, key=lambda t: (t.trade_date, t.id)) if trades else None
+    adjs = [a for a in facts.actions if a.kind == OPTION_ADJUST and a.to_symbol == symbol
+            and a.d <= day]
+    last_a = max(adjs, key=lambda a: (a.d, a.id)) if adjs else None
+    if last_a is not None and (last_t is None or last_t.trade_date < last_a.d):
+        prev = option_price_on(facts, last_a.from_symbol, last_a.d)
+        if prev is not None:
+            return prev[0] * last_a.ratio_from / last_a.ratio_to, prev[1]
+    if last_t is None:
+        return None
+    return last_t.price, last_t.trade_date
+
+
+def option_prices(facts: Facts, day: date) -> dict[str, tuple[Decimal, date]]:
+    """:func:`option_price_on` for every option symbol the ledger names."""
+    syms = {t.symbol for t in facts.txs if is_option(t.symbol)}
+    syms |= {a.to_symbol for a in facts.actions if a.kind == OPTION_ADJUST}
+    out: dict[str, tuple[Decimal, date]] = {}
+    for s in syms:
+        p = option_price_on(facts, s, day)
+        if p is not None:
+            out[s] = p
+    return out
+
+
+def trend_skips_an_option(facts: Facts, first: date, last: date) -> bool:
+    """``options.trend_excludes_value`` (spec §5), derived: was an option position open at the
+    CLOSE of some trend day in ``[first, last]``?
+
+    The trend excludes an open option's value (R3); the flag says it did so on at least one
+    day. Positions only change on event dates, so the day-end states after each option
+    event (and at ``first``) are every state the series passed through.
+    """
+    days = {first}
+    days |= {t.trade_date for t in facts.txs if is_option(t.symbol)}
+    days |= {a.d for a in facts.actions if a.kind == OPTION_ADJUST}
+    for d in sorted(days):
+        if d < first or d > last:
+            continue
+        res = replay_through(facts, d)
+        if any(is_option(h.symbol) and h.shares != ZERO for h in res.holdings.values()):
+            return True
+    return False
 
 
 def trading_financing_cost(facts: Facts, reporting: str, fx_on) -> Decimal:
@@ -1477,7 +1764,11 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
 
     final = ZERO
     for h in res.holdings.values():
-        if h.shares <= ZERO:
+        # OPT-D4: "XIRR's final value must carry the open liability" — an open option enters
+        # the terminal value at its last trade price on its SIGNED quantity (a sold contract
+        # is a negative value). A stock short never reaches here: the caller gates the KPI
+        # family off while one is open.
+        if h.shares == ZERO or (h.shares < ZERO and not is_option(h.symbol)):
             continue
         p = prices.get(h.symbol)
         if p is None:
@@ -1613,6 +1904,10 @@ def integrity_findings(
     with zero shares always has zero basis, so ``_apply_action``'s E2 predicate reaches
     the same verdict it reaches in the replay.
 
+    OPTIONS (2026-10-09 spec): ``OPTION_ADJUST`` moves the long AND the short count through
+    the same :func:`_apply_action`; a §4.4-refused close moves nothing, exactly as the replay
+    books nothing for it, and is not a "sell without a realized row".
+
     Returns ``[(check, scope)]`` for each violation; empty means clean.
     """
     ok = acked or set()
@@ -1640,6 +1935,7 @@ def integrity_findings(
         return positions.setdefault(
             (aid, sym), _Pos(aid, sym, inst.quote_ccy if inst is not None else ""))
 
+    refused_close_ids: set[int] = set()
     for d, _prio, _seq, ekind, ev in events:
         if ekind == "corp":
             assert isinstance(ev, CorpFact)
@@ -1651,6 +1947,11 @@ def integrity_findings(
             p.shares += ev.shares
         elif ekind == "tx":
             assert isinstance(ev, TxFact)
+            if _close_refused(positions.get((ev.account_id, ev.symbol)), ev):
+                # Options §4.4, as the replay: a refused close moves no share and creates no
+                # position. It is also no "sell without a realized row" — it was never booked.
+                refused_close_ids.add(ev.id)
+                continue
             p = pos_for(ev.account_id, ev.symbol)
             if ev.qty != ZERO:
                 _reopen(p)                                   # CR-06, as the replay
@@ -1683,8 +1984,20 @@ def integrity_findings(
                 continue
             p.shares += ev.reinvest_shares
 
+    # Options spec §4.2 (structural, every door): a price-0 row exists ONLY as a close row, and
+    # a close row is an option, one of the three reasons, never a declared short, and carries
+    # no fee and no tax. A stored row breaking either rule got past an input control.
+    for t in facts.txs:
+        if t.close_reason is None:
+            if t.price <= ZERO:
+                out.append(("trade.price_positive", f"id={t.id} {t.account_id}/{t.symbol}"))
+        elif (t.close_reason not in CLOSE_REASONS or not is_option(t.symbol)
+              or t.price != ZERO or t.fee != ZERO or t.tax != ZERO or t.short_sale):
+            out.append(("close_row.well_formed", f"id={t.id} {t.account_id}/{t.symbol}"))
+
     sold = {(t.account_id, t.symbol, t.trade_date)
-            for t in facts.txs if t.side.upper() == "SELL" and not t.short_sale}
+            for t in facts.txs if t.side.upper() == "SELL" and not t.short_sale
+            and t.id not in refused_close_ids}
     booked = {(r.account_id, r.symbol, r.sell_date) for r in realized_rows
               if getattr(r, "kind", "sale") == "sale"}
     for key in sorted(sold - booked):

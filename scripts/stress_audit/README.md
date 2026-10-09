@@ -228,6 +228,94 @@ E24 dividends, the orphan door probe, the legacy write, the successor's sale and
 delete. The pass count moved by much more, because the trend family now runs at `short_open`
 and at four new checkpoints, and `trend.net_worth` doubles its assertions.
 
+### 8. US equity options (spec `docs/spec/2026-10-09-options-ledger.md`, plan W7a, 2026-10-10)
+
+**What the oracle transcribes from the SPEC** (never from `shared/options.py` or
+`portfolio/options.py` — the same §7.4 suspension as the corporate actions, stated in the
+oracle's docstring):
+
+| spec | oracle |
+| --- | --- |
+| §3 OCC symbol, OPT-D22 | `parse_occ` — its own regex: letters-only root, `YYMMDD`, `C`/`P`, strike × 1000 as 8 digits; the display name 「XYZ 2026-12-18 50 Put」 |
+| OPT-D1 | `OPTION_MULTIPLIER = 100`; quantities are share-equivalents |
+| §4.1 / OPT-D2 | price-0 close rows go through the ordinary branches (a BUY at 0 covers the short → the whole remaining premium; a SELL at 0 of the long → `−basis`); `close_reason` rides on the realized row |
+| §4.4 | `_close_refused`: a close that would OPEN OR EXTEND a lot books nothing, creates no position, sets the sticky `unbookable_close` on an existing one, and is recorded on `OracleResult.refused_closes` — which withholds XIRR and B |
+| §4.3 / OPT-D11 / D16 | `OPTION_ADJUST` in `_apply_action`, after SPLIT's checks and before E5: the standard-adjustment check (`ratio_from == 1`, strike conserved, same right / expiry), E22, the opposite-direction refusal, the full field table (long AND short lot × `ratio_to`, proceeds carried, flags OR-ed, `vacated_to`) |
+| OPT-D6 / §4.2 | `fee_tax(..., is_option=, close_reason=)`: close rows 0 / 0; `option_per_contract` × 口數 (+ reg) + SEC on a sell over the premium notional; no TAF, no tax, no MY stamp; an unset rate (`moomoo_us`) returns `None` — the statement fee is the only answer |
+| §5 / R2 | `option_price_on`: the last ORDINARY trade per symbol across accounts ≤ the valuation day, dated that trade; after an `OPTION_ADJUST` with no trade since, the predecessor's price ÷ `ratio_to` |
+| OPT-D4 / R3 | point-in-time figures (KPI 總市值 / 未實現 / 已實現 / 總報酬, XIRR's terminal value, the FX pool's exposure) include an open contract on its SIGNED quantity; the trend excludes its value without marking the day incomplete; `trend_skips_an_option` derives `trend_excludes_value` |
+| OPT-D20 | `principal_fx_effect` is `None` and `principal_fx_note` set whenever a contract is open on the valuation day |
+
+**Scenario (`run_options`, placed before `run_refused_dividends`** — that block leaves refused
+payouts in the ledger until `final`, which would mark every later trend day incomplete and
+withhold B, masking exactly what the options checkpoints must see). Every row goes through a
+real door: option-mode manual entry (`option_intent` + 口數), the CSV door (share-equivalents,
+statement fees on `moomoo_my`, whose rule set has no per-contract rate), the close-row manual
+entry (`close_reason`, side and price derived by the server), and `OPTION_ADJUST` through
+`POST /api/ledgers/corporate-actions` (not the DB fixture the equity actions use).
+
+| op | contract | asserts beyond the reconcile families |
+| --- | --- | --- |
+| STO → BTC | `OPA260918P00045000` | realized literal 217.39 |
+| STO → expire | `OPA260821C00055000` | realized literal 79.34 (the whole premium) |
+| BTO → STC (CSV, moomoo_my) | `OPB260918C00030000` | realized literal 281.90; supplied fees |
+| BTO → expire (long) | `OPB260821P00025000` | realized literal −111.30 (the whole basis) |
+| 1 → 3 adjustment on a SHORT, then BTC 1 of 3 | `OPA261218P00060000` → `…P00020000` | 3 contracts, price 3.00 ÷ 3 dated the predecessor's trade, obligation 6,000; then realized 9.13 and the new last price |
+| 1:1 rename on a LONG | `OPC261120C00010000` → `OPD261120C00010000` | valued at the predecessor's 1.25 |
+| sold-put assignment (two legs) | `OPA260918P00040000` | realized 218.69 (R5: premium stays option P&L); stock leg 200 OPA at 8,000 |
+| partial call exercise (two legs), the rest expires | `OPA260918C00042000` | realized −140.65 on the exercise and −140.65 on the expiry (R5); stock leg 100 OPA at 4,200 — OPA ends 300 shares at 12,200 |
+| same-day BTC + expiry | `OPB260821P00020000` | 63.695 then 69.345, write order |
+| left open past expiry | `OPB260904C00035000` | `past_expiry`, still valued at its last trade (R2) |
+| §4.4 refused close (legacy data) | `OPB260918C00030000` BUY 100 `expired` on a flat contract | `refused_closes`, `refused_close`, XIRR withheld + reason names the row, B withheld, trend days from its date incomplete, remedy text; then deleted through the door |
+| door probes | — | OPT-D6 `option_fee_unset` (400, nothing written), OPT-D14 BTC beyond the short (400, nothing written) |
+| cash tie per USD pool | schwab · moomoo_my | the statement's option lines = the oracle's net premiums line for line, with the same §6.1 label as the ledger wire |
+
+New families: `options.*` (presence, block / row / realized keys, `open[]` fields, roll-ups,
+refused closes, the KPI 「其中選擇權」 decomposition — KPI − the block's part == the oracle's
+STOCK part, `check_rel` because it subtracts two 28-digit figures — R3 / OPT-D20 notes),
+`options.anchor.*` (literals), `options.option_side.ledger`, `options.cash_tie.*`,
+`ledger.tx.close_reason` / `contracts` / `refused_close` / `stock_rows_carry_no_option_marks`,
+`kpi.principal_fx_withheld_option_open`, `xirr.withheld_for_refused_close`,
+`instrument.asset_type_matches_symbol`, and the integrity rules `trade.price_positive` /
+`close_row.well_formed`.
+
+**One oracle assumption corrected on the first run.** The oracle first read §4.4's "XIRR and
+B are withheld" as a KPI-only gate; the app also marks every trend day from the refused close's
+date incomplete (2 `trend.incomplete` failures). The spec's "the record, like
+`orphan_dividends`" points at K3 — a refused dividend marks every day from its date — so the
+app's reading is the spec's and the oracle now says the same (`_day_incomplete`).
+
+**Detection power, measured (2026-10-10, API-only `run_phase1.py`, oracle-side breaks, each
+restored; on the scenario before the call-exercise op was added).** Clean on that scenario:
+`ops=160 pass=18819 fail=0`. The app was not modified: a break in the ORACLE that the app does
+not share is the same disagreement a defect in the app would produce, seen from the other side.
+
+| break (oracle) | result | failing families |
+| --- | --- | --- |
+| §4.4 off (a refused close books a lot) + R3 off (option days counted incomplete) + SEC dropped from the option fee | `pass=18741 fail=78` | §4.4: `options.open.keyset/present`, `options.refused_closes`, `ledger.tx.refused_close`, `kpi.*`, `kpi.xirr`, `fx.reporting_unrealized` (11); R3: `trend.incomplete` (58) + `kpi.fx_complete_withheld` / `trading_financing_cost` (4); SEC: `fee_engine.fee` on the 6 STO rows |
+| adjustment valued at the predecessor's price NOT ÷ `ratio_to` + the short lot moved NOT × `ratio_to` | `pass=18573 fail=120` | `options.open.last_price` / `contracts` / `share_equivalents` / `average_premium` / `obligation`, `options.realized.*` and every roll-up, `options.obligation_subtotals`, `kpi.*`, `kpi.xirr`, `fx.reporting_unrealized`, the report's KPI lines — at 7 checkpoints |
+
+**Disclosed limitations.** (1) `share_equivalents`, `premium_total` and `average_premium`
+have no sign convention in the spec, so their MAGNITUDE is asserted; `market_value` /
+`unrealized` are asserted signed. (2) `by_contract`'s `premium_in` / `premium_out` and its
+`opened` / `closed` dates are not asserted (their definition is not in the spec); its
+`realized` is. (3) Until W6 lands the realized CSV is compared on its stock rows only — the
+check switches to stock + option rows by itself when the CSV gains the spec's `asset_type`
+column; the holdings CSV's 選擇權 block is not parsed. (4) A statement line that moves no money
+(a price-0 close) is compared through the ledger wire, not the cash tie. (5) No PUT exercise /
+CALL assignment (a stock SELL leg) is written — the scenario's two pairs both BUY the
+underlying; the oracle needs no branch for the other shape (it is an ordinary stock sell).
+(6) The OPT-D17 underlying-price date is this fixture's last seeded close (`ASOF`).
+
+Baseline after this change (`run_all.py --phase 1`, with the UI read-back, same-day A/B on
+2026-10-10): **before** (the harness at `7f23c51`) `ops=137 pass=11406 fail=0`; **after**
+`ops=163 pass=19252 fail=0`. **`ops` moved 137 → 163 (+26)**: `run_options` adds 18 manual
+option entries (6 STO, 3 BTO, 3 BTC, 4 expiries, the exercise pair, the assignment pair), 2 CSV
+commits, 2 `OPTION_ADJUST`s, 2 door probes, the legacy refused-close write and its delete.
+The pass count moved by much more because the options checkpoints run every family (trend
+included) on a ledger with open contracts, and every later checkpoint carries the `options`
+block.
+
 ## Must-pass assertion families
 
 A run is only green when **all** of these hold (exact Decimal unless noted):
@@ -276,6 +364,11 @@ A run is only green when **all** of these hold (exact Decimal unless noted):
   every door refuses it since CR-02 (proved first: `refused.orphan_door_refuses`), so it is
   written below the validators (`common.write_legacy_dividend`), reconciled, then deleted
   through the door. The open-short class is the 2609 block.
+- **US equity options** (spec 2026-10-09, README §8) — the `options` block against the oracle's
+  own replay of contracts (OCC parse, §4.1 close rows, §4.4 refusal, §4.3 `OPTION_ADJUST`,
+  §5 last-trade valuation); KPI / XIRR / FX include an open contract on its signed quantity,
+  the trend excludes it; OPT-D20; the §6.1 label on the ledger wire and the cash statement;
+  the cash tie per USD pool; the option fee branch (OPT-D6) in `fee_engine.*`.
 - **Per-(account, currency) cash pool** — every pool balance, **and** the reconstructed
   running-balance **statement terminal** (deposits/withdrawals + trade settlements + FX
   legs + cash dividends) equals the app's reported balance.

@@ -7,6 +7,7 @@ import sqlite3
 import sys
 
 import common as C
+import oracle as O
 import phase1 as P1
 from phase1 import Ops, _json, reconcile
 
@@ -248,9 +249,324 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
 
     run_corporate_actions(ev, api, db_path, op, buy, sell)
     run_batch_import(ev, api, db_path, op)
+    # Options run BEFORE the refused-dividend block on purpose: that block leaves two refused
+    # payouts in the ledger until `final`, which marks every later trend day incomplete and
+    # withholds B — and would mask exactly what the options checkpoints must see (R3: an open
+    # contract is excluded from the trend WITHOUT marking the day incomplete; B is withheld by
+    # a refused close and by nothing else the options block does).
+    run_options(ev, api, db_path, op)
     run_refused_dividends(ev, api, db_path, op, buy, sell)
 
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
+
+
+def run_options(ev: C.Evidence, api: C.Api, db_path, op: Ops):
+    """US equity options (spec 2026-10-09, plan W7a) — every §4.1 row through the real doors.
+
+    STO→BTC · STO→expire · BTO→STC (moomoo_my, CSV, statement fees — its rule set has no
+    per-contract rate) · BTO→expire · a 1→3 ``OPTION_ADJUST`` on a SHORT (then a partial BTC
+    on the new contract) · a 1:1 rename on a LONG · a sold-put assignment (two legs, one
+    request) · a partial call EXERCISE (two legs) and the rest expiring · a same-day BTC +
+    expiry · an open contract left past its expiry · a §4.4 close the replay must refuse
+    (legacy data, then deleted through the door) · the cash tie per pool. Every §4.1 row.
+
+    Every figure is reconciled by ``reconcile`` (section O and the KPI / XIRR / FX / trend
+    families) against the oracle's OWN replay; on top of that, the scenario pins:
+
+    * hand-computed LITERALS for each close's realized amount (an anchor, like corp.anchor.*:
+      two replays agreeing cannot prove either landed on the statement's figure);
+    * the §6.1 ``option_side`` of every option row — the ledger wire AND the cash statement
+      lines — against the label this scenario knows it wrote (one table, two surfaces);
+    * the cash tie per USD pool: the statement's option lines sum to the oracle's net
+      premiums, line for line.
+
+    Dates: every option event is in Jul–Sep 2026, before the run's clock (2026-10), so nothing
+    here is a future-dated row. Expiries in the future (Nov / Dec 2026) are only ever OPEN.
+    """
+    ph = "phase1:options"
+    labels: dict[int, str] = {}     # txn id -> the §6.1 option_side this scenario wrote
+
+    PUT45 = "OPA260918P00045000"    # STO 2 -> BTC 2
+    CALL55 = "OPA260821C00055000"   # STO 1 -> expires worthless
+    CALL30 = "OPB260918C00030000"   # BTO 3 -> STC 3 (moomoo_my, CSV door, supplied fees)
+    PUT25 = "OPB260821P00025000"    # BTO 2 -> expires worthless (a LONG expiry)
+    PUT60 = "OPA261218P00060000"    # STO 1 -> OPTION_ADJUST 1->3 into PUT20
+    PUT20 = "OPA261218P00020000"    #   60 x 1 == 20 x 3; later BTC 1 of the 3
+    CALLC = "OPC261120C00010000"    # BTO 2 -> OPTION_ADJUST 1:1 rename into CALLD
+    CALLD = "OPD261120C00010000"
+    PUT40 = "OPA260918P00040000"    # STO 2 -> ASSIGNED (option close + buy 200 OPA @ 40)
+    PUT20B = "OPB260821P00020000"   # STO 2 -> same day: BTC 1, then the expiry of the other 1
+    CALL35 = "OPB260904C00035000"   # STO 1 -> never closed: past expiry at `final`
+    CALL42 = "OPA260918C00042000"   # BTO 2 -> EXERCISE 1 (option close + buy 100 OPA @ 42),
+    #                                  then the other 1 expires (a partial exercise, §4.2)
+
+    def wrote(resp, label: str, scope: str) -> int | None:
+        ev.check("options.door_accepts", scope, 201, resp.get("status"), ph)
+        j = resp.get("json") if isinstance(resp, dict) else None
+        t = j.get("txn_id") if isinstance(j, dict) else None
+        if t:
+            labels[int(t)] = label
+        return t
+
+    def tx_count() -> int:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        finally:
+            conn.close()
+
+    # ---- the fee parameters the oracle transcribed (OPT-D6) are the app's EFFECTIVE ones ----
+    eff = C.read_effective_fee_rules(api)
+    ev.check("options.fee_param.option_per_contract", "schwab",
+             O.FEE_RULES["schwab"]["option_per_contract"],
+             (eff.get("schwab") or {}).get("option_per_contract"), ph)
+    ev.check("options.fee_param.option_per_contract", "moomoo_us (unset, not 0)", None,
+             (eff.get("moomoo_us") or {}).get("option_per_contract"), ph)
+
+    # No funding op on purpose: schwab's USD pool already holds ~17,000 (the assignment's leg
+    # is 8,000) and moomoo_my's ~830 (the BTO is 631.50). A USD deposit would be an UNBASED
+    # foreign acquisition and move schwab's covered_ratio (F2/F3) — a different feature.
+
+    # ---- door probe: OPT-D6 — no per-contract rate and no statement fee -> refused ---------
+    before = tx_count()
+    r = op.option_trade("moomoo_my", CALL30, "2026-07-22", "BTO", 3, "2.10",
+                        expect_status=400)
+    ev.check("guard.option_fee_unset_refused", "moomoo_my (moomoo_us, rate unset), no fee",
+             400, r.get("status"), ph)
+    ev.check("guard.option_fee_unset_writes_nothing", "moomoo_my BTO without fee",
+             before, tx_count(), ph)
+
+    # ---- opens -------------------------------------------------------------------------
+    wrote(op.option_trade("schwab", PUT45, "2026-07-20", "STO", 2, "1.50"), "賣出開倉",
+          "STO PUT45")
+    wrote(op.option_trade("schwab", CALL55, "2026-07-21", "STO", 1, "0.80"), "賣出開倉",
+          "STO CALL55")
+    # BTO on moomoo_my through the CSV door: shares in SHARE-EQUIVALENTS (3 口 = 300), the
+    # statement fee supplied, tax blank (an option carries none).
+    r = op.import_csv("transactions", "option_bto_moomoo",
+                      ["account", "symbol", "side", "date", "shares", "price", "fee", "tax"],
+                      [["moomoo_my", CALL30, "buy", "2026-07-22", "300", "2.10", "1.50", ""]])
+    ev.check("options.csv_writes", "BTO CALL30 via CSV", 1, _written(r), ph)
+    bto30 = op._latest_tx_id("moomoo_my", CALL30, "buy")
+    if bto30:
+        labels[int(bto30)] = "買進開倉"
+        op._fee_check(bto30, "moomoo_my", "BUY", 300, "2.10", CALL30, "2026-07-22",
+                      supplied_fee="1.50")
+    wrote(op.option_trade("schwab", PUT25, "2026-07-23", "BTO", 2, "0.55"), "買進開倉",
+          "BTO PUT25")
+    wrote(op.option_trade("schwab", PUT60, "2026-07-24", "STO", 1, "3.00"), "賣出開倉",
+          "STO PUT60")
+    wrote(op.option_trade("schwab", CALLC, "2026-07-27", "BTO", 2, "1.25"), "買進開倉",
+          "BTO CALLC")
+    wrote(op.option_trade("schwab", PUT40, "2026-07-28", "STO", 2, "1.10"), "賣出開倉",
+          "STO PUT40")
+    wrote(op.option_trade("schwab", PUT20B, "2026-07-29", "STO", 2, "0.70"), "賣出開倉",
+          "STO PUT20B")
+    wrote(op.option_trade("schwab", CALL35, "2026-08-03", "STO", 1, "0.60"), "賣出開倉",
+          "STO CALL35")
+    wrote(op.option_trade("schwab", CALL42, "2026-07-30", "BTO", 2, "1.40"), "買進開倉",
+          "BTO CALL42")
+
+    # ---- §4.3 OPTION_ADJUST through the real corporate-action door ------------------------
+    r = op.option_adjust("schwab", "2026-08-03", PUT60, PUT20, 3)
+    ev.check("options.adjust_accepted", "1->3 on a SHORT (60 x 1 == 20 x 3)",
+             201, r.get("status"), ph)
+    r = op.option_adjust("schwab", "2026-08-10", CALLC, CALLD, 1)
+    ev.check("options.adjust_accepted", "1:1 rename on a LONG", 201, r.get("status"), ph)
+
+    # ---- door probe: OPT-D14 — 買進平倉 beyond the short is refused, nothing written ---------
+    before = tx_count()
+    r = op.option_trade("schwab", PUT45, "2026-08-14", "BTC", 3, "0.40", expect_status=400)
+    ev.check("guard.option_btc_beyond_short_refused", "BTC 3 on a 2-contract short",
+             400, r.get("status"), ph)
+    ev.check("guard.option_btc_beyond_short_writes_nothing", "BTC 3 on 2", before,
+             tx_count(), ph)
+
+    res = P1.reconcile(ev, api, db_path, "options_open", valuation=True)
+    # Literal anchors (hand-computed from the spec, not the oracle):
+    # PUT60 STO 1 @ 3.00 -> 1->3 into PUT20: 3 contracts SHORT, valued at 3.00 / 3 = 1.00 and
+    # dated the predecessor's trade (§5); the strike is conserved, so the obligation is
+    # 20 x 100 x 3 = 6,000.
+    _option_anchor(ev, api, "schwab", PUT20, "contracts", "3", "options_open")
+    _option_anchor(ev, api, "schwab", PUT20, "direction", "short", "options_open")
+    _option_anchor(ev, api, "schwab", PUT20, "last_price", "1", "options_open")
+    _option_anchor(ev, api, "schwab", PUT20, "last_price_date", "2026-07-24", "options_open")
+    _option_anchor(ev, api, "schwab", PUT20, "obligation", "6000", "options_open")
+    # CALLC BTO 2 @ 1.25 -> 1:1 into CALLD: 2 contracts LONG at the predecessor's 1.25. (Not
+    # 1.20: with it the three contracts still open at `final` — PUT20 −180, CALLD +240,
+    # CALL35 −60 — net to exactly 0, and a block total of 0 agrees with too many mistakes.)
+    _option_anchor(ev, api, "schwab", CALLD, "contracts", "2", "options_open")
+    _option_anchor(ev, api, "schwab", CALLD, "last_price", "1.25", "options_open")
+    _option_anchor(ev, api, "schwab", CALLD, "obligation", None, "options_open")
+    # The two adjusted-away contracts hold nothing.
+    ev.check("options.adjust_source_flat", "PUT60 / CALLC after their adjustments", [],
+             sorted(k[1] for k, h in res.holdings.items()
+                    if k[1] in (PUT60, CALLC) and h.shares != O.ZERO), "phase1:options_open")
+    ev.check("options.refusal_codes", "options_open", [],
+             [c for c, _ in res.action_refusals], "phase1:options_open")
+
+    # ---- closes ------------------------------------------------------------------------
+    wrote(op.option_trade("schwab", PUT45, "2026-08-14", "BTC", 2, "0.40"), "買進平倉",
+          "BTC PUT45")
+    wrote(op.option_close("schwab", CALL55, "2026-08-21", "expired", 1), "到期作廢",
+          "expire CALL55 (short)")
+    wrote(op.option_close("schwab", PUT25, "2026-08-21", "expired", 2), "到期作廢",
+          "expire PUT25 (long)")
+    # Same day: BTC 1 first, then the expiry of the remaining 1 — write order is the intraday
+    # order (DEF-012), so the expiry's quantity is |open| AFTER the BTC.
+    wrote(op.option_trade("schwab", PUT20B, "2026-08-21", "BTC", 1, "0.05"), "買進平倉",
+          "BTC PUT20B (same day as its expiry)")
+    wrote(op.option_close("schwab", PUT20B, "2026-08-21", "expired", 1), "到期作廢",
+          "expire PUT20B after the same-day BTC")
+    r = op.import_csv("transactions", "option_stc_moomoo",
+                      ["account", "symbol", "side", "date", "shares", "price", "fee", "tax"],
+                      [["moomoo_my", CALL30, "sell", "2026-09-01", "300", "3.05", "1.60", ""]])
+    ev.check("options.csv_writes", "STC CALL30 via CSV", 1, _written(r), ph)
+    stc30 = op._latest_tx_id("moomoo_my", CALL30, "sell")
+    if stc30:
+        labels[int(stc30)] = "賣出平倉"
+        op._fee_check(stc30, "moomoo_my", "SELL", 300, "3.05", CALL30, "2026-09-01",
+                      supplied_fee="1.60")
+    wrote(op.option_trade("schwab", PUT20, "2026-09-02", "BTC", 1, "0.90"), "買進平倉",
+          "BTC 1 of the 3 adjusted PUT20")
+    # A PARTIAL exercise (0 < quantity <= |open|): the option SELL at 0 + the stock BUY of the
+    # underlying at the strike, then the remaining contract expires on its expiry date.
+    r = op.option_close("schwab", CALL42, "2026-09-11", "exercised", 1)
+    wrote(r, "履約", "exercised 1 of 2 CALL42 (two legs)")
+    j = r.get("json") if isinstance(r.get("json"), dict) else {}
+    ev.check("options.exercise_two_legs", "txn_ids = [option, stock]", 2,
+             len(j.get("txn_ids") or []), ph)
+    wrote(op.option_close("schwab", CALL42, "2026-09-18", "expired", 1), "到期作廢",
+          "expire the other CALL42 (long)")
+    r = op.option_close("schwab", PUT40, "2026-09-18", "assigned", 2)
+    wrote(r, "被指派", "assigned PUT40 (two legs)")
+    j = r.get("json") if isinstance(r.get("json"), dict) else {}
+    ev.check("options.assignment_two_legs", "txn_ids = [option, stock]", 2,
+             len(j.get("txn_ids") or []), ph)
+
+    res = P1.reconcile(ev, api, db_path, "options_closed", valuation=True)
+    # Realized LITERALS (spec §4.1; schwab 0.65/contract + SEC on a sell, min 0.01):
+    #   PUT45  STO 2 @ 1.50: 300 − 1.31 = 298.69 in;  BTC 2 @ 0.40: 80 + 1.30 = 81.30 out
+    #   CALL55 STO 1 @ 0.80: 80 − 0.66 = 79.34 — the whole premium on the expiry
+    #   PUT25  BTO 2 @ 0.55: 110 + 1.30 = 111.30 paid — the whole basis lost on the expiry
+    #   PUT20B STO 2 @ 0.70: 140 − 1.31 = 138.69; BTC 1 @ 0.05 (5.65) -> 69.345 − 5.65; the
+    #          expiry of the other 100 realizes the remaining 69.345
+    #   CALL30 (moomoo, statement fees) 915 − 1.60 − (630 + 1.50)
+    #   PUT20  1 of 3 @ 0.90: 299.34 × 100/300 = 99.78 − 90.65
+    #   PUT40  STO 2 @ 1.10: 220 − 1.31 = 218.69 — the premium stays option P&L (R5)
+    #   CALL42 BTO 2 @ 1.40: 280 + 1.30 = 281.30 paid; each contract's half (140.65) is lost —
+    #          on the exercise (R5: the premium paid is the option's realized loss, never folded
+    #          into the stock) and on the other contract's expiry
+    for acct, sym, d, reason, want in (
+            ("schwab", CALL42, "2026-09-11", "exercised", "-140.65"),
+            ("schwab", CALL42, "2026-09-18", "expired", "-140.65"),
+            ("schwab", PUT45, "2026-08-14", None, "217.39"),
+            ("schwab", CALL55, "2026-08-21", "expired", "79.34"),
+            ("schwab", PUT25, "2026-08-21", "expired", "-111.30"),
+            ("schwab", PUT20B, "2026-08-21", None, "63.695"),
+            ("schwab", PUT20B, "2026-08-21", "expired", "69.345"),
+            ("moomoo_my", CALL30, "2026-09-01", None, "281.90"),
+            ("schwab", PUT20, "2026-09-02", None, "9.13"),
+            ("schwab", PUT40, "2026-09-18", "assigned", "218.69")):
+        _option_realized_anchor(ev, api, acct, sym, d, reason, want)
+    # The two stock legs: 100 OPA at the 42 strike (exercise) + 200 OPA at the 40 strike
+    # (assignment), schwab's $0 commission — an ordinary stock holding of 300 at 4,200 + 8,000;
+    # neither premium is folded into its cost (R5).
+    P1.anchor(ev, api, "options.anchor.stock_legs_shares", "schwab", "OPA", "shares",
+              "300", phase="phase1:options_closed")
+    P1.anchor(ev, api, "options.anchor.stock_legs_cost", "schwab", "OPA",
+              "original_cost_total", "12200", phase="phase1:options_closed")
+    _option_side_anchors(ev, api, labels, "phase1:options_closed")
+    _option_cash_tie(ev, api, db_path, labels, "phase1:options_closed")
+
+    # ---- §4.4: a close the replay must REFUSE — legacy data --------------------------------
+    # Every door refuses it (§4.2: an `expired` row must equal |open|, and CALL30 is flat), so
+    # it can only exist below the validators. A BUY close on a flat contract would OPEN a
+    # long lot: the replay books nothing, records it, flags the (flat) position, and
+    # withholds XIRR and B. Then the owner's remedy — delete it through the door.
+    rid = C.write_legacy_transaction(db_path, "moomoo_my", CALL30, "BUY", "2026-09-18",
+                                     C.dec("100"), C.dec("0"), close_reason="expired")
+    labels[int(rid)] = "未入帳（待釐清）"
+    ev.op("phase1", "DB", "legacy.option_close_without_position",
+          {"account_id": "moomoo_my", "symbol": CALL30, "side": "BUY", "date": "2026-09-18",
+           "quantity": "100", "close_reason": "expired"},
+          {"status": 201, "json": {"txn_id": rid}},
+          note="legacy-data scenario: no door accepts this row (spec §4.2)")
+    ev.check("options.refused_close_dashboard_200", "a stored refused close must not 500",
+             "200", str(api.get("/api/dashboard").status_code), "phase1:options_refused_close")
+    res = P1.reconcile(ev, api, db_path, "options_refused_close", valuation=True)
+    ev.check("options.oracle_refuses_the_close", "options_refused_close", [rid],
+             [rc.txn_id for rc in res.refused_closes], "phase1:options_refused_close")
+    _option_side_anchors(ev, api, labels, "phase1:options_refused_close")
+    _option_cash_tie(ev, api, db_path, labels, "phase1:options_refused_close")
+    rd = api.delete(f"/api/ledgers/transactions/{rid}")
+    ev.op("phase1", "API", "delete.transaction", {"id": rid},
+          {"status": rd.status_code, "json": _json(rd)}, note="remove the refused close")
+    ev.check("options.refused_close_removable", "delete the legacy refused close",
+             "200", str(rd.status_code), "phase1:options_refused_close")
+    labels.pop(int(rid), None)
+
+
+def _option_anchor(ev, api, account_id, symbol, field, expected, label):
+    """One `options.open[]` field against a hand-computed LITERAL (see P1.anchor)."""
+    block = api.get("/api/dashboard").json().get("options") or {}
+    row = next((r for r in block.get("open") or []
+                if r.get("account_id") == account_id and r.get("symbol") == symbol), None)
+    ev.check(f"options.anchor.open.{field}", f"{account_id}/{symbol}", expected,
+             None if row is None else row.get(field), f"phase1:{label}")
+
+
+def _option_realized_anchor(ev, api, account_id, symbol, sell_date, reason, expected):
+    """One option realized row (matched by account, contract, date and close reason) against
+    a hand-computed LITERAL."""
+    block = api.get("/api/dashboard").json().get("options") or {}
+    rows = [r for r in (block.get("realized") or {}).get("rows") or []
+            if r.get("account_id") == account_id and r.get("symbol") == symbol
+            and r.get("sell_date") == sell_date and r.get("close_reason") == reason]
+    ev.check("options.anchor.realized", f"{account_id}/{symbol}@{sell_date} {reason}",
+             expected, rows[0].get("realized") if len(rows) == 1 else f"{len(rows)} rows",
+             "phase1:options_closed")
+
+
+def _option_side_anchors(ev, api, labels: dict[int, str], phase: str) -> None:
+    """Spec §6.1: every option row's `option_side` on the ledger wire is the label this
+    scenario knows it wrote — one assertion per row."""
+    rows = {r["id"]: r for r in api.get("/api/ledgers/transactions", limit=500).json()["rows"]}
+    for tid, want in sorted(labels.items()):
+        ev.check("options.option_side.ledger", f"id={tid}", want,
+                 (rows.get(tid) or {}).get("option_side"), phase)
+
+
+def _option_cash_tie(ev, api, db_path, labels: dict[int, str], phase: str) -> None:
+    """The cash tie per pool (plan W7a): the statement's OPTION lines of each USD pool are
+    the oracle's net premiums, line for line, with the same §6.1 label the ledger wire has.
+
+    Expected lines come from the stored rows (each option trade's settled 價金 ± fee ± tax,
+    the oracle's own `settled`) and the scenario's label table; actual lines are the
+    statement rows carrying an `option_side`. Lines that move no money (a price-0 close) are
+    compared through the ledger wire instead: whether a statement LISTS a zero line is not
+    a money fact.
+    """
+    facts = C.load_facts_from_db(db_path)
+    for acct in ("schwab", "moomoo_my"):
+        want: list = []
+        net = O.ZERO
+        for t in facts.txs:
+            if t.account_id != acct or not O.is_option(t.symbol):
+                continue
+            gross = O.settled(t.qty, t.price, "USD")
+            delta = -(gross + t.fee + t.tax) if t.side == "BUY" else gross - t.fee - t.tax
+            net += delta
+            if delta != O.ZERO:
+                want.append((t.trade_date.isoformat(), t.symbol, labels.get(t.id), delta))
+        st = api.get("/api/cash/statement", account=acct, ccy="USD", limit=500).json()
+        got_rows = [r for r in st.get("rows") or [] if r.get("option_side") is not None]
+        got = [(r["date"], r.get("symbol"), r.get("option_side"), C.dec(r["delta"]))
+               for r in got_rows if C.dec(r["delta"]) != O.ZERO]
+        ev.check("options.cash_tie.net", f"{acct}|USD option lines", net,
+                 sum((C.dec(r["delta"]) for r in got_rows), O.ZERO), phase)
+        ev.check("options.cash_tie.lines", f"{acct}|USD option lines", P1._cv(sorted(want)),
+                 P1._cv(sorted(got)), phase)
 
 
 def _written(resp) -> int:
