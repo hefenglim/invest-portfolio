@@ -9,6 +9,54 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+### Added — US equity options in the ledger (P3, approach ④; branch `feat/options-ledger`)
+
+Spec `docs/spec/2026-10-09-options-ledger.md` (APPROVED 2026-10-09), plan
+`docs/superpowers/plans/2026-10-09-options-ledger.md`. **Owner rulings (in chat, 2026-10-09):**
+R1 approach ④ — each contract is an instrument in the trade ledger, sell-to-open is the existing
+declared short; R2 an open contract is valued at its last trade price; R3 the historical trend
+excludes option value, with a note; R4 a separate 選擇權 section; R5 on assignment / exercise the
+premium stays option P&L; R6 US only; R7 approach ⑤ (a dedicated sub-ledger) kept as a TODO
+(spec §12, `TODO(options-⑤)` in `shared/options.py`). **Decisions OPT-D1..D22** confirmed by the
+owner across four review rounds and a pre-build review (spec §2); the OPT-D21 mirror (買進開倉 while
+short refused) was confirmed with the plan approval.
+
+- **Ledger.** `instruments.asset_type` ('stock' | 'option') and `transactions.close_reason`
+  (`expired` / `assigned` / `exercised`) — both additive, every existing row migrates as a stock /
+  NULL. A contract's terms are parsed from its OCC symbol (`XYZ261218P00050000`), never stored
+  twice (OPT-D22); quantity is in share-equivalents (OPT-D1). Expiry / assignment / exercise are
+  price-0 closing rows with no fee (OPT-D2); assignment / exercise also write the stock leg at the
+  strike, both rows in one transaction. The replay refuses a close row that would open or extend a
+  lot (spec §4.4) — `Book.refused_closes`, sticky `unbookable_close`, XIRR and B withheld, the
+  correction doors refuse to strand one (`refused_close_correction`). New corporate-action kind
+  `OPTION_ADJUST` (選擇權合約調整, 1 → N contracts only, OPT-D3 / D11 / D16).
+- **Valuation.** Last-trade price from the ledger (never a quote, never in `prices`); point-in-time
+  figures include an open contract, trend-derived figures exclude its value (OPT-D4); KPI 總市值 =
+  stock grand subtotal + `options.market_value` (「其中選擇權」); holdings, weights, allocation and
+  the stock realized rows stay stock-only (OPT-D5); 本金匯率效果 withheld while an option is open
+  (OPT-D20). Every new dashboard field lives in `DashboardData.options`, absent on a ledger with no
+  option — **the golden payload is unchanged**.
+- **Doors.** Manual entry option mode (`option_intent` STO / BTC / BTO / STC, `contracts`, 到期作廢,
+  被指派／履約 with both legs; OPT-D14 / D18 / D21), the compose endpoint
+  `GET /api/input/option-symbol`, the CSV `close_reason` column, the edit door on a close row, the
+  corporate-action doors, the Schwab converter (option rows mapped, `known_positions` injected —
+  OPT-D19; assignment rows not mapped blind — OPT-D9). Option fees per rule set (`schwab` 0.65 per
+  contract, `moomoo_us` unset → the statement fee is required; + SEC on sells; OPT-D6).
+- **Surfaces.** A 選擇權 section, the 待確認到期 expiry inbox (third 收件匣 panel, OPT-D13), §6.1
+  side labels derived on the server by one classifier (OPT-D15), the drawer for a contract, the
+  watchlist filter, every export (spec §9). Options are excluded from quotes and from every
+  stock-only reader — AI insights, signals, alerts, digest, news, fundamentals, target weights,
+  rebalance, what-if (OPT-D10).
+- **Stock ledger blast radius (spec §10, invariant 1):** additive keys only — the raw transactions
+  dump / per-tab CSV gain `close_reason`, the transaction template gains `close_reason（選填）`, the
+  realized CSV gains `asset_type`, `contract`, and the wire keys spec §10 lists read null / false /
+  "stock". Every other export of a stock ledger is byte-identical (digest-pinned).
+- **Verification.** Stress-audit oracle extended from the spec (independent; phase 1 163 ops /
+  19,727 assertions / 0 fail, 2026-10-10 — new baseline); accounting manual v1.12 §4.5; rule files
+  updated (`domain-ledger.md`, `markets-and-fees.md`, `data-and-pricing.md`, `architecture.md`).
+- **Fixed on the way:** `/api/input/holdings` now lists a contract that received its position
+  through an `OPTION_ADJUST` and has no row of its own yet.
+
 **Owner rulings 2026-10-05 (in chat, one by one; 24 items).** The open questions of the CR round
 were put to the owner as choices; the kept-as-built answers need no code.
 
