@@ -23,6 +23,7 @@ from typing import Protocol
 from pydantic import BaseModel, ValidationError, model_validator
 
 from portfolio_dash.shared.money import cap_dp
+from portfolio_dash.shared.options import ADJUST_KIND_ZH
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -34,11 +35,14 @@ _PRICE_DP = 4
 
 
 class CorporateActionKind(StrEnum):
-    """SPLIT re-denominates one position; EXCHANGE moves it; SPINOFF carves a child off it."""
+    """SPLIT re-denominates one position; EXCHANGE moves it; SPINOFF carves a child off it;
+    OPTION_ADJUST moves an option contract — long or short — onto its adjusted successor
+    (options spec §4.3, OPT-D3: a new kind so every equity path stays byte-identical)."""
 
     SPLIT = "SPLIT"
     EXCHANGE = "EXCHANGE"
     SPINOFF = "SPINOFF"
+    OPTION_ADJUST = "OPTION_ADJUST"
 
 
 #: The zh label of each kind — one owner, because the words are not interchangeable.
@@ -49,7 +53,8 @@ class CorporateActionKind(StrEnum):
 #: disagreed — it labelled SPINOFF 「分割」, this table's word for SPLIT. Resolved 2026-09-23
 #: (I-14): the frontend prints the wire's ``kind_label`` (:func:`kind_label`) instead of
 #: keeping a table of its own.
-KIND_ZH: dict[str, str] = {"SPLIT": "分割", "EXCHANGE": "換股", "SPINOFF": "分拆"}
+KIND_ZH: dict[str, str] = {"SPLIT": "分割", "EXCHANGE": "換股", "SPINOFF": "分拆",
+                           "OPTION_ADJUST": ADJUST_KIND_ZH}
 
 
 def kind_label(kind: str) -> str:
@@ -128,6 +133,15 @@ class CorporateAction(BaseModel):
                 raise ValueError(f"cost_carry must be in [0, 1], got {self.cost_carry}")
         elif self.cost_carry is not None:
             raise ValueError(f"cost_carry is SPINOFF-only, got {self.kind} with {self.cost_carry}")
+        if self.kind is CorporateActionKind.OPTION_ADJUST:
+            # The replay moves the lots × ``ratio_to`` and nothing else, which is exact only
+            # for 1 → N contracts (OPT-D16: ``ratio_from > 1`` leaves a fractional contract),
+            # and a contract cannot be adjusted onto itself. A stored row breaking either is
+            # unreadable (``convert_stored``) — 待釐清, never a silently wrong lot.
+            if self.ratio_from != _ONE:
+                raise ValueError(f"OPTION_ADJUST requires ratio_from 1, got {self.ratio_from}")
+            if self.from_symbol == self.to_symbol:
+                raise ValueError("OPTION_ADJUST requires from_symbol != to_symbol")
         return self
 
 
@@ -285,12 +299,19 @@ def convert_stored(
                     reason=(
                         f"{r.from_symbol} 在 {r.date.isoformat()} 的公司行動資料不完整，"
                         f"無法套用（{r.kind} {r.ratio_to}/{r.ratio_from}）— "
-                        "比例必須是兩個正整數，且分割的前後代號必須相同。"
+                        f"{_rule_of(str(r.kind))}"
                         f"請到公司行動帳本修正這一筆（{_first_line(exc)}）"
                     ),
                 )
             )
     return good, bad
+
+
+def _rule_of(kind: str) -> str:
+    """The structural rule an unreadable row of *kind* broke, in the owner's words."""
+    if kind.strip().upper() == CorporateActionKind.OPTION_ADJUST.value:
+        return "選擇權合約調整以 1 口為基準（比例 1 → N），且前後合約代號必須不同。"
+    return "比例必須是兩個正整數，且分割的前後代號必須相同。"
 
 
 def _first_line(exc: Exception) -> str:

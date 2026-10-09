@@ -24,6 +24,7 @@ from portfolio_dash.shared.models.ledger import (
     Transaction,
 )
 from portfolio_dash.shared.money import cap_dp, from_db, to_db
+from portfolio_dash.shared.options import CloseReason
 from portfolio_dash.shared.sectors import CANONICAL_KEYS, canonical_sector
 
 #: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
@@ -185,6 +186,12 @@ def upsert_instrument(
       set), so "no band" never carries a date for a band that is not there.
     * ``inst.target_set_at`` is IGNORED. The model field is read-only (see ``Instrument``);
       one owner, and this is it.
+
+    **``asset_type`` only ever moves stock → option** (options spec §3). An insert writes the
+    model's value; on conflict an ``'option'`` write wins and a ``'stock'`` write keeps what is
+    stored — because a writer that rebuilt the row without knowing its type (a rename, a band
+    edit) passes the model default, and that must never turn a registered contract back into
+    a stock. ``register.register_option_contract`` is the one door that writes ``'option'``.
     * **The stamp is a BUSINESS date, so it is the Taipei day** (DEF-022, 2026-09-23 —
       ``shared/clock.py``, decision Q6: Asia/Taipei is the only day anchor for business
       logic). It was ``datetime.now(UTC).date()``, which between 00:00 and 07:59 Taipei is
@@ -200,14 +207,16 @@ def upsert_instrument(
     conn.execute(
         """INSERT INTO instruments (symbol, market, quote_ccy, sector, name, board,
                target_low, target_high, is_etf, etf_flag_unknown, industry,
-               target_set_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               target_set_at, asset_type)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(symbol) DO UPDATE SET
                market=excluded.market, quote_ccy=excluded.quote_ccy,
                sector=excluded.sector, name=excluded.name, board=excluded.board,
                target_low=excluded.target_low, target_high=excluded.target_high,
                is_etf=excluded.is_etf, etf_flag_unknown=excluded.etf_flag_unknown,
                industry=excluded.industry,
+               asset_type=CASE WHEN excluded.asset_type = 'option' THEN 'option'
+                               ELSE instruments.asset_type END,
                target_set_at=CASE
                    WHEN instruments.target_low IS NOT excluded.target_low
                      OR instruments.target_high IS NOT excluded.target_high
@@ -223,6 +232,7 @@ def upsert_instrument(
             1 if inst.etf_flag_unknown else 0,
             inst.industry,
             new_stamp,
+            inst.asset_type,
         ),
     )
     # ``commit=False`` lets a caller inside an all-or-nothing batch defer to the batch's
@@ -592,6 +602,8 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
             date.fromisoformat(row["target_set_at"]) if row["target_set_at"] else None
         ),
         aliases=_aliases_of(row),
+        asset_type=("option" if "asset_type" in row.keys() and row["asset_type"] == "option"
+                    else "stock"),
     )
 
 
@@ -624,7 +636,7 @@ def get_instrument(conn: sqlite3.Connection, symbol: str) -> Instrument | None:
     """Return a single instrument by exact symbol, or None if not found."""
     row = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases "
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases, asset_type "
         "FROM instruments WHERE symbol=?",
         (symbol,),
     ).fetchone()
@@ -638,7 +650,7 @@ def list_instruments(conn: sqlite3.Connection) -> list[Instrument]:
     so no money figure is affected by archiving)."""
     rows = conn.execute(
         "SELECT symbol, market, quote_ccy, sector, name, board, target_low, target_high, "
-        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases "
+        "is_etf, etf_flag_unknown, archived, industry, target_set_at, aliases, asset_type "
         "FROM instruments"
     ).fetchall()
     return [_row_to_instrument(r) for r in rows]
@@ -900,6 +912,8 @@ class StoredTransaction(BaseModel):
     note: str | None = None
     daytrade: bool = False
     short_sale: bool = False
+    #: Options spec §3: a price-0 closing row's reason (OPT-D2); ``None`` on every other row.
+    close_reason: CloseReason | None = None
 
 
 def insert_transaction(
@@ -917,6 +931,7 @@ def insert_transaction(
     note: str | None = None,
     daytrade: bool = False,
     short_sale: bool = False,
+    close_reason: CloseReason | None = None,
     commit: bool = True,
 ) -> int:
     """Insert a transaction row and return its new primary-key id.
@@ -927,8 +942,8 @@ def insert_transaction(
     """
     cur = conn.execute(
         """INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax,
-               trade_date, fee_rule_snapshot, note, daytrade, short_sale)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               trade_date, fee_rule_snapshot, note, daytrade, short_sale, close_reason)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             account_id,
             symbol,
@@ -942,6 +957,7 @@ def insert_transaction(
             note,
             1 if daytrade else 0,
             1 if short_sale else 0,
+            close_reason,
         ),
     )
     _unarchive_on_booking(conn, symbol)  # held => not archived (FU-D13)
@@ -1333,7 +1349,7 @@ def list_transactions(
 
 # The ONE column list and row shape for ``transactions`` (S6) — see ``_DIV_SELECT``.
 _TXN_SELECT = ("SELECT id, account_id, symbol, side, quantity, price, fees, tax, trade_date, "
-               "fee_rule_snapshot, note, daytrade, short_sale FROM transactions")
+               "fee_rule_snapshot, note, daytrade, short_sale, close_reason FROM transactions")
 
 
 def _txn_row(r: sqlite3.Row) -> StoredTransaction:
@@ -1351,6 +1367,7 @@ def _txn_row(r: sqlite3.Row) -> StoredTransaction:
         note=r["note"],
         daytrade=bool(r["daytrade"]),
         short_sale=bool(r["short_sale"]),
+        close_reason=r["close_reason"],
     )
 
 
@@ -1678,9 +1695,12 @@ def load_ledger_bundle(
     good_actions, bad_actions = convert_stored(s_acts)
     return LedgerBundle(
         transactions=[
+            # ``id`` and ``close_reason`` (options spec §3): the replay names a refused close
+            # by its row, and books a close row by its reason.
             Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                         quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
-                        trade_date=s.trade_date, short_sale=s.short_sale)
+                        trade_date=s.trade_date, short_sale=s.short_sale, id=s.id,
+                        close_reason=s.close_reason)
             for s in s_txs
         ],
         dividends=[

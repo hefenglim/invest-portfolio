@@ -198,6 +198,12 @@ class CashLine:
     of this module's views — a refused line that reached a guard's timeline could not move it
     either. ``reason`` (X1, 2026-10-05) is the replay's own sentence for that refusal, when the
     listing that built the line was handed one (``pool_lines``' ``unbooked_reason``).
+
+    ``txn_id`` (options spec §3, 2026-10-09) is the ``transactions.id`` a ``buy`` / ``sell``
+    line settles — an identity :func:`pool_lines` copies from the row when the row has one
+    (a draft does not), never a label. ``option_side`` is the §6.1 label of an option trade
+    line, set ONLY by ``account_statement`` (keyed by ``txn_id``): the balances and the
+    guards' timelines never see a label.
     """
 
     date: date
@@ -216,6 +222,8 @@ class CashLine:
     counter_amount: Decimal | None = None
     booked: bool = True
     reason: str | None = None
+    txn_id: int | None = None
+    option_side: str | None = None
 
 
 #: ⑪ — how every listing marks a ``booked=False`` line: the 現金收支明細 screen (sent on the
@@ -284,9 +292,13 @@ def pool_lines(
         gross = settled_notional(t.quantity, t.price, ccy)
         delta = (-(gross + t.fees + t.tax) if t.side is Side.BUY
                  else gross - t.fees - t.tax)
+        # The row's ledger id when it has one (a stored row, or a ``Transaction`` read by
+        # ``load_ledger_bundle``); a draft or a protocol-only test row has none.
+        row_id = getattr(t, "id", None)
         lines.append(CashLine(t.trade_date, kind, t.symbol, delta, symbol=t.symbol,
                               name=inst.name, qty=t.quantity, price=t.price,
-                              fee=t.fees, tax=t.tax))
+                              fee=t.fees, tax=t.tax,
+                              txn_id=row_id if isinstance(row_id, int) else None))
     for booked, rows in ((True, dividends), (False, unbooked_dividends)):
         for d in rows:
             inst = instruments.get(d.symbol)

@@ -323,6 +323,15 @@ def _apply_action(
             source.short_shares = apply_ratio(source.short_shares, action)
             return
 
+        if action.kind is CorporateActionKind.OPTION_ADJUST:
+            # Options W1 placeholder (2026-10-09): the kind exists so the doors and the
+            # vocabulary can name it, but the §4.3 transfer lands in W2 — until then the
+            # replay REFUSES it like any action it cannot apply, rather than letting it fall
+            # through to the EXCHANGE / SPINOFF code below.
+            _reject(f"{action.from_symbol}（{acct_ref}）於 {action.date.isoformat()} 的"
+                    "選擇權合約調整尚未支援",
+                    source, action, unapplied, allow_oversell=allow_oversell)
+
         # --- EXCHANGE / SPINOFF share a destination and its guards ---
         # E5: no honest booking exists for moving an open short to another symbol.
         if source.short_shares > _ZERO:

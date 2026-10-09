@@ -56,3 +56,16 @@ def test_5225_matches_both_tw_and_my() -> None:
     assert matches_market_format("5225", Market.TW)
     assert matches_market_format("5225", Market.MY)
     assert looks_like_market_code("5225")
+
+
+def test_an_occ_contract_is_us_code_shaped() -> None:
+    """Options spec §8: an OCC symbol is a code, so it resolves EXACT-only and never earns
+    name suggestions; the US ticker pattern itself is unchanged."""
+    from portfolio_dash.shared.symbol_format import MARKET_CODE_PATTERNS
+
+    assert matches_market_format("XYZ261218P00050000", Market.US)
+    assert matches_market_format(" xyz261218p00050000 ", Market.US)
+    assert looks_like_market_code("XYZ261218P00050000")
+    assert not matches_market_format("XYZ261218P00050000", Market.TW)
+    assert not matches_market_format("2330261218P00050000", Market.US)  # digit root
+    assert MARKET_CODE_PATTERNS[Market.US].match("XYZ261218P00050000") is None

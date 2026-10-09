@@ -14,8 +14,15 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.data_ingestion.store import get_instrument, upsert_instrument
 from portfolio_dash.data_ingestion.validate import Issue
-from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.options import (
+    ASSET_OPTION,
+    OptionSymbolError,
+    option_display_name,
+    option_symbol,
+    parse_option_symbol,
+)
 
 BoardProber = Callable[[str], str | None]
 
@@ -133,3 +140,52 @@ def spinoff_child_draft(parent: Instrument, child_symbol: str) -> Instrument:
                       # (which means "answered: no") — the fee engine computes with False and
                       # DISCLOSES it on a TW SELL, exactly as for a manual auto-registration.
                       etf_flag_unknown=True)
+
+
+def register_option_contract(
+    conn: sqlite3.Connection, symbol: str, *, commit: bool = True,
+) -> Instrument:
+    """OPT-D7: register a US option contract from its OCC symbol alone — no quote lookup.
+
+    A contract is never quoted (R2 values it at its last trade price), so the provider gate
+    every stock registration passes cannot apply; the symbol carries every term (OPT-D22) and
+    the row is written from the parse: market ``US``, currency ``USD``, the display name
+    (「XYZ 2026-12-18 50 Put」), ``sector`` / ``board`` empty, ``is_etf`` and
+    ``etf_flag_unknown`` both False (a contract is not an ETF, and nothing is left unanswered),
+    ``asset_type='option'``. The underlying need not be registered and is never touched.
+
+    Idempotent: a registered contract is returned as stored. A row already carrying this
+    symbol as a US stock (typed by hand before options existed) is turned into the option the
+    symbol says it is; a row in another market is refused — options are US only (R6).
+
+    ``commit=False`` defers to the caller's transaction: the CSV and manual doors register a
+    contract only inside the commit that writes its first trade, never on a preview.
+
+    Raises :class:`~portfolio_dash.shared.options.OptionSymbolError` (a ``ValueError``) with
+    the zh refusal.
+    """
+    terms = parse_option_symbol(symbol)
+    if terms is None:
+        raise OptionSymbolError(
+            f"「{symbol.strip()}」不是選擇權合約代號（標的＋到期日 YYMMDD＋C／P＋履約價×1000 "
+            "的八位數，例：XYZ261218P00050000）；選擇權僅支援美股")
+    canonical = option_symbol(terms)
+    existing = get_instrument(conn, canonical)
+    if existing is not None:
+        if existing.market is not Market.US:
+            raise OptionSymbolError(
+                f"{canonical} 已登錄為 {existing.market.value} 標的；選擇權僅支援美股")
+        if existing.is_option:
+            return existing
+        upsert_instrument(conn, existing.model_copy(update={"asset_type": ASSET_OPTION}),
+                          commit=commit)
+    else:
+        register_instrument(
+            conn,
+            Instrument(symbol=canonical, market=Market.US, quote_ccy=Currency.USD,
+                       sector="", name=option_display_name(terms), board="",
+                       is_etf=False, etf_flag_unknown=False, asset_type=ASSET_OPTION),
+            prober=None, confirm=True, commit=commit)
+    stored = get_instrument(conn, canonical)
+    assert stored is not None  # written above, on this connection
+    return stored

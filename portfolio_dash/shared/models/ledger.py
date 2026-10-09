@@ -17,6 +17,7 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
 from portfolio_dash.shared.models.types import Money
+from portfolio_dash.shared.options import CloseReason
 
 #: Alias for :class:`datetime.date`. A Pydantic field named ``date`` SHADOWS the type
 #: inside its own class body, so every annotation after it — ``ex_date``, the
@@ -42,6 +43,13 @@ class Transaction(BaseModel):
     # slip into a plausible-looking realized loss. Only a flagged sell may exceed holdings
     # without the 賣超 guard; the position it opens is covered by the next buy(s).
     short_sale: bool = False
+    #: The ``transactions.id`` this row was read from, or ``None`` for a draft that is not
+    #: written yet (options spec §3). Identity only — the replay orders by its list position,
+    #: never by this — so a refused close (``RefusedClose.txn_id``) can name its row.
+    id: int | None = None
+    #: A price-0 closing row of an option contract (OPT-D2): ``expired`` | ``assigned`` |
+    #: ``exercised``. ``None`` on every ordinary trade, and on every stock row.
+    close_reason: CloseReason | None = None
 
 
 class Dividend(BaseModel):

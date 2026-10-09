@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import Dividend
 
 
@@ -103,6 +104,12 @@ class Holding(BaseModel):
     # Mechanisms (1) + (2); mechanism (3) is driven by `Book.unapplied_actions`, which sees
     # the two cases this flag structurally cannot (see that field).
     unbookable_action: bool = False
+    # Options spec §4.4 (2026-10-09): the replay refused a ``close_reason`` row on this
+    # position — an expiry / assignment / exercise that would have opened or extended a lot.
+    # STICKY like ``unbookable_action`` and read by the same readers; the refused ROW is on
+    # the book (``Book.refused_closes``). Never on the holdings wire: ``HoldingRow`` does not
+    # carry it (the dashboard names refused closes from ``options.refused_closes``).
+    unbookable_close: bool = False
     # QA-06 (owner ruling 2026-09-01: 記錄並標記). This position was FLAT when a DRIP/STOCK
     # dividend added shares to it, so it exists only because of that payout and carries a cost
     # basis of exactly zero. Booked deliberately — the shares may really have been received —
@@ -267,6 +274,35 @@ class OpenedPosition(BaseModel):
     shares: Decimal
     oversold: bool = False
     unbookable_action: bool = False
+    #: Options spec §4.4 — sticky on the position, exactly like ``unbookable_action``.
+    unbookable_close: bool = False
+
+
+class RefusedClose(BaseModel):
+    """A ``close_reason`` row the replay could not book (options spec §4.4).
+
+    An expiry / assignment / exercise row books only against the lot it closes: a BUY within
+    the short lot, a SELL within the long lot. One that would OPEN or EXTEND a lot — a close
+    left behind after its opening trade was deleted, or one against the wrong direction —
+    books nothing and is recorded here, held position or none (a close with no position at
+    all has nothing to flag, which is why the record, not ``Holding.unbookable_close``, is
+    what withholds XIRR and B). ALWAYS EMPTY on the strict path, which raises
+    ``UnbookableLedgerError`` with the same ``reason``.
+    """
+
+    #: ``transactions.id`` of the refused row (``Transaction.id``); ``None`` for a draft.
+    txn_id: int | None = None
+    account_id: str
+    symbol: str
+    date: date
+    side: Side
+    #: Share-equivalents, as stored.
+    quantity: Decimal
+    close_reason: str
+    #: The zh sentence naming the row and why it cannot book.
+    reason: str
+    #: ``shared/options.py::REFUSED_CLOSE_REMEDY``.
+    remedy: str
 
 
 class UnbookableDividend(BaseModel):
@@ -360,6 +396,14 @@ class Book(BaseModel):
     # this list is the whole answer either way. Each is ALSO in ``refused_dividends``. ALWAYS
     # EMPTY on the strict path, which raises ``UnbookableLedgerError`` with the same ``reason``.
     unbookable_dividends: list[UnbookableDividend] = Field(default_factory=list)
+    # Option close rows the replay refused (options spec §4.4; see :class:`RefusedClose`), in
+    # replay order. A non-empty list withholds XIRR and B, like ``orphan_dividends``. ALWAYS
+    # EMPTY on the strict path, which raises instead.
+    refused_closes: list[RefusedClose] = Field(default_factory=list)
+    # For each realized row a ``close_reason`` row emitted: its INDEX into ``realized.rows``
+    # (emission order) → the close reason, so the 選擇權 section can chip 到期作廢／被指派／履約
+    # without a second walk. Empty on a ledger with no close row.
+    realized_close_reasons: dict[int, str] = Field(default_factory=dict)
 
 
 class CurrencyReturn(BaseModel):

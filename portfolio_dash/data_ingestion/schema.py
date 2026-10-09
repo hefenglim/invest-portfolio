@@ -283,6 +283,15 @@ def create_tables(conn: sqlite3.Connection) -> None:
     # provenance columns so every database — fresh or migrated — lists it last. NULL on every
     # pre-existing row, where the delete keeps R3's signature-only rule.
     _add_column_if_missing(conn, "corporate_actions", "child_seed_json", "TEXT")
+    # Options (spec 2026-10-09 §3). Both additive and added LAST, so a fresh and a migrated
+    # database list them in the same place (the raw ledger dump reads ``SELECT *``).
+    # ``asset_type``: every existing instrument migrates in as a stock, and only
+    # ``register.register_option_contract`` writes 'option' — from the symbol's parse, so the
+    # symbol and the type never disagree. ``close_reason``: NULL on every existing row and on
+    # every ordinary trade; ``expired`` / ``assigned`` / ``exercised`` marks a price-0 closing
+    # row of an option contract (OPT-D2), and a NULL row replays exactly as before.
+    _add_column_if_missing(conn, "instruments", "asset_type", "TEXT NOT NULL DEFAULT 'stock'")
+    _add_column_if_missing(conn, "transactions", "close_reason", "TEXT")
     # original_avg_cost drop (A6, 2026-07-21): the stored rounded average is retired — cost
     # basis / XIRR key off original_cost_total only, and the average is computed on read. A
     # legacy DB carried a NOT NULL original_avg_cost column that upsert_opening no longer fills,

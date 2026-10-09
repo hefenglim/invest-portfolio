@@ -1,7 +1,8 @@
 """Per-market instrument-code SHAPE patterns — the single source of truth.
 
-Pure module: stdlib :mod:`re` + :class:`shared.enums.Market` only (``shared/`` imports
-nothing internal beyond ``shared``).  It defines "what a local exchange code looks like"
+Pure module: stdlib :mod:`re` + :class:`shared.enums.Market` + the option contract shape
+(``shared.options.OPTION_PATTERN``) only (``shared/`` imports nothing internal beyond
+``shared``).  It defines "what a local exchange code looks like"
 exactly ONCE so the several places that need that judgement cannot drift apart:
 
 * :mod:`portfolio_dash.data_ingestion.agents` — the post-parse soft symbol-format
@@ -21,6 +22,7 @@ import re
 from collections.abc import Mapping
 
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.options import OPTION_PATTERN
 
 MARKET_CODE_PATTERNS: Mapping[Market, re.Pattern[str]] = {
     Market.TW: re.compile(r"^\d{4,6}[A-Z]{0,2}$"),
@@ -35,8 +37,16 @@ def _normalize(raw: str) -> str:
 
 
 def matches_market_format(symbol: str, market: Market) -> bool:
-    """Return True when *symbol* has the code SHAPE of *market* (after strip+upper)."""
-    return MARKET_CODE_PATTERNS[market].match(_normalize(symbol)) is not None
+    """Return True when *symbol* has the code SHAPE of *market* (after strip+upper).
+
+    A US option contract (``XYZ261218P00050000``, ``shared/options.py::OPTION_PATTERN``) is
+    US-shaped too (options spec §8): it is a code, so it resolves EXACT-only. The ticker
+    pattern itself is unchanged, so nothing that reads ``MARKET_CODE_PATTERNS`` directly
+    starts treating a contract as a ticker."""
+    norm = _normalize(symbol)
+    if market is Market.US and OPTION_PATTERN.match(norm) is not None:
+        return True
+    return MARKET_CODE_PATTERNS[market].match(norm) is not None
 
 
 def looks_like_market_code(raw: str) -> bool:
@@ -47,7 +57,8 @@ def looks_like_market_code(raw: str) -> bool:
     exactly 0.75) — from name-shaped input, which may earn non-binding name suggestions.
     """
     norm = _normalize(raw)
-    return any(pattern.match(norm) is not None for pattern in MARKET_CODE_PATTERNS.values())
+    return (OPTION_PATTERN.match(norm) is not None
+            or any(pattern.match(norm) is not None for pattern in MARKET_CODE_PATTERNS.values()))
 
 
 #: CJK symbols & punctuation, kana, CJK ideographs (+ Extension A + compatibility) and Hangul

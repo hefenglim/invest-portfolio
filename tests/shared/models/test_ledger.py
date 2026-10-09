@@ -82,3 +82,26 @@ def test_opening_inventory_construction() -> None:
     assert oi.original_cost_total == Decimal("1000000")
     # A6: the average is NEVER stored — it is computed on read (total / shares).
     assert oi.original_avg == Decimal("500")
+
+
+def test_transaction_carries_its_ledger_id_and_close_reason() -> None:
+    """Options spec §3: ``Transaction.id`` (the refused-close record names its row) and
+    ``close_reason`` (a price-0 closing row, OPT-D2) — both default to the stock meaning."""
+    from datetime import date
+    from decimal import Decimal
+
+    import pytest
+    from pydantic import ValidationError
+
+    from portfolio_dash.shared.models.enums import Side
+    from portfolio_dash.shared.models.ledger import Transaction
+
+    base = dict(account_id="schwab", symbol="XYZ261218P00050000", side=Side.BUY,
+                quantity=Decimal("100"), price=Decimal("0"), fees=Decimal("0"),
+                tax=Decimal("0"), trade_date=date(2026, 12, 18))
+    plain = Transaction(**base)  # type: ignore[arg-type]
+    assert plain.id is None and plain.close_reason is None
+    closed = Transaction(**base, id=7, close_reason="expired")  # type: ignore[arg-type]
+    assert closed.id == 7 and closed.close_reason == "expired"
+    with pytest.raises(ValidationError):
+        Transaction(**base, close_reason="lapsed")  # type: ignore[arg-type]
