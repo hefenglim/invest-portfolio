@@ -53,35 +53,42 @@ def test_the_last_ordinary_trade_across_accounts_on_or_before_the_day() -> None:
         _tx(PUT, "0", date(2026, 4, 2), side=Side.BUY, close="assigned"),   # not a price
         _tx(PUT, "9.99", date(2026, 7, 1)),                                 # after the day
     ], instruments=_INSTS)
-    assert last_trade_prices(bundle, date(2026, 6, 10)) == {
+    assert last_trade_prices(bundle, date(2026, 6, 10), unapplied=[]) == {
         PUT: LastTrade(price=D("2.50"), on=date(2026, 4, 1))}
-    assert last_trade_prices(bundle, date(2026, 3, 31)) == {
+    assert last_trade_prices(bundle, date(2026, 3, 31), unapplied=[]) == {
         PUT: LastTrade(price=D("2.00"), on=date(2026, 3, 2))}
 
 
 def test_after_an_adjustment_with_no_later_trade_the_predecessor_price_over_ratio() -> None:
     bundle = LedgerBundle(transactions=[_tx(SRC, "6.00", date(2026, 3, 2))],
                           instruments=_INSTS, actions=[_adjust(date(2026, 6, 1))])
-    assert last_trade_prices(bundle, date(2026, 6, 10))[DST] == LastTrade(
+    assert last_trade_prices(bundle, date(2026, 6, 10), unapplied=[])[DST] == LastTrade(
         price=D("2.00"), on=date(2026, 3, 2))
     # a trade on the successor after the adjustment replaces it
     later = LedgerBundle(transactions=[_tx(SRC, "6.00", date(2026, 3, 2)),
                                        _tx(DST, "1.75", date(2026, 6, 5))],
                          instruments=_INSTS, actions=[_adjust(date(2026, 6, 1))])
-    assert last_trade_prices(later, date(2026, 6, 10))[DST] == LastTrade(
+    assert last_trade_prices(later, date(2026, 6, 10), unapplied=[])[DST] == LastTrade(
         price=D("1.75"), on=date(2026, 6, 5))
-    # and a successor trade from BEFORE the adjustment does not survive it
+    # a successor trade from before the adjustment survives it only when it is LATER than
+    # the predecessor's (final review R1-M2, 2026-10-10): here it is, 05-01 against 03-02
     before = LedgerBundle(transactions=[_tx(SRC, "6.00", date(2026, 3, 2)),
                                         _tx(DST, "1.10", date(2026, 5, 1))],
                           instruments=_INSTS, actions=[_adjust(date(2026, 6, 1))])
-    assert last_trade_prices(before, date(2026, 6, 10))[DST].price == D("2.00")
+    assert last_trade_prices(before, date(2026, 6, 10), unapplied=[])[DST] == LastTrade(
+        price=D("1.10"), on=date(2026, 5, 1))
+    # ... and when it is older than the predecessor's last trade, the derived price wins
+    older = LedgerBundle(transactions=[_tx(DST, "1.10", date(2026, 2, 1)),
+                                       _tx(SRC, "6.00", date(2026, 3, 2))],
+                         instruments=_INSTS, actions=[_adjust(date(2026, 6, 1))])
+    assert last_trade_prices(older, date(2026, 6, 10), unapplied=[])[DST].price == D("2.00")
 
 
 def test_a_same_day_trade_on_the_successor_follows_the_adjustment() -> None:
     bundle = LedgerBundle(transactions=[_tx(SRC, "6.00", date(2026, 3, 2)),
                                         _tx(DST, "1.90", date(2026, 6, 1))],
                           instruments=_INSTS, actions=[_adjust(date(2026, 6, 1))])
-    assert last_trade_prices(bundle, date(2026, 6, 1))[DST].price == D("1.90")
+    assert last_trade_prices(bundle, date(2026, 6, 1), unapplied=[])[DST].price == D("1.90")
 
 
 def test_the_block_exists_only_with_a_traded_or_adjusted_contract() -> None:

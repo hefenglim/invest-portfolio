@@ -1368,8 +1368,11 @@ def _reconcile_options(ev, dash, raw, facts, res, prices, sp, as_of, phase, valu
         ev.check("options.open.average_premium_abs", sc, abs(h.adjusted_total / h.shares),
                  abs(dec(a["average_premium"])) if a.get("average_premium") is not None
                  else None, phase)
+        # Spec §7.1 (final review R1-M1 / N2): a 待釐清 contract (賣超 / a refused close) states
+        # no price, no value and no 履約義務 — its count is the thing in question.
+        unresolved = h.oversold or h.unbookable_close
         obligation = (terms.strike * O.OPTION_MULTIPLIER * n_contracts
-                      if short and terms.right == "P" else None)
+                      if short and terms.right == "P" and not unresolved else None)
         ev.check("options.open.obligation", sc, obligation, a.get("obligation"), phase)
         if obligation is not None:
             k2 = (key[0], h.quote_ccy)
@@ -1381,7 +1384,10 @@ def _reconcile_options(ev, dash, raw, facts, res, prices, sp, as_of, phase, valu
         ev.check("options.open.underlying_price_date", sc,
                  ASOF.isoformat() if u_px is not None else None,
                  a.get("underlying_price_date"), phase)
-        if valuation and key[1] in priced:
+        if valuation and unresolved:
+            for fld in ("last_price", "last_price_date", "market_value", "unrealized"):
+                ev.check(f"options.open.{fld}", f"{sc} (待釐清)", None, a.get(fld), phase)
+        elif valuation and key[1] in priced:
             p, on = priced[key[1]]
             ev.check("options.open.last_price", sc, p, a.get("last_price"), phase)
             ev.check("options.open.last_price_date", sc, on.isoformat(),

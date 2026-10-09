@@ -148,8 +148,11 @@ class HoldingSubtotal(BaseModel):
     A re-AGGREGATION of the SAME per-holding computed values that feed ``KpiSummary`` —
     NOT a new money-of-record formula. ``account_id`` / ``market`` are the filter
     selectors; ``None`` on an axis means "all" on that axis, so ``(None, None)`` is the
-    grand cell and EQUALS ``KpiSummary.total_market_value`` / ``.unrealized_total`` by
-    construction (identical terms, merely regrouped). 缺價 (missing-price) holdings are
+    grand cell. On a ledger without an option contract it EQUALS
+    ``KpiSummary.total_market_value`` / ``.unrealized_total`` by construction (identical
+    terms, merely regrouped); on an option ledger the cells are STOCK-ONLY (OPT-D5) and the
+    KPI is the grand cell PLUS ``OptionsBlock.market_value`` / ``.unrealized`` (spec §6.2,
+    「其中選擇權」). 缺價 (missing-price) holdings are
     excluded per cell exactly as the KPI excludes them; oversold positions carry a null
     market value and drop out the same way. Every figure is in the reporting currency via
     the shared FX helper. Money is ``Decimal | None`` — None honours the same

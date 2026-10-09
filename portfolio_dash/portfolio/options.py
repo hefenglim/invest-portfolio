@@ -11,8 +11,9 @@ What lives here, each with ONE definition (plan invariant 6):
   whether a ledger carries one (the block exists iff it does, decided on the UNCUT ledger);
 * :func:`last_trade_prices` — R2: an open contract's price is its last ORDINARY trade
   (``close_reason`` rows excluded), per symbol across accounts, on or before the valuation
-  day; a contract with no trade since an ``OPTION_ADJUST`` takes its predecessor's last price
-  ÷ ``ratio_to``. Never a quote and never written to ``prices`` (plan invariant 4);
+  day; after an ``OPTION_ADJUST`` the LATER of the destination's own last trade and its
+  predecessor's last price ÷ ``ratio_to`` (a refused adjustment propagates nothing). Never a
+  quote and never written to ``prices`` (plan invariant 4);
 * :func:`split_holdings` / :func:`stock_realized` — the stock-only lists every existing
   dashboard surface keeps (OPT-D5): holdings, weights, allocation, subtotals and the
   ``realized`` section are stocks; the KPI totals add the block;
@@ -23,7 +24,7 @@ multiplier is ``shared/options.py``'s alone.
 """
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -39,13 +40,14 @@ from portfolio_dash.portfolio.dashboard_models import (
     OptionRealizedYear,
     OptionsBlock,
 )
-from portfolio_dash.portfolio.results import Book, Holding, RealizedPnL
+from portfolio_dash.portfolio.results import Book, Holding, RealizedPnL, UnappliedAction
 from portfolio_dash.shared.corporate_actions import CorporateAction, CorporateActionKind
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
 from portfolio_dash.shared.options import (
+    ADJUST_KIND_ZH,
     CLOSE_REASON_ZH,
     PRINCIPAL_FX_OPTION_NOTE,
     TREND_EXCLUDES_OPTIONS_NOTE,
@@ -85,19 +87,50 @@ def ledger_has_options(bundle: LedgerBundle) -> bool:
             or any(a.from_symbol in opts or a.to_symbol in opts for a in bundle.actions))
 
 
-def last_trade_prices(bundle: LedgerBundle, as_of: date) -> dict[str, LastTrade]:
+#: How an ``OPTION_ADJUST`` row is recognised among the replay's refusals: its stored id, or
+#: — for an action only being validated, which has none — its terms.
+_ActionKey = tuple[object, ...]
+
+
+def _action_key(account_id: str, on: date, from_symbol: str, to_symbol: str,
+                action_id: int | None) -> _ActionKey:
+    if action_id is not None:
+        return ("id", action_id)
+    return ("terms", account_id, on, from_symbol, to_symbol)
+
+
+def refused_adjustments(unapplied: Iterable[UnappliedAction]) -> frozenset[_ActionKey]:
+    """The ``OPTION_ADJUST`` rows the replay REFUSED (``Book.unapplied_actions``), matched by
+    action id (by terms for an unsaved action) — they moved nothing, so they move no price."""
+    return frozenset(
+        _action_key(u.account_id, u.date, u.from_symbol, u.to_symbol, u.action_id)
+        for u in unapplied if u.kind == CorporateActionKind.OPTION_ADJUST)
+
+
+def _is_refused(a: CorporateAction, refused: frozenset[_ActionKey]) -> bool:
+    return _action_key(a.account_id, a.date, a.from_symbol, a.to_symbol, a.id) in refused
+
+
+def last_trade_prices(bundle: LedgerBundle, as_of: date, *,
+                      unapplied: Collection[UnappliedAction]) -> dict[str, LastTrade]:
     """R2 (spec §5): every option contract's price as of *as_of*.
 
-    One walk in the replay's order — an adjustment precedes the same day's trades: an ordinary
+    One walk in the replay's order — an adjustment precedes the same day's trades. An ordinary
     trade (``close_reason is None``, any account) sets its symbol's price to its own premium
-    and date; an ``OPTION_ADJUST`` sets the destination's price to the source's last price ÷
-    ``ratio_to``, dated the source trade's date, so a later trade on the destination replaces
-    it ("no trade since the adjustment"). A close row (price 0) never sets a price: an expiry
+    and date. An ``OPTION_ADJUST`` derives the predecessor's last price ÷ ``ratio_to``, dated
+    the predecessor's trade, and the destination keeps the LATER (by date) of that and its own
+    last trade — on a tie its own trade (final review R1-M2, 2026-10-10): a destination traded
+    after the predecessor's last trade carries the more recent market evidence. A later trade
+    on the destination always replaces a derived price, which is dated before the adjustment.
+    An adjustment the replay refused (*unapplied* — pass ``Book.unapplied_actions``; required,
+    so a forgotten argument is a ``TypeError``, never a silently propagated price) moves no
+    position, so it moves no price either. A close row (price 0) never sets a price: an expiry
     is not a market. Rows after *as_of* are ignored.
     """
     opts = option_symbols(bundle.instruments)
     if not opts:
         return {}
+    refused = refused_adjustments(unapplied)
     # (date, rank, sequence, event): an action ranks before the day's trades (the replay's
     # EventPriority order), and each list keeps its own ledger order within a rank.
     events: list[tuple[date, int, int, Transaction | CorporateAction]] = []
@@ -105,7 +138,8 @@ def last_trade_prices(bundle: LedgerBundle, as_of: date) -> dict[str, LastTrade]
         if t.symbol in opts and t.close_reason is None and t.trade_date <= as_of:
             events.append((t.trade_date, 1, seq, t))
     for seq, a in enumerate(bundle.actions):
-        if a.kind is CorporateActionKind.OPTION_ADJUST and a.date <= as_of:
+        if (a.kind is CorporateActionKind.OPTION_ADJUST and a.date <= as_of
+                and not _is_refused(a, refused)):
             events.append((a.date, 0, seq, a))
     events.sort(key=lambda e: (e[0], e[1], e[2]))
     out: dict[str, LastTrade] = {}
@@ -114,7 +148,10 @@ def last_trade_prices(bundle: LedgerBundle, as_of: date) -> dict[str, LastTrade]
             out[ev.symbol] = LastTrade(price=ev.price, on=ev.trade_date)
             continue
         before = out.get(ev.from_symbol)
-        if before is not None:
+        if before is None:
+            continue
+        own = out.get(ev.to_symbol)
+        if own is None or before.on > own.on:      # the later wins; a tie keeps the own trade
             out[ev.to_symbol] = LastTrade(price=before.price / ev.ratio_to, on=before.on)
     return out
 
@@ -182,20 +219,27 @@ def _open_row(h: Holding, terms: OptionTerms, last: LastTrade | None,
               underlying: tuple[Decimal, date] | None, as_of: date) -> OptionOpenRow:
     short = h.shares < _ZERO
     shares = abs(h.shares)            # share-equivalents held (contracts × 100)
+    # 待釐清 (spec §7.1's sign pin): a 賣超 discarded the basis and a refused close left the
+    # count unreconciled, so the position has no figure to state — no price, no value (already
+    # None from `value_holdings`), and no 履約義務 either: strike × a count that is itself in
+    # question is not an obligation (final review R1-M1 / N2).
+    unresolved = h.oversold or h.unbookable_close
+    priced = last if not unresolved else None
     obligation = (terms.strike * shares
-                  if short and terms.right == "P" and not h.oversold
-                  else None)   # strike × 100 × contracts — a SOLD put only, never a 賣超
+                  if short and terms.right == "P" and not unresolved
+                  else None)   # strike × 100 × contracts — a SOLD put only, never a 待釐清
     return OptionOpenRow(
         account_id=h.account_id, symbol=h.symbol, contract=option_display_name(terms),
         underlying=terms.underlying, expiry=terms.expiry,
         days_to_expiry=(terms.expiry - as_of).days, strike=terms.strike, right=terms.right,
         direction="short" if short else "long",
         contracts=shares_to_contracts(shares), share_equivalents=h.shares,
-        # avg = total / shares on read: positive for both directions (a short's proceeds
-        # and its count are both negative), the premium received or paid per share.
-        average_premium=h.adjusted_avg, premium_total=abs(h.adjusted_cost_total),
-        last_price=last.price if last is not None else None,
-        last_price_date=last.on if last is not None else None,
+        # Magnitudes (spec §7.1): the premium received or paid per share. avg = total / shares
+        # on read is already positive in both directions, except on a 賣超, whose discarded
+        # basis (0) over a negative count is -0 — the abs keeps the wire at "0" (R1-N1).
+        average_premium=abs(h.adjusted_avg), premium_total=abs(h.adjusted_cost_total),
+        last_price=priced.price if priced is not None else None,
+        last_price_date=priced.on if priced is not None else None,
         market_value=h.market_value, unrealized=h.unrealized_pnl, obligation=obligation,
         underlying_price=underlying[0] if underlying is not None else None,
         underlying_price_date=underlying[1] if underlying is not None else None,
@@ -222,21 +266,34 @@ def _closed_how(row: OptionRealizedRow) -> str:
 
 
 def _by_contract(rows: Sequence[OptionRealizedRow], bundle: LedgerBundle,
-                 open_keys: set[tuple[str, str]]) -> list[OptionContractRealized]:
+                 open_keys: set[tuple[str, str]],
+                 refused: frozenset[_ActionKey]) -> list[OptionContractRealized]:
     """One entry per (account, contract) with at least one realized row. Premium in / out are
     the realized rows' own two sides (``proceeds_net`` / ``adjusted_cost_removed``: the
     premium received and paid for the contracts that closed), so ``realized`` is exactly
-    their difference — an adjusted contract's carried premium included."""
+    their difference — an adjusted contract's carried premium included.
+
+    How a flat contract closed is the LAST event that emptied it: its last realized row, or —
+    when an applied ``OPTION_ADJUST`` moved the remaining position away after that row — the
+    adjustment (「選擇權合約調整」, dated the adjustment, no ``close_reason``; final review
+    R1-N3). A same-day trade follows the adjustment (the replay's order), so only an
+    adjustment dated AFTER the last realized row closed the contract; a refused one
+    (*refused*, :func:`refused_adjustments`) moved nothing."""
     opened: dict[tuple[str, str], date] = {}
     for t in bundle.transactions:
         key = (t.account_id, t.symbol)
         if key not in opened or t.trade_date < opened[key]:
             opened[key] = t.trade_date
+    moved_away: dict[tuple[str, str], date] = {}
     for a in bundle.actions:
         if a.kind is CorporateActionKind.OPTION_ADJUST:
             key = (a.account_id, a.to_symbol)
             if key not in opened or a.date < opened[key]:
                 opened[key] = a.date
+            if not _is_refused(a, refused):
+                src = (a.account_id, a.from_symbol)
+                if src not in moved_away or a.date > moved_away[src]:
+                    moved_away[src] = a.date
     grouped: dict[tuple[str, str], list[OptionRealizedRow]] = {}
     for r in rows:
         grouped.setdefault((r.account_id, r.symbol), []).append(r)
@@ -244,12 +301,16 @@ def _by_contract(rows: Sequence[OptionRealizedRow], bundle: LedgerBundle,
     for key, group in grouped.items():
         last = group[-1]
         closed = key not in open_keys
+        adjusted_on = moved_away.get(key)
+        by_adjustment = adjusted_on is not None and adjusted_on > last.sell_date
         out.append(OptionContractRealized(
             account_id=key[0], symbol=key[1], contract=last.contract, ccy=last.quote_ccy,
             opened=opened.get(key),
-            closed=last.sell_date if closed else None,
-            close_reason=last.close_reason if closed else None,
-            closed_how=_closed_how(last) if closed else None,
+            closed=(None if not closed else adjusted_on if by_adjustment
+                    else last.sell_date),
+            close_reason=last.close_reason if closed and not by_adjustment else None,
+            closed_how=(None if not closed else ADJUST_KIND_ZH if by_adjustment
+                        else _closed_how(last)),
             premium_in=sum((r.proceeds_net for r in group), _ZERO),
             premium_out=sum((r.adjusted_cost_removed for r in group), _ZERO),
             realized=sum((r.realized for r in group), _ZERO)))
@@ -323,7 +384,8 @@ def option_summary(
         refused_closes=list(book.refused_closes),
         realized=OptionRealized(
             rows=rows,
-            by_contract=_by_contract(rows, bundle, open_keys),
+            by_contract=_by_contract(rows, bundle, open_keys,
+                                     refused_adjustments(book.unapplied_actions)),
             by_year=[OptionRealizedYear(year=y, **_money(years[y], fx_rate, reporting)
                                         .model_dump())
                      for y in sorted(years)],

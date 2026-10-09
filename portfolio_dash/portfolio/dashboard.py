@@ -779,7 +779,8 @@ def build_dashboard(
     # R2 (options spec §5): an open contract is valued at its last ordinary trade. It joins
     # `price_map` — the ONE dict both `value_holdings` and XIRR's terminal value read, so the
     # open liability is in both — and never `price_reads` (no freshness) nor `prices`.
-    last_trades = last_trade_prices(bundle, as_of) if has_options else {}
+    last_trades = (last_trade_prices(bundle, as_of, unapplied=book.unapplied_actions)
+                   if has_options else {})
     for h in book.holdings:
         if h.symbol in opt_syms and h.symbol in last_trades:
             price_map[h.symbol] = last_trades[h.symbol].price

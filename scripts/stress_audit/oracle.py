@@ -682,6 +682,10 @@ class OracleResult:
     # Options spec §4.4: every close row the replay refused, in replay order. Like an orphan
     # dividend it is a RECORD, not a flag: XIRR and B are withheld while it is non-empty.
     refused_closes: list[RefusedClose] = field(default_factory=list)
+    # The fact ids of every corporate action the replay refused (``action_refusals`` names the
+    # rule). Options spec §5 (clarified 2026-10-10, final review R1-M2): a refused
+    # ``OPTION_ADJUST`` moved nothing, so it propagates no price — :func:`option_price_on`.
+    refused_action_ids: frozenset[int] = field(default_factory=frozenset)
 
 
 class EventPriority(IntEnum):
@@ -1127,6 +1131,7 @@ def replay(facts: Facts) -> OracleResult:
     refused_divs: set[int] = set()   # ⑪: the payouts this replay refused, by fact id
     orphan_dividends: list[tuple[str, str, date]] = []    # CR-02 — see OracleResult
     refused_closes: list[RefusedClose] = []               # options spec §4.4
+    refused_actions: set[int] = set()                     # options spec §5 (R1-M2)
 
     def refuse_dividend(dv: DivFact) -> None:
         refused_dividends.append((dv.account_id, dv.symbol, dv.d))
@@ -1137,6 +1142,7 @@ def replay(facts: Facts) -> OracleResult:
             assert isinstance(ev, CorpFact)
             code = _apply_action(positions, ev, insts)
             if code is not None:
+                refused_actions.add(ev.id)
                 refusals.append(
                     (code, f"{ev.account_id}/{ev.from_symbol}->{ev.to_symbol}"
                            f" {ev.kind} {ev.ratio_to}-for-{ev.ratio_from} @{ev.d}"))
@@ -1308,7 +1314,8 @@ def replay(facts: Facts) -> OracleResult:
                         refused_dividends=refused_dividends,
                         refused_dividend_ids=frozenset(refused_divs),
                         orphan_dividends=orphan_dividends,
-                        refused_closes=refused_closes)
+                        refused_closes=refused_closes,
+                        refused_action_ids=frozenset(refused_actions))
 
 
 def facts_through(facts: Facts, day: date) -> Facts:
@@ -1352,41 +1359,61 @@ def facts_valued_as_of(facts: Facts, day: date) -> Facts:
 
 
 # ---- options: last-trade valuation (spec §5, R2) ------------------------------------
-def option_price_on(facts: Facts, symbol: str, day: date) -> tuple[Decimal, date] | None:
+def option_price_on(facts: Facts, symbol: str, day: date,
+                    refused: Collection[int] = frozenset(), *,
+                    before: CorpFact | None = None) -> tuple[Decimal, date] | None:
     """The price an open contract is valued at on *day*, and the date it is dated.
 
-    Transcribed from spec §5 (R2): the price of the contract's LAST ORDINARY TRADE —
-    ``close_reason`` rows excluded (a price-0 expiry is not a market price) — per symbol
-    ACROSS accounts, ``trade_date <= day``, dated that trade's date. With no trade since an
-    ``OPTION_ADJUST`` into it, the PREDECESSOR's last price ÷ ``ratio_to`` (× ``ratio_from``,
-    which OPT-D16 fixes at 1), dated the predecessor's trade. An adjustment is effective at
-    the start of its date, so a same-day trade on the destination counts as "since".
+    Transcribed from spec §5 (R2, clarified 2026-10-10 — final review R1-M2): the price of the
+    contract's LAST ORDINARY TRADE — ``close_reason`` rows excluded (a price-0 expiry is not a
+    market price) — per symbol ACROSS accounts, ``trade_date <= day``, dated that trade's date.
+    After an ``OPTION_ADJUST`` into it, the destination's price is the LATER — by date; on a
+    tie, the destination's own trade — of its own last ordinary trade and the predecessor's
+    last price BEFORE the adjustment ÷ ``ratio_to`` (× ``ratio_from``, which OPT-D16 fixes at
+    1), dated the predecessor's trade; an adjustment the replay refused (*refused*, the ids in
+    :attr:`OracleResult.refused_action_ids`) propagates no price.
+
+    "Before the adjustment" is the replay's order (spec §4.4's EventPriority, this file's own
+    copy): an action precedes the day's trades and same-day actions run in id order, so the
+    predecessor is priced by its trades dated strictly before the adjustment and by the
+    adjustments into it that precede this one (*before*). Two derived prices of one date (two
+    adjustments into one contract) keep the earlier adjustment's.
 
     Recursive over a chain of adjustments; ``None`` when nothing priced the contract.
     Never a provider quote: an option is never quoted (spec §5), so this is the ONLY price.
     """
-    trades = [t for t in facts.txs if t.symbol == symbol and t.close_reason is None
-              and t.trade_date <= day]
-    last_t = max(trades, key=lambda t: (t.trade_date, t.id)) if trades else None
-    adjs = [a for a in facts.actions if a.kind == OPTION_ADJUST and a.to_symbol == symbol
-            and a.d <= day]
-    last_a = max(adjs, key=lambda a: (a.d, a.id)) if adjs else None
-    if last_a is not None and (last_t is None or last_t.trade_date < last_a.d):
-        prev = option_price_on(facts, last_a.from_symbol, last_a.d)
-        if prev is not None:
-            return prev[0] * last_a.ratio_from / last_a.ratio_to, prev[1]
-    if last_t is None:
-        return None
-    return last_t.price, last_t.trade_date
+    if before is None:
+        trades = [t for t in facts.txs if t.symbol == symbol and t.close_reason is None
+                  and t.trade_date <= day]
+        adjs = [a for a in facts.actions if a.kind == OPTION_ADJUST and a.to_symbol == symbol
+                and a.d <= day and a.id not in refused]
+    else:
+        trades = [t for t in facts.txs if t.symbol == symbol and t.close_reason is None
+                  and t.trade_date < before.d]
+        adjs = [a for a in facts.actions if a.kind == OPTION_ADJUST and a.to_symbol == symbol
+                and (a.d, a.id) < (before.d, before.id) and a.id not in refused]
+    best: tuple[Decimal, date] | None = None
+    if trades:
+        last_t = max(trades, key=lambda t: (t.trade_date, t.id))
+        best = (last_t.price, last_t.trade_date)
+    # Own trade first, then the adjustments in replay order: a candidate replaces the best
+    # only when STRICTLY later, so a tie keeps the own trade (then the earlier adjustment).
+    for a in sorted(adjs, key=lambda a: (a.d, a.id)):
+        prev = option_price_on(facts, a.from_symbol, day, refused, before=a)
+        if prev is not None and (best is None or prev[1] > best[1]):
+            best = (prev[0] * a.ratio_from / a.ratio_to, prev[1])
+    return best
 
 
 def option_prices(facts: Facts, day: date) -> dict[str, tuple[Decimal, date]]:
-    """:func:`option_price_on` for every option symbol the ledger names."""
+    """:func:`option_price_on` for every option symbol the ledger names, with the refusals of
+    the oracle's OWN replay of the same ledger through *day*."""
+    refused = replay(facts_through(facts, day)).refused_action_ids
     syms = {t.symbol for t in facts.txs if is_option(t.symbol)}
     syms |= {a.to_symbol for a in facts.actions if a.kind == OPTION_ADJUST}
     out: dict[str, tuple[Decimal, date]] = {}
     for s in syms:
-        p = option_price_on(facts, s, day)
+        p = option_price_on(facts, s, day, refused)
         if p is not None:
             out[s] = p
     return out

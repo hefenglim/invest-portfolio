@@ -234,7 +234,11 @@ from `GET /api/ledgers/transactions?account_id&symbol`).
 
 - **Price of an open contract** = the price of its last ordinary trade (`close_reason` rows
   excluded), per symbol across accounts, `trade_date ≤` the valuation day; dated that trade's date.
-  With no trade since an `OPTION_ADJUST`, the predecessor's last price ÷ `ratio_to`. The price enters
+  After an `OPTION_ADJUST` the destination's price is the LATER — by date; on a tie, the destination's
+  own trade — of its own last ordinary trade and the predecessor's last price before the adjustment ÷
+  `ratio_to` (dated the predecessor's trade), and an adjustment the replay refused
+  (`Book.unapplied_actions`, matched by action id) propagates no price (clarified 2026-10-10, final
+  review R1-M2). The price enters
   `price_map` (XIRR's terminal value reads it) but **not** `price_reads` — never in
   `freshness.prices`, `missing_prices`, `any_stale`; **never written to `prices`**.
 - **Point-in-time figures include it; trend-derived figures exclude its value** without marking the
@@ -299,7 +303,8 @@ dashboard wire field lives inside this block.** Keys (Decimal values as strings)
 - `open[]`: `account_id`, `symbol`, `contract` (display name), `underlying`, `expiry`,
   `days_to_expiry`, `strike`, `right` (`C`/`P`), `direction` (`long`/`short`), `contracts`,
   `share_equivalents`, `average_premium`, `premium_total`, `last_price`, `last_price_date`,
-  `market_value`, `unrealized`, `obligation` (sold put: strike × 100 × contracts, else null),
+  `market_value`, `unrealized`, `obligation` (sold put: strike × 100 × contracts, else null — and
+  null on a 待釐清 contract, which adds nothing to `obligation_subtotals`; final review R1-N2),
   `underlying_price` + `underlying_price_date` (OPT-D17; one latest-price read per distinct
   registered underlying, never in `price_reads` / freshness; omitted when unpriced), `past_expiry`,
   `unbookable_close`, `oversold` (a 賣超 contract: it has no holdings row to carry the badge).
@@ -315,7 +320,9 @@ dashboard wire field lives inside this block.** Keys (Decimal values as strings)
   `by_contract[]` (contract, account, opened, closed, how it closed, premium in, premium out,
   realized — `premium_in` = Σ the contract's realized rows' `proceeds_net`, `premium_out` = Σ
   their `adjusted_cost_removed`, so `premium_in − premium_out = realized` exactly; listed once it
-  has a realized row; `closed` / `closed_how` only once the position is flat), `by_year[]`,
+  has a realized row; `closed` / `closed_how` only once the position is flat — a contract an applied
+  `OPTION_ADJUST` emptied after its last realized row reads `closed_how` 「選擇權合約調整」, `closed` = the
+  adjustment date, `close_reason` null; final review R1-N3), `by_year[]`,
   `by_underlying[]`; `realized_total` (`{by_currency, reporting}`).
 - `trend_excludes_value`, `note`, `principal_fx_note` (OPT-D20; null when no option is open).
 
