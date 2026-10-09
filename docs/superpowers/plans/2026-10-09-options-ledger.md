@@ -209,15 +209,19 @@ fee_rules,broker_import}.py`, `api/wire.py`; tests under `tests/data_ingestion/`
   `asset_type`; **`/api/input/holdings`: an option with a non-zero signed count is `held`** with
   `asset_type`, `direction`, `contracts`, signed `shares` (stock rows unchanged).
 - [ ] **Ledger doors** (`ledgers.py`): `GET /api/ledgers/transactions` rows gain `close_reason`,
-  `contracts`, `option_side` (ONE `classify_option_rows` call per request over the account's stored
-  option rows and `OPTION_ADJUST` rows), `refused_close` (from the replay's `Book.refused_closes`); the
+  `contracts`, `option_side` (ONE `classify_option_rows` call per request over the stored option rows
+  and `OPTION_ADJUST` rows of every account on the page — the classifier keys by (account, symbol)),
+  `refused_close` (from the replay's `Book.refused_closes`); the
   edit door runs the close-row helper with `replacement`; the corporate-action doors accept
   `OPTION_ADJUST` (a row with `ratio_from ≠ 1` refused 「選擇權合約調整以 1 口為基準，請填 1 → N」); the CA
   preview returns `strike_products` / `conserves`.
-- [ ] **Cash lines**: `CashLine.option_side`; the statement-line builder in `portfolio/cash.py` takes a
-  required `option_side_of: Mapping[int, str]` (no actions are in its scope); its callers — the
-  statement route (`api/routers/cash.py`, B) and the statement export (E) — compute it once with
-  `classify_option_rows`; the route puts `option_side` on the statement wire.
+- [ ] **Cash lines**: `CashLine.option_side: str | None = None`. **`account_statement(...)`** (the
+  statement wrapper, `portfolio/cash.py`) takes a required `option_side_of: Mapping[int, str]` and sets
+  the field inside it (`dataclasses.replace` — `CashLine` is frozen); **`pool_lines` and
+  `cash_balances` are unchanged** (the guards' pool arithmetic never sees a label, and A's
+  `networth.py` is untouched). Its callers — the statement route (`api/routers/cash.py`, B) and the
+  statement export (E) — compute it once with `classify_option_rows`; B updates the two direct calls in
+  `tests/portfolio/test_cash_running.py`; the route puts `option_side` on the statement wire.
 - [ ] **Schwab converter + broker import**: option rows stop being dropped; `from_broker_option` →
   OCC; **quantity = `contracts_to_shares(Quantity)`**, price per share (test the reconciler's
   qty × price = Amount on an option row); the four sides; `Expired` and the TD removal journal
@@ -367,7 +371,7 @@ the app (`grep -E '^\s*(import|from)\s+portfolio_dash' oracle.py` prints nothing
 
 | Wave 1 — A (W2) | Wave 1 — B (W3) | Wave 1 — C (W4) |
 | --- | --- | --- |
-| `portfolio/{cost_basis,options,dashboard,timeseries,allocation,dashboard_models,pnl,position_aggregate,dividends}.py`, `data_ingestion/holdings.py`, `shared/models/ledger.py`, `api/replay_guard.py`, `api/routers/performance.py`, CA spec §4.4 row, `tests/portfolio/test_corporate_actions.py` | `data_ingestion/{validate,csv_import,corporate_action_import,opening_import,import_templates,fees,config_seed,fee_overrides,agents}.py`, `data_ingestion/broker/*`, `portfolio/cash.py`, `api/routers/{input_center,ledgers,cash,fee_rules,broker_import}.py`, `api/wire.py` | `shared/instrument_scope.py`, `api/instrument_service.py`, `scheduler/jobs.py`, `api/{fundamentals_service,news_service,alert_inputs,signals_service,insight_service,digest_service}.py`, `strategy/*`, `api/routers/{strategy,instruments,prompts,actions}.py`, `llm_insight/variables.py` |
+| `portfolio/{cost_basis,options,dashboard,timeseries,allocation,dashboard_models,pnl,position_aggregate,dividends}.py`, `data_ingestion/holdings.py`, `shared/models/ledger.py`, `api/replay_guard.py`, `api/routers/performance.py`, CA spec §4.4 row, `tests/portfolio/test_corporate_actions.py` | `data_ingestion/{validate,csv_import,corporate_action_import,opening_import,import_templates,fees,config_seed,fee_overrides,agents}.py`, `data_ingestion/broker/*`, `portfolio/cash.py`, `api/routers/{input_center,ledgers,cash,fee_rules,broker_import}.py`, `api/wire.py`, `tests/portfolio/test_cash_running.py` | `shared/instrument_scope.py`, `api/instrument_service.py`, `scheduler/jobs.py`, `api/{fundamentals_service,news_service,alert_inputs,signals_service,insight_service,digest_service}.py`, `strategy/*`, `api/routers/{strategy,instruments,prompts,actions}.py`, `llm_insight/variables.py` |
 
 | Wave 2 — D (W5) | Wave 2 — E (W6) | Wave 2 — F (W7a) |
 | --- | --- | --- |
