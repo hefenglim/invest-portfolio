@@ -153,12 +153,17 @@ Canonical tables (names indicative; finalize in the spec phase):
 
 - `accounts` — first-class entity: broker, settlement currency, funding currency,
   fee-rule-set ref, dividend model (see `domain-ledger.md`).
-- `instruments` — symbol, market (`US` / `TW` / `MY`), quote currency, sector, name, and
+- `instruments` — symbol, market (`US` / `TW` / `MY`), quote currency, sector, name,
+  `asset_type` (`'stock'` | `'option'`, 2026-10-09: only `register.register_option_contract`
+  writes `'option'`, from the OCC symbol's parse, and `upsert_instrument` never turns it back),
+  and
   `aliases` (a JSON list of the other names a card may use — 大立光 for 3008 LARGAN; one
   writer, `store.set_instrument_aliases`; one name belongs to one instrument — item 8,
   2026-09-30).
 - `transactions` — source of truth: account, instrument, side, quantity, price, fees,
-  tax, trade date. **Append-only in spirit**; corrections are new rows or explicit
+  tax, trade date, and `close_reason` (2026-10-09: `expired` / `assigned` / `exercised` on a
+  price-0 option closing row, NULL on every other row; v1's edit door keeps it — delete and
+  re-enter to change it). **Append-only in spirit**; corrections are new rows or explicit
   edits, never silent mutation. Store a fee/tax/FX-rate **snapshot** per row so 重算
   reproduces history even after rules change.
   ⚠ **`fee_rule_snapshot` is PROVENANCE, not the replay's input** (recorded 2026-08-24, after a
@@ -213,6 +218,13 @@ Rules:
 - A failed/stale fetch degrades gracefully: serve last-known price with a clear
   staleness indicator; never crash the dashboard, never silently fabricate.
 - Source is recorded per row, so data provenance is always auditable.
+- **An option contract is never quoted and never has a `prices` row** (options spec R2 / §5,
+  2026-10-09). It is valued at its last ordinary trade price from the ledger (computed on read
+  in `portfolio/options.py::last_trade_prices`), outside `price_reads` and the freshness report.
+  `shared/instrument_scope.py::TRACKED_SQL` reads `asset_type = 'stock'`, so no quote, history,
+  dividend, news, chip or fundamentals job ever asks a provider for a contract, and every
+  one-symbol bypass (quick-add, restore, gap backfill, `refresh_instrument_quote`, the Alpha
+  Vantage held universe, held-only news) refuses one at entry (「選擇權合約由交易登錄建立」).
 - **Exactly one price row is typed by a human: the SPINOFF child's seed** (D48b; DEF-040,
   owner ruling 2026-09-24, R4 2026-09-25). A spinoff creates a holding no provider has quoted
   yet, so the corporate-action form takes the child's opening price off the statement.

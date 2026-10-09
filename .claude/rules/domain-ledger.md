@@ -378,3 +378,44 @@ accounting applies **only** to a sell the user explicitly declared, never to an 
   重算 = rebuild all stats from ledgers.
 - Live price unobtainable → label clearly; **never guess**.
 - Data over narrative; thousands separators in all displayed tables.
+
+### US equity options (owner rulings R1–R7, OPT-D1..D22, 2026-10-09)
+
+Spec of record: `docs/spec/2026-10-09-options-ledger.md` (approach ④). US only (R6); single-leg
+calls and puts with the standard 100-share deliverable; anything else is refused (OPT-D11).
+
+- **A contract is an instrument in the trade ledger** (R1): `instruments.asset_type = 'option'`,
+  its terms parsed from the OCC symbol (`XYZ261218P00050000`) — never stored a second time
+  (OPT-D22). `shared/options.py` is the ONE owner of the symbol, the multiplier, the standard-
+  adjustment check and the §6.1 vocabulary; nothing re-derives them.
+- **Quantity is in SHARE-EQUIVALENTS** (contracts × 100) and the price is the premium per share
+  (OPT-D1), so every `quantity × price` in the package stays correct untouched. The manual and
+  edit doors take 口數 (`contracts`) and the server converts; the CSV takes share-equivalents.
+- **Sell-to-open IS the declared short sale** above; buy-to-close covers it (`short_cover`).
+- **Expiry / assignment / exercise is a price-0 closing trade with `close_reason`** (OPT-D2),
+  fee = tax = 0 without the engine. Its side and quantity are DERIVED from the position (an
+  expiry closes the whole position, on the expiry date). R5: on assignment / exercise the
+  premium stays OPTION P&L — the stock leg is an ordinary trade at the strike, never re-costed.
+- **A close row never opens a lot (§4.4).** The replay refuses a `close_reason` row that is a
+  BUY beyond the short lot or a SELL beyond `max(long, 0)` (no position at all included): it
+  books nothing, is recorded in `Book.refused_closes` (and sets the sticky `unbookable_close`
+  when the position exists), and XIRR and B are withheld while any is recorded — the
+  `orphan_dividends` posture. A correction that would strand a close row is refused hard
+  (`refused_close_correction`). `classify_option_rows` mirrors exactly this rule, so the side
+  label 未入帳（待釐清） and the record cannot disagree.
+- **`OPTION_ADJUST`** (OPT-D3) moves a contract — long or short — onto its adjusted successor,
+  1 → N contracts only (`ratio_from == 1`, OPT-D16; strike × contracts conserved, same right and
+  expiry). It sits after SPLIT in `_apply_action` and has its own guards (E22, opposite
+  direction); EXCHANGE's short refusal (E5) does not apply to it.
+- **Valuation (R2, OPT-D4):** an open contract is valued at its LAST ordinary trade price from
+  the ledger (close rows excluded; predecessor ÷ ratio after an adjustment) — never a quote,
+  never written to `prices`, never in freshness. POINT-IN-TIME figures include it (KPI 總市值 /
+  總報酬 / XIRR's terminal value / total return A / the FX pool / 月度成績); TREND-DERIVED figures
+  exclude its value (the trend, B, TWR, the benchmark) with one note (R3). 本金匯率效果 (B − A) is
+  withheld while an option is open (OPT-D20) — B leaves the option out while A carries its
+  unrealized, so their difference would read the option's value as FX.
+- **Stock-only lists (OPT-D5):** `holdings`, weights, allocation, subtotals and `realized.rows`
+  are stocks only; the options live in `DashboardData.options` (absent on a ledger with no
+  option, so a stock ledger's payload is byte-identical). KPI 總市值 = the stock grand subtotal +
+  `options.market_value`. AI insights, signals, alerts, digest, news, fundamentals, target
+  weights, rebalance and what-if exclude options (OPT-D10).

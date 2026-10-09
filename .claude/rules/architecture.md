@@ -234,6 +234,16 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   sentence, because there was no Chinese for a half-width mark to touch.
 - **bootstrap.py** — first-run composition root: creates the ledger schema and seeds config.
 
+**US equity options (2026-10-09, spec `docs/spec/2026-10-09-options-ledger.md`).**
+`shared/options.py` imports NOTHING internal — not even another `shared` module — so every layer
+reaches the OCC symbol, the multiplier, the standard-adjustment check, the §6.1 vocabulary and
+the ONE side classifier (`classify_option_rows`) without an edge (`tests/shared/test_options.py`
+guards it). `portfolio/options.py` is calc core (last-trade valuation, the `options` block);
+`portfolio/cost_basis.py` and `portfolio/results.py` stay leaves. The expiry inbox detector lives
+in `api/` because it reads the BOOK. The Schwab converter stays pure: the ledger's open option
+positions reach it as a REQUIRED `known_positions` argument bound by
+`api/routers/broker_import.py` (the injection convention above; the CLI passes `{}`).
+
 ## "Strategy logic self-defined" — current form
 
 Implement strategies as **Python modules/functions** authored by Claude Code from
