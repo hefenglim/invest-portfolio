@@ -97,9 +97,6 @@ _ALLOWLIST: dict[str, str] = {
     "export/holdings_report.py::_filter_label": _EXPORT,
     "export/holdings_report.py::_holdings_table_html": _EXPORT,
     "export/rebalance_report.py::build_rebalance_report_html": _EXPORT,
-    "api/routers/symbol.py::symbol_detail": (
-        "the drawer: a contract's drawer is its own branch (W5); DashboardData.holdings is "
-        "stock-only by W2"),
     # -- the replay and the doors that must see every position, options included ----------
     "portfolio/dashboard.py::build_dashboard": (
         "the valuation itself: W2 splits book.holdings into the stock list and the options "
