@@ -16,6 +16,7 @@ hold and are the starting point here.
 | --- | --- |
 | 2026-10-09 | First draft; owner rulings R1–R7; OPT-D1..D10 confirmed as recommended |
 | 2026-10-09 | **Review round 1** (independent reviewer, Fable 5.1, max effort; verdict NOT READY, all fixes document-level). Folded in: B1 → OPT-D11 (owner: standard adjustments only); B2 → the replay refuses a close that would open a lot (§4.4); M1 → every new wire field lives in the `options` block, omitted when absent (§7); M2 / M10 → `holdings`, `realized.rows`, weights and subtotals are stock-only, KPI totals include options (§6); M3 / M4 → the `OPTION_ADJUST` branch placement and its complete field table (§4.3); M5 → invariant 1 names its three additive columns (§10); M6 → OPT-D12 (owner: 月度成績 includes options); M7 / M8 / M12 → exact close rules, side derivation and the over-cover finding (§4.2); M9 → file ownership (plan); M11 → the share walker skips an opposite-direction adjustment (§4.3); m5–m18 → wording, defaults and the oracle's fee branch |
+| 2026-10-09 | **Review round 2** (same reviewer; verdict READY-WITH-FIXES, no blocker; round-1 B2 / M5 partial, the rest resolved). Folded in: N1 → invariant 1 names its additive wire keys (§10) and the doors that produce them (§6, §8); N2 → `Holding.unbookable_close` so every per-holding reader can read it (§3, §4.4); N3 → the drawer's reconciliation reads `options.open` (§6); N4 → `options.realized.rows` are the replay's own realized rows (§7); N5 → option-mode closing sides refuse when there is nothing to close (§4.2); N6 → OPT-D11 also requires the same right and expiry; N7 → the assignment's stock leg registers through the existing path (§4.2); N8 / N11 → §4.4 / §4.3 wording; N10 → options leave `freshness.prices` (§5) |
 
 **Why now.** A real broker history cannot reconcile without its option legs: the premiums are cash
 the account really received and paid, so a ledger that leaves them out ends with a cash balance the
@@ -64,7 +65,7 @@ and alerts — deferred to approach ⑤ (§12). Index and non-equity options.
 | OPT-D8 | Entry units | CSV `shares` = share-equivalents (a multiple of 100; the preview shows 「= N 口」); the manual form sends **口數** (`contracts`) and the server converts | The raw ledger CSV must round-trip (DEF-026); a typed "1" meaning one contract is refused as not a multiple of 100 instead of booking 1/100 of a contract. The multiplier lives in one place (`shared/options.py`), never in JS |
 | OPT-D9 | Assignment / exercise rows in the broker converter | **Not mapped blind**: `Assigned` / `Exercise` keep raising `UnmappedRow`; the manual door and CSV support them now | Same rule as the missing wire-out mapping: no rule without a real row behind it |
 | OPT-D10 | v1 exclusions | Options are out of: AI insights / signals / alerts / digest / news / fundamentals, the watchlist list (filterable), target weights, rebalance, what-if, the ex-dividend calendar and dividend projection | Each reader treats a held symbol as a stock (§6) |
-| OPT-D11 | Non-standard deliverables (owner, after review) | **Standard only**: an `OPTION_ADJUST` is accepted iff both contracts parse with multiplier 100, the destination root has no digit, and `strike_from × ratio_from == strike_to × ratio_to`; otherwise refused at the doors and `UnmappedRow` in the converter | A 3-for-2 split or a reverse split changes what one contract delivers; v1 has no deliverable model. The owner's two real adjustments conserve strike × contracts |
+| OPT-D11 | Non-standard deliverables (owner, after review) | **Standard only**: an `OPTION_ADJUST` is accepted iff both contracts parse with multiplier 100, the destination root has no digit, the right (C/P) and the expiry are unchanged, and `strike_from × ratio_from == strike_to × ratio_to`; otherwise refused at the doors and `UnmappedRow` in the converter | A 3-for-2 split or a reverse split changes what one contract delivers; v1 has no deliverable model. The owner's two real adjustments conserve strike × contracts |
 | OPT-D12 | 月度成績 (owner, after review) | **Includes options** — it stores the KPI 總市值 (`api/snapshots.py` from `build_dashboard`), a point-in-time figure; no note | It is not a trend reading |
 
 ## 3. Data model
@@ -87,8 +88,9 @@ and alerts — deferred to approach ⑤ (§12). Index and non-equity options.
 - **`OPTION_ADJUST`** joins `CorporateActionKind` (`shared/corporate_actions.py`) with zh
   「選擇權合約調整」. No schema change (`kind` has no CHECK).
 - **Models:** `Instrument.asset_type`, `Instrument.option: OptionTerms | None`,
-  `Instrument.is_option`; `Transaction.close_reason`; `_Position.unbookable_close` and
-  `OpenedPosition.unbookable_close` (sticky, §4.4); `Book.refused_closes: list[RefusedClose]`
+  `Instrument.is_option`; `Transaction.close_reason`; `_Position.unbookable_close`,
+  `OpenedPosition.unbookable_close` and `Holding.unbookable_close` (sticky, §4.4 — `HoldingRow` declares
+  no extra-field config, so `HoldingRow(**h.model_dump())` drops it and the holdings wire is unchanged); `Book.refused_closes: list[RefusedClose]`
   (row id, account, symbol, date, reason); `DashboardData.options: OptionsBlock | None` (§7).
 
 ## 4. Ledger mechanics
@@ -129,8 +131,10 @@ on output. Nothing below changes how a stock is booked.
 - **Every option row:** quantity a multiple of 100 (「選擇權數量須為 100 的倍數（1 口 = 100 股當量）」); a
   sell that would open a short without `short_sale=1` is the ordinary 賣超 (never inferred); a BUY
   that covers more than the open short raises the soft finding 「買進平倉口數超過空頭部位，多出的 N 口將成為
-  買方部位」 (`needs_confirm`); a 「買進平倉」 with no short, or a 「賣出平倉」 with no long, raises the soft
-  finding that the row opens a position instead.
+  買方部位」 (`needs_confirm`). In the manual door's option mode the intent is known: 「買進平倉」 with
+  no short is refused 「無空頭部位可平倉，請改選買進開倉」; 「賣出平倉」 with no long, or beyond the long, is
+  refused 「無多頭部位可平倉，請改選賣出開倉」. A CSV or edit row carries no intent and keeps the stock rules
+  (the 賣超 guard, the over-cover finding).
 - **Elsewhere:** a dividend on an option is refused (`dividend_on_option`); an opening-inventory row
   on an option is refused 「選擇權請以交易登錄」; `SPLIT` / `EXCHANGE` / `SPINOFF` naming an option are
   refused; a `SPLIT` entered on an underlying with open options raises the soft finding
@@ -138,7 +142,9 @@ on output. Nothing below changes how a stock is booked.
 - **Assignment / exercise are two rows** (option close + stock leg). The manual door's
   「被指派／履約」 writes both in one database transaction: both rows or neither; the stock leg runs the
   ordinary rules (fees, cash, 賣超, preview); one acknowledgement covers the pair and the response
-  names the leg each finding belongs to.
+  names the leg each finding belongs to. The stock leg's underlying registers through the manual
+  door's existing auto-register path (its quote gate applies); if that fails the pair is refused
+  「請先登錄標的 XYZ」 — OPT-D7's "need not be registered" is about the option contract, not this leg.
 
 ### 4.3 `OPTION_ADJUST`
 
@@ -164,7 +170,9 @@ on output. Nothing below changes how a stock is booked.
 | `payback_from`, `payback_carried`, `payback_own` | as EXCHANGE (moved to Q; P cleared) — always empty on an option |
 
   `unbookable_close` is a new `_Position` field: the field-count test and the corporate-actions spec
-  §4.4 table gain its row (SPLIT unchanged; EXCHANGE / SPINOFF unreachable — they refuse options).
+  §4.4 table gain its row — SPLIT unchanged; EXCHANGE / SPINOFF OR it into Q exactly like
+  `unbookable_action` (the doors refuse options for those kinds, so only a hand-edited row reaches
+  that branch, but the replay has no instrument type and must stay total).
 - **Share walker** (`data_ingestion/holdings.py::_delta_of`, `created_by`; `opened_by`): moves the
   signed count by the ratio, shorts included; when source and destination hold opposite signs it
   skips the action and records both symbols through the existing `note_negative_side_skip`.
@@ -172,14 +180,17 @@ on output. Nothing below changes how a stock is booked.
 ### 4.4 A close the replay cannot book
 
 Validators refuse every close that would open or extend a lot, but an edit, delete or batch undo of
-an earlier row can still leave one behind. The replay therefore refuses a `close_reason` row whose
-side and quantity do not exactly close existing exposure (BUY beyond the short, SELL beyond the
-long, or against the opposite direction): it books nothing for that row, records it in
-`Book.refused_closes`, and sets the sticky `unbookable_close` on the position (strict path: raises
-`UnbookableLedgerError`). Every reader of `unbookable_action` reads `unbookable_close` the same way
-(the trend marks days incomplete from that date, XIRR and B are withheld with a reason naming the
-row, the drawer shows 待釐清 with the remedy 「刪除該筆到期／指派／履約列，或補回被刪除的交易」, the manual
-preview withholds its position math). The correction doors' replay guard treats a newly refused
+an earlier row can still leave one behind. The replay therefore refuses a `close_reason` row that
+**would open or extend a lot** — a BUY beyond the short lot, a SELL beyond the long lot, or a close
+against the opposite direction (a partial `assigned` / `exercised` within the open lot is booked
+normally): it books nothing for that row and always records it in `Book.refused_closes`; when the
+position exists it sets the sticky `unbookable_close` (strict path: raises `UnbookableLedgerError`).
+Every reader of `unbookable_action` — the per-holding ones included (`portfolio/pnl.py`,
+`position_aggregate.py`, `dividends.py`, `timeseries.py`, the manual preview, the drawer, the
+holdings badge) — reads `unbookable_close` the same way: valuation withheld, the trend marks days
+incomplete from that date, XIRR and B are withheld with a reason naming the row, the drawer and the
+選擇權 section show 待釐清 with the remedy 「刪除該筆到期／指派／履約列，或補回被刪除的交易」, the manual
+preview withholds its position math. The correction doors' replay guard treats a newly refused
 close like a stranded dividend: hard refusal `refused_close_correction`, naming the row.
 
 ## 5. Valuation (R2, OPT-D4)
@@ -189,7 +200,8 @@ close like a stranded dividend: hard refusal `refused_close_correction`, naming 
   trade's date. With no trade since an `OPTION_ADJUST`, the predecessor's last price ×
   `ratio_from / ratio_to`. Read at the valuation seam (`portfolio/dashboard.py` `price_reads` /
   `price_map`) from `portfolio/options.py`; **never written to `prices`**.
-- Shown as 「最後成交價 YYYY-MM-DD」; never counted in `missing_prices` / `any_stale`.
+- Shown as 「最後成交價 YYYY-MM-DD」; options are left out of the freshness use of `price_reads`, so they
+  are never in `freshness.prices`, `missing_prices` or `any_stale`.
 - **Point-in-time figures include it** (signed market value; unrealized = (price − avg) × signed
   shares): KPI totals, total return A, XIRR's final value, the FX pool's `foreign_stock_value`,
   月度成績.
@@ -205,12 +217,12 @@ close like a stranded dividend: hard refusal `refused_close_correction`, naming 
 | --- | --- |
 | Quote jobs | `shared/instrument_scope.py::TRACKED_SQL` filters `asset_type='stock'` — one seam for quotes, history, dividends, the inbox scan, FinMind, consensus, fundamentals. The five bypass paths each refuse an option: `quick_register`'s quote gate + history fetch, the gap backfill, `refresh_instrument_quote`, the Alpha Vantage held universe, held-only news. An option is never in a worklist, so it can never make a run 部分 |
 | Dashboard | `holdings`, allocation, weights (`weight = stock MV / Σ stock MV`), subtotals, `realized.rows` and the realized block's totals: **stocks only**. KPI 總市值 / 總報酬 / unrealized / XIRR: stocks + options, with 「其中選擇權」 read from `options.market_value`. New 選擇權 section (§7) |
-| Drawer (`/symbol/{symbol}/detail`) | works for a contract: contract header (underlying, expiry, strike, right, multiplier), trades in 口 and share-equivalents, no 配息史, 試算 replaced by 「選擇權不提供試算」; it reads the contract from `options.open` |
-| Watchlist | contracts hidden by default, a 「顯示選擇權合約」 filter; archive / purge read `holds_position` as today |
+| Drawer (`/symbol/{symbol}/detail`) | works for a contract: contract header (underlying, expiry, strike, right, multiplier), trades in 口 and share-equivalents, no 配息史, 試算 replaced by 「選擇權不提供試算」; it reads the contract from `options.open`, and its reconciliation footer takes the book's share count from those rows (signed share-equivalents) — `data.holdings` has no option rows |
+| Watchlist | contracts hidden by default, a 「顯示選擇權合約」 filter; `/api/instruments` elements carry `asset_type` (the page never re-derives option-ness from a symbol); archive / purge read `holds_position` as today |
 | Target weights, rebalance, what-if, ex-dividend calendar, dividend projection | exclude options |
 | Signals, alerts, alert inputs, insights, LLM variables, prompts, digest, news, fundamentals | exclude options (OPT-D10) |
 | Cash page / 現金收支明細 | option trades settle like any trade; `CashLine` carries `short_sale` and `close_reason`, so a line reads 「賣出開倉 1 口 XYZ 2026-12-18 50 Put」, 「到期作廢」, 「被指派」, 「履約」 |
-| Ledger tabs | 交易: contract name, 口數 beside share-equivalents, chips 「賣出開倉」/「買進平倉」/「買進開倉」/「賣出平倉」/「到期」/「被指派」/「履約」; 公司行動: `OPTION_ADJUST` |
+| Ledger tabs | `GET /api/ledgers/transactions` rows carry `close_reason` and `contracts` (null on a stock). 交易: contract name, 口數 beside share-equivalents, chips 「賣出開倉」/「買進平倉」/「買進開倉」/「賣出平倉」/「到期」/「被指派」/「履約」; 公司行動: `OPTION_ADJUST` |
 
 ## 7. The 選擇權 section and its wire block (R4)
 
@@ -222,9 +234,13 @@ field lives inside this block** — no existing model (`TrendPoint`, `KpiSummary
 
 - `open` — per account × contract: 標的, 到期日 + 剩餘天數, 履約價, 買權/賣權, 方向 (買方/賣方), 口數,
   share-equivalents, 平均權利金, 最後成交價 + 日期, 市值, 未實現損益, 履約義務 (sold put: strike × 100 ×
-  contracts — the cash an assignment would take).
-- `realized` — rows per closed contract (open date, close date, how it closed, premium in / out,
-  realized) and totals by year and by underlying; `realized_total`.
+  contracts — the cash an assignment would take), and the 待釐清 flag (`unbookable_close`).
+- `realized.rows` — the replay's own `RealizedRow`s for option symbols, **the same shape as
+  `realized.rows`** (one per closing event, so a partial assignment and a later expiry are two
+  rows), plus `close_reason` and `contract`; the reason comes from a book-level record the replay
+  keeps for each realized row it emits from a `close_reason` trade (`RealizedRow` itself is
+  unchanged). Separate aggregates: `by_contract` (open date, close date, how it closed, premium in /
+  out, realized), `by_year`, `by_underlying`; `realized_total`.
 - `market_value`, `unrealized` — per currency and in the reporting currency (the KPI 「其中選擇權」).
 - `trend_excludes_value` (true when an option position existed in the trend window) and `note`.
 - The section renders after 持倉明細; the R3 note sits under it.
@@ -239,7 +255,8 @@ field lives inside this block** — no existing model (`TrendPoint`, `KpiSummary
 - **Opening-inventory CSV:** an option symbol is refused (§4.2).
 - **Manual entry** (`input_center.py`): an option symbol (or the contract picker) switches to option
   mode — `contracts` (口數), the four sides mapped to side + `short_sale`, 「到期作廢」 and
-  「被指派／履約」; the preview mirrors the replay's branch.
+  「被指派／履約」; the preview mirrors the replay's branch. `/api/input/context`'s instruments carry
+  `asset_type`, so the form knows a contract without parsing its symbol in JS.
 - **Schwab converter** (`data_ingestion/broker/`; pure — it emits the OCC symbol, the CSV door
   registers it): option rows stop being dropped. `option_symbol` "XYZ 12/18/2026 50.00 P" → OCC;
   Sell to Open → SELL `short_sale=1`, Buy to Close / Buy to Open → BUY, Sell to Close → SELL (fees
@@ -261,7 +278,7 @@ field lives inside this block** — no existing model (`TrendPoint`, `KpiSummary
 | --- | --- |
 | Raw ledgers zip / per-tab ledger CSV | `transactions.close_reason` rides the `SELECT *` dump (re-pinned, §10). The zip carries ledger tables only (`instruments` is not in it), so neither `asset_type` nor `option_contracts` is exported: on re-import an option's terms re-derive from its symbol (OPT-D7) |
 | 持股 CSV / 持股報表 (print) | stock rows as today; a separate 選擇權 block (§7 columns) and the 「其中選擇權」 KPI line — only when `options` is present |
-| 已實現損益 CSV | stock rows from `realized.rows` plus option rows from `options.realized`; columns `asset_type` and `contract` appended (re-pinned, §10) |
+| 已實現損益 CSV | stock rows from `realized.rows` plus option rows from `options.realized.rows` (same columns, one per closing event, matching the tax package); columns `asset_type` and `contract` appended (re-pinned, §10) |
 | 稅務包 | option closes are `sale` / `short_cover` and already land in capital gains (`export/tax.py` kind filter); add the contract name and a 「其中選擇權」 subtotal |
 | 帳本報告 (print) | 口數 + the option chips; `OPTION_ADJUST` in the actions section |
 | 現金收支明細 CSV / print | the option descriptions of §6 |
@@ -271,10 +288,14 @@ field lives inside this block** — no existing model (`TrendPoint`, `KpiSummary
 ## 10. Verification
 
 - **Invariant 1 (blast radius, D38).** A ledger with no option is byte-identical in every API payload
-  and export **except three additive column changes**, each re-pinned in its own test in the same
-  commit: (1) the raw transactions dump / per-tab CSV gains `close_reason` (empty); (2) the
+  and export **except these additive changes**, each re-pinned in the same commit wherever a test
+  pins it: (1) the raw transactions dump / per-tab CSV gains `close_reason` (empty); (2) the
   transaction import template gains `close_reason（選填）`; (3) the realized CSV gains `asset_type`
-  and `contract`. The golden payload does not change.
+  and `contract`; (4) additive **wire keys**, null / false on a stock ledger: cash statement rows
+  `short_sale` / `close_reason`; `/api/ledgers/transactions` rows `close_reason` / `contracts`; the
+  instrument elements of `/api/instruments` and `/api/input/context` `asset_type`. The dashboard
+  payload — the golden — does not change at all (`options` is popped when `None`;
+  `Holding.unbookable_close` does not reach `HoldingRow`).
 - **Hermetic tests** per mechanism (§4.1 rows both directions, §4.2 rules incl. side derivation,
   same-day ordering and over-cover, §4.3 transfer table on long and short, the walker's
   opposite-direction skip, §4.4 refusal incl. delete-the-STO-then-expiry), per surface (§6 / §9 — a

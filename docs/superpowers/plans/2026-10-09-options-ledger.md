@@ -2,7 +2,7 @@
 
 > **Spec:** `docs/spec/2026-10-09-options-ledger.md` (APPROVED 2026-10-09: R1–R7, OPT-D1..D12).
 > **Branch:** `feat/options-ledger`, off `main` at `aa5c80a`. **Status:** PLAN for owner review —
-> revised after review round 1 (Fable 5.1, max effort). No code until the owner approves this plan
+> revised after review rounds 1 and 2 (Fable 5.1, max effort; round 2: READY-WITH-FIXES, folded). No code until the owner approves this plan
 > (owner, 2026-10-09: approve the plan → compact the context → then build).
 > Execution: subagent-driven, **at most 3 parallel subagents**, worktree-isolated, disjoint files.
 > Every steps list is `- [ ]`. Line numbers in the appendix were verified at `aa5c80a`; re-check
@@ -16,12 +16,16 @@ app's Schwab USD cash ends at the broker's figure once the whole real history is
 **Invariants every task keeps (a violation is a bug, not a choice):**
 
 1. **Blast radius (D38, spec §10).** A ledger with no option is byte-identical in every API payload
-   and export **except the three named additive columns** — raw transactions `close_reason`, the
-   transaction template's `close_reason（選填）`, the realized CSV's `asset_type` / `contract` —
-   each re-pinned in its own test in the same commit. The golden payload
+   and export **except the additive changes the spec §10 names** — raw transactions `close_reason`,
+   the transaction template's `close_reason（選填）`, the realized CSV's `asset_type` / `contract`,
+   and the wire keys (null / false on a stock ledger) of cash statement rows (`short_sale`,
+   `close_reason`), `/api/ledgers/transactions` rows (`close_reason`, `contracts`) and the instrument
+   elements of `/api/instruments` and `/api/input/context` (`asset_type`) — each re-pinned in the
+   same commit wherever a test pins it. The golden payload
    (`tests/golden/dashboard_full.json`, whole-payload equality) does not change: **no existing wire
-   model gains a field**; every new wire field lives inside `options`, which the dashboard router
-   removes when it is `None`.
+   dashboard model gains a field**; every new dashboard field lives inside `options`, which the
+   router removes when it is `None`; `Holding.unbookable_close` never reaches `HoldingRow` (no
+   extra-field config — `HoldingRow(**h.model_dump())` drops it).
 2. **Money.** Decimal end to end; the frontend only formats server strings; the multiplier lives in
    `shared/options.py`, never in JS.
 3. **Layering** (`architecture.md`). New `shared/options.py` imports nothing internal (L0); new
@@ -56,14 +60,17 @@ the worktrees by cherry-pick and re-run the seam tests after each.
 
 **Cross-package dependencies, stated so no package waits on another inside its wave:**
 - W1 defines every type the others code against: `OptionTerms`, `Instrument.is_option`,
-  `Transaction.close_reason`, `RefusedClose`, `Book.refused_closes`, `OpenedPosition.unbookable_close`,
-  `OptionsBlock` (the wire model, empty shell) and `DashboardData.options`.
+  `Transaction.close_reason`, `RefusedClose`, `Book.refused_closes`, `Book.realized_close_reasons`,
+  `OpenedPosition.unbookable_close`, `Holding.unbookable_close`, `OptionsBlock` (the wire model,
+  empty shell) and `DashboardData.options`.
 - B's validators read `holdings.shares_through` and the replay; their `OPTION_ADJUST` behaviour is A's
   deliverable. **B's tests do not cross an `OPTION_ADJUST` until the wave-1 merge**; the main session
   adds the cross tests (an expiry after an adjustment; a validator over an adjusted contract) at the
   merge.
-- Readers of `unbookable_close` are split by file owner: A (trend, dashboard reasons, replay guard),
-  B (the manual preview's withholding), D (the drawer). Each implements its own readers in its wave.
+- Readers of `unbookable_close` mirror today's readers of `unbookable_action`, split by file owner:
+  A (`pnl.py` valuation, `position_aggregate.py`, `dividends.py`, `timeseries.py`, dashboard reasons,
+  replay guard), B (the manual preview, `input_center.py`), D (`web/app.js` badges, `web/detail.js`
+  drawer). Each implements its own readers in its wave.
 - D needs A's `options` block and B's door responses; E needs A's block and B's `CashLine` fields; F
   needs only the spec — all are wave 2.
 
@@ -84,7 +91,8 @@ the worktrees by cherry-pick and re-run the seam tests after each.
   trailing zeros); `from_broker_option(text) -> OptionTerms | None` for "XYZ 12/18/2026 50.00 P";
   `contracts_to_shares(n)` / `shares_to_contracts(q)` (the only multiplier arithmetic);
   `is_standard_adjustment(from_terms, to_terms, ratio_to, ratio_from) -> bool` (OPT-D11: both
-  multiplier 100, letters-only destination root, `strike_from × ratio_from == strike_to × ratio_to`);
+  multiplier 100, letters-only destination root, same right, same expiry,
+  `strike_from × ratio_from == strike_to × ratio_to`);
   `TREND_EXCLUDES_OPTIONS_NOTE` (spec §5 sentence).
 - [ ] `symbol_format.py`: `MARKET_CODE_PATTERNS["US"]` unchanged; `matches_market_format(sym, US)`
   and `looks_like_market_code` also accept `OPTION_PATTERN`.
@@ -92,8 +100,9 @@ the worktrees by cherry-pick and re-run the seam tests after each.
   None = None`, property `is_option`; `Transaction.close_reason: Literal["expired","assigned",
   "exercised"] | None = None`.
 - [ ] Result / wire types with defaults (no behaviour): `portfolio/results.py` `RefusedClose` (row
-  id, account, symbol, date, reason), `Book.refused_closes = []`, `OpenedPosition.unbookable_close
-  = False`; `portfolio/dashboard_models.py` `OptionsBlock` (spec §7 fields) and
+  id, account, symbol, date, reason), `Book.refused_closes = []`, `Book.realized_close_reasons:
+  dict[int, str] = {}` (index into `realized.rows` → `close_reason`; `RealizedRow` unchanged),
+  `OpenedPosition.unbookable_close = False`, `Holding.unbookable_close = False`; `portfolio/dashboard_models.py` `OptionsBlock` (spec §7 fields) and
   `DashboardData.options: OptionsBlock | None = None`, and in the same commit
   `api/routers/dashboard.py` drops the `options` key from the wire when it is `None` — without the
   pop, `to_wire(data.model_dump())` would emit `"options": null` and the golden equality test would
@@ -115,7 +124,7 @@ the worktrees by cherry-pick and re-run the seam tests after each.
   branch, which W2 replaces. `test_i14` `_PAIR` regex widened to the fourth kind.
 - [ ] Tests (fail first): symbol parse / format / display / broker-string round trip incl. 7.5
   strikes; digit root refused; `is_standard_adjustment` on a 1→3 split, a 1:1 rename, a 3-for-2
-  (refused), a digit-root destination (refused); an old database migrates with every instrument
+  (refused), a digit-root destination (refused), a put → call (refused), a changed expiry (refused); an old database migrates with every instrument
   `stock` and every `close_reason` NULL; registration idempotent with the spec §3 defaults; golden
   untouched.
 - **Done when:** targeted tests green, ruff clean, mypy clean on touched modules; commit
@@ -124,7 +133,8 @@ the worktrees by cherry-pick and re-run the seam tests after each.
 ## 3. W2 — Replay, valuation, trend, payload (wave 1, subagent A)
 
 **Files:** `portfolio/cost_basis.py`, `portfolio/options.py` (new), `portfolio/dashboard.py`,
-`portfolio/timeseries.py`, `portfolio/allocation.py`, `portfolio/dashboard_models.py` (fill the
+`portfolio/timeseries.py`, `portfolio/allocation.py`, `portfolio/{pnl,position_aggregate,dividends}.py`
+(the `unbookable_close` readers), `portfolio/dashboard_models.py` (fill the
 block), `data_ingestion/holdings.py` (`_delta_of`, `created_by`), `shared/models/ledger.py`
 (`opened_by` / `position_opened_by`), `api/replay_guard.py`, `api/routers/performance.py`, `docs/spec/2026-08-06-corporate-actions.md` (§4.4 table row only),
 `tests/portfolio/test_corporate_actions.py` (field-count list); tests under `tests/portfolio/`,
@@ -135,10 +145,15 @@ block), `data_ingestion/holdings.py` (`_delta_of`, `created_by`), `shared/models
   in write order; partial assignment).
 - [ ] **§4.4 refusal**: in `build_book`, a `close_reason` row that does not exactly close existing
   exposure books nothing, appends a `RefusedClose`, sets `_Position.unbookable_close` (new field,
-  sticky) and the `OpenedPosition` flag; strict path raises `UnbookableLedgerError`. Add the field's
-  row to the corporate-actions spec §4.4 table and to the field-count test. Readers in A's files:
-  trend incomplete from that date (`timeseries.py`, like `unbookable_action`), XIRR and B withheld
-  with a reason naming the row (`dashboard.py`), `api/replay_guard.py` hard refusal
+  sticky, only when the position exists — the `RefusedClose` record is unconditional), the
+  `OpenedPosition` and `Holding` flags; strict path raises `UnbookableLedgerError`. A partial
+  `assigned` / `exercised` within the open lot is booked normally. The replay also fills
+  `Book.realized_close_reasons` for every realized row it emits from a `close_reason` trade. Add the field's
+  row to the corporate-actions spec §4.4 table (EXCHANGE / SPINOFF OR it into Q like
+  `unbookable_action`) and to the field-count test. Readers in A's files, each mirroring its
+  `unbookable_action` read: valuation withheld (`pnl.py`), `position_aggregate.py`, `dividends.py`,
+  trend incomplete from that date (`timeseries.py`), XIRR and B withheld with a reason naming the
+  row (`dashboard.py`), `api/replay_guard.py` hard refusal
   `refused_close_correction` naming the row (compared per row, like `orphan`). Test: delete the STO
   of an expired short → the guard refuses; a legacy ledger with the shape → flagged, never a 500.
 - [ ] **`OPTION_ADJUST` branch** in `_apply_action` **immediately after the SPLIT branch, before
@@ -152,12 +167,17 @@ block), `data_ingestion/holdings.py` (`_delta_of`, `created_by`), `shared/models
   across accounts, ordinary trades only, `trade_date ≤ as_of`, predecessor price × `ratio_from /
   ratio_to` across an `OPTION_ADJUST`; `option_summary(...) -> OptionsBlock` per spec §7 (open rows
   incl. 履約義務; realized rows per closed contract with how it closed; totals by year / by
-  underlying; `market_value` / `unrealized` per currency and in the reporting currency;
-  `trend_excludes_value`, `note`). Name its money products so `tests/portfolio/
+  underlying; `realized.rows` = the replay's option `RealizedRow`s, same shape as
+  `realized.rows`, plus `close_reason` (from `Book.realized_close_reasons`) and `contract`;
+  `by_contract` / `by_year` / `by_underlying` aggregates; open rows carry `unbookable_close`;
+  `market_value` / `unrealized` per currency and in the reporting currency;
+  `trend_excludes_value`, `note`). Add the block's row models to
+  `tests/contract/test_frontend_never_computes_money.py`'s model scan. Name its money products so `tests/portfolio/
   test_settled_notional.py`'s scan classifies them (valuation, not settlement), or add reviewed
   allowlist entries.
 - [ ] **Valuation seam** (`dashboard.py` `price_reads` / `price_map`): an option's price from
-  `last_trade_prices`; never in `missing_prices` / `any_stale`.
+  `last_trade_prices`; options are left out of the freshness use of `price_reads`, so never in
+  `freshness.prices`, `missing_prices` or `any_stale`.
 - [ ] **Split the lists** (spec §6): `holdings`, `realized.rows` and the realized block's totals,
   sector allocation, weights (`weight = stock MV / Σ stock MV`), `holdings_subtotals`, the
   ex-dividend calendar and dividend projection — stock rows only. KPI 總市值 / 總報酬 / unrealized,
@@ -214,12 +234,17 @@ grouping,convert,reconcile}.py`, `portfolio/cash.py` (`CashLine` fields only),
   `api/wire.py::fee_rules_wire`).
 - [ ] **Manual door** (`input_center.py`): `ManualBody.contracts` for an option (the server converts
   with `contracts_to_shares`; `quantity` stays the stock field); `ManualBody.close_reason`; the four
-  sides map to side + `short_sale`; the server derives an expiry's side; the preview mirrors the
+  sides map to side + `short_sale`; the server derives an expiry's side; option mode refuses
+  「買進平倉」 with no short 「無空頭部位可平倉，請改選買進開倉」 and 「賣出平倉」 with no long or beyond the
+  long 「無多頭部位可平倉，請改選賣出開倉」 (CSV / edit rows keep the stock rules);
+  `/api/input/context` instruments carry `asset_type`; the preview mirrors the
   replay branch and withholds its position math on `unbookable_close` (as on `oversold`); the
   two-leg 「被指派／履約」 commit: both rows or neither, one acknowledgement covers the pair, every
-  finding names its leg.
-- [ ] **Edit / delete doors** (`ledgers.py`): the transaction edit door runs the same helper (with
-  `replacement`); the corporate-action create / edit / delete doors accept `OPTION_ADJUST` (the
+  finding names its leg; the stock leg's underlying registers through the existing auto-register
+  path (quote gate applies), and a failure refuses the pair 「請先登錄標的 XYZ」.
+- [ ] **Edit / delete doors** (`ledgers.py`): `GET /api/ledgers/transactions` rows gain
+  `close_reason` and `contracts` (null on a stock); the transaction edit door runs the same helper
+  (with `replacement`); the corporate-action create / edit / delete doors accept `OPTION_ADJUST` (the
   replay guard's new refusal is A's).
 - [ ] **Cash lines**: `CashLine` gains `short_sale` and `close_reason` (`portfolio/cash.py` only
   copies them from the transaction); `api/routers/cash.py` puts them on the statement wire.
@@ -261,8 +286,8 @@ new `tests/contract/test_options_excluded_from_stock_readers.py`.
   only reads `data.holdings` needs no filter — the scan test proves it rather than assuming it.
   Filter where the reader reads the registry or the book: target weights, rebalance, what-if,
   alerts (single weight, sector, drift), alert inputs, signals, insights, LLM variables, prompts
-  preview, digest (incl. `_chores` staleness), news, fundamentals; the watchlist list hides options
-  unless `include_options=1`; archive / remove / purge unchanged (`holds_position`).
+  preview, digest (incl. `_chores` staleness), news, fundamentals; `/api/instruments` elements gain
+  `asset_type`; the watchlist list hides options unless `include_options=1`; archive / remove / purge unchanged (`holds_position`).
 - [ ] **Scan test**: every module that iterates `book.holdings`, calls `held_among` /
   `holds_position` / `held_in_book`, reads `tracked_instruments`, or is `strategy/whatif.py` must
   apply the stock filter or be a reviewed allowlist entry with its reason.
@@ -276,7 +301,7 @@ new `tests/contract/test_options_excluded_from_stock_readers.py`.
 
 **Files:** `web/index.html`, `web/app.js` (or a new `web/options.js` + its script tag),
 `web/charts.js`, `web/ledger.js`, `web/trades.html`, `web/input.js`, `web/corp-action-form.js`,
-`web/broker-import.js`, the drawer's JS, `web/instruments.js`, `web/cash.js`, the what's-new
+`web/broker-import.js`, `web/detail.js` (the drawer), `web/instruments.js`, `web/cash.js`, the what's-new
 catalog, `api/routers/symbol.py`; tests under `tests/contract/`, `tests/e2e/`.
 
 - [ ] Dashboard 選擇權 section after 持倉明細 (`data-screen-label="選擇權"`): 未平倉 and 已實現 (by year /
@@ -289,7 +314,10 @@ catalog, `api/routers/symbol.py`; tests under `tests/contract/`, `tests/e2e/`.
   symbol), sends `contracts` (no multiplier in JS), the four sides, 「到期作廢」, 「被指派／履約」
   (two-leg), preview in 口 and share-equivalents.
 - [ ] Drawer for a contract (`symbol.py` reads `options.open`): header, trades in 口, no 配息史,
-  「選擇權不提供試算」, 待釐清 + remedy on `unbookable_close`.
+  「選擇權不提供試算」, 待釐清 + remedy on `unbookable_close`; the reconciliation footer (`_reconcile`)
+  takes the book's share count from the contract's `options.open` rows (signed share-equivalents),
+  since `data.holdings` has no option rows — e2e: an open contract's footer is green. The 選擇權
+  section badges `unbookable_close` as `web/app.js` badges `unbookable_action` on holdings.
 - [ ] Watchlist 「顯示選擇權合約」 filter; broker-import labels for the new reason codes; cash page
   descriptions from `short_sale` / `close_reason`.
 - [ ] What's-new catalog entry saying where to verify.
@@ -310,8 +338,8 @@ under `tests/export/`, `tests/contract/`.
 
 - [ ] 持股 CSV / 持股報表: stock rows unchanged; a 選擇權 block and the 「其中選擇權」 line only when
   `options` is present.
-- [ ] 已實現損益 CSV: rows from `realized.rows` + `options.realized`; `asset_type`, `contract`
-  appended; re-pin `tests/contract/test_export_realized.py`'s header.
+- [ ] 已實現損益 CSV: rows from `realized.rows` + `options.realized.rows` (same columns, one per
+  closing event — the tax package's granularity); `asset_type`, `contract` appended; re-pin `tests/contract/test_export_realized.py`'s header.
 - [ ] 稅務包: contract name on option rows; 「其中選擇權」 subtotal; pin that option closes land in
   capital gains (`export/tax.py` kind filter).
 - [ ] 帳本報告: 口數 + chips; `OPTION_ADJUST` in the actions section.
@@ -362,7 +390,7 @@ nothing):
 
 | Wave 1 — A (W2) | Wave 1 — B (W3) | Wave 1 — C (W4) |
 | --- | --- | --- |
-| `portfolio/{cost_basis,options,dashboard,timeseries,allocation,dashboard_models}.py`, `data_ingestion/holdings.py`, `shared/models/ledger.py`, `api/replay_guard.py`, `api/routers/performance.py`, corporate-actions spec §4.4 row, `tests/portfolio/test_corporate_actions.py` | `data_ingestion/{validate,csv_import,corporate_action_import,opening_import,import_templates,fees,config_seed,fee_overrides,agents}.py`, `data_ingestion/broker/*`, `portfolio/cash.py`, `api/routers/{input_center,ledgers,cash,fee_rules}.py`, `api/wire.py` | `shared/instrument_scope.py`, `api/instrument_service.py`, `scheduler/jobs.py`, `api/{fundamentals_service,news_service,alert_inputs,signals_service,insight_service,digest_service}.py`, `strategy/*`, `api/routers/{strategy,instruments,prompts,actions}.py`, `llm_insight/variables.py`, `data_ingestion/dividend_inbox.py` |
+| `portfolio/{cost_basis,options,dashboard,timeseries,allocation,dashboard_models,pnl,position_aggregate,dividends}.py`, `data_ingestion/holdings.py`, `shared/models/ledger.py`, `api/replay_guard.py`, `api/routers/performance.py`, corporate-actions spec §4.4 row, `tests/portfolio/test_corporate_actions.py` | `data_ingestion/{validate,csv_import,corporate_action_import,opening_import,import_templates,fees,config_seed,fee_overrides,agents}.py`, `data_ingestion/broker/*`, `portfolio/cash.py`, `api/routers/{input_center,ledgers,cash,fee_rules}.py`, `api/wire.py` | `shared/instrument_scope.py`, `api/instrument_service.py`, `scheduler/jobs.py`, `api/{fundamentals_service,news_service,alert_inputs,signals_service,insight_service,digest_service}.py`, `strategy/*`, `api/routers/{strategy,instruments,prompts,actions}.py`, `llm_insight/variables.py`, `data_ingestion/dividend_inbox.py` |
 
 | Wave 2 — D (W5) | Wave 2 — E (W6) | Wave 2 — F (W7a) |
 | --- | --- | --- |
@@ -412,8 +440,15 @@ dispatch :1754/:1887/:2041/:2069; `api/routers/symbol.py` role :345-350; `store.
 
 **Share walker** — `data_ingestion/holdings.py` `_delta_of` :287-352 (negative side skipped for
 EXCHANGE / SPINOFF :328-333, SPLIT exempt :324-327), `shares_through` :450-474, `created_by` :676;
-`shared/models/ledger.py` `opened_by` :319. Validator helpers `validate.py` `_replacement_flows` /
-`siblings_booked_before` :803-832.
+`shared/models/ledger.py` `opened_by` :319. Validator helpers `validate.py` defs
+`pending_share_flows` :475, `siblings_booked_before` :511, `_replacement_flows` :534 (call sites
+:803-832); the 賣超 guard :778-873.
+
+**`unbookable_action` readers (mirror for `unbookable_close`)** — `Holding.unbookable_action`
+`portfolio/results.py` :105; `portfolio/pnl.py` :39; `timeseries.py` :391; `position_aggregate.py`
+:172 (→ drawer `api/routers/symbol.py` :259); `dividends.py` :85; `input_center.py` :228/:252;
+`web/app.js` :702/:733; `web/detail.js` :558-583. Drawer reconciliation `symbol.py` `_reconcile`
+:507-553. Money-arithmetic scan `tests/contract/test_frontend_never_computes_money.py` :34.
 
 **Replay guard** — `api/replay_guard.py` block codes :78 (`oversell` | `orphan`), `_replay_block`
 :287-363, orphan → 422 `orphan_correction` :394-396.
@@ -443,7 +478,7 @@ POST :543-617 (gap backfill scheduled :613), quick :630-660, `{symbol}` paths :6
 → `forex/fx_pnl.py` :275/:329 → `compute_account_fx` :138-217; ex-dividend calendar :940-957;
 `combined_view` → :961/:1121; row weight :967-973 (+ :1137-1150); stale row :992-993; cash series
 :1046-1068; `total_return` → :1078-1089; freshness :1173-1174; subtotals :317-390;
-`fx_complete_return` :489-533; benchmark :539. `pnl.py` no price :55-66; `returns.py`
+`fx_complete_return` :489-533; benchmark :539. freshness `prices` :1151-1156; `pnl.py` no price :55-66; `returns.py`
 `total_return` :39-87, XIRR all-or-nothing :388-396; `allocation.py` :16-65.
 `portfolio/dashboard_models.py` `TrendPoint` :211-221, `exclude=True` precedent :427-443.
 `api/routers/dashboard.py` `to_wire(data.model_dump())` :47. Golden equality
@@ -466,7 +501,9 @@ price → incomplete :410-413), `net_invested` flows :198-204; frontend note `we
 :177-200/:587-589, `short_sale` :614, fee compute vs supplied :319-387; `fees.py`
 `supplied_snapshot` :103-134, `_us` :208-255, `compute_fees` :297-336, settled notional :322-327;
 `config_seed.py` `FeeRuleSet` :42-54, schwab :134-143; `fee_overrides.py` :46-60/:80-86;
-`api/wire.py` `fee_rules_wire` :163-185; `input_center.py` `ManualBody` :402-443 → `TxnInput`
+`api/wire.py` `fee_rules_wire` :163-185; `/api/input/context` `input_center.py` :139-167;
+`/api/ledgers/transactions` rows `ledgers.py` :262-290; `/api/instruments` elements
+`instruments.py` :91-135; `input_center.py` `ManualBody` :402-443 → `TxnInput`
 :446-454, `_cash_overdraft_issue` :560-595, `manual_preview` :1026-1102, commit :1106+; cash lines
 `portfolio/cash.py` :283-289, `api/routers/cash.py` :615-640, `web/cash.js` :345-346; UI
 `trades.html` :102-114, `input.js` :193-211/:252/:284-318/:451-534. Converter: `broker/ir.py`
@@ -485,8 +522,8 @@ price → incomplete :410-413), `net_invested` flows :198-204; frontend note `we
 :79-89, DEF-056 sweep `tests/e2e/test_def056_r5_future_row_sweep_flow.py` :96-147.
 
 **Exports** — `export/holdings.py` :61-63; `holdings_report.py` :147/:203/:282; `realized.py`
-reads `data.realized.rows` :33, header pinned `tests/contract/test_export_realized.py` :28;
-`tax.py` capital-gains kind filter :116; `ledgers_report.py` `_side_chip` :110,
+:25-45 reads `data.realized.rows` :33, header pinned `tests/contract/test_export_realized.py` :28;
+`tax.py` per-event realized rows :103-116 (capital-gains kind filter :116); `ledgers_report.py` `_side_chip` :110,
 `_transactions_section` :185, `_actions_section` :379; `cash_statement.py` `_describe` :198;
 `symbol_detail.py` :58; `rebalance_report.py` :322/:337; raw zip = `shared/ledger_registry.py`
 `LEDGER_TABLES` (no `instruments`); export → import decisions
