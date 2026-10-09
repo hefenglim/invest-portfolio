@@ -425,7 +425,7 @@ def test_a_stored_malformed_option_adjust_is_unreadable_not_raised() -> None:
     ok = SimpleNamespace(**_adj(), cost_carry=None, note=None, id=1)
     bad = SimpleNamespace(**_adj(ratio_from=Decimal(2), ratio_to=Decimal(6)),
                           cost_carry=None, note=None, id=2)
-    good, unreadable = convert_stored([ok, bad])  # type: ignore[list-item]
+    good, unreadable = convert_stored([ok, bad])
     assert [a.id for a in good] == [1]
     assert [u.id for u in unreadable] == [2] and unreadable[0].kind == "OPTION_ADJUST"
 
@@ -437,5 +437,5 @@ def test_an_unreadable_option_adjust_names_its_own_rule() -> None:
 
     bad = SimpleNamespace(**_adj(ratio_from=Decimal(2), ratio_to=Decimal(6)),
                           cost_carry=None, note=None, id=2)
-    _good, (u,) = convert_stored([bad])  # type: ignore[list-item]
+    _good, (u,) = convert_stored([bad])
     assert "選擇權合約調整以 1 口為基準" in u.reason and "分割的前後代號" not in u.reason
