@@ -32,6 +32,7 @@ from portfolio_dash.api.wire import (
     issue_wire,
     option_fee_label,
     parse_side,
+    whole_contracts_refusal,
 )
 from portfolio_dash.data_ingestion.agents import (
     AiDraftList,
@@ -122,6 +123,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.data_ingestion.validate import (
     Issue,
     TxnInput,
+    option_open_position,
     option_terms_of,
     unknown_account_issue,
     unknown_account_message,
@@ -592,16 +594,30 @@ def _txn_input(body: ManualBody) -> TxnInput:
     )
 
 
-def _option_mode(conn: sqlite3.Connection, body: ManualBody) -> ManualBody | JSONResponse:
+#: R2 m1 — an option row on the manual door says what it does (spec §4.2): one of the four
+#: side buttons, or a close reason. Without either, OPT-D14 / OPT-D21 never ran and a plain BUY
+#: beyond a short was written as one row that closes AND opens.
+OPTION_INTENT_REQUIRED_MESSAGE = (
+    "選擇權請選擇方向（賣出開倉／買進平倉／買進開倉／賣出平倉）或到期作廢／被指派／履約")
+
+
+def _option_mode(
+    conn: sqlite3.Connection, body: ManualBody, *, replacing: StoredTransaction | None = None,
+) -> ManualBody | JSONResponse:
     """Normalise an option-mode request (spec §4.2), or refuse it in zh.
 
     * ``contracts`` / ``option_intent`` / ``close_reason`` only on an option contract — 口數
       sent for a stock would book 100× its shares;
+    * 口數 is a whole number (「口數須為正整數」, R2 nit (b));
+    * a NEW option row carries an intent or a close reason (R2 m1); the edit dialog's preview
+      (*replacing* set) carries neither and keeps the stock rules, exactly as the edit door;
     * the symbol is canonicalised to the OCC spelling (the registrar's);
     * an intent sets the side and STO's declared short (``manual.intent_side``);
     * a close row is price 0, never a declared short, and its side is DERIVED from the
       position at the close of the trade date (a short closes with a BUY) — the close rules
-      then check it against the same position.
+      then check it against the same position. An edit's replaced row is taken out of that
+      position (``validate.option_open_position``, R2 M4) exactly as the close rules take it
+      out, so the preview of an unchanged stored expiry reads clean.
 
     A stock request comes back unchanged (``body`` itself)."""
     option_fields = (body.contracts is not None or body.option_intent is not None
@@ -614,16 +630,22 @@ def _option_mode(conn: sqlite3.Connection, body: ManualBody) -> ManualBody | JSO
                 "口數、選擇權買賣方向與到期作廢／被指派／履約只適用於選擇權合約",
                 field="symbol"))
         return body
+    if (fraction := whole_contracts_refusal(body.contracts)) is not None:
+        return fraction
     if body.option_intent is not None and body.close_reason is not None:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "請擇一：選擇權買賣方向，或到期作廢／被指派／履約",
             field="option_intent"))
+    if body.option_intent is None and body.close_reason is None and replacing is None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", OPTION_INTENT_REQUIRED_MESSAGE, field="option_intent"))
     update: dict[str, Any] = {"symbol": option_symbol(terms)}
     if body.option_intent is not None:
         side, short = intent_side(body.option_intent)
         update.update(side=side.value, short_sale=short)
     if body.close_reason is not None:
-        held = shares_through(conn, body.account_id, update["symbol"], on=body.date)
+        held = option_open_position(
+            conn, _txn_input(body.model_copy(update=update)), replacing=replacing)
         update.update(side=(Side.BUY if held < 0 else Side.SELL).value, short_sale=False,
                       price=_ZERO)
     return body.model_copy(update=update)
@@ -1222,7 +1244,7 @@ def manual_preview(
         if replacing is None:
             return JSONResponse(status_code=404, content=error_body(
                 "not_found", f"交易 #{body.replaces_txn_id} 不存在"))
-    normalized = _option_mode(conn, body)
+    normalized = _option_mode(conn, body, replacing=replacing)
     if isinstance(normalized, JSONResponse):
         return normalized
     body = normalized
@@ -1285,7 +1307,9 @@ def manual_preview(
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
-        "fee_rule_label": _fee_label(rule, option=contract["contract_name"] is not None),
+        # R2 nit (a): a close row costs nothing (spec §4.2) — it shows no fee label at all.
+        "fee_rule_label": (None if body.close_reason is not None else
+                           _fee_label(rule, option=contract["contract_name"] is not None)),
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
         "rebate_estimate": rebate_estimate,

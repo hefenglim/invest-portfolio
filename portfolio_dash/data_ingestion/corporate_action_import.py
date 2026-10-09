@@ -157,6 +157,8 @@ def _parse_row(raw: dict[str, str]) -> tuple[CorporateActionInput | None, Issue 
             account_id=account_id,
             date=action_date,
             kind=_canonical_kind(raw.get("kind", "")),
+            # An OCC contract comes out of the model in its ONE spelling (R2 M1): the payload
+            # the writer registers AND inserts is the symbol the replay looks up.
             from_symbol=raw.get("from_symbol", "").strip(),
             to_symbol=raw.get("to_symbol", "").strip(),
             ratio_to=_decimal(raw, "ratio_to", "換得股數"),

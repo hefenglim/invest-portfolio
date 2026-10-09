@@ -165,9 +165,12 @@ def register_option_contract(
     ``etf_flag_unknown`` both False (a contract is not an ETF, and nothing is left unanswered),
     ``asset_type='option'``. The underlying need not be registered and is never touched.
 
-    Idempotent: a registered contract is returned as stored. A row already carrying this
-    symbol as a US stock (typed by hand before options existed) is turned into the option the
-    symbol says it is; a row in another market is refused — options are US only (R6).
+    Idempotent: a registered contract is returned as stored; a row in another market is
+    refused — options are US only (R6). The US-stock branch (a row carrying this symbol with
+    ``asset_type='stock'`` is turned into the option the symbol says it is) is DEFENSIVE: no
+    door reaches it today, because every stock-registering door refuses the OCC shape at entry,
+    so no stored stock row can carry a contract symbol. It is kept so the registry and the
+    symbol can never disagree should such a row appear (R2 nit (c)).
 
     ``commit=False`` defers to the caller's transaction: the CSV and manual doors register a
     contract only inside the commit that writes its first trade, never on a preview.

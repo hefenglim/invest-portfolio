@@ -72,7 +72,12 @@ from portfolio_dash.api.routers.cash import (
     fx_edit_negative_guard,
     load_cash_ledgers,
 )
-from portfolio_dash.api.wire import issue_wire, parse_side, unbooked_wire
+from portfolio_dash.api.wire import (
+    issue_wire,
+    parse_side,
+    unbooked_wire,
+    whole_contracts_refusal,
+)
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.fees import (
@@ -148,6 +153,7 @@ from portfolio_dash.data_ingestion.validate import (
     DividendInput,
     Issue,
     TxnInput,
+    canonical_contract_symbol,
     identifier_change_repair,
     restated_band,
     unknown_account_message,
@@ -586,6 +592,13 @@ class TxEditBody(BaseModel):
     # sending a different one is refused rather than ignored.
     close_reason: str | None = None
 
+    @field_validator("symbol")
+    @classmethod
+    def _one_contract_spelling(cls, value: str) -> str:
+        """R2 M1: a contract in its one spelling, so the edit validates and WRITES the symbol
+        the stored rows carry (a stock symbol is untouched)."""
+        return canonical_contract_symbol(value)
+
     @model_validator(mode="before")
     @classmethod
     def _contracts_to_shares(cls, data: Any) -> Any:
@@ -772,6 +785,8 @@ def edit_transaction(
         if edited_inst is None or not edited_inst.is_option:
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error", "口數只適用於選擇權合約", field="contracts"))
+        if (fraction := whole_contracts_refusal(body.contracts)) is not None:
+            return fraction   # R2 nit (b): named in 口數, the unit this body carries
     # None on the wire = preserve the stored flag (MED-1 for 當沖, DEF-013 for 放空).
     effective_daytrade = body.daytrade if body.daytrade is not None else existing.daytrade
     effective_short = body.short_sale if body.short_sale is not None else existing.short_sale
@@ -1337,6 +1352,14 @@ class ActionBody(BaseModel):
     #: The fee's currency; defaults to the source instrument's quote currency.
     reorg_fee_ccy: str | None = None
 
+    @field_validator("from_symbol", "to_symbol")
+    @classmethod
+    def _one_contract_spelling(cls, value: str) -> str:
+        """R2 M1: an OCC contract in its one spelling BEFORE anything reads the body — the
+        E13 holder scan (``_build_batch``), the validator, the registration and the insert
+        all see the symbol the replay looks up. A stock symbol is untouched."""
+        return canonical_contract_symbol(value)
+
 
 def _num(raw: str | None, label: str) -> Decimal | None | JSONResponse:
     """A wire string -> Decimal, or a zh 400. ``None``/blank -> ``None`` (optional field)."""
@@ -1678,13 +1701,18 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
 
     ``acked_keys is None`` keeps the bare flag for API callers that never rendered a preview —
     they acknowledge whatever the server finds, exactly as before.
+
+    An ADVISORY (``Issue.info`` — e.g. 「將建立選擇權合約 …」) is shown, never acknowledged, so
+    it never gates (options final review R2, m2): only the soft findings are asked about, and
+    only their keys must be in ``acked_keys``. The 422 still lists every finding.
     """
-    if not issues:
+    asks = [i for i in issues if not i.info]
+    if not asks:
         return None
     wires = _issue_wires(issues)
     if not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
-            "warnings_unacknowledged", issues[0].message, issues=wires))
+            "warnings_unacknowledged", asks[0].message, issues=wires))
     if body.acked_warnings is not None:
         # S2: a tab still running the pre-R1 JavaScript. Its list cannot be checked (it is
         # the resolved TEXT R1 stopped trusting) and must not fall to the bare-flag path below,
@@ -1699,7 +1727,7 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
     if body.acked_keys is None:
         return None
     acked = set(body.acked_keys)
-    unseen = [w for w in wires if w["ack_key"] not in acked]
+    unseen = [w for w in _issue_wires(asks) if w["ack_key"] not in acked]
     if not unseen:
         return None
     return JSONResponse(status_code=422, content=error_body(
@@ -2033,7 +2061,8 @@ def _preview_payload(
             _with_fix(_issue_wires(issues), fix), restate,
             code=TARGET_BAND_PREDATES_SPLIT),
         "blocking": any(not i.needs_confirm for i in issues),
-        "needs_confirm": any(i.needs_confirm for i in issues),
+        # An advisory is shown, never acknowledged (R2 m2) — it does not ask for the tick.
+        "needs_confirm": any(i.needs_confirm and not i.info for i in issues),
         "fractions": fractions,
         "unpriced_symbols": sorted({
             body.to_symbol.strip() for i in issues if i.kind == "to_symbol_unpriced"}),

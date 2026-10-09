@@ -681,6 +681,8 @@ def build_transaction_preview(
             account_id, alias_issue = alias_import_account(_cell(raw, "account"))
             inp = TxnInput(
                 account_id=account_id,
+                # An OCC contract comes out of the model in its ONE spelling (R2 M1), so every
+                # rule below — and every sibling of the batch — reads the stored spelling.
                 symbol=_cell(raw, "symbol"),
                 side=_side_cell(raw, "side"),
                 quantity=_decimal_cell(raw, "shares"),

@@ -81,8 +81,6 @@ OVERSOLD_REMEDY = "此合約為賣超部位（待釐清）：請先補回缺少�
 #: Confirm on a (account, contract) the inbox does not list (closed meanwhile, never expired,
 #: or skipped).
 NOT_PENDING_MESSAGE = "此合約目前沒有待確認的到期部位"
-#: The inbox has no acknowledgement: a close row that would oversell is refused, never acked.
-OVERSELL_MESSAGE = "此到期作廢列會造成賣超，請改至交易輸入登錄"
 
 
 class ExpiryItem(BaseModel):
@@ -326,7 +324,12 @@ def pending_count(conn: sqlite3.Connection, *, now: datetime) -> int:
 
 
 def _write(conn: sqlite3.Connection, pending: _Pending, today: date) -> int:
-    """Write the §4.1 price-0 ``expired`` row for *pending* — the manual door's path."""
+    """Write the §4.1 price-0 ``expired`` row for *pending* — the manual door's path.
+
+    The inbox has no acknowledgement and needs none: a ``close_reason`` row never reaches the
+    sell guard (``validate_transaction`` exempts it), so it can raise no 賣超 to ask about — a
+    close beyond the lot is a HARD close-rule refusal instead, answered below (R2 nit (d);
+    ``test_options_w3_validate.py::test_a_close_sell_never_raises_the_ordinary_oversell``)."""
     item = pending.item
     inp = close_row_input(conn, account_id=item.account_id, symbol=item.symbol,
                           close_reason="expired", trade_date=item.expiry,
@@ -335,8 +338,6 @@ def _write(conn: sqlite3.Connection, pending: _Pending, today: date) -> int:
     hard = [i for i in draft.issues if not i.needs_confirm]
     if hard:
         raise ExpiryConfirmError("validation_error", hard[0].message, draft.issues)
-    if any(i.kind == "sell_exceeds_holdings" for i in draft.issues):
-        raise ExpiryConfirmError("oversell_unacknowledged", OVERSELL_MESSAGE, draft.issues)
     written = enter_transaction(conn, inp, confirm=True, today=today)
     if not written.written or written.transaction_id is None:
         raise ExpiryConfirmError("validation_error", NOT_PENDING_MESSAGE, written.issues)

@@ -26,7 +26,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from portfolio_dash.data_ingestion.dividend_model import (
     MODEL_ALLOWED_TYPES,
@@ -88,11 +88,13 @@ from portfolio_dash.shared.money import MINOR_UNITS, from_db, quantize_amount
 from portfolio_dash.shared.options import (
     CLOSE_REASON_ZH,
     CloseReason,
+    OptionSymbolError,
     OptionTerms,
     contract_name,
     is_contract_multiple,
     nonstandard_adjustment_reason,
     option_display_name,
+    option_symbol,
     parse_option_symbol,
     shares_to_contracts,
 )
@@ -126,8 +128,31 @@ TARGET_BAND_PREDATES_SPLIT = "target_band_predates_split"
 SPINOFF_CHILD_AUTOREGISTER = "spinoff_child_autoregister"
 
 
+def canonical_contract_symbol(symbol: str) -> str:
+    """An OCC-shaped *symbol* in its ONE spelling — ``option_symbol(parse_option_symbol(…))``:
+    upper case, no surrounding space (options final review R2, M1). Any other symbol comes back
+    exactly as given, so a stock's handling is unchanged.
+
+    Every validator input that names an instrument runs its symbols through this the moment it
+    is built (:class:`TxnInput`, :class:`CorporateActionInput`, and the API bodies that feed
+    them), i.e. at the start of each door's row parse — before any rule reads the symbol and
+    before any write. A lower-case contract used to reach the position-aware option rules
+    under a spelling no stored row carries (so a stored ``expired`` row could be stranded),
+    and an ``OPTION_ADJUST`` was stored with a lower-case destination the replay never found.
+    """
+    terms = parse_option_symbol(symbol)
+    if terms is None:
+        return symbol
+    try:
+        return option_symbol(terms)
+    except OptionSymbolError:   # unreachable for a parsed symbol; never a 500 at a door
+        return symbol
+
+
 class TxnInput(BaseModel):
-    """Validated input for a single transaction before it is persisted."""
+    """Validated input for a single transaction before it is persisted.
+
+    ``symbol`` is canonicalised when it is an OCC contract (:func:`canonical_contract_symbol`)."""
 
     account_id: str
     symbol: str
@@ -146,6 +171,11 @@ class TxnInput(BaseModel):
     # Options spec §3 / §4.2: a price-0 closing row of an option contract (OPT-D2). The
     # validators work in SHARE-EQUIVALENTS — the routers convert 口數 before building this.
     close_reason: CloseReason | None = None
+
+    @field_validator("symbol")
+    @classmethod
+    def _one_contract_spelling(cls, value: str) -> str:
+        return canonical_contract_symbol(value)
 
 
 class Issue(BaseModel):
@@ -1098,6 +1128,13 @@ def option_close_issues(
         pending_share_flows(before_me, exclude=inp, instrument_of=lookup), replaced_on_date)
     open_ = shares_through(conn, inp.account_id, inp.symbol, on=inp.trade_date,
                            index=walk_index, pending=pending_then)
+    after_expiry = _after_same_day_expiry(conn, inp, before_me, replacing)
+    if after_expiry:
+        # Listed BEFORE the close rules (R2 M2): an expiry re-derived from a statement that
+        # overlaps an already-imported one meets the stored ``expired`` row first, and its
+        # 「沒有部位」 is only the consequence — the row's reason names the cause.
+        issues.append(Issue(kind="option_row_after_expiry_close",
+                            message=EXPIRED_ROW_STRANDED_MESSAGE))
     if inp.close_reason is not None:
         issues.extend(_close_rule_issues(inp, terms, name, open_))
     elif inp.side is Side.BUY and open_ < 0 and inp.quantity > -open_:
@@ -1105,14 +1142,47 @@ def option_close_issues(
             kind="option_over_cover", needs_confirm=True,
             message=(f"買進平倉口數超過空頭部位，多出的 "
                      f"{_contracts_text(inp.quantity + open_)} 口將成為買方部位")))
-    if _after_same_day_expiry(conn, inp, before_me, replacing):
-        issues.append(Issue(kind="option_row_after_expiry_close",
-                            message=EXPIRED_ROW_STRANDED_MESSAGE))
-    elif _strands_a_stored_expiry(conn, inp, batch, replacing, replaced_net, walk_index,
-                                  lookup):
+    if not after_expiry and _strands_a_stored_expiry(
+            conn, inp, batch, replacing, replaced_net, walk_index, lookup):
         issues.append(Issue(kind="option_expired_row_stranded",
                             message=EXPIRED_ROW_STRANDED_MESSAGE))
     return issues
+
+
+def option_open_position(
+    conn: sqlite3.Connection,
+    inp: TxnInput,
+    *,
+    replacing: StoredTransaction | None = None,
+    index: ActionIndex | None = None,
+) -> Decimal:
+    """*open* of spec §4.2 for one row entered on its own (no batch): the signed position of
+    its account in its contract at the close of its date, the row itself never counting.
+
+    With *replacing* — the stored row an edit previews a replacement for — that row is taken
+    out, together with the same-day rows booked after it (DEF-012), through the same
+    :func:`_replacement_flows` :func:`option_close_issues` uses, so the side the manual door
+    derives for a close row and the side the close rules then check are read off ONE
+    position (R2 M4: counting the replaced expiry made a short read flat and the edit preview
+    reported a false ``option_close_side_mismatch``)."""
+    on_date: PendingFlows = (
+        _replacement_flows(conn, inp, replacing)[1] if replacing is not None else {})
+    return shares_through(conn, inp.account_id, inp.symbol, on=inp.trade_date,
+                          index=index if index is not None else load_action_index(conn),
+                          pending=on_date)
+
+
+def _close_row_on_or_after(
+    conn: sqlite3.Connection, account_id: str, symbol: str, on: date
+) -> date | None:
+    """The earliest stored ``close_reason`` row of *symbol* in *account_id* dated on or after
+    *on* — the row an ``OPTION_ADJUST`` dated *on* would strand (R2 M3) — or ``None``."""
+    row = conn.execute(
+        "SELECT MIN(trade_date) AS d FROM transactions WHERE account_id=? AND symbol=? "
+        "AND close_reason IS NOT NULL AND trade_date>=?",
+        (account_id, symbol, on.isoformat()),
+    ).fetchone()
+    return date.fromisoformat(row["d"]) if row is not None and row["d"] else None
 
 
 def _unregistered_contract_market(conn: sqlite3.Connection, inp: TxnInput) -> list[Issue]:
@@ -1286,6 +1356,13 @@ class CorporateActionInput(BaseModel):
     ratio_from: Decimal
     cost_carry: Decimal | None = None
     note: str | None = None
+
+    @field_validator("from_symbol", "to_symbol")
+    @classmethod
+    def _one_contract_spelling(cls, value: str) -> str:
+        """An OCC contract in its one spelling (R2 M1): the CSV door, the form and the broker
+        path then validate, register and STORE the same symbol the replay looks up."""
+        return canonical_contract_symbol(value)
 
 
 def _has_prices(
@@ -1684,6 +1761,17 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                       message=(f"選擇權合約調整：目的合約 {inp.to_symbol} 已有反方向的部位"
                                f"（{_DIRECTION_ZH[dest_shares < 0]}），"
                                "買方與賣方部位不能合併")))
+    if adjust and from_inst is not None and (
+            stranded_on := _close_row_on_or_after(conn, inp.account_id, inp.from_symbol,
+                                                  inp.date)) is not None:
+        # R2 M3: the adjustment empties the source contract at its (date, CORPORATE_ACTION)
+        # cut, so a stored close row of that contract dated on or after it would have nothing
+        # to close — the replay refuses it (§4.4) and withholds XIRR. The edit / delete doors
+        # refuse the same shape through the replay guard (``refused_close_correction``); this
+        # is the ADD doors' half, in the one validator every door runs (form, CSV, broker).
+        add(Issue(kind="option_adjust_strands_close",
+                  message=(f"此合約已登錄到期作廢／被指派／履約列（{stranded_on.isoformat()}），"
+                           "合約調整會使該列無法入帳；請先修改或刪除該列")))
     if kind is CorporateActionKind.SPLIT and from_inst is not None and not from_inst.is_option:
         if _has_open_options_on(conn, inp.from_symbol, inp.date, walk_index):
             add(Issue(kind="split_with_open_options", needs_confirm=True,

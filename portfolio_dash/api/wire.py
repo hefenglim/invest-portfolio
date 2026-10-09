@@ -2,10 +2,13 @@
 
 import sqlite3
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 
+from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.csv_import import _CellError, _side_cell
 from portfolio_dash.data_ingestion.validate import Issue
@@ -181,6 +184,21 @@ def option_fee_label(r: FeeRuleSet) -> str:
     reg = (f"＋監管費每口 {decimal_str(r.option_reg_per_contract)}"
            if r.option_reg_per_contract > 0 else "")
     return f"每口 {decimal_str(r.option_per_contract)}{reg}＋SEC（賣出）"
+
+
+#: Options final review R2, nit (b): a door that takes 口數 (the manual door's option mode, the
+#: ledger edit door) names a fraction in 口數 — not with the CSV door's share-equivalent hint
+#: 「若填的是口數，請改為 口數×100」, which tells someone who typed 口數 to multiply by 100.
+WHOLE_CONTRACTS_MESSAGE = "口數須為正整數"
+
+
+def whole_contracts_refusal(contracts: Decimal | None) -> JSONResponse | None:
+    """The 400 for a fractional ``contracts`` (口數), or ``None`` for a whole or absent one.
+    The field itself is already ``> 0`` on both bodies that carry it."""
+    if contracts is None or contracts == contracts.to_integral_value():
+        return None
+    return JSONResponse(status_code=400, content=error_body(
+        "validation_error", WHOLE_CONTRACTS_MESSAGE, field="contracts"))
 
 
 def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:

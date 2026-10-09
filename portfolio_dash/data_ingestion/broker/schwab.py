@@ -48,6 +48,7 @@ from portfolio_dash.data_ingestion.broker.ir import (
     UnmappedRow,
     looks_like_cusip,
 )
+from portfolio_dash.shared.options import from_broker_option
 
 #: The broker's own header, in its own order. A file whose header differs is refused rather
 #: than read positionally: a silently mis-mapped column is a wrong ledger, not an error.
@@ -112,9 +113,6 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Journaled Shares", "INTERNAL TRANSFER BETWEEN ACCOUNTS", EventKind.JOURNAL_INTERNAL),
     ("Journaled Shares", "INTRA-ACCOUNT TRANSFER", EventKind.JOURNAL_INTERNAL),
     ("Journaled Shares", "TRANSFER OF SECURITY OR OPTION OUT", EventKind.TRANSFER_OUT),
-    # The inbound leg of the same platform transfer (options spec §8: dropped with a reason
-    # when it is an option and does not cancel against its OUT leg).
-    ("Journaled Shares", "TRANSFER OF SECURITY OR OPTION IN", EventKind.TRANSFER_OUT),
     ("Journaled Shares", "CASH MOVEMENT OF OUTGOING ACCOUNT TRANSFER", EventKind.CASH_SWEEP),
     ("Journaled Shares", "MARK TO THE MARKET", EventKind.MARK_TO_MARKET),
     ("Journaled Shares", "MANDATORY REVERSE SPLIT", EventKind.REVERSE_SPLIT),
@@ -126,6 +124,16 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     # TD's expiry journal: an EXPIRY, not an adjustment (options spec §8 — re-mapped; it
     # becomes the price-0 ``expired`` row like Schwab's own ``Expired``).
     ("Journaled Shares", "REMOVAL OF OPTION DUE TO EXPIRATION", EventKind.OPT_EXPIRED),
+)
+
+#: Rules that apply ONLY to a row whose ``Symbol`` is a standard option contract
+#: (``from_broker_option`` parses it). The inbound leg of a platform transfer (options spec §8:
+#: dropped with a reason when it does not cancel against its OUT leg). Scoped to contracts
+#: (R2 m3): as a general rule it mapped a STOCK in-transfer to ``TRANSFER_OUT`` too, where
+#: ``main`` stopped the run with ``UnmappedRow`` — no stock row of that shape has been seen
+#: behind a rule, so it stays the loud first encounter it was.
+_OPTION_ONLY_RULES: tuple[tuple[str, str | None, EventKind], ...] = (
+    ("Journaled Shares", "TRANSFER OF SECURITY OR OPTION IN", EventKind.TRANSFER_OUT),
 )
 
 #: Assignment / exercise rows (OPT-D9): RECOGNISED and refused — never mapped blind. The
@@ -174,15 +182,18 @@ def newest_first(posted_dates: list[date]) -> bool:
 
 
 
-def classify(action: str, description: str) -> EventKind | None:
+def classify(action: str, description: str, *, option_contract: bool = False) -> EventKind | None:
     """The ``(action, description)`` verdict, or ``None`` when no rule matches.
 
     ``None`` is not a kind — the caller turns it into :class:`~.ir.UnmappedRow` with the
     line number attached. Kept separate so the table stays a pure lookup and the error
-    carries the context only the reader has.
+    carries the context only the reader has. *option_contract* — the row's ``Symbol`` is a
+    standard option contract — also admits :data:`_OPTION_ONLY_RULES` (after the general
+    table, which no option-only description matches).
     """
     upper = description.upper()
-    for rule_action, pattern, kind in _RULES:
+    rules = (*_RULES, *_OPTION_ONLY_RULES) if option_contract else _RULES
+    for rule_action, pattern, kind in rules:
         if rule_action != action:
             continue
         if pattern is None or pattern in upper:
@@ -315,7 +326,8 @@ def parse(
                 reason=OPTION_ASSIGNED_UNMAPPED,
                 detail="assignment / exercise rows are entered through the manual form",
             )
-        kind = classify(action, description)
+        kind = classify(action, description,
+                        option_contract=from_broker_option(data["Symbol"]) is not None)
         if kind is None:
             raise UnmappedRow(
                 source_file=source_file, line_no=offset,
