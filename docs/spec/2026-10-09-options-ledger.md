@@ -18,6 +18,7 @@ record for options. Its multiplier census and its "direction is not a gap" findi
 | 2026-10-09 | **Review round 2** (READY-WITH-FIXES → folded): N1 additive wire keys; N2 `Holding.unbookable_close`; N3 drawer reconciliation; N4 `options.realized.rows`; N5 option-mode refusals; N6 same right / expiry; N7 the assignment's stock leg; N8 / N11 wording; N10 freshness |
 | 2026-10-09 | **Review round 3** (READY): N14–N16 wording |
 | 2026-10-09 | **Review round 4** — reviewer A (fresh consistency, READY-WITH-FIXES, F1–F15), reviewer B (usability of every entry point, ADEQUATE, U1–U14 + D1–D5), reviewer C (integration: 26 confirmed / 3 partly / 0 incorrect, M1–M21, READY-AFTER-FOLD). Owner answered seven questions: OPT-D13 expiry inbox in v1; OPT-D14 option-mode 買進平倉 beyond the short refused; OPT-D15 server-derived `option_side`; OPT-D16 `ratio_from == 1`; OPT-D17 underlying price beside the strike; OPT-D18 default side by position; OPT-D19 the converter knows the ledger's open contracts. Folded everywhere below; a vocabulary table (§6.1) now fixes every zh term |
+| 2026-10-09 | **Round 4 fold verification** (reviewer C; READY-WITH-FIXES, no owner decision): N1 the `option_side` walk includes `OPTION_ADJUST` (§6.1); N2 the converter's whole-number ratio and the form's 1 → N input (§4.3, §6.2, §8); N3 two more additive keys + the broker report adds none (§8, §10); N4 the fee settings panel (§8); N5 the what's-new wording (§8); N6 the underlying-price read (§7.1); N7 three branches — the inbox on a refused close (§7.2), the two-leg response (§4.2), the edit door's over-cover gate (§4.2); N8 `known_positions` as of the day before the request (§8) |
 
 **Why now.** A real broker history cannot reconcile without its option legs: the premiums are cash
 the account really received and paid. The owner's acceptance figures live in the git-ignored
@@ -144,7 +145,9 @@ short lot; the signed `shares` is derived on output. Nothing below changes how a
   「無空頭部位可平倉，請改選買進開倉」; beyond the short → refused (OPT-D14); 「賣出平倉」 with no long or
   beyond the long → refused 「無多頭部位可平倉，請改選賣出開倉」. A CSV or edit row carries no intent and
   keeps the stock rules; there a BUY covering more than the open short raises the soft finding
-  「買進平倉口數超過空頭部位，多出的 N 口將成為買方部位」 under the file-level `ack_warnings` gate.
+  「買進平倉口數超過空頭部位，多出的 N 口將成為買方部位」 — under the file-level `ack_warnings` gate on the CSV
+  door, and as a preview warning on the edit door (which has no file gate, as `cash_overdraft` on the
+  manual door).
 - **Elsewhere:** a dividend on an option is refused (`dividend_on_option`); an opening-inventory row
   on an option is refused 「選擇權請以交易登錄」; `SPLIT` / `EXCHANGE` / `SPINOFF` naming an option are
   refused; a `SPLIT` on an underlying with open options raises the soft finding
@@ -156,12 +159,14 @@ short lot; the signed `shares` is derived on output. Nothing below changes how a
   「被指派：以 50.00 買入 200 股 XYZ，現金 −10,000.00 USD」 (server strings). The pair's one
   acknowledgement is `ack_oversell` when a call assignment's stock SELL exceeds holdings. The stock
   leg's underlying registers through the existing auto-register path (its quote gate applies); on
-  failure the pair is refused 「請先登錄標的 XYZ」 with the inline 立即註冊 link.
+  failure the pair is refused 「請先登錄標的 XYZ」 with the inline 立即註冊 link. The commit answers
+  `txn_ids: [option, stock]` and per-leg totals (an option-only response shape).
 
 ### 4.3 `OPTION_ADJUST`
 
 - **Validation:** both symbols are option contracts (registrable from their symbols at the same
-  door); OPT-D11 holds (incl. `ratio_from == 1`); positive integer `ratio_to`; from ≠ to; the source
+  door); OPT-D11 holds (incl. `ratio_from == 1` — a CSV or API row with `ratio_from ≠ 1` is refused
+  「選擇權合約調整以 1 口為基準，請填 1 → N」); positive integer `ratio_to`; from ≠ to; the source
   holds a **non-zero signed** position at the `(date, CORPORATE_ACTION)` cut
   (`shares_before_action_on`, E13's predicate — a short counts); the destination is flat or in the
   same direction. The corporate-action preview returns `strike_products` (two Decimal strings) and
@@ -234,8 +239,11 @@ close rows of the same contract that would be stranded.
 | action kind | 選擇權合約調整 |
 
 `option_side` is derived by **one** pure classifier, `shared/options.py`, from (side, short_sale,
-close_reason, signed position before the row), applied by **one walk per (account, contract) in
-ledger order** — never per row, never in JS. The ledger tab, the cash lines, the drawer, the exports
+close_reason, signed position before the row), applied by **one walk per account over its option
+rows and its `OPTION_ADJUST` rows** in replay order `(date, priority, id)` — an adjustment (before
+the day's trades) moves the count × `ratio_to` from the source contract to the destination, so a
+buy-back after an adjustment reads 買進平倉 exactly as the replay books it — never per row, never in
+JS. The ledger tab, the cash lines, the drawer, the exports
 and the inbox all read it. A vocabulary guard test (like `test_i14`) pins the table.
 
 ### 6.2 Surface table
@@ -249,7 +257,7 @@ and the inbox all read it. A vocabulary guard test (like `test_i14`) pins the ta
 | `/api/input/holdings` (picker, sell hints) | an option position with a **non-zero signed** count is `held` (never 已清倉), carrying `asset_type`, `direction`, `contracts`, signed `shares`; the picker shows 「XYZ 2026-12-18 50 Put・賣方 2 口」; the hint reads 「可平倉 N 口」. Stock rows unchanged |
 | Target weights, rebalance, what-if, ex-dividend calendar, projection; signals, alerts, alert inputs, insights, LLM variables, prompts, digest, news, fundamentals | exclude options (OPT-D10). The dividend inbox is already covered by `TRACKED_SQL` |
 | Ledger tab (交易) | rows carry `close_reason`, `contracts`, `option_side`, `refused_close` (null / false on a stock); contract display name, 口數 beside share-equivalents, the §6.1 chips; keyword filter matches the display name; a refused close reads 「未入帳（待釐清）」; deep link `?ledger=tx&txn_id=` |
-| 公司行動 tab / form | the fourth kind 「選擇權合約被調整（分割／更名後合約代號改變）」, example 「1 口 60 Put → 3 口 20 Put；SPAC 更名 1：1」; 來源 = a held contract; 目的 = 新標的代號（預設同）＋新履約價 → the compose endpoint → `to_symbol`; ratio in 口; the preview's `strike_products` / `conserves` |
+| 公司行動 tab / form | the fourth kind 「選擇權合約被調整（分割／更名後合約代號改變）」, example 「1 口 60 Put → 3 口 20 Put；SPAC 更名 1：1」; 來源 = a held contract; 目的 = 新標的代號（預設同）＋新履約價 → the compose endpoint → `to_symbol`; 來源 is fixed at 1 口 and the form asks 目的 口數 (= `ratio_to`); the preview's `strike_products` / `conserves` |
 | Cash page / 現金收支明細 | `CashLine` carries `option_side`; a line reads 「賣出開倉 1 口 XYZ 2026-12-18 50 Put」, 「到期作廢」, 「被指派」, 「履約」 |
 | 收件匣 | the third panel 「待確認到期」 (§7.2); the sidebar badge adds its count |
 
@@ -262,7 +270,9 @@ or action on an option instrument; the dashboard router removes the key when `No
 dashboard wire field lives inside this block.** Contents (Decimal strings, server-computed):
 
 - `open` rows (per account × contract): contract, `underlying`, 到期日 + 剩餘天數, 履約價,
-  `underlying_price` + its date (OPT-D17; only when the underlying is registered and priced), 買權/賣權,
+  `underlying_price` + its date (OPT-D17; one latest-price read per distinct registered underlying —
+  usually not held, so never from the holdings' price reads and never added to freshness; omitted when
+  unpriced), 買權/賣權,
   方向, 口數, 股當量, 平均權利金, `premium_total` (已收／已付權利金), 最後成交價 + 日期, 市值, 未實現損益,
   履約義務 (sold put: strike × 100 × contracts), `past_expiry`, `unbookable_close`.
 - `obligation_subtotals` (per account × currency); `market_value`, `unrealized` (per currency and in
@@ -289,8 +299,9 @@ whose expiry is before the server's today, with no close row and not skipped: �
 「確認到期作廢」 writes the §4.1 price-0 row through the same validator helper and write path as the
 manual door; 「改登錄被指派／履約」 deep-links to the manual form prefilled for the two-leg action;
 「略過」 records a skip (「取消略過」 in the skipped list); 「全部確認」 (an in-page confirm dialog) confirms
-every listed item, each validated on its own, and reports per item. A count route feeds the sidebar
-badge. Detector and routes live in `api/` (the detector reads the book; `data_ingestion` never
+every listed item, each validated on its own, and reports per item. An item whose contract already
+carries a refused close shows 待釐清 and the §4.4 remedy instead of 「確認到期作廢」 (a confirm would be
+refused by §4.2's same-day rule). A count route feeds the sidebar badge. Detector and routes live in `api/` (the detector reads the book; `data_ingestion` never
 imports `portfolio` for it).
 
 ## 8. Import doors
@@ -314,7 +325,10 @@ imports `portfolio` for it).
   an inline button 「轉倉：賣出開倉同標的新合約」 reopens the builder prefilled (underlying, right, 口數,
   date), side 賣出開倉, focus on 到期日 — two rows, no chain (§12). The fee refusal for `moomoo_my`
   reads 「此帳戶未設定選擇權手續費：請按 ✎ 覆寫填入對帳單手續費，或到 系統設定 → 費率 設定每口費率」 with a link;
-  the fee label reads 「每口 0.65＋SEC（賣出）」.
+  the fee label reads 「每口 0.65＋SEC（賣出）」. The fee settings panel lists the two new fields
+  「選擇權每口手續費」／「選擇權每口監管費」 for US rule sets.
+- **What's new:** an entry titled 「可以登錄美股選擇權了：賣出 Put、到期、被指派、合約調整都進帳本」, href
+  `trades.html`, target `#m-sym-foot`, area 「交易帳本 → 交易輸入／儀表板 → 選擇權」.
 - **AI input door:** an OCC symbol is code-shaped; AI-recognised option rows commit through the CSV
   door's path and register there (OPT-D7); `resolve.py`'s register-first path meets
   `quick_register`'s entry refusal. `MARKET_CODE_PATTERNS["US"]` is unchanged.
@@ -324,14 +338,20 @@ imports `portfolio` for it).
   Close / Buy to Open → BUY; Sell to Close → SELL; fees verbatim, tax 0; `Expired` and TD's
   「REMOVAL OF OPTION DUE TO EXPIRATION」 (re-mapped from `OPT_ADJUST`) → price-0 `expired`, dated the
   contract's expiry, side from the running signed position **across every file of the request plus
-  `known_positions`** (OPT-D19, injected by `api/routers/broker_import.py` from the ledger), same-day
+  `known_positions`** (OPT-D19, injected by `api/routers/broker_import.py`: the ledger's signed
+  share-equivalents per (account, contract) **through the day before the request's earliest row**;
+  the running count = that + the request's rows; an overlap with already-imported rows is caught at
+  the CSV door by `expired = |open|`), same-day
   rows per contract merged, written after that day's trades; odd-split / position-change journal
-  pairs → one `OPTION_ADJUST` when OPT-D11 holds; 「TRANSFER OF SECURITY OR OPTION OUT」 and
+  pairs → one `OPTION_ADJUST` with `ratio_to = |to qty| ÷ |from qty|`, accepted only when a whole
+  number and OPT-D11 holds (else `option_nonstandard_adjust`); 「TRANSFER OF SECURITY OR OPTION OUT」 and
   「…OPTION IN」 between the broker's own platforms → dropped with a stated reason. `UnmappedRow`
   carries `reason` ∈ {`option_assigned_unmapped`, `option_nonstandard_adjust`,
   `option_expiry_no_opening`} and the line number; the 422 body carries both; the page prints a
   per-reason remedy (e.g. 「第 N 列是選擇權被指派／履約：第一版轉換器不處理。請先從匯出檔刪除這一列再轉換；被指派本身請用手動交易的
-  「被指派／履約」登錄」). The report's labels use §6.1 and 「2 口（200 股當量）」.
+  「被指派／履約」登錄」). The report's labels use §6.1 and 「2 口（200 股當量）」 — the display name goes into the
+  existing `symbol` cell and 「2 口（200 股當量）」 into the `shares` cell of `RowDetail.cells`, so the
+  conversion report gains **no** new key.
 
 ## 9. Export doors
 
@@ -357,7 +377,9 @@ imports `portfolio` for it).
   `refused_close`; instrument elements of `/api/instruments` and `/api/input/context` `asset_type`;
   `/api/input/holdings` rows `asset_type`, `direction`, `contracts`; the manual preview
   `share_equivalents`, `contract_name`, `legs`; the corporate-action preview `strike_products`,
-  `conserves`; the broker-import 422 body `reason`, `line`. **New routes** (the compose endpoint, the
+  `conserves`; the broker-import 422 body `reason`, `line`; the CSV import preview rows' `data`
+  `contracts`, `contract_name`; the `/api/fee-rules` `fields` `option_per_contract`,
+  `option_reg_per_contract` (every rule set, editable). **New routes** (the compose endpoint, the
   expiry inbox) add no key to an existing payload; the inbox count is 0 on a stock ledger, so the
   sidebar badge is unchanged. The dashboard payload — the golden — does not change at all.
 - **Hermetic tests** per mechanism and per rule (§4 incl. structural price-0, fee-free closes, side

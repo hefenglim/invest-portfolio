@@ -84,9 +84,11 @@ seam tests after each.
   `contracts_to_shares` / `shares_to_contracts`; `is_standard_adjustment(from, to, ratio_to,
   ratio_from)` — multiplier 100 both, letters-only destination root, same right, same expiry,
   **`ratio_from == 1`**, `strike_from × ratio_from == strike_to × ratio_to`; `OptionSide` and
-  `classify_option_rows(rows) -> list[OptionSide | None]` — a pure walk over rows in ledger order
-  (account, symbol, side, quantity, short_sale, close_reason) keeping a signed count per (account,
-  symbol), the ONE definition of spec §6.1; the §6.1 zh constants; `TREND_EXCLUDES_OPTIONS_NOTE`.
+  `classify_option_rows(rows, actions) -> dict[int, OptionSide]` — rows carry `(id, account, symbol,
+  trade_date, side, quantity, short_sale, close_reason)`, actions `(account, date, from_symbol,
+  to_symbol, ratio_to)`; ONE walk per account in replay order `(date, priority, id)` (an
+  `OPTION_ADJUST` before the day's trades moves the signed count × `ratio_to` from → to), the ONE
+  definition of spec §6.1; the §6.1 zh constants; `TREND_EXCLUDES_OPTIONS_NOTE`.
 - [ ] `symbol_format.py`: `MARKET_CODE_PATTERNS["US"]` unchanged; `matches_market_format(sym, US)` and
   `looks_like_market_code` also accept `OPTION_PATTERN`.
 - [ ] Models: `Instrument.asset_type` (default `"stock"`), `option`, `is_option = asset_type ==
@@ -109,7 +111,7 @@ seam tests after each.
 - [ ] Tests (fail first): parse / compose / display / broker string incl. 7.5 strikes; digit root
   refused; `is_standard_adjustment` (1→3 ok, 1:1 ok, 3-for-2 / reverse / `ratio_from > 1` / digit
   root / put→call / changed expiry refused); `classify_option_rows` over every §6.1 value incl. the
-  over-cover; migration keeps every instrument `stock` and every `close_reason` NULL; registration
+  over-cover, and STO 1 口 → 1→3 adjustment → BUY 3 口 reads 買進平倉; migration keeps every instrument `stock` and every `close_reason` NULL; registration
   defaults; golden untouched.
 - **Done when:** targeted tests green, ruff, mypy on touched modules; commit `feat(options): W1
   foundation — option terms, classifier, schema, registration, OPTION_ADJUST vocabulary`.
@@ -140,8 +142,9 @@ corporate-actions spec §4.4 row, `tests/portfolio/test_corporate_actions.py` (f
   `note_negative_side_skip`. Agreement test with `build_book` after a 1→3 adjustment of a short.
 - [ ] **`portfolio/options.py`**: `last_trade_prices` (per symbol across accounts, ordinary trades,
   `trade_date ≤ as_of`, predecessor ÷ `ratio_to`); `option_summary(...) -> OptionsBlock` with every
-  spec §7.1 field: open rows (`underlying`, `underlying_price` + date from the dashboard's price reads
-  when the underlying is registered and priced, `premium_total`, `past_expiry` = expiry < valuation
+  spec §7.1 field: open rows (`underlying`, `underlying_price` + date from ONE `get_latest_price` read
+  per distinct registered underlying — never added to `price_reads` / freshness; omitted when
+  unpriced, `premium_total`, `past_expiry` = expiry < valuation
   day and no close row, `unbookable_close`, 履約義務), `obligation_subtotals`, `market_value`,
   `unrealized`, `refused_closes[]` (with the remedy text), `realized.rows` (the replay's option
   `RealizedRow`s + `close_reason` + `contract`), `by_contract` / `by_year` / `by_underlying`,
@@ -187,36 +190,45 @@ fee_rules,broker_import}.py`, `api/wire.py`; tests under `tests/data_ingestion/`
   `FeeRuleSet.option_per_contract` / `option_reg_per_contract`; `compute_fees(..., is_option=)` →
   `_us_option` (bypasses `_us`; 0 / 0 at notional 0; per contract + reg + SEC on sells; snapshot
   `{"option": true, "contracts": N}`); schwab 0.65, moomoo_my None → the spec §8 refusal text with the
-  settings link; `fee_rule_label` 「每口 0.65＋SEC（賣出）」; owner-editable via `fee_overrides`,
-  `fee_rules.py`, `wire.py::fee_rules_wire`.
+  settings link; `fee_rule_label` 「每口 0.65＋SEC（賣出）」; both keys editable in `fee_overrides`
+  (`_RATE_FIELDS` / `_AMOUNT_FIELDS`, `EDITABLE_FIELD_ORDER`), on `/api/fee-rules` `fields` via
+  `fee_rules.py` / `wire.py::fee_rules_wire` — re-pin `tests/api/test_r7_fee_rule_readonly_wire.py` and
+  the DEF-010 test in the same commit.
 - [ ] **Registration at the doors** (OPT-D7): CSV transaction / corporate-action doors and the manual
   door call `register_option_contract` inside the commit's transaction; the AI door's option rows
   commit through the CSV path (`agents.py` edits only if a test shows it needs one).
-- [ ] **CSV + template**: `close_reason` column; hints and the example note (spec §8); preview
-  `contracts`, `contract_name`; soft `option_premium_exceeds_strike` on puts; re-pin the template and
+- [ ] **CSV + template**: `close_reason` column; hints and the example note (spec §8); preview rows'
+  `data` gains `contracts`, `contract_name` (re-pin the preview-shape tests in the same commit); soft `option_premium_exceeds_strike` on puts; re-pin the template and
   DEF-026 tests; the corporate-action CSV accepts `OPTION_ADJUST`.
 - [ ] **Manual door** (`input_center.py`): compose endpoint `GET /api/input/option-symbol`;
   `ManualBody.contracts` / `close_reason`; option-mode side mapping, OPT-D14 refusals, server-derived
   expiry side; preview `share_equivalents`, `contract_name`, withholding on `unbookable_close`; the
   two-leg 「被指派／履約」 (`legs` preview, one transaction, `ack_oversell` as the pair's only ack,
-  underlying auto-register or refusal 「請先登錄標的 XYZ」); `/api/input/context` instruments carry
+  underlying auto-register or refusal 「請先登錄標的 XYZ」; the commit answers `txn_ids: [option,
+  stock]` + per-leg totals); `/api/input/context` instruments carry
   `asset_type`; **`/api/input/holdings`: an option with a non-zero signed count is `held`** with
   `asset_type`, `direction`, `contracts`, signed `shares` (stock rows unchanged).
 - [ ] **Ledger doors** (`ledgers.py`): `GET /api/ledgers/transactions` rows gain `close_reason`,
-  `contracts`, `option_side` (one `classify_option_rows` walk per (account, contract) on the page,
-  fed from the stored ledger in order), `refused_close` (from the replay's `Book.refused_closes`); the
+  `contracts`, `option_side` (ONE `classify_option_rows` call per request over the account's stored
+  option rows and `OPTION_ADJUST` rows), `refused_close` (from the replay's `Book.refused_closes`); the
   edit door runs the close-row helper with `replacement`; the corporate-action doors accept
-  `OPTION_ADJUST`; the CA preview returns `strike_products` / `conserves`.
-- [ ] **Cash lines**: `CashLine.option_side` (`portfolio/cash.py` copies it from the same classifier
-  walk); `api/routers/cash.py` puts it on the statement wire.
+  `OPTION_ADJUST` (a row with `ratio_from ≠ 1` refused 「選擇權合約調整以 1 口為基準，請填 1 → N」); the CA
+  preview returns `strike_products` / `conserves`.
+- [ ] **Cash lines**: `CashLine.option_side`; the statement-line builder in `portfolio/cash.py` takes a
+  required `option_side_of: Mapping[int, str]` (no actions are in its scope); its callers — the
+  statement route (`api/routers/cash.py`, B) and the statement export (E) — compute it once with
+  `classify_option_rows`; the route puts `option_side` on the statement wire.
 - [ ] **Schwab converter + broker import**: option rows stop being dropped; `from_broker_option` →
   OCC; **quantity = `contracts_to_shares(Quantity)`**, price per share (test the reconciler's
   qty × price = Amount on an option row); the four sides; `Expired` and the TD removal journal
   (re-map `schwab.py`'s rule, fix `ir.py`'s comment) → price-0 `expired` dated the expiry, side from
   the running position across every file of the request **plus `known_positions`** — a required
-  argument of `convert(...)`, supplied by `api/routers/broker_import.py` from the ledger's open option
-  positions (OPT-D19); same-day merge, written after the day's trades; standard journal pairs →
-  `OPTION_ADJUST`; 「…OPTION OUT」 and new 「…OPTION IN」 rules → dropped with a reason; `UnmappedRow`
+  argument of `convert(...)`, supplied by `api/routers/broker_import.py`: the ledger's signed
+  share-equivalents per (account, contract) through the day before the request's earliest row
+  (OPT-D19); same-day merge, written after the day's trades; standard journal pairs →
+  `OPTION_ADJUST` with `ratio_to = |to| ÷ |from|` only when a whole number (else
+  `option_nonstandard_adjust`); the conversion report adds no key (display name in the `symbol` cell,
+  「2 口（200 股當量）」 in the `shares` cell); 「…OPTION OUT」 and new 「…OPTION IN」 rules → dropped with a reason; `UnmappedRow`
   carries `reason` (`option_assigned_unmapped` / `option_nonstandard_adjust` /
   `option_expiry_no_opening`) and the line; `broker_import.py`'s 422 body carries both.
 - [ ] Tests (fail first): every rule with its zh message; CSV round trip of the raw export with option
@@ -224,7 +236,8 @@ fee_rules,broker_import}.py`, `api/wire.py`; tests under `tests/data_ingestion/`
   or neither; `/api/input/holdings` lists a short contract as held; the compose endpoint (ok, digit
   root, malformed strike); `option_side` on ledger rows and cash lines equals `classify_option_rows`;
   the converter on a synthetic Schwab file with every option row shape, units vs Amount, an expiry
-  whose opening is only in `known_positions`, and each `UnmappedRow` reason.
+  whose opening is only in `known_positions` (and a request that overlaps already-imported rows,
+  caught at the CSV door), a 2 → 6 journal pair read as 1 → 3, and each `UnmappedRow` reason.
 - **Done when:** targeted tests, ruff, mypy; commit `feat(options): W3 doors — validators, fees,
   CSV + manual + converter, option sides, input wires`.
 
@@ -255,7 +268,8 @@ insight_service,digest_service}.py`, `strategy/{rebalance,whatif,alerts}.py`,
 ## 6. W5 — Web UI (wave 2, subagent D)
 
 **Files:** `web/{index.html,app.js,charts.js,ledger.js,trades.html,input.js,sym-picker.js,
-corp-action-form.js,broker-import.js,detail.js,instruments.js,cash.js,shell.js,dividend-inbox.html}`,
+corp-action-form.js,broker-import.js,detail.js,instruments.js,cash.js,shell.js,dividend-inbox.html,
+settings-fees.js}`,
 new `web/options.js` (if the section is split out) and `web/expiry-inbox.js`, `shared/whatsnew.py`,
 `api/routers/symbol.py`; tests under `tests/contract/`, `tests/e2e/`.
 
@@ -272,18 +286,21 @@ new `web/options.js` (if the section is split out) and `web/expiry-inbox.js`, `s
 - [ ] **Ledger**: §6.1 chips from `option_side`, 口數 beside share-equivalents, 「未入帳（待釐清）」 on
   `refused_close`, keyword filter on the display name; the delete dialog pre-lists later close rows of
   the same contract; the edit dialog shows 「N 口（＝ 股當量）」 and the reason chip (rows stay editable).
-- [ ] **公司行動 form**: the fourth kind, 來源 = held contract, 目的 = underlying + new strike → compose
-  endpoint, ratio in 口, `strike_products` / `conserves` line; tab hint; `input.js` CSV hint lists
+- [ ] **公司行動 form**: the fourth kind, 來源 = held contract fixed at 1 口, 目的 = underlying + new
+  strike → compose endpoint + 目的 口數 (= `ratio_to`), `strike_products` / `conserves` line; tab hint; `input.js` CSV hint lists
   four kinds.
 - [ ] **Broker import page**: `BLOCK_ZH` per-reason remedies with the line number; `TYPE_ZH` §6.1
   labels; 「2 口（200 股當量）」.
 - [ ] **Drawer** (`detail.js`, `symbol.py`): contract header, chips, reason chips, 試算 note, 待釐清, the
   footer from `options.open` (unit 股當量); the stock drawer's 未平倉選擇權 line.
 - [ ] **Expiry inbox panel**: `web/expiry-inbox.js` + its tag in `dividend-inbox.html`; items, 確認到期作廢,
-  改登錄被指派／履約 (deep link), 略過 / 取消略過, 全部確認 via `confirmDialog`, per-item results; the
-  sidebar badge (`shell.js`) adds the inbox count.
-- [ ] **Watchlist** filter; cash page descriptions from `option_side`; what's-new entry (spec §8
-  wording, target `#m-sym-foot`).
+  改登錄被指派／履約 (deep link), 略過 / 取消略過, 全部確認 via `confirmDialog`, per-item results; an item
+  on a contract with a refused close shows 待釐清 + remedy instead of the confirm button; the sidebar
+  badge (`shell.js`) adds the inbox count.
+- [ ] **Fee settings** (`settings-fees.js`): labels 「選擇權每口手續費」／「選擇權每口監管費」 and their field
+  order; shown for US rule sets only.
+- [ ] **Watchlist** filter; cash page descriptions from `option_side`; the what's-new entry with
+  spec §8's title, href, target `#m-sym-foot` and area.
 - [ ] Static tests (`?v=` stamps, `names.js` before `api.js`, page lists, `ledger-count-ok`, state
   colour classes, no native dialogs, no horizontal scroll); the DEF-056 seed rule; e2e: section from a
   seeded option ledger, option-mode STO → BTC, the roll button, the inbox confirm and confirm-all, an
@@ -299,7 +316,8 @@ and `api/routers/option_expiry.py`; tests under `tests/export/`, `tests/contract
 
 - [ ] Exports per spec §9 (持股 block only when `options` present; realized CSV rows +
   `asset_type` / `contract` with the header re-pinned; 稅務包 contract name + subtotal; 帳本報告 chips,
-  口數, refused-close marks, `OPTION_ADJUST`; 現金收支明細 from `option_side`; 個股明細 for a contract;
+  口數, refused-close marks, `OPTION_ADJUST`; 現金收支明細 from `option_side` (the export computes
+  `option_side_of` once with `classify_option_rows` and hands it to the statement-line builder); 個股明細 for a contract;
   再平衡 excludes options; raw zip round trip). Every other export of a stock ledger byte-identical.
 - [ ] **Expiry inbox backend** (spec §7.2): `api/option_expiry.py` — `ensure_tables` (`option_expiry_skips`),
   `pending_expiries(conn, today)` (compute-on-read from the book: non-zero signed option positions
