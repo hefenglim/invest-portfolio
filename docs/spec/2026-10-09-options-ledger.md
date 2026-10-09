@@ -302,13 +302,21 @@ dashboard wire field lives inside this block.** Keys (Decimal values as strings)
   `market_value`, `unrealized`, `obligation` (sold put: strike × 100 × contracts, else null),
   `underlying_price` + `underlying_price_date` (OPT-D17; one latest-price read per distinct
   registered underlying, never in `price_reads` / freshness; omitted when unpriced), `past_expiry`,
-  `unbookable_close`.
+  `unbookable_close`, `oversold` (a 賣超 contract: it has no holdings row to carry the badge).
+  Signs (pinned at the build, 2026-10-10): `contracts`, `average_premium` and `premium_total` are
+  magnitudes (positive in both directions — the premium received or paid); `share_equivalents`,
+  `market_value` and `unrealized` are signed (a short is negative / profits when the price
+  falls). `last_price`, `last_price_date`, `market_value` and `unrealized` are null on a 待釐清
+  contract (`oversold` / `unbookable_close`) or with no last trade.
 - `obligation_subtotals[]` (`account_id`, `ccy`, `amount`); `market_value` and `unrealized`, each
   `{by_currency: {ccy: amount}, reporting: amount}`; `refused_closes[]` (the `RefusedClose` fields).
 - `realized`: `rows` — the replay's own `RealizedRow`s for option symbols, same shape as the stock
   `realized.rows`, plus `close_reason` (from `Book.realized_close_reasons`) and `contract`;
   `by_contract[]` (contract, account, opened, closed, how it closed, premium in, premium out,
-  realized), `by_year[]`, `by_underlying[]`; `realized_total` (`{by_currency, reporting}`).
+  realized — `premium_in` = Σ the contract's realized rows' `proceeds_net`, `premium_out` = Σ
+  their `adjusted_cost_removed`, so `premium_in − premium_out = realized` exactly; listed once it
+  has a realized row; `closed` / `closed_how` only once the position is flat), `by_year[]`,
+  `by_underlying[]`; `realized_total` (`{by_currency, reporting}`).
 - `trend_excludes_value`, `note`, `principal_fx_note` (OPT-D20; null when no option is open).
 
 **Layout (after 持倉明細):** 未平倉 sorted by 剩餘天數 ↑; leading columns 合約・方向/口數・剩餘天數・
