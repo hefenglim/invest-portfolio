@@ -27,6 +27,16 @@ _ISSUE_FIELD = {
     "negative_fee": "fee",
     "negative_tax": "tax",
     "fee_overflow": "shares",
+    # Options spec §4.2 / OPT-D6 — the field each option finding is about.
+    "option_quantity_not_contract_multiple": "shares",
+    "option_expiry_quantity": "shares",
+    "option_close_quantity": "shares",
+    "option_after_expiry": "date",
+    "option_expiry_date": "date",
+    "close_row_price": "price",
+    "close_row_fee": "fee",
+    "option_fee_unset": "fee",
+    "option_premium_exceeds_strike": "price",
 }
 
 _DIV_MODEL = {"cash_cost_reduction": "tw", "drip_us": "drip", "cash": "net"}
@@ -158,6 +168,19 @@ def _my_label(r: FeeRuleSet) -> str:
         f"清算 {r.clearing_rate * 100}%・SST {r.sst_rate * 100}%・"
         f"印花 ceil(金額/{r.stamp_unit})×RM{r.stamp_per_unit}"
     )
+
+
+def option_fee_label(r: FeeRuleSet) -> str:
+    """The manual preview's fee label on an OPTION trade (options spec §8, OPT-D6) — a separate
+    helper, so :func:`fee_rules_wire`'s ``label`` (the rule set's stock schedule) is unchanged.
+
+    「每口 0.65＋SEC（賣出）」; with a regulatory per-contract fee 「每口 0.65＋監管費每口
+    0.04＋SEC（賣出）」; an unset rate says so — the engine computes nothing for it."""
+    if r.option_per_contract is None:
+        return "未設定選擇權每口手續費（請填對帳單手續費）"
+    reg = (f"＋監管費每口 {decimal_str(r.option_reg_per_contract)}"
+           if r.option_reg_per_contract > 0 else "")
+    return f"每口 {decimal_str(r.option_per_contract)}{reg}＋SEC（賣出）"
 
 
 def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:

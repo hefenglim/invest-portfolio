@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from portfolio_dash.data_ingestion.broker.grouping import (
@@ -35,9 +36,26 @@ from portfolio_dash.data_ingestion.broker.grouping import (
     pair_actions,
     prehistory_shares,
 )
-from portfolio_dash.data_ingestion.broker.ir import EventKind, RawEvent, chrono_key
+from portfolio_dash.data_ingestion.broker.ir import (
+    OPTION_EXPIRY_NO_OPENING,
+    OPTION_KINDS,
+    OPTION_NONSTANDARD_ADJUST,
+    EventKind,
+    RawEvent,
+    UnmappedRow,
+    chrono_key,
+)
 from portfolio_dash.data_ingestion.broker.reconcile import ReconcileReport, reconcile
 from portfolio_dash.data_ingestion.import_templates import template_columns
+from portfolio_dash.shared.options import (
+    OptionTerms,
+    contracts_to_shares,
+    from_broker_option,
+    nonstandard_adjustment_reason,
+    option_display_name,
+    option_symbol,
+    shares_to_contracts,
+)
 
 _ZERO = Decimal(0)
 
@@ -133,6 +151,9 @@ class Conversion:
     details: dict[str, list[RowDetail]]
     #: Every source row that produced no row of its own, with its destination.
     dropped: list[DroppedRow]
+    #: How many transactions rows came from option legs (options spec §8) — the count half of
+    #: :func:`account_for_output` adds them to the equity trades.
+    option_trade_rows: int = 0
 
 
 # --------------------------------------------------------------------------- formatting
@@ -157,6 +178,207 @@ def _shares(value: Decimal) -> str:
 _DUPLICATE_MARK = "可能重複（兩份匯出的日期區間重疊）"
 
 
+#: The sort key of one transactions-CSV row: the date the ROW carries, then 0 for a trade /
+#: 1 for an expiry (spec §8: an expiry is written after that day's trades), then the source
+#: chronology. Equity and option trades interleave by :func:`chrono_key` exactly as before.
+_RowKey = tuple[date, int, tuple[date, str, int, int]]
+
+
+@dataclass
+class _OptionConversion:
+    """What the option legs of one request become (options spec §8)."""
+
+    #: ``(sort key, row)`` — merged into the transactions CSV in date / chronology order.
+    trades: list[tuple[_RowKey, RowDetail]]
+    actions: list[RowDetail]
+    dropped: list[DroppedRow]
+    #: Every option source row that reached a row (trades, expiries, adjustment legs).
+    written: set[str]
+
+
+_OPTION_SIDE: dict[EventKind, tuple[str, bool]] = {
+    # (ledger side, declared short) — selling to OPEN is the declared short sale (R1).
+    EventKind.OPT_SELL_OPEN: ("SELL", True),
+    EventKind.OPT_SELL_CLOSE: ("SELL", False),
+    EventKind.OPT_BUY_OPEN: ("BUY", False),
+    EventKind.OPT_BUY_CLOSE: ("BUY", False),
+}
+
+
+def _unmapped(e: RawEvent, reason: str, detail: str) -> UnmappedRow:
+    return UnmappedRow(source_file=e.source_file, line_no=e.line_no, action=e.kind.value,
+                       description=e.description, reason=reason, detail=detail)
+
+
+def _contract_of(e: RawEvent) -> tuple[str, OptionTerms]:
+    """The OCC symbol and terms of an option leg — or the refusal: a contract string that is
+    not a standard one (a digit root after an adjustment, a malformed strike) is a
+    non-standard deliverable v1 does not model (OPT-D11)."""
+    terms = from_broker_option(e.option_symbol)
+    if terms is None:
+        raise _unmapped(e, OPTION_NONSTANDARD_ADJUST,
+                        f"not a standard contract: {e.option_symbol!r}")
+    return option_symbol(terms), terms
+
+
+def _option_units(shares: Decimal) -> str:
+    """「2 口（200 股當量）」 — the report fields only; the CSV cell holds the share-equivalents."""
+    return (f"{_shares(shares_to_contracts(shares))} 口"
+            f"（{_shares(shares)} 股當量）")
+
+
+def _convert_options(  # noqa: C901, PLR0912 - one branch per option row shape (spec §8)
+    options: list[RawEvent], account: str, currency: str, suspect: set[str],
+    known_positions: Mapping[str, Decimal],
+) -> _OptionConversion:
+    """The option legs → transactions rows, ``OPTION_ADJUST`` rows and named drops.
+
+    * a trade leg → a trade row on the OCC contract: share-equivalents
+      (``contracts_to_shares(Quantity)``) and the per-share premium in ``cells`` (so
+      quantity × price is the statement's own Amount before fees), the display name and
+      「2 口（200 股當量）」 in the report fields; fees verbatim, tax 0;
+    * ``Expired`` / TD's removal journal → a price-0 ``expired`` row dated the contract's
+      EXPIRY, its side from the running signed position (``known_positions`` + every earlier
+      leg of the request); same-day expiry rows of one contract merged into one row, written
+      after that day's trades; no position → ``UnmappedRow(option_expiry_no_opening)``;
+    * an adjustment journal pair → one ``OPTION_ADJUST`` with ``ratio_to = |to| ÷ |from|``
+      when that is a whole number and OPT-D11 holds, else
+      ``UnmappedRow(option_nonstandard_adjust)``;
+    * any other option row (a platform transfer that did not cancel) → dropped, named.
+
+    The running position walks the legs in the order they happened, an adjustment first on
+    its day, an expiry last — the replay's own order.
+    """
+    out = _OptionConversion(trades=[], actions=[], dropped=[], written=set())
+    position: dict[str, Decimal] = {k: v for k, v in known_positions.items()}
+    trades = [e for e in options if e.kind in _OPTION_SIDE]
+    expiries = [e for e in options if e.kind is EventKind.OPT_EXPIRED]
+    adjusts = [e for e in options if e.kind is EventKind.OPT_ADJUST]
+    for e in options:
+        if e.kind not in _OPTION_SIDE and e.kind not in (
+                EventKind.OPT_EXPIRED, EventKind.OPT_ADJUST):
+            out.dropped.append(DroppedRow(
+                refs=(e.ref,), why="option_transfer", date=e.trade_date.isoformat(),
+                symbol=e.option_symbol, kinds=(e.kind.value,), into="",
+                detail="選擇權在券商平台之間移轉（未互相抵銷），不入帳；移轉不改變部位",
+            ))
+    # --- adjustment pairs, per day: (date, expiry, right) groups of exactly two legs ---
+    groups: dict[tuple[date, date, str], list[tuple[RawEvent, str, OptionTerms]]] = {}
+    for e in adjusts:
+        symbol, terms = _contract_of(e)
+        groups.setdefault((e.trade_date, terms.expiry, terms.right), []).append(
+            (e, symbol, terms))
+    # --- expiries, merged per (contract, expiry) ---
+    merged: dict[tuple[str, date], list[tuple[RawEvent, OptionTerms]]] = {}
+    for e in expiries:
+        symbol, terms = _contract_of(e)
+        merged.setdefault((symbol, terms.expiry), []).append((e, terms))
+    # --- one walk in the replay's order ---
+    walk: list[tuple[tuple[date, int, tuple[date, str, int, int]], str, object]] = []
+    for key, legs in groups.items():
+        first = min((leg[0] for leg in legs), key=chrono_key)
+        walk.append(((key[0], 0, chrono_key(first)), "adjust", legs))
+    for e in trades:
+        walk.append(((e.trade_date, 1, chrono_key(e)), "trade", e))
+    for (symbol, expiry), rows in merged.items():
+        first = min((r[0] for r in rows), key=chrono_key)
+        walk.append(((expiry, 2, chrono_key(first)), "expiry", (symbol, rows)))
+    walk.sort(key=lambda w: w[0])
+    for (day, _rank, chrono), what, payload in walk:
+        if what == "adjust":
+            assert isinstance(payload, list)
+            row = _adjust_row(payload, account, position)
+            out.actions.append(row)
+            out.written.update(row.refs)
+        elif what == "trade":
+            assert isinstance(payload, RawEvent)
+            e = payload
+            symbol, terms = _contract_of(e)
+            side, short = _OPTION_SIDE[e.kind]
+            shares = contracts_to_shares(abs(e.quantity))
+            position[symbol] = position.get(symbol, _ZERO) + (
+                shares if side == "BUY" else -shares)
+            duplicate = e.ref in suspect
+            out.trades.append(((day, 0, chrono), RowDetail(
+                refs=(e.ref,), date=e.trade_date.isoformat(), type=side,
+                symbol=option_display_name(terms), shares=_option_units(shares),
+                price=_money(e.price), amount=_money(abs(e.amount)), currency=currency,
+                note=_DUPLICATE_MARK if duplicate else "",
+                cells=[
+                    account, symbol, side, e.trade_date.isoformat(), _shares(shares),
+                    _money(e.price), _money(abs(e.fees)), "0", "0", "1" if short else "0",
+                    f"{_DUPLICATE_MARK} {e.ref}" if duplicate else e.ref, "",
+                ],
+            )))
+            out.written.add(e.ref)
+        else:
+            assert isinstance(payload, tuple)
+            symbol, rows = payload
+            held = position.get(symbol, _ZERO)
+            first_event = min((r[0] for r in rows), key=chrono_key)
+            if held == _ZERO:
+                raise _unmapped(first_event, OPTION_EXPIRY_NO_OPENING,
+                                f"no open position in {symbol} to expire")
+            shares = sum((contracts_to_shares(abs(r[0].quantity)) for r in rows), _ZERO)
+            side = "BUY" if held < _ZERO else "SELL"
+            position[symbol] = held + (shares if side == "BUY" else -shares)
+            refs = tuple(sorted((r[0].ref for r in rows), key=lambda ref: ref))
+            terms = rows[0][1]
+            out.trades.append(((day, 1, chrono), RowDetail(
+                refs=refs, date=day.isoformat(), type=side,
+                symbol=option_display_name(terms), shares=_option_units(shares),
+                price="0", amount="0", currency=currency, note="到期作廢",
+                cells=[
+                    account, symbol, side, day.isoformat(), _shares(shares), "0", "0", "0",
+                    "0", "0", " · ".join(refs), "expired",
+                ],
+            )))
+            out.written.update(refs)
+    return out
+
+
+def _adjust_row(
+    legs: list[tuple[RawEvent, str, OptionTerms]], account: str,
+    position: dict[str, Decimal],
+) -> RowDetail:
+    """One adjustment journal pair → one ``OPTION_ADJUST`` row (options spec §8 / OPT-D11).
+
+    The FROM leg is the one whose contract the request (with ``known_positions``) holds; the
+    statement prints a leg per contract, so a pair is exactly two legs. ``ratio_to`` is the
+    contract ratio ``|to| ÷ |from|`` — 2 → 6 is 1 → 3 — and must be a whole number with the
+    strike products equal; anything else is a non-standard deliverable and stops the run."""
+    first = min((leg[0] for leg in legs), key=chrono_key)
+    if len(legs) != 2:
+        raise _unmapped(first, OPTION_NONSTANDARD_ADJUST,
+                        f"{len(legs)} adjustment legs on one day — not a 1-to-1 pair")
+    held = [leg for leg in legs if position.get(leg[1], _ZERO) != _ZERO]
+    if len(held) != 1:
+        raise _unmapped(first, OPTION_NONSTANDARD_ADJUST,
+                        "cannot tell the adjusted contract from its successor")
+    src = held[0]
+    dst = legs[1] if legs[0] is src else legs[0]
+    out_qty, in_qty = abs(src[0].quantity), abs(dst[0].quantity)
+    if out_qty == _ZERO or in_qty == _ZERO or in_qty % out_qty != _ZERO:
+        raise _unmapped(first, OPTION_NONSTANDARD_ADJUST,
+                        f"contract ratio {in_qty}/{out_qty} is not a whole number")
+    ratio = in_qty / out_qty
+    why = nonstandard_adjustment_reason(src[2], dst[2], ratio, Decimal(1))
+    if why is not None:
+        raise _unmapped(first, OPTION_NONSTANDARD_ADJUST, why)
+    moved = position.pop(src[1]) * ratio
+    position[dst[1]] = position.get(dst[1], _ZERO) + moved
+    refs = tuple(leg[0].ref for leg in sorted(legs, key=lambda leg: chrono_key(leg[0])))
+    ratio_text = _shares(ratio)
+    return RowDetail(
+        refs=refs, date=first.trade_date.isoformat(), type="OPTION_ADJUST",
+        symbol=option_display_name(dst[2]), shares="", price="", amount="", currency="",
+        note=(f"{option_display_name(src[2])} → {option_display_name(dst[2])}，"
+              f"每 1 口 → {ratio_text} 口"),
+        cells=[account, first.trade_date.isoformat(), "OPTION_ADJUST", src[1], dst[1],
+               ratio_text, "1", "", " · ".join(refs)],
+    )
+
+
 def _transaction_rows(
     grouped: GroupedImport, account: str, currency: str, suspect: set[str]
 ) -> list[RowDetail]:
@@ -173,11 +395,19 @@ def _transaction_rows(
     sort wrote a same-day buy-then-sell as sell-then-buy — an oversell on a position the
     same file had just opened.
     """
-    out: list[RowDetail] = []
+    return [row for _key, row in _keyed_trade_rows(grouped, account, currency, suspect)]
+
+
+def _keyed_trade_rows(
+    grouped: GroupedImport, account: str, currency: str, suspect: set[str]
+) -> list[tuple[_RowKey, RowDetail]]:
+    """:func:`_transaction_rows` with each row's sort key, so the option rows can be merged in
+    (:func:`convert`)."""
+    out: list[tuple[_RowKey, RowDetail]] = []
     for e in sorted(grouped.trades, key=chrono_key):
         side = "BUY" if e.kind in _BUY_SIDE else "SELL"
         duplicate = e.ref in suspect
-        out.append(RowDetail(
+        out.append(((e.trade_date, 0, chrono_key(e)), RowDetail(
             refs=(e.ref,), date=e.trade_date.isoformat(), type=side, symbol=e.symbol,
             shares=_shares(abs(e.quantity)), price=_money(e.price),
             amount=_money(abs(e.amount)), currency=currency,
@@ -188,8 +418,9 @@ def _transaction_rows(
                 _money(abs(e.fees)), "0",
                 "0", "1" if e.kind is EventKind.SELL_SHORT else "0",
                 f"{_DUPLICATE_MARK} {e.ref}" if duplicate else e.ref,
+                "",   # close_reason (options spec §8): blank on every equity trade
             ],
-        ))
+        )))
     return out
 
 
@@ -346,12 +577,8 @@ def _dropped_rows(
             into=f"cash:{target}" if target is not None else "",
             detail="利息預扣稅已併入同日的利息收入（記淨額）",
         ))
-    for e in grouped.options:
-        out.append(DroppedRow(
-            refs=(e.ref,), why="option_row_unsupported", date=e.trade_date.isoformat(),
-            symbol=e.option_symbol, kinds=(e.kind.value,), into="",
-            detail="選擇權腿：本系統認得但不支援，不匯入",
-        ))
+    # Option legs are not dropped here any more (options spec §8): each one becomes a row or
+    # is named by ``_convert_options`` (a platform transfer that did not cancel).
     for e in grouped.unrouted:
         out.append(DroppedRow(
             refs=(e.ref,), why="unrouted_row", date=e.trade_date.isoformat(),
@@ -405,6 +632,9 @@ def account_for_output(grouped: GroupedImport, conv: Conversion) -> list[str]:
         *(r for d in grouped.dividends for r in d.refs),
         *(e.ref for e in grouped.cash),
         *(e.ref for e in grouped.actions),
+        # Options spec §8: every option LEG (trade, expiry, adjustment) is written; only a
+        # platform transfer is dropped, and it is named in ``dropped``.
+        *(e.ref for e in grouped.options if e.kind in OPTION_KINDS),
     }
     problems: list[str] = []
     missing = sorted(expected - conv.written_refs)
@@ -422,7 +652,8 @@ def account_for_output(grouped: GroupedImport, conv: Conversion) -> list[str]:
     # two are the other half: both builders are straight 1:1 comprehensions, so a count that
     # disagrees means one of them grew a condition.
     for label, rows, source in (
-        ("transactions", conv.rows["transactions"], len(grouped.trades)),
+        ("transactions", conv.rows["transactions"],
+         len(grouped.trades) + conv.option_trade_rows),
         ("dividends", conv.rows["dividends"], len(grouped.dividends)),
     ):
         if len(rows) != source:
@@ -432,10 +663,19 @@ def account_for_output(grouped: GroupedImport, conv: Conversion) -> list[str]:
     return problems
 
 
-def convert(events: list[RawEvent], account: str, currency: str) -> tuple[
-    Conversion, GroupedImport, ReconcileReport
-]:
-    """Parse-to-rows, with the reconciler run over the grouped events on the way through."""
+def convert(
+    events: list[RawEvent], account: str, currency: str, *,
+    known_positions: Mapping[str, Decimal],
+) -> tuple[Conversion, GroupedImport, ReconcileReport]:
+    """Parse-to-rows, with the reconciler run over the grouped events on the way through.
+
+    *known_positions* (options spec §8, OPT-D19 — REQUIRED): the ledger's signed position in
+    each option contract of *account*, in share-equivalents, keyed by OCC symbol, through the
+    day before the request's earliest row. The converter stays pure: the caller reads the
+    ledger (``api/routers/broker_import.py``), and an expiry's side then comes from that
+    position plus every earlier leg of the request — statements may be imported separately.
+    The offline CLI has no ledger and passes ``{}``. Raises :class:`UnmappedRow` with a
+    ``reason`` for an option row it cannot convert (spec §8)."""
     inferred, ambiguous = infer_cusip_aliases(events)
     events = apply_aliases(events, inferred)
     grouped = group_events(events)
@@ -444,6 +684,7 @@ def convert(events: list[RawEvent], account: str, currency: str) -> tuple[
     pairs, unpaired = pair_actions(events, grouped.actions)
     ready, worksheet, pending = _action_rows(pairs, account)
     suspect = {ref for i in report.advisory if i.code == "overlap_duplicate" for ref in i.refs}
+    options = _convert_options(grouped.options, account, currency, suspect, known_positions)
     cash, unconvertible = _cash_rows(grouped, account, currency, suspect)
     unconvertible += [(e, "corporate-action leg that could not be paired") for e in unpaired]
 
@@ -454,12 +695,14 @@ def convert(events: list[RawEvent], account: str, currency: str) -> tuple[
     # replay's same-date ordering decide whether the opening covers a sell or arrives after it.
     build = (earliest - timedelta(days=1)).isoformat() if earliest is not None else ""
 
+    keyed = [*_keyed_trade_rows(grouped, account, currency, suspect), *options.trades]
+    keyed.sort(key=lambda kr: kr[0])
     details: dict[str, list[RowDetail]] = {
-        "transactions": _transaction_rows(grouped, account, currency, suspect),
+        "transactions": [row for _key, row in keyed],
         "dividends": _dividend_rows(grouped.dividends, account, currency),
         "cash": cash,
         "fx": [],
-        "corporate_actions": ready,
+        "corporate_actions": [*ready, *options.actions],
     }
     conv = Conversion(
         rows={
@@ -481,9 +724,11 @@ def convert(events: list[RawEvent], account: str, currency: str) -> tuple[
             *(e.ref for e in grouped.cash if e.kind in CASH_KIND),
             *(r for p in pairs for r in p.refs),
             *(e.ref for e, _ in unconvertible),
+            *options.written,
         },
         details=details,
-        dropped=_dropped_rows(grouped, details, unconvertible, pending),
+        dropped=[*_dropped_rows(grouped, details, unconvertible, pending), *options.dropped],
+        option_trade_rows=len(options.trades),
     )
     return conv, grouped, report
 

@@ -53,6 +53,14 @@ class FeeRuleSet(BaseModel):
     taf_cap: Decimal | None = None  # TAF cap ($9.79)
     broker_assisted_surcharge: Decimal = Decimal("0")  # Schwab $25 (config; not applied)
 
+    # --- US equity options (options spec OPT-D6) ---
+    # Per contract, per RULE SET. ``None`` is UNSET, which is not 0: the engine never guesses a
+    # rate it was not given, so an option trade on an unset rule set needs the statement's fee
+    # (``fees.option_fee_unset_applies``). SEC on sells is the stock formula on the premium
+    # notional; no TAF and no MY stamp on an option in v1.
+    option_per_contract: Decimal | None = None
+    option_reg_per_contract: Decimal = Decimal("0")  # optional regulatory fee per contract
+
     # --- MY commission / clearing / SST (Moomoo MY market) ---
     clearing_rate: Decimal = Decimal("0")  # MY clearing fee rate of notional
     clearing_cap: Decimal | None = None  # MY clearing cap (RM1,000)
@@ -140,6 +148,7 @@ FEE_RULES: dict[str, FeeRuleSet] = {
         taf_min=_US_TAF_MIN,
         taf_cap=_US_TAF_CAP,
         broker_assisted_surcharge=Decimal("25.00"),
+        option_per_contract=Decimal("0.65"),   # OPT-D6: Schwab online options, per contract
     ),
     # Moomoo MY (US) — commission + platform + settlement + CAT (+ SELL: SEC + TAF), plus
     # the MY stamp on US trades (FE-D2): computed in MYR, booked in USD.

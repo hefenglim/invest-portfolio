@@ -106,6 +106,11 @@ EXPECTED_CALL_SITES = {
     ("portfolio_dash/api/routers/actions.py", "held_among"),
     ("portfolio_dash/data_ingestion/validate.py", "current_shares"),
     ("portfolio_dash/data_ingestion/validate.py", "shares_through"),
+    # Options W3 (spec §4.2): the manual door's option-mode refusals and the §4.1 close-row
+    # builder read the position in the CONTRACT at the close of the trade date. Containment
+    # is the same structural short-circuit: they run only for an option symbol, and an
+    # action-free contract takes `_shares_until` — no walk on a ledger without actions.
+    ("portfolio_dash/data_ingestion/manual.py", "shares_through"),
     # E1a (spec §5, 2026-08-11): the ONE accessor that deliberately skips the structural
     # short-circuit, so unlike the other nine it always walks. Containment is unaffected:
     # `validate_corporate_action` runs only when an action is being ENTERED, so there is no

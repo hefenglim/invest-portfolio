@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from portfolio_dash.api.action_log import DETAIL_ATTR
 from portfolio_dash.api.deps import get_conn, get_now
@@ -30,6 +30,7 @@ from portfolio_dash.api.wire import (
     div_model_wire,
     fee_rules_wire,
     issue_wire,
+    option_fee_label,
     parse_side,
 )
 from portfolio_dash.data_ingestion.agents import (
@@ -78,7 +79,14 @@ from portfolio_dash.data_ingestion.import_templates import (
     render_import_template,
     template_filename,
 )
-from portfolio_dash.data_ingestion.manual import enter_transaction
+from portfolio_dash.data_ingestion.manual import (
+    OptionIntent,
+    TxnDraft,
+    assignment_stock_leg,
+    enter_pair,
+    enter_transaction,
+    intent_side,
+)
 from portfolio_dash.data_ingestion.markets import account_market as _account_market
 from portfolio_dash.data_ingestion.opening_import import (
     build_opening_preview,
@@ -105,6 +113,7 @@ from portfolio_dash.data_ingestion.store import (
     MovedWeight,
     StoredCorporateAction,
     StoredTransaction,
+    get_instrument,
     get_transaction,
     list_accounts,
     list_corporate_actions,
@@ -113,6 +122,7 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.data_ingestion.validate import (
     Issue,
     TxnInput,
+    option_terms_of,
     unknown_account_issue,
     unknown_account_message,
 )
@@ -127,6 +137,17 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import (
+    CLOSE_REASON_ZH,
+    CloseReason,
+    OptionSymbolError,
+    OptionTerms,
+    contract_name,
+    contracts_to_shares,
+    option_display_name,
+    option_symbol,
+    shares_to_contracts,
+)
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy.target_weights import move_target_weight
 
@@ -179,6 +200,9 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
             "etf": i.is_etf,
             "etf_unknown": i.etf_flag_unknown,
             "archived": i.archived,
+            # Options spec §10 (4): ``"stock"`` | ``"option"`` — the picker files a contract
+            # under 選擇權 and opens option mode on it.
+            "asset_type": i.asset_type,
         }
         for i in insts
     ]
@@ -197,6 +221,48 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         "instruments": instruments,
         "holdings": holdings,
     }
+
+
+_RIGHT_WORDS = {"C": "C", "CALL": "C", "買權": "C", "P": "P", "PUT": "P", "賣權": "P"}
+
+
+@router.get("/input/option-symbol")
+def compose_option_symbol(
+    underlying: str = "", expiry: str = "", strike: str = "", right: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> Any:
+    """The compose endpoint (options spec §8): 標的／到期日／履約價／買權｜賣權 → the OCC
+    symbol and its display name, through ``shared.options.option_symbol`` — the ONLY composer
+    (the browser never composes one). Read-only (DEF-065): it never registers the contract —
+    the trade that uses it does, inside its commit.
+
+    Refusals (400, zh): a malformed date; the composer's own (a digit root, a malformed
+    strike, a right that is neither C nor P); an underlying REGISTERED in another market
+    (options are US only, R6)."""
+    root = underlying.strip().upper()
+    try:
+        exp = date.fromisoformat(expiry.strip())
+    except ValueError:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "到期日格式不正確，須為 YYYY-MM-DD", field="expiry"))
+    try:
+        k = Decimal(strike.strip().replace(",", ""))
+    except ArithmeticError:
+        k = Decimal("NaN")   # the composer's own strike sentence answers
+    registered = get_instrument(conn, root) if root else None
+    if registered is not None and registered.market is not Market.US:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error",
+            f"選擇權僅支援美股：{root} 是 {registered.market.value} 市場的標的",
+            field="underlying"))
+    side = _RIGHT_WORDS.get(right.strip().upper(), _RIGHT_WORDS.get(right.strip(), "?"))
+    try:
+        symbol = option_symbol(OptionTerms(underlying=root, expiry=exp, strike=k,
+                                           right=side))  # type: ignore[arg-type]
+    except OptionSymbolError as exc:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", str(exc), field="strike" if "履約價" in str(exc) else None))
+    return {"symbol": symbol, "name": contract_name(symbol)}
 
 
 def _unclear(h: Holding) -> bool:
@@ -225,7 +291,10 @@ def _unclear(h: Holding) -> bool:
     books. Withholding would hide a correct projection, not a wrong one. Pinned by
     ``tests/contract/test_k3_unbookable_dividend_reaches_every_reader.py``.
     """
-    return h.oversold or h.unbookable_action
+    # ``unbookable_close`` (options spec §4.4) is read exactly as ``unbookable_action`` is: a
+    # close the replay refused left the position's share count unmoved by a row the ledger
+    # holds, so no what-if may be quoted on it.
+    return h.oversold or h.unbookable_action or h.unbookable_close
 
 
 def _withheld(book: Book, key: tuple[str, str], *, count_oversold: bool = True) -> bool:
@@ -249,7 +318,8 @@ def _withheld(book: Book, key: tuple[str, str], *, count_oversold: bool = True) 
     rec = next((p for p in book.opened_positions if (p.account_id, p.symbol) == key), None)
     if rec is None:
         return False
-    return rec.unbookable_action or (count_oversold and rec.oversold)
+    return (rec.unbookable_action or rec.unbookable_close
+            or (count_oversold and rec.oversold))
 
 
 def _book_of(bundle: LedgerBundle) -> Book | None:
@@ -378,14 +448,20 @@ def input_holdings(
         "SELECT DISTINCT symbol FROM dividends WHERE account_id=? AND date<=?", (account, day)
     ):
         symbols.add(row["symbol"])
-    names = {i.symbol: i.name for i in list_instruments(conn)}
+    registry = {i.symbol: i for i in list_instruments(conn)}
+    names = {s: i.name for s, i in registry.items()}
     avg_map: dict[tuple[str, str], Decimal] | None = None  # built once, on first held row
     held: list[dict[str, Any]] = []
-    closed: list[dict[str, str]] = []
+    closed: list[dict[str, Any]] = []
     index = load_action_index(conn)   # ONE per request (trap #21)
     for sym in sorted(symbols):
         shares = shares_through(conn, account, sym, on=today, index=index)
-        if shares > _ZERO:
+        inst = registry.get(sym)
+        option = inst is not None and inst.is_option
+        # Options spec §6.2: a contract with a NON-ZERO signed count is held — a sold put is a
+        # position to close, never 已清倉 — and carries its direction and 口數 (the server's
+        # 口 ↔ 股當量, never the browser's). A stock keeps ``shares > 0`` exactly.
+        if shares > _ZERO or (option and shares != _ZERO):
             if avg_map is None:
                 avg_map = _adjusted_avg_by_position(conn, as_of=today)
             avg = avg_map.get((account, sym))
@@ -393,10 +469,24 @@ def input_holdings(
                 "symbol": sym, "name": names.get(sym) or sym,
                 "shares": decimal_str(shares),
                 "adjusted_avg": decimal_str(avg) if avg is not None else None,
+                **_holding_option_keys(option, shares),
             })
         else:
-            closed.append({"symbol": sym, "name": names.get(sym) or sym})
+            closed.append({"symbol": sym, "name": names.get(sym) or sym,
+                           **_holding_option_keys(option, None)})
     return {"held": held, "closed": closed}
+
+
+def _holding_option_keys(option: bool, shares: Decimal | None) -> dict[str, str | None]:
+    """``asset_type`` / ``direction`` / ``contracts`` of one ``/api/input/holdings`` row (spec
+    §10 (4)): ``"stock"`` / null / null on a stock; on a held contract ``long`` | ``short`` and
+    the 口數 as a server string (the picker's 「賣方 2 口」, the hint's 「可平倉 N 口」)."""
+    if not option:
+        return {"asset_type": "stock", "direction": None, "contracts": None}
+    if shares is None or shares == _ZERO:
+        return {"asset_type": "option", "direction": None, "contracts": None}
+    return {"asset_type": "option", "direction": "short" if shares < _ZERO else "long",
+            "contracts": decimal_str(shares_to_contracts(abs(shares)))}
 
 
 class ManualBody(BaseModel):
@@ -441,6 +531,43 @@ class ManualBody(BaseModel):
     #: and the new-position / cash lines — which describe an ADDED row — are withheld.
     #: The commit door ignores it: an edit is written by ``PUT /api/ledgers/transactions``.
     replaces_txn_id: int | None = None
+    # --- option mode (options spec §4.2 / §8) -----------------------------------------------
+    #: 口數. The server converts (``shared.options.contracts_to_shares``): ``shares`` is then
+    #: omitted by the browser, which never composes a share-equivalent itself (OPT-D8).
+    contracts: Decimal | None = Field(default=None, gt=0, le=Decimal("1e10"))
+    #: The four side buttons — STO / BTC / BTO / STC; the side (and STO's declared short) is
+    #: the server's reading of it, and each carries its own refusal (OPT-D14 / OPT-D21).
+    option_intent: OptionIntent | None = None
+    #: 到期作廢 / 被指派 / 履約 — a price-0 closing row; ``assigned`` / ``exercised`` are TWO
+    #: rows (the option close + the stock leg) written in one transaction.
+    close_reason: CloseReason | None = None
+    #: The stock leg's price on an assignment / exercise; defaults to the strike.
+    stock_price: Decimal | None = Field(default=None, gt=0, le=Decimal("1e12"))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _option_mode_fills(cls, data: Any) -> Any:
+        """Option mode sends 口數 and a side BUTTON, not ``shares`` / ``side``: derive the two
+        here so every later step reads one shape. A stock request is untouched — a missing
+        ``shares`` with no ``contracts`` is still the ordinary 422 it always was."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        if out.get("shares") is None and out.get("contracts") is not None:
+            try:
+                out["shares"] = contracts_to_shares(Decimal(str(out["contracts"])))
+            except (ArithmeticError, ValueError):
+                pass   # the ``contracts`` field's own validation answers
+        intent = out.get("option_intent")
+        if not out.get("side") and intent in ("STO", "STC"):
+            out["side"] = "SELL"
+        elif not out.get("side") and intent in ("BTC", "BTO"):
+            out["side"] = "BUY"
+        if out.get("close_reason") is not None:
+            out.setdefault("price", "0")
+            if not out.get("side"):
+                out["side"] = "BUY"   # re-derived from the position by ``_option_mode``
+        return out
 
 
 def _txn_input(body: ManualBody) -> TxnInput:
@@ -450,8 +577,55 @@ def _txn_input(body: ManualBody) -> TxnInput:
         account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
         quantity=body.shares, price=body.price, trade_date=body.date,
         fee=body.fee_override, tax=body.tax_override, daytrade=body.daytrade,
-        short_sale=body.short_sale, note=body.note,
+        short_sale=body.short_sale, note=body.note, close_reason=body.close_reason,
     )
+
+
+def _option_mode(conn: sqlite3.Connection, body: ManualBody) -> ManualBody | JSONResponse:
+    """Normalise an option-mode request (spec §4.2), or refuse it in zh.
+
+    * ``contracts`` / ``option_intent`` / ``close_reason`` only on an option contract — 口數
+      sent for a stock would book 100× its shares;
+    * the symbol is canonicalised to the OCC spelling (the registrar's);
+    * an intent sets the side and STO's declared short (``manual.intent_side``);
+    * a close row is price 0, never a declared short, and its side is DERIVED from the
+      position at the close of the trade date (a short closes with a BUY) — the close rules
+      then check it against the same position.
+
+    A stock request comes back unchanged (``body`` itself)."""
+    option_fields = (body.contracts is not None or body.option_intent is not None
+                     or body.close_reason is not None)
+    terms = option_terms_of(get_instrument(conn, body.symbol.strip()), body.symbol.strip())
+    if terms is None:
+        if option_fields:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error",
+                "口數、選擇權買賣方向與到期作廢／被指派／履約只適用於選擇權合約",
+                field="symbol"))
+        return body
+    if body.option_intent is not None and body.close_reason is not None:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", "請擇一：選擇權買賣方向，或到期作廢／被指派／履約",
+            field="option_intent"))
+    update: dict[str, Any] = {"symbol": option_symbol(terms)}
+    if body.option_intent is not None:
+        side, short = intent_side(body.option_intent)
+        update.update(side=side.value, short_sale=short)
+    if body.close_reason is not None:
+        held = shares_through(conn, body.account_id, update["symbol"], on=body.date)
+        update.update(side=(Side.BUY if held < 0 else Side.SELL).value, short_sale=False,
+                      price=_ZERO)
+    return body.model_copy(update=update)
+
+
+def _contract_wire(conn: sqlite3.Connection, body: ManualBody) -> dict[str, str | None]:
+    """The two additive manual-preview keys (spec §10 (4)): ``share_equivalents`` — the
+    server's 口 → 股當量 (「= 200 股當量」) — and ``contract_name``; both null on a stock."""
+    terms = option_terms_of(get_instrument(conn, body.symbol), body.symbol)
+    if terms is None:
+        return {"share_equivalents": None, "contract_name": None}
+    return {"share_equivalents": decimal_str(body.shares),
+            "contract_name": option_display_name(terms)}
 
 
 def _settled_gross(
@@ -631,7 +805,7 @@ def _draft_transaction(body: ManualBody, fee: Decimal, tax: Decimal) -> Transact
     return Transaction(
         account_id=body.account_id, symbol=body.symbol, side=parse_side(body.side),
         quantity=body.shares, price=body.price, fees=fee, tax=tax,
-        trade_date=body.date, short_sale=body.short_sale,
+        trade_date=body.date, short_sale=body.short_sale, close_reason=body.close_reason,
     )
 
 
@@ -780,7 +954,9 @@ def _position_preview(
     if inst is None:
         return None
     qty = body.shares
-    if qty <= _ZERO or body.price <= _ZERO:
+    # A ``close_reason`` row is priced 0 by definition (options spec §4.1) and its preview is
+    # the replay's own booking of it — the realized figure and the position after (§4.2).
+    if qty <= _ZERO or body.price < _ZERO or (body.price == _ZERO and body.close_reason is None):
         return None
     try:
         bundle = _to_models(conn)
@@ -1035,8 +1211,14 @@ def manual_preview(
         if replacing is None:
             return JSONResponse(status_code=404, content=error_body(
                 "not_found", f"交易 #{body.replaces_txn_id} 不存在"))
+    normalized = _option_mode(conn, body)
+    if isinstance(normalized, JSONResponse):
+        return normalized
+    body = normalized
+    if body.close_reason in ("assigned", "exercised") and replacing is None:
+        return _pair_preview(conn, body, now=now)
     draft = enter_transaction(conn, _txn_input(body), confirm=False, today=now.date(),
-                              replacing=replacing)
+                              replacing=replacing, option_intent=body.option_intent)
     # Market-aware per-trade rule (Batch B): the resolved instrument's market picks the rule
     # set; an unregistered symbol (draft.instrument None) keeps the account scalar (whatif
     # None-fallback). The preview never fails on the lookup — degrades to None.
@@ -1088,10 +1270,11 @@ def manual_preview(
     # Merged-account preview overlay (F05): the unregistered-symbol note tells the user to
     # pick a market first. Dormant for single-market accounts (exactly one bound market).
     multi_market = len(_account_markets(conn, body.account_id)) > 1
+    contract = _contract_wire(conn, body)
     return {
         "fee": decimal_str(draft.fee), "tax": decimal_str(draft.tax),
         "gross": decimal_str(gross), "total": decimal_str(total),
-        "fee_rule_label": fee_rules_wire(rule)["label"] if rule is not None else None,
+        "fee_rule_label": _fee_label(rule, option=contract["contract_name"] is not None),
         "fee_overridden": body.fee_override is not None,
         "tax_overridden": body.tax_override is not None,
         "rebate_estimate": rebate_estimate,
@@ -1099,6 +1282,107 @@ def manual_preview(
         "account_cash": account_cash,
         "cash_after": cash_after,
         "issues": [_issue_wire_manual(i, body.symbol, multi_market=multi_market) for i in issues],
+        # Options spec §10 (4): additive, null on a stock.
+        **contract,
+        "legs": None,
+    }
+
+
+def _fee_label(rule: FeeRuleSet | None, *, option: bool) -> str | None:
+    """The preview's fee-rule label: the rule set's own, or — on an option — the separate
+    option label (「每口 0.65＋SEC（賣出）」); ``fee_rules_wire()["label"]`` is unchanged."""
+    if rule is None:
+        return None
+    return option_fee_label(rule) if option else fee_rules_wire(rule)["label"]
+
+
+def _signed_money_text(value: Decimal) -> str:
+    """「−10,000.00」 / 「+11,999.98」: a settled USD figure with thousands separators, its sign
+    spelled (U+2212 for money out) — the server writes the leg sentence, the page prints it."""
+    sign = "−" if value < _ZERO else "+"
+    return f"{sign}{abs(value):,.2f}"
+
+
+def _leg_text(close_reason: str, leg: TxnInput, total: Decimal, ccy: str) -> str:
+    """The stock leg's sentence on the pair card (spec §4.2): 「被指派：以 50.00 買入 200 股
+    XYZ，現金 −10,000.00 USD」."""
+    verb = "買入" if leg.side is Side.BUY else "賣出"
+    return (f"{CLOSE_REASON_ZH[close_reason]}：以 {leg.price:,.2f} {verb} "
+            f"{decimal_str(leg.quantity)} 股 {leg.symbol}，現金 {_signed_money_text(total)} {ccy}")
+
+
+def _leg_wire(
+    role: str, draft: TxnDraft, *, ccy: str, text: str, txn_id: int | None = None
+) -> dict[str, Any]:
+    """One leg of an assignment / exercise, every figure a server string (spec §4.2)."""
+    inp = draft.inp
+    gross = settled_notional(inp.quantity, inp.price, Currency(ccy))
+    total = (-(gross + draft.fee + draft.tax) if inp.side is Side.BUY
+             else gross - draft.fee - draft.tax)
+    name = draft.instrument.name if draft.instrument is not None else inp.symbol
+    out: dict[str, Any] = {
+        "role": role, "label": "選擇權腿" if role == "option" else "股票腿",
+        "symbol": draft.instrument.symbol if draft.instrument is not None else inp.symbol,
+        "name": name, "side": inp.side.value.lower(), "shares": decimal_str(inp.quantity),
+        "contracts": (decimal_str(shares_to_contracts(inp.quantity)) if role == "option"
+                      else None),
+        "price": decimal_str(inp.price), "fee": decimal_str(draft.fee),
+        "tax": decimal_str(draft.tax), "gross": decimal_str(gross), "total": decimal_str(total),
+        "ccy": ccy, "text": text,
+    }
+    if txn_id is not None:
+        out["txn_id"] = txn_id
+    return out
+
+
+def _pair_inputs(
+    conn: sqlite3.Connection, body: ManualBody
+) -> tuple[TxnInput, TxnInput, OptionTerms]:
+    """The two legs of an assignment / exercise, both DERIVED (spec §4.2): the option's
+    price-0 close row as ``_option_mode`` normalised it, and ``manual.assignment_stock_leg``."""
+    option_inp = _txn_input(body)
+    terms = option_terms_of(get_instrument(conn, body.symbol), body.symbol)
+    assert terms is not None   # ``_option_mode`` admitted only an option to option mode
+    return option_inp, assignment_stock_leg(option_inp, terms, body.stock_price), terms
+
+
+def _pair_legs_wire(
+    opt: TxnDraft, stock: TxnDraft, close_reason: str, *,
+    txn_ids: tuple[int | None, int | None] = (None, None),
+) -> list[dict[str, Any]]:
+    stock_gross = settled_notional(stock.inp.quantity, stock.inp.price, Currency.USD)
+    stock_total = (-(stock_gross + stock.fee + stock.tax) if stock.inp.side is Side.BUY
+                   else stock_gross - stock.fee - stock.tax)
+    opt_name = opt.instrument.name if opt.instrument is not None else opt.inp.symbol
+    contracts = decimal_str(shares_to_contracts(opt.inp.quantity))
+    opt_text = (f"{CLOSE_REASON_ZH[close_reason]}：{opt_name} {contracts} 口結清，"
+                "權利金不計入股票成本")
+    return [
+        _leg_wire("option", opt, ccy="USD", text=opt_text, txn_id=txn_ids[0]),
+        _leg_wire("stock", stock, ccy="USD", txn_id=txn_ids[1],
+                  text=_leg_text(close_reason, stock.inp, stock_total, "USD")),
+    ]
+
+
+def _pair_preview(conn: sqlite3.Connection, body: ManualBody, *, now: datetime) -> Any:
+    """An assignment / exercise preview — the pair, fully derived; nothing is written."""
+    option_inp, stock_inp, _terms = _pair_inputs(conn, body)
+    opt, stock = enter_pair(conn, option_inp, stock_inp, today=now.date())
+    assert body.close_reason is not None
+    legs = _pair_legs_wire(opt, stock, body.close_reason)
+    multi_market = len(_account_markets(conn, body.account_id)) > 1
+    issues = [_issue_wire_manual(i, body.symbol, multi_market=multi_market) for i in opt.issues]
+    issues += [_issue_wire_manual(i, stock.inp.symbol, multi_market=multi_market)
+               for i in stock.issues]
+    rule = _rule_for(conn, body.account_id, Market.US)
+    return {
+        "fee": "0", "tax": "0", "gross": "0", "total": legs[1]["total"],
+        "fee_rule_label": _fee_label(rule, option=False),
+        "fee_overridden": False, "tax_overridden": False, "rebate_estimate": None,
+        "position_preview": None, "account_cash": None, "cash_after": None,
+        "issues": issues,
+        **_contract_wire(conn, body),
+        "legs": legs,
     }
 
 
@@ -1109,8 +1393,15 @@ def manual_commit(
     now: datetime = Depends(get_now),
 ) -> Any:
     today = now.date()
+    normalized = _option_mode(conn, body)
+    if isinstance(normalized, JSONResponse):
+        return normalized
+    body = normalized
+    if body.close_reason in ("assigned", "exercised"):
+        return _pair_commit(conn, body, now=now)
     inp = _txn_input(body)
-    draft = enter_transaction(conn, inp, confirm=False, today=today)  # inspect, no write
+    draft = enter_transaction(conn, inp, confirm=False, today=today,
+                              option_intent=body.option_intent)  # inspect, no write
 
     # Auto-register an unknown symbol (2026-07-02): infer the market and run the one-step
     # registration (which REQUIRES a real quote — the typo guard). Success -> the entry
@@ -1176,7 +1467,8 @@ def manual_commit(
             }
             body = body.model_copy(update={"symbol": outcome.instrument.symbol})
         inp = _txn_input(body)
-        draft = enter_transaction(conn, inp, confirm=False, today=today)  # re-validate now
+        draft = enter_transaction(conn, inp, confirm=False, today=today,
+                                  option_intent=body.option_intent)  # re-validate now
 
     hard = [i for i in draft.issues if not i.needs_confirm]
     if hard:
@@ -1188,12 +1480,53 @@ def manual_commit(
         return JSONResponse(status_code=422, content=error_body(
             "oversell_unacknowledged", "需確認賣超",
             issues=[issue_wire(i) for i in draft.issues]))
-    written = enter_transaction(conn, inp, confirm=True, today=today)
+    written = enter_transaction(conn, inp, confirm=True, today=today,
+                                option_intent=body.option_intent)
     gross = _settled_gross(body.shares, body.price, written.instrument, None)
     total = (-(gross + written.fee + written.tax) if inp.side.value == "BUY"
              else (gross - written.fee - written.tax))
     return {"txn_id": written.transaction_id, "total": decimal_str(total),
             "auto_registered": auto_registered}
+
+
+def _pair_commit(conn: sqlite3.Connection, body: ManualBody, *, now: datetime) -> Any:
+    """An assignment / exercise commit (spec §4.2): the underlying registers through the
+    ordinary auto-register path first (quote gate applies; a failure refuses the PAIR —
+    「請先登錄標的 XYZ」), then both rows are written in ONE transaction, or neither."""
+    today = now.date()
+    option_inp, stock_inp, terms = _pair_inputs(conn, body)
+    opt, stock = enter_pair(conn, option_inp, stock_inp, today=today)
+    auto_registered: dict[str, Any] | None = None
+    if any(i.kind == "symbol_unresolved" for i in stock.issues):
+        try:
+            outcome = quick_register(conn, symbol=terms.underlying, market=Market.US,
+                                     now=now, force=False, is_etf=None)
+        except QuickRegisterError as exc:
+            if exc.code != "duplicate_symbol":
+                return JSONResponse(status_code=400, content=error_body(
+                    "underlying_unregistered", f"請先登錄標的 {terms.underlying}",
+                    field="symbol"))
+        else:
+            auto_registered = {
+                "symbol": outcome.instrument.symbol, "name": outcome.instrument.name,
+                "last": decimal_str(outcome.last) if outcome.last is not None else None,
+            }
+        opt, stock = enter_pair(conn, option_inp, stock_inp, today=today)
+    every = [*opt.issues, *stock.issues]
+    hard = [i for i in every if not i.needs_confirm]
+    if hard:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error", hard[0].message, issues=[issue_wire(i) for i in every]))
+    if any(i.kind == "sell_exceeds_holdings" for i in every) and not body.ack_oversell:
+        # The pair's ONE acknowledgement: a call assignment's stock SELL beyond holdings.
+        return JSONResponse(status_code=422, content=error_body(
+            "oversell_unacknowledged", "需確認賣超", issues=[issue_wire(i) for i in every]))
+    opt, stock = enter_pair(conn, option_inp, stock_inp, confirm=True, today=today)
+    assert body.close_reason is not None
+    ids = (opt.transaction_id, stock.transaction_id)
+    legs = _pair_legs_wire(opt, stock, body.close_reason, txn_ids=ids)
+    return {"txn_id": opt.transaction_id, "txn_ids": list(ids),
+            "total": legs[1]["total"], "legs": legs, "auto_registered": auto_registered}
 
 
 # --- CSV import: preview (12.3) + commit (12.4) shared infrastructure ---
@@ -1346,13 +1679,31 @@ def _row_status(row: PreviewRow) -> str:
     return "warn" if any(not i.info for i in row.issues) else "ok"
 
 
-def _row_data(row: PreviewRow) -> dict[str, Any]:
-    data = {k: v for k, v in row.payload.items() if not k.startswith("snap.")}
+def _row_data(row: PreviewRow, kind: str | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {k: v for k, v in row.payload.items() if not k.startswith("snap.")}
     if row.fee is not None:
         data["fee"] = decimal_str(row.fee)
     if row.tax is not None:
         data["tax"] = decimal_str(row.tax)
+    if kind == "transactions":
+        data.update(_csv_contract_keys(data))
     return data
+
+
+def _csv_contract_keys(data: dict[str, Any]) -> dict[str, str | None]:
+    """Options spec §8 / §10 (4): a transactions preview row's ``contracts`` (「200 = 2 口」 —
+    the server's 股當量 → 口) and ``contract_name`` (the OCC symbol stays the tooltip); both
+    null on a stock row, and on a row that did not parse."""
+    symbol = str(data.get("symbol") or "")
+    name = contract_name(symbol) if symbol else None
+    raw = data.get("quantity")
+    if name is None or not raw:
+        return {"contracts": None, "contract_name": None}
+    try:
+        contracts = decimal_str(shares_to_contracts(Decimal(str(raw))))
+    except ArithmeticError:
+        contracts = None
+    return {"contracts": contracts, "contract_name": name}
 
 
 def _row_code(row: PreviewRow) -> str | None:
@@ -1366,7 +1717,7 @@ def _row_code(row: PreviewRow) -> str | None:
     return None
 
 
-def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
+def _preview_wire(preview: ImportPreview, kind: str | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     counts = {"ok": 0, "warn": 0, "error": 0}
     for r in preview.rows:
@@ -1386,7 +1737,7 @@ def _preview_wire(preview: ImportPreview) -> dict[str, Any]:
             # a page that needs to recognise one (the broker door's 賣超 consequence line)
             # reads the kind instead of pattern-matching the server's sentence. ADDITIVE.
             "kinds": [i.kind for i in r.issues],
-            "data": _row_data(r),
+            "data": _row_data(r, kind),
         }
         if advisory:
             wire["info"] = [i.message for i in advisory]
@@ -1478,7 +1829,7 @@ def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(g
     # FU-D19: canonicalize headers + resolve the date column to ISO before the ISO-only builder.
     norm = normalize_import_csv(
         body.csv_text, DATE_COLUMN_BY_KIND[body.kind], date_format=body.date_format)
-    wire = _preview_wire(builder(conn, norm.text))
+    wire = _preview_wire(builder(conn, norm.text), body.kind)
     if norm.ambiguity is not None:
         wire["date_ambiguity"] = _date_ambiguity_wire(norm.ambiguity)
     return wire
@@ -1792,6 +2143,8 @@ _UNDO_REFUSED_ZH = {
     "oversell": "賣超待確認",
     "orphan_correction": "股利會失去對應持倉",
     "negative_cash": "現金將為負數待確認",
+    # Options spec §4.4 (W2's hard replay-guard refusal): the undo would strand a close row.
+    "refused_close_correction": "選擇權平倉列將無法入帳",
 }
 
 
@@ -2025,7 +2378,7 @@ def _ai_wire(result: AiInputResult) -> dict[str, Any]:
     wire: dict[str, Any] = {
         # One preview + one commit CSV PER KIND (transactions/dividends/cash); the frontend
         # commits each kind through the ORDINARY /api/import/commit (AI-D18).
-        "previews": {kind: _preview_wire(p) for kind, p in result.previews.items()},
+        "previews": {kind: _preview_wire(p, kind) for kind, p in result.previews.items()},
         "csv_texts": result.csv_texts,
         # DEF-035: the editable drafts, row-aligned with each kind's preview rows, and the
         # server-owned cash-kind vocabulary the draft table's 類型 select is built from.

@@ -159,8 +159,10 @@ FILE_2: list[list[str]] = [
     # A position whose FIRST event is a sell, and which oversells: both pre-history
     # detectors fire on the same symbol, and the union must not double-count it.
     ["11/20/2025", "Sell", _PRE, "PREH CORP", "80", "$15.00", "$0.06", "$1,199.94"],
-    # An option round trip. Recognised so rule 7 does not fire; routed nowhere (P3).
-    ["12/01/2025", "Sell to Open", _OPT, "SELL TO OPEN", "1", "$2.00", "$0.65", "$134.35"],
+    # A sold put, converted since the options ledger (spec §8): 1 contract × 100 × $2.00 less
+    # $0.65 is the $199.35 the reconciler re-derives (it read $134.35 while options were
+    # routed nowhere and no check tied the amount).
+    ["12/01/2025", "Sell to Open", _OPT, "SELL TO OPEN", "1", "$2.00", "$0.65", "$199.35"],
     # A dual date: printed as posted-as-of-trade. The TRADE date is the second one.
     ["12/18/2025 as of 12/15/2025", "Buy", _A, "ALFA CORP", "10", "$33.00", "$0.00",
      "-$330.00"],

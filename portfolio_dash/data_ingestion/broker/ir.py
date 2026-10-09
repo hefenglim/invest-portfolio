@@ -73,17 +73,19 @@ class EventKind(StrEnum):
     SPINOFF = "SPINOFF"
     CASH_IN_LIEU = "CASH_IN_LIEU"          # cash for a fractional share
 
-    # --- options (P3) -------------------------------------------------------------
-    # Recognised so rule 7 does not fire on a statement that legitimately contains them.
-    # RECOGNISED IS NOT SUPPORTED: the grouper routes them nowhere, and the reconciler
-    # reports them as unhandled. The 100x contract multiplier is an assumption to remove
-    # from every money formula, not a field to add, so options stay their own sub-project.
+    # --- options (options spec §8) -----------------------------------------------
+    # Converted since the options ledger (approach ④): each leg becomes a trade row in
+    # SHARE-EQUIVALENTS (contracts × 100, OPT-D1) on the OCC contract, an expiry a price-0
+    # ``expired`` row, a journal pair an ``OPTION_ADJUST``. The grouper parks them in
+    # ``GroupedImport.options``; ``convert.py`` owns what each becomes. Assignment / exercise
+    # rows are NOT mapped (OPT-D9) — the adapter raises ``UnmappedRow`` with a reason.
     OPT_BUY_OPEN = "OPT_BUY_OPEN"
     OPT_SELL_OPEN = "OPT_SELL_OPEN"
     OPT_BUY_CLOSE = "OPT_BUY_CLOSE"
     OPT_SELL_CLOSE = "OPT_SELL_CLOSE"
+    #: Expired — and TD's 「REMOVAL OF OPTION DUE TO EXPIRATION」 journal (re-mapped here).
     OPT_EXPIRED = "OPT_EXPIRED"
-    OPT_ADJUST = "OPT_ADJUST"              # odd-split reorg / position change / removal
+    OPT_ADJUST = "OPT_ADJUST"              # odd-split reorganisation / position change
 
     # --- suppressed: real lines that are NOT domain events ------------------------
     # Each is a *classification*, never a guess. The zero-sum check then runs as a VETO on
@@ -113,11 +115,22 @@ SUPPRESSIBLE_KINDS: Final[frozenset[EventKind]] = frozenset({
     EventKind.MARK_TO_MARKET, EventKind.CANCELLED, EventKind.REINVEST_ADJ,
 })
 
-#: Option legs — recognised, deliberately unsupported (P3).
+#: Option legs — converted to ledger rows by ``convert.py`` (options spec §8).
 OPTION_KINDS: Final[frozenset[EventKind]] = frozenset({
     EventKind.OPT_BUY_OPEN, EventKind.OPT_SELL_OPEN, EventKind.OPT_BUY_CLOSE,
     EventKind.OPT_SELL_CLOSE, EventKind.OPT_EXPIRED, EventKind.OPT_ADJUST,
 })
+#: The option legs that move cash: the four trades (premium in / out).
+OPTION_TRADE_KINDS: Final[frozenset[EventKind]] = frozenset({
+    EventKind.OPT_BUY_OPEN, EventKind.OPT_SELL_OPEN, EventKind.OPT_BUY_CLOSE,
+    EventKind.OPT_SELL_CLOSE,
+})
+
+#: ``UnmappedRow.reason`` values the converter raises for option rows (spec §8); the
+#: broker-import page prints a remedy per reason. ``None`` is the generic rule-7 refusal.
+OPTION_ASSIGNED_UNMAPPED: Final = "option_assigned_unmapped"
+OPTION_NONSTANDARD_ADJUST: Final = "option_nonstandard_adjust"
+OPTION_EXPIRY_NO_OPENING: Final = "option_expiry_no_opening"
 
 #: The corporate actions that P0's ``corporate_actions`` ledger can express.
 CORPORATE_ACTION_KINDS: Final[frozenset[EventKind]] = frozenset({
@@ -226,12 +239,27 @@ class UnmappedRow(Exception):
     booked as an option adjustment and vanished from every equity figure without a word.
     """
 
-    def __init__(self, *, source_file: str, line_no: int, action: str, description: str):
+    def __init__(self, *, source_file: str, line_no: int, action: str, description: str,
+                 reason: str | None = None, detail: str = ""):
         self.source_file = source_file
         self.line_no = line_no
         self.action = action
         self.description = description
-        super().__init__(
+        #: Options spec §8: why an OPTION row cannot be converted — one of
+        #: ``option_assigned_unmapped`` / ``option_nonstandard_adjust`` /
+        #: ``option_expiry_no_opening`` — or ``None`` for the generic rule-7 refusal.
+        self.reason = reason
+        message = (
             f"{source_file}:{line_no}: unmapped broker row — action={action!r} "
-            f"description={description!r}. Add an explicit rule; never a default."
+            f"description={description!r}."
         )
+        if reason is not None:
+            message += f" [{reason}] {detail}".rstrip()
+        else:
+            message += " Add an explicit rule; never a default."
+        super().__init__(message)
+
+    @property
+    def line(self) -> str:
+        """``file:line`` — the row the refusal names (the 422 body's ``line``)."""
+        return f"{self.source_file}:{self.line_no}"

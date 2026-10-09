@@ -385,28 +385,48 @@ def test_a_history_that_opens_with_a_reinvest_reports_an_unknown_quantity() -> N
 # ============================================================ severity is not a matter of taste
 
 
+_OPTION_OUT = ('08/13/2021,Journaled Shares,{c},'
+               '"TDA TRAN - TRANSFER OF SECURITY OR OPTION OUT (AAA)",-1,,,$0.00')
+
+
 def test_advisories_do_not_refuse_the_import() -> None:
-    """An export legitimately contains option legs and pre-history. A gate that rejected those
-    would reject every real statement and be switched off within a week."""
+    """An export legitimately contains option platform transfers and pre-history. A gate that
+    rejected those would reject every real statement and be switched off within a week.
+    (The option LEGS themselves are converted since the options ledger, spec §8.)"""
     events = _parse(
+        _OPTION_OUT.format(c="AAA 01/21/2022 30.00 C"),
         '08/13/2021,Sell to Open,AAA 01/21/2022 30.00 C,"SOLD OPTION",1,$2.00,,$200.00',
         '03/11/2026,Reinvest Shares,AAA,"REINVEST",0.28,$25.00,,-$7.00',
     )
     report = run_reconcile(events, group_events(events))
-    assert {"option_row_unsupported", "prehistory_position"} <= _codes(report, "advisory")
+    assert {"option_transfer_dropped", "prehistory_position"} <= _codes(report, "advisory")
+    assert "option_row_unsupported" not in _codes(report, "advisory")
     assert report.ok
     require_clean(report)  # must not raise
 
 
 def test_every_skipped_row_is_named_individually_not_summarised() -> None:
     events = _parse(
-        '08/13/2021,Sell to Open,AAA 01/21/2022 30.00 C,"A",1,$2.00,,$200.00',
-        '08/14/2021,Sell to Open,BBB 01/21/2022 30.00 C,"B",1,$2.00,,$200.00',
+        _OPTION_OUT.format(c="AAA 01/21/2022 30.00 C"),
+        _OPTION_OUT.format(c="BBB 01/21/2022 30.00 C").replace("08/13", "08/14"),
     )
     report = run_reconcile(events, group_events(events))
-    options = [i for i in report.advisory if i.code == "option_row_unsupported"]
+    options = [i for i in report.advisory if i.code == "option_transfer_dropped"]
     assert len(options) == 2
     assert {i.refs for i in options} == {("export.csv:2",), ("export.csv:3",)}
+
+
+def test_an_option_leg_must_tie_contracts_times_premium_to_its_amount() -> None:
+    """Options spec §8: the CSV door books share-equivalents × the per-share premium, so the
+    statement's Amount must be that product less fees — the equity check, restated through
+    the one multiplier."""
+    ties = _parse(
+        '08/13/2021,Sell to Open,AAA 01/21/2022 30.00 C,"A",2,$1.50,$1.30,$298.70')
+    assert run_reconcile(ties, group_events(ties)).ok
+    off = _parse(
+        '08/13/2021,Sell to Open,AAA 01/21/2022 30.00 C,"A",2,$1.50,$1.30,$1.70')
+    report = run_reconcile(off, group_events(off))
+    assert "priced_row_mismatch" in _codes(report, "blocking")
 
 
 def test_require_clean_raises_and_carries_the_report() -> None:
@@ -420,12 +440,12 @@ def test_require_clean_raises_and_carries_the_report() -> None:
 
 def test_counts_summarise_without_naming_anything() -> None:
     events = _parse(
-        '08/13/2021,Sell to Open,AAA 01/21/2022 30.00 C,"A",1,$2.00,,$200.00',
+        _OPTION_OUT.format(c="AAA 01/21/2022 30.00 C"),
         '01/05/2026,Buy,BBB,"B",10,$20.00,,$200.00',
     )
     report = run_reconcile(events, group_events(events))
     assert report.counts()["priced_row_mismatch"] == 1
-    assert report.counts()["option_row_unsupported"] == 1
+    assert report.counts()["option_transfer_dropped"] == 1
 
 
 # ============================================================ the committed corpus

@@ -42,6 +42,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Final
 
 from portfolio_dash.data_ingestion.broker.ir import (
+    OPTION_ASSIGNED_UNMAPPED,
     EventKind,
     RawEvent,
     UnmappedRow,
@@ -92,7 +93,7 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Cash In Lieu", _ANY, EventKind.CASH_IN_LIEU),
     ("Stock Merger", _ANY, EventKind.NAME_CHANGE),
     ("Reverse Split", _ANY, EventKind.REVERSE_SPLIT),
-    # --- options (P3: recognised, not supported)
+    # --- options (options spec §8: converted to option rows by convert.py)
     ("Buy to Open", _ANY, EventKind.OPT_BUY_OPEN),
     ("Sell to Open", _ANY, EventKind.OPT_SELL_OPEN),
     ("Buy to Close", _ANY, EventKind.OPT_BUY_CLOSE),
@@ -111,6 +112,9 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Journaled Shares", "INTERNAL TRANSFER BETWEEN ACCOUNTS", EventKind.JOURNAL_INTERNAL),
     ("Journaled Shares", "INTRA-ACCOUNT TRANSFER", EventKind.JOURNAL_INTERNAL),
     ("Journaled Shares", "TRANSFER OF SECURITY OR OPTION OUT", EventKind.TRANSFER_OUT),
+    # The inbound leg of the same platform transfer (options spec §8: dropped with a reason
+    # when it is an option and does not cancel against its OUT leg).
+    ("Journaled Shares", "TRANSFER OF SECURITY OR OPTION IN", EventKind.TRANSFER_OUT),
     ("Journaled Shares", "CASH MOVEMENT OF OUTGOING ACCOUNT TRANSFER", EventKind.CASH_SWEEP),
     ("Journaled Shares", "MARK TO THE MARKET", EventKind.MARK_TO_MARKET),
     ("Journaled Shares", "MANDATORY REVERSE SPLIT", EventKind.REVERSE_SPLIT),
@@ -119,8 +123,17 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Journaled Shares", "SPIN OFF", EventKind.SPINOFF),
     ("Journaled Shares", "OPTION ODD SPLIT REORGANIZATION", EventKind.OPT_ADJUST),
     ("Journaled Shares", "OPTION POSITION CHANGE", EventKind.OPT_ADJUST),
-    ("Journaled Shares", "REMOVAL OF OPTION DUE TO EXPIRATION", EventKind.OPT_ADJUST),
+    # TD's expiry journal: an EXPIRY, not an adjustment (options spec §8 — re-mapped; it
+    # becomes the price-0 ``expired`` row like Schwab's own ``Expired``).
+    ("Journaled Shares", "REMOVAL OF OPTION DUE TO EXPIRATION", EventKind.OPT_EXPIRED),
 )
+
+#: Assignment / exercise rows (OPT-D9): RECOGNISED and refused — never mapped blind. The
+#: converter has no real row of either shape behind a rule yet, so the run stops with the
+#: reason and the line instead (``UnmappedRow.reason``), and the owner enters the pair through
+#: the manual form's 被指派／履約.
+_ASSIGNMENT_ACTIONS: frozenset[str] = frozenset({"Assigned", "Exchange or Exercise",
+                                                 "Exercise"})
 
 #: ``... (TICKER)`` at the end of the description, optionally followed by the broker's own
 #: ``@<price>`` suffix — ``TDA TRAN - Bought 10 (TICKER) @4.4400``.
@@ -295,6 +308,13 @@ def parse(
         if not action:
             continue
 
+        if action in _ASSIGNMENT_ACTIONS:
+            raise UnmappedRow(
+                source_file=source_file, line_no=offset,
+                action=action, description=description,
+                reason=OPTION_ASSIGNED_UNMAPPED,
+                detail="assignment / exercise rows are entered through the manual form",
+            )
         kind = classify(action, description)
         if kind is None:
             raise UnmappedRow(

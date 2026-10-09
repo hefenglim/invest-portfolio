@@ -13,6 +13,7 @@ from portfolio_dash.data_ingestion.store import upsert_opening
 from portfolio_dash.data_ingestion.validate import (
     Issue,
     alias_import_account,
+    option_terms_of,
     unknown_account_issue,
     validate_opening_cost,
 )
@@ -206,8 +207,14 @@ def build_opening_preview(conn: sqlite3.Connection, csv_text: str) -> ImportPrev
         if (bad_cost := validate_opening_cost(total)) is not None:
             issues.append(bad_cost)
 
+        # --- options spec §4.2: an option contract is never an opening position (HARD) ---
+        # Its premium is cash the account received or paid, which only a trade row books;
+        # an opening row would carry a "cost" with no cash behind it.
+        res = resolve(conn, symbol)
+        if option_terms_of(res.instrument, symbol) is not None:
+            issues.append(Issue(kind="opening_on_option", message="選擇權請以交易登錄"))
         # --- warn if symbol cannot be resolved (soft — needs confirm) ---
-        if resolve(conn, symbol).status is ResolutionStatus.NEEDS_AI:
+        elif res.status is ResolutionStatus.NEEDS_AI:
             issues.append(
                 Issue(
                     kind="symbol_unresolved",

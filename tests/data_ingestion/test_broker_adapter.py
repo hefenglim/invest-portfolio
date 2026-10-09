@@ -97,7 +97,8 @@ def test_action_keyed_rules(action: str, description: str, kind: EventKind) -> N
     ("TDA TRAN - NON-TAXABLE SPIN OFF/LIQUIDATION DISTRIBUTION (AAA)", EventKind.SPINOFF),
     ("TDA TRAN - OPTION ODD SPLIT REORGANIZATION (AAA)", EventKind.OPT_ADJUST),
     ("TDA TRAN - OPTION POSITION CHANGE (AAA)", EventKind.OPT_ADJUST),
-    ("TDA TRAN - REMOVAL OF OPTION DUE TO EXPIRATION 1A1NI0)", EventKind.OPT_ADJUST),
+    # Options spec §8: TD's expiry journal is an EXPIRY (re-mapped from OPT_ADJUST).
+    ("TDA TRAN - REMOVAL OF OPTION DUE TO EXPIRATION 1A1NI0)", EventKind.OPT_EXPIRED),
 ])
 def test_the_overloaded_action_is_keyed_on_its_description(
     description: str, kind: EventKind
@@ -422,9 +423,10 @@ def test_a_vetoed_row_is_listed_as_unrouted_not_discarded() -> None:
     assert [e.ref for e in grouped.unrouted] == ["a.csv:2"]
 
 
-def test_options_are_recognised_but_routed_nowhere() -> None:
-    """Recognised is not supported: rule 7 must not fire on a statement that legitimately
-    contains options, and the ledger must not pretend it booked them."""
+def test_options_are_parked_apart_from_the_equity_buckets() -> None:
+    """The grouper keeps option legs out of every equity bucket (``trades`` / ``cash``);
+    since the options ledger the converter turns them into rows (spec §8,
+    ``tests/data_ingestion/test_options_w3_converter.py``)."""
     [event] = _parse("01/05/2026,Sell to Open,AAA 01/16/2026 50.00 P,SELL,1,2.00,0.65,134.35")
     grouped = grouping.group_events([event])
     assert grouped.options == [event]
@@ -615,7 +617,7 @@ def test_a_same_day_round_trip_converts_BUY_before_SELL_and_fabricates_no_openin
     from portfolio_dash.data_ingestion.broker.convert import convert
 
     events = _parse(*_ROUND_TRIP_NEWEST_FIRST)
-    conv, _grouped, report = convert(events, "schwab", "USD")
+    conv, _grouped, report = convert(events, "schwab", "USD", known_positions={})
     assert [r[2] for r in conv.rows["transactions"]] == ["BUY", "SELL"]
     assert grouping.prehistory_shares(events) == {}
     assert [i for i in report.advisory if i.code == "prehistory_position"] == []
@@ -641,9 +643,14 @@ def test_the_corpus_keeps_its_numbers_under_the_chronological_sort() -> None:
     from portfolio_dash.data_ingestion.broker.convert import convert
 
     conv, _grouped, _report = convert(
-        _corpus("schwab_2024.csv", "schwab_2025.csv"), "schwab", "USD")
+        _corpus("schwab_2024.csv", "schwab_2025.csv"), "schwab", "USD", known_positions={})
     assert [(r[3], r[1], r[2]) for r in conv.rows["transactions"]][:3] == [
         ("2024-01-08", "ALFA", "BUY"), ("2024-02-12", "ALFA", "BUY"),
         ("2024-05-06", "ALFA", "SELL"),
     ]
-    assert len(conv.rows["transactions"]) == 11
+    # 11 equity trades + the corpus's one sold put, converted since the options ledger
+    # (spec §8): share-equivalents and the per-share premium on the OCC contract.
+    assert len(conv.rows["transactions"]) == 12
+    (put,) = [r for r in conv.rows["transactions"] if r[1] == "ALFA260116P00050000"]
+    assert (put[2], put[3], put[4], put[5], put[6], put[9], put[11]) == (
+        "SELL", "2025-12-01", "100", "2.00", "0.65", "1", "")

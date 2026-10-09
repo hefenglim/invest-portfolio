@@ -22,7 +22,7 @@ so the guards hold no matter which path a row arrives on. For transactions:
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Protocol
 
@@ -67,6 +67,7 @@ from portfolio_dash.shared.cash_kinds import (
     is_fx_acquisition,
 )
 from portfolio_dash.shared.corporate_actions import (
+    KIND_ZH,
     ActionIndex,
     CorporateAction,
     CorporateActionKind,
@@ -84,6 +85,17 @@ from portfolio_dash.shared.models.ledger import (
     dividend_effective_date,
 )
 from portfolio_dash.shared.money import MINOR_UNITS, from_db, quantize_amount
+from portfolio_dash.shared.options import (
+    CLOSE_REASON_ZH,
+    CloseReason,
+    OptionTerms,
+    contract_name,
+    is_contract_multiple,
+    nonstandard_adjustment_reason,
+    option_display_name,
+    parse_option_symbol,
+    shares_to_contracts,
+)
 from portfolio_dash.shared.wire import decimal_str
 
 # Overflow guard (audit M4): shares/price above this are rejected as a hard issue so the
@@ -131,6 +143,9 @@ class TxnInput(BaseModel):
     # short lot in the replay. Deliberate per-transaction choice; never inferred.
     short_sale: bool = False
     note: str | None = None
+    # Options spec §3 / §4.2: a price-0 closing row of an option contract (OPT-D2). The
+    # validators work in SHARE-EQUIVALENTS — the routers convert 口數 before building this.
+    close_reason: CloseReason | None = None
 
 
 class Issue(BaseModel):
@@ -626,11 +641,14 @@ def transaction_structural_issues(inp: TxnInput) -> list[Issue]:
     hard kinds are KEY-level and may stay in the batch.
     """
     issues: list[Issue] = []
+    closing = inp.close_reason is not None
     if inp.quantity <= 0:
         issues.append(Issue(kind="non_positive_quantity", message="股數必須大於 0"))
     elif inp.quantity > _MAX_MAGNITUDE:
         issues.append(Issue(kind="amount_too_large", message="股數過大，無法處理"))
-    if inp.price <= 0:
+    # Options spec §4.2: a price of 0 is the closing row of an option (OPT-D2) — accepted
+    # ONLY with its ``close_reason``; every other price-0 row keeps its refusal.
+    if inp.price <= 0 and not (closing and inp.price == 0):
         issues.append(Issue(kind="non_positive_price", message="價格必須大於 0"))
     elif inp.price > _MAX_MAGNITUDE:
         issues.append(Issue(kind="amount_too_large", message="價格過大，無法處理"))
@@ -638,7 +656,34 @@ def transaction_structural_issues(inp: TxnInput) -> list[Issue]:
         issues.append(Issue(kind="negative_fee", message="手續費不可為負"))
     if inp.tax is not None and inp.tax < 0:
         issues.append(Issue(kind="negative_tax", message="交易稅不可為負"))
+    if closing:
+        issues.extend(_close_row_structural_issues(inp))
     return issues
+
+
+#: §4.2 — the one sentence for a close row that carries money (every door, one spelling).
+CLOSE_ROW_FEE_MESSAGE = "到期作廢／被指派／履約列不收手續費與稅"
+
+
+def _close_row_structural_issues(inp: TxnInput) -> list[Issue]:
+    """The row-level shape of a ``close_reason`` row (options spec §4.1 / §4.2).
+
+    A close row moves no money: price 0, fee 0, tax 0 — the premium was settled by the
+    opening trade and the close only ends the position. It is also never a declared short
+    (``close_reason`` requires ``short_sale=0``). A non-zero price is refused here rather than
+    booked, because a close at a price is an ordinary closing trade (買進平倉／賣出平倉) and
+    should be entered as one.
+    """
+    out: list[Issue] = []
+    if inp.price > 0:
+        out.append(Issue(kind="close_row_price",
+                         message="到期作廢／被指派／履約列的價格必須為 0"))
+    if inp.short_sale:
+        out.append(Issue(kind="close_row_short_sale",
+                         message="到期作廢／被指派／履約列不可標記為放空"))
+    if (inp.fee is not None and inp.fee != 0) or (inp.tax is not None and inp.tax != 0):
+        out.append(Issue(kind="close_row_fee", message=CLOSE_ROW_FEE_MESSAGE))
+    return out
 
 
 def validate_transaction(
@@ -705,6 +750,7 @@ def validate_transaction(
         quantity=replacing.quantity, price=replacing.price, trade_date=replacing.trade_date,
         fee=replacing.fees, tax=replacing.tax, daytrade=replacing.daytrade,
         short_sale=replacing.short_sale, note=replacing.note,
+        close_reason=replacing.close_reason,
     )
     carried = {
         (i.kind, i.message)
@@ -771,11 +817,20 @@ def _row_findings(
     if (whole := whole_share_issue(inp, inst)) is not None:
         issues.append(whole)
 
+    # --- option contracts (options spec §4.2): one helper, every door ---
+    # A stock row with no close_reason takes no branch inside the helper (D38 invariant 1).
+    issues.extend(option_close_issues(
+        conn, inp, batch=batch, replacing=replacing, index=index,
+        instrument_of=lambda s: inst if s == inp.symbol else get_instrument(conn, s)))
+
     # --- sell must not exceed holdings (soft) ---
     # A DECLARED short sale (spec 2026-07-31 option C) is exempt: exceeding the position is
     # the whole point, the intent is recorded on the row, and the replay opens a short lot
-    # with a real cost basis instead of discarding one.
-    if inp.side is Side.SELL and inp.quantity > 0 and not getattr(inp, "short_sale", False):
+    # with a real cost basis instead of discarding one. A ``close_reason`` row is exempt too:
+    # its quantity is checked against the position by :func:`option_close_issues` (a close
+    # beyond the lot is a HARD refusal there, never an acknowledgeable 賣超).
+    if (inp.side is Side.SELL and inp.quantity > 0 and not getattr(inp, "short_sale", False)
+            and inp.close_reason is None):
         # ACTION-AWARE (W4, spec §6.2): both counts now replay corporate actions, because a
         # guard reading the pre-split count blocks a legitimate post-split sell and reports
         # it as the owner's data error. For a symbol with no corporate action this takes the
@@ -938,6 +993,280 @@ def _row_findings(
     return issues
 
 
+# ---------------------------------------------------------------------------
+# Option contracts (options spec §4.2) — the ONE helper every door runs
+# ---------------------------------------------------------------------------
+
+#: §4.2 — every option row: the 100-multiple rule, with the 口數 hint (one spelling).
+OPTION_MULTIPLE_MESSAGE = (
+    "選擇權數量須為 100 的倍數（1 口 = 100 股當量）；若填的是口數，請改為 口數×100")
+#: §4.2 — the stored-``expired``-row protection and the same-day-after-expiry rule.
+EXPIRED_ROW_STRANDED_MESSAGE = "此合約已登錄到期作廢，請先修改或刪除該列"
+_DIRECTION_ZH = {True: "賣方", False: "買方"}   # keyed on "is short"
+_SIDE_ZH = {Side.BUY: "買進（BUY）", Side.SELL: "賣出（SELL）"}
+
+
+def option_terms_of(inst: Instrument | None, symbol: str) -> OptionTerms | None:
+    """The contract terms of *symbol*: a registered option's own terms, or — for a symbol not
+    registered yet — the parse of an OCC symbol the commit will register (OPT-D7). ``None``
+    for a stock, and for a registered NON-option row (a stock keeps its type even if its name
+    happens to look like a contract)."""
+    if inst is not None:
+        return inst.option
+    return parse_option_symbol(symbol)
+
+
+def _signed(side: Side, quantity: Decimal) -> Decimal:
+    return quantity if side is Side.BUY else -quantity
+
+
+def _contracts_text(shares: Decimal) -> str:
+    return decimal_str(shares_to_contracts(abs(shares)))
+
+
+def option_close_issues(
+    conn: sqlite3.Connection,
+    inp: TxnInput,
+    *,
+    batch: Sequence[TxnInput] = (),
+    replacing: StoredTransaction | None = None,
+    index: ActionIndex | None = None,
+    instrument_of: InstrumentOf | None = None,
+) -> list[Issue]:
+    """Every option-specific rule for one trade row (options spec §4.2) — the ONE helper.
+
+    Called by :func:`validate_transaction` (so the manual door, the CSV / AI / broker door and
+    the ledger 更正 door all run it) and directly by the expiry inbox's confirm (W6), which
+    builds the §4.1 price-0 row and asks exactly this question before writing it. It returns
+    ``[]`` for a stock row with no ``close_reason``, so a ledger with no option takes no branch.
+
+    *inp* is in SHARE-EQUIVALENTS (the routers convert 口數 first). The conventions are
+    :func:`validate_transaction`'s: *batch* is every row written together INCLUDING *inp*
+    (the CSV door; empty on a single-row door); *replacing* is the stored row an edit replaces;
+    *index* one shared :class:`ActionIndex`; *instrument_of* a registry lookup (memoised by
+    the caller), read through ``get_instrument`` when omitted.
+
+    Rules (hard unless stated):
+
+    * ``close_reason`` on a symbol that is not an option contract → ``close_reason_not_option``.
+    * an unregistered contract in an account that does not book US → ``market_mismatch``
+      (a registered one meets the H1 coherence check instead).
+    * quantity not a multiple of 100 → ``option_quantity_not_contract_multiple``.
+    * any row dated after the contract's expiry → ``option_after_expiry``.
+    * a close row's side, quantity and date are DERIVED from *open* — the signed position of
+      the account in the contract at the close of the row's date, the row itself never
+      counting (``holdings.shares_through`` with the siblings booked before it and an edit's
+      replacement flows): ``expired`` is a BUY of a short / a SELL of a long, of exactly
+      ``|open|``, dated the expiry; ``assigned`` needs a short (BUY, ≤ ``|open|``);
+      ``exercised`` a long (SELL, ≤ ``open``) — ``option_close_no_position`` /
+      ``option_close_direction`` / ``option_close_side_mismatch`` /
+      ``option_expiry_quantity`` / ``option_close_quantity`` / ``option_expiry_date``.
+    * an ordinary BUY beyond the open short → SOFT ``option_over_cover`` (the CSV / edit
+      doors; the manual door's option mode refuses it instead, OPT-D14).
+    * a row of the contract ordered after a same-day ``expired`` row, and any row that would
+      leave a stored ``expired`` row unequal to ``|open|`` → ``option_row_after_expiry_close`` /
+      ``option_expired_row_stranded`` (「此合約已登錄到期作廢，請先修改或刪除該列」).
+
+    The close row's money (price 0, fee 0, tax 0, never a declared short) is the structural
+    prefix's (:func:`transaction_structural_issues`), because it decides batch membership.
+    """
+    lookup: InstrumentOf = (instrument_of if instrument_of is not None
+                            else (lambda s: get_instrument(conn, s)))
+    inst = lookup(inp.symbol)
+    terms = option_terms_of(inst, inp.symbol)
+    if terms is None:
+        if inp.close_reason is not None:
+            return [Issue(kind="close_reason_not_option",
+                          message="到期作廢／被指派／履約只適用於選擇權合約")]
+        return []
+    issues: list[Issue] = []
+    name = option_display_name(terms)
+    if inst is None:
+        issues.extend(_unregistered_contract_market(conn, inp))
+    if inp.quantity > 0 and not is_contract_multiple(inp.quantity):
+        issues.append(Issue(kind="option_quantity_not_contract_multiple",
+                            message=OPTION_MULTIPLE_MESSAGE))
+    if inp.trade_date > terms.expiry:
+        issues.append(Issue(kind="option_after_expiry",
+                            message=(f"{name} 已於 {terms.expiry.isoformat()} 到期，"
+                                     "到期日之後不能再登錄這個合約")))
+    walk_index = index if index is not None else load_action_index(conn)
+    before_me = siblings_booked_before(batch, inp)
+    replaced_net, replaced_on_date = (
+        _replacement_flows(conn, inp, replacing) if replacing is not None else ({}, {}))
+    pending_then = _merge_flows(
+        pending_share_flows(before_me, exclude=inp, instrument_of=lookup), replaced_on_date)
+    open_ = shares_through(conn, inp.account_id, inp.symbol, on=inp.trade_date,
+                           index=walk_index, pending=pending_then)
+    if inp.close_reason is not None:
+        issues.extend(_close_rule_issues(inp, terms, name, open_))
+    elif inp.side is Side.BUY and open_ < 0 and inp.quantity > -open_:
+        issues.append(Issue(
+            kind="option_over_cover", needs_confirm=True,
+            message=(f"買進平倉口數超過空頭部位，多出的 "
+                     f"{_contracts_text(inp.quantity + open_)} 口將成為買方部位")))
+    if _after_same_day_expiry(conn, inp, before_me, replacing):
+        issues.append(Issue(kind="option_row_after_expiry_close",
+                            message=EXPIRED_ROW_STRANDED_MESSAGE))
+    elif _strands_a_stored_expiry(conn, inp, batch, replacing, replaced_net, walk_index,
+                                  lookup):
+        issues.append(Issue(kind="option_expired_row_stranded",
+                            message=EXPIRED_ROW_STRANDED_MESSAGE))
+    return issues
+
+
+def _unregistered_contract_market(conn: sqlite3.Connection, inp: TxnInput) -> list[Issue]:
+    """An OCC symbol the commit will register is a US instrument (R6); refuse it on an account
+    that does not book US, in H1's own sentence (the registered case meets H1 itself)."""
+    acc = conn.execute(
+        "SELECT settlement_ccy FROM accounts WHERE account_id=?", (inp.account_id,)
+    ).fetchone()
+    if acc is None:
+        return []   # unknown_account already says it
+    acct_mkt = CCY_MARKET.get(acc["settlement_ccy"])
+    try:
+        markets = allowed_markets(conn, inp.account_id)
+    except (KeyError, ValueError):
+        return []
+    if acct_mkt is None or any(m.value == "US" for m in markets):
+        return []
+    return [Issue(kind="market_mismatch",
+                  message=(f"{inp.symbol} 屬 US 市場，"
+                           f"不可登錄於 {MARKET_ZH.get(acct_mkt, acct_mkt.value)}帳戶"))]
+
+
+def _close_rule_issues(
+    inp: TxnInput, terms: OptionTerms, name: str, open_: Decimal
+) -> list[Issue]:
+    """§4.2's derived side / quantity / date for one ``close_reason`` row against *open_*."""
+    reason = inp.close_reason
+    assert reason is not None
+    label = CLOSE_REASON_ZH[reason]
+    on = inp.trade_date.isoformat()
+    if open_ == 0:
+        return [Issue(kind="option_close_no_position",
+                      message=(f"{account_ref(inp.account_id)} 在 {on} 沒有 {name} 的部位，"
+                               f"無法登錄{label}"))]
+    short = open_ < 0
+    out: list[Issue] = []
+    if reason == "assigned" and not short:
+        return [Issue(kind="option_close_direction",
+                      message=(f"被指派只適用於賣方部位；{name} 在 {on} 為買方部位，"
+                               "請改登錄履約或到期作廢"))]
+    if reason == "exercised" and short:
+        return [Issue(kind="option_close_direction",
+                      message=(f"履約只適用於買方部位；{name} 在 {on} 為賣方部位，"
+                               "請改登錄被指派或到期作廢"))]
+    want = Side.BUY if short else Side.SELL
+    if inp.side is not want:
+        out.append(Issue(kind="option_close_side_mismatch",
+                         message=(f"{label}列應為{_SIDE_ZH[want]}：{name} 在 {on} 為"
+                                  f"{_DIRECTION_ZH[short]}部位")))
+    held = abs(open_)
+    if reason == "expired":
+        if inp.quantity != held:
+            out.append(Issue(kind="option_expiry_quantity",
+                             message=(f"到期作廢的數量須等於整個部位 {_contracts_text(held)} 口"
+                                      f"（{decimal_str(held)} 股當量）")))
+        if inp.trade_date != terms.expiry:
+            out.append(Issue(kind="option_expiry_date",
+                             message=f"到期作廢的日期須為合約到期日 {terms.expiry.isoformat()}"))
+    elif inp.quantity > held:
+        out.append(Issue(kind="option_close_quantity",
+                         message=(f"{label}口數超過部位（{_contracts_text(held)} 口）")))
+    return out
+
+
+def _after_same_day_expiry(
+    conn: sqlite3.Connection, inp: TxnInput, before_me: Sequence[TxnInput],
+    replacing: StoredTransaction | None,
+) -> bool:
+    """Is *inp* booked after a same-day ``expired`` row of the same contract? Trades of one day
+    replay in write order (DEF-012): a new row takes the highest id, an edit keeps its own,
+    a CSV row follows the rows listed above it."""
+    sibling = any(
+        row is not inp and row.close_reason == "expired"
+        and (row.account_id, row.symbol, row.trade_date)
+        == (inp.account_id, inp.symbol, inp.trade_date)
+        for row in before_me)
+    if sibling:
+        return True
+    for r in conn.execute(
+        "SELECT id FROM transactions WHERE account_id=? AND symbol=? AND trade_date=? "
+        "AND close_reason='expired'",
+        (inp.account_id, inp.symbol, inp.trade_date.isoformat()),
+    ):
+        if replacing is None or int(r["id"]) < replacing.id:
+            return True
+    return False
+
+
+def _strands_a_stored_expiry(  # noqa: PLR0913 - the change is described by all six
+    conn: sqlite3.Connection,
+    inp: TxnInput,
+    batch: Sequence[TxnInput],
+    replacing: StoredTransaction | None,
+    replaced_net: Mapping[tuple[str, str], Sequence[tuple[date, int, Decimal]]],
+    index: ActionIndex,
+    instrument_of: InstrumentOf,
+) -> bool:
+    """Would this change leave a stored ``expired`` row no longer equal to ``|open|``?
+
+    The position an ``expired`` row E closes is everything booked before it: the rows dated
+    before E's date (``shares_through`` the day before, with the change's flows) plus the
+    same-day rows written before E (lower id). The change is *inp* added (or an edit's stored
+    row replaced by it) and, at the CSV door, every sibling of the file. E is checked only
+    when the change reaches its window — a row dated on or before E's date on E's contract —
+    so a ledger whose expiry was already stranded does not refuse unrelated rows."""
+    keys = {(inp.account_id, inp.symbol)}
+    if replacing is not None:
+        keys.add((replacing.account_id, replacing.symbol))
+    me = (inp.trade_date, int(EventPriority.TRADE), _signed(inp.side, inp.quantity))
+    siblings = pending_share_flows(batch, exclude=inp, instrument_of=instrument_of)
+    for account_id, symbol in keys:
+        for e in conn.execute(
+            "SELECT id, side, quantity, trade_date FROM transactions "
+            "WHERE account_id=? AND symbol=? AND close_reason='expired'",
+            (account_id, symbol),
+        ):
+            e_id = int(e["id"])
+            if replacing is not None and e_id == replacing.id:
+                continue
+            e_date = date.fromisoformat(e["trade_date"])
+            mine = (account_id, symbol) == (inp.account_id, inp.symbol)
+            touched = (mine and inp.trade_date <= e_date) or (
+                replacing is not None
+                and (account_id, symbol) == (replacing.account_id, replacing.symbol)
+                and replacing.trade_date <= e_date)
+            if not touched:
+                continue
+            flows: list[tuple[date, int, Decimal]] = [
+                f for f in siblings.get((account_id, symbol), ()) if f[0] < e_date]
+            if mine and inp.trade_date < e_date:
+                flows.append(me)
+            flows.extend(f for f in replaced_net.get((account_id, symbol), ())
+                         if f[0] < e_date)
+            open_e = shares_through(conn, account_id, symbol,
+                                    on=e_date - timedelta(days=1), index=index,
+                                    pending={(account_id, symbol): flows})
+            for r in conn.execute(
+                "SELECT id, side, quantity FROM transactions WHERE account_id=? AND symbol=? "
+                "AND trade_date=? AND id<?",
+                (account_id, symbol, e_date.isoformat(), e_id),
+            ):
+                if replacing is not None and int(r["id"]) == replacing.id:
+                    continue
+                open_e += _signed(Side(r["side"]), from_db(r["quantity"]))
+            if (mine and replacing is not None and inp.trade_date == e_date
+                    and replacing.id < e_id):
+                open_e += _signed(inp.side, inp.quantity)
+            qty = from_db(e["quantity"])
+            closes = -open_e if Side(e["side"]) is Side.BUY else open_e
+            if closes != qty:
+                return True
+    return False
+
+
 class CorporateActionInput(BaseModel):
     """User-supplied corporate action, BEFORE it is trusted.
 
@@ -1023,6 +1352,34 @@ def _accounts_holding_on(
         if shares_through(conn, account_id, symbol, on=on, index=index) != 0:
             held.add(account_id)
     return held
+
+
+def _has_open_options_on(
+    conn: sqlite3.Connection, underlying: str, on: date, index: ActionIndex
+) -> bool:
+    """Does any account hold a non-zero position in an option contract on *underlying* at
+    the close of *on*? (Options spec §4.2 — a SPLIT of the underlying adjusts its contracts,
+    and that adjustment is a separate 選擇權合約調整 row the owner must enter.)
+
+    The contracts are the REGISTERED option instruments whose parsed underlying is *underlying*
+    (OPT-D22: the terms live in the symbol); their holders come from the trade ledger and the
+    adjustments that moved a position onto them, like :func:`_accounts_holding_on`."""
+    for r in conn.execute(
+        "SELECT symbol FROM instruments WHERE asset_type='option' AND symbol LIKE ?",
+        (f"{underlying}%",),
+    ):
+        symbol = str(r["symbol"])
+        terms = parse_option_symbol(symbol)
+        if terms is None or terms.underlying != underlying:
+            continue
+        for a in conn.execute(
+            "SELECT account_id FROM transactions WHERE symbol=? "
+            "UNION SELECT account_id FROM corporate_actions WHERE to_symbol=?",
+            (symbol, symbol),
+        ):
+            if shares_through(conn, str(a[0]), symbol, on=on, index=index) != 0:
+                return True
+    return False
 
 
 def _book_before(
@@ -1145,9 +1502,13 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     try:
         kind = CorporateActionKind(inp.kind.strip().upper())
     except ValueError:
+        # The supported kinds are listed FROM ``KIND_ZH`` (options spec §8), so a fourth kind
+        # can never be accepted by the parser while the sentence still names three.
         add(Issue(kind="unknown_action_kind",
-                  message=f"未知的公司行動類型 {inp.kind}（僅支援 分割 / 換股 / 分拆）"))
+                  message=(f"未知的公司行動類型 {inp.kind}"
+                           f"（僅支援 {' / '.join(KIND_ZH.values())}）")))
         return issues
+    adjust = kind is CorporateActionKind.OPTION_ADJUST
 
     if conn.execute("SELECT 1 FROM accounts WHERE account_id=?",
                     (inp.account_id,)).fetchone() is None:
@@ -1171,7 +1532,10 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         add(Issue(kind="split_symbol_mismatch",
                   message=f"分割的標的必須相同（{inp.from_symbol} → {inp.to_symbol}）；"
                           "若標的有變更，請改用「換股」"))
-    if kind is not CorporateActionKind.SPLIT and same_symbol:
+    if adjust and same_symbol:
+        add(Issue(kind="self_referential_action",
+                  message=f"選擇權合約調整的來源與目的合約不可相同（{inp.from_symbol}）"))
+    elif kind is not CorporateActionKind.SPLIT and same_symbol:
         zh = "換股" if kind is CorporateActionKind.EXCHANGE else "分拆"
         add(Issue(kind="self_referential_action",
                   message=f"{zh}的來源與目的標的不可相同（{inp.from_symbol}）；"
@@ -1194,7 +1558,8 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                                "甚至可能標示「已回本」。確定要這樣登錄嗎？")))
     elif inp.cost_carry is not None:
         add(Issue(kind="cost_carry_not_applicable",
-                  message=f"成本分攤比例僅適用於分拆，{inp.kind} 不需填寫"))
+                  message=("成本分攤比例僅適用於分拆，"
+                           f"{KIND_ZH[kind.value] if adjust else inp.kind} 不需填寫")))
 
     # --- E7: a no-op SPLIT (soft; ratio == 1 on an EXCHANGE is the ordinary rename) ---
     if kind is CorporateActionKind.SPLIT and inp.ratio_to == inp.ratio_from:
@@ -1224,9 +1589,18 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         and from_inst is not None
         and not same_symbol
     )
+    # Options spec §4.3: an OPTION_ADJUST destination is a contract that did not exist until
+    # the adjustment; it is registered FROM ITS SYMBOL on save (OPT-D7, no quote), which is
+    # how E10's registration is satisfied — said as an advisory, never a hard refusal.
+    autoreg_contract = (adjust and to_inst is None
+                        and parse_option_symbol(inp.to_symbol) is not None)
     for label, symbol, inst in (("來源", inp.from_symbol, from_inst),
                                 ("目的", inp.to_symbol, to_inst)):
-        if inst is None and autoreg_child and symbol == inp.to_symbol:
+        if inst is None and autoreg_contract and symbol == inp.to_symbol:
+            add(advisory_issue(
+                "option_contract_autoregister",
+                f"將建立選擇權合約 {contract_name(symbol)}（{symbol}）"))
+        elif inst is None and autoreg_child and symbol == inp.to_symbol:
             assert from_inst is not None  # implied by autoreg_child
             add(Issue(kind=SPINOFF_CHILD_AUTOREGISTER, needs_confirm=True,
                       message=(f"{symbol} 尚未註冊 — 分拆會產生這檔新標的，"
@@ -1239,6 +1613,27 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                       message=(f"{label}標的 {symbol} 尚未註冊。請先到「標的管理」註冊；"
                                "若這是券商對帳單上的內部代碼（而非交易代號），"
                                "請改填該證券真正的代號")))
+
+    # --- options (spec §4.2 / §4.3): which kinds may name a contract ---
+    from_terms = option_terms_of(from_inst, inp.from_symbol)
+    to_terms = option_terms_of(to_inst, inp.to_symbol)
+    if adjust:
+        if from_terms is None or to_terms is None:
+            add(Issue(kind="option_adjust_not_option",
+                      message=("選擇權合約調整的來源與目的都必須是美股選擇權合約代號"
+                               "（例：XYZ261218P00050000）")))
+        elif (is_ratio_term(inp.ratio_to) and is_ratio_term(inp.ratio_from)
+              and (why := nonstandard_adjustment_reason(
+                  from_terms, to_terms, inp.ratio_to, inp.ratio_from)) is not None):
+            # OPT-D11 / OPT-D16: standard deliverables only, 1 → N contracts.
+            add(Issue(kind="option_adjust_nonstandard", message=why))
+    else:
+        for symbol, terms in ((inp.from_symbol, from_terms), (inp.to_symbol, to_terms)):
+            if terms is not None:
+                add(Issue(kind="option_in_equity_action",
+                          message=(f"{symbol} 是選擇權合約，分割／換股／分拆不適用；"
+                                   "合約調整請改用「選擇權合約調整」")))
+                break
 
     # --- E11: quote currency must match; carrying a basis across currencies would need an
     # action-date FX rate, and inventing one corrupts the basis ---
@@ -1262,13 +1657,37 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # date (2026-08-11, D41's twin on the share side). `shares_through` counts a same-day
     # SELL, and selling exactly the pre-split count on the split date then hard-rejected the
     # split with 「沒有持倉」 while the owner really held the post-split remainder.
-    if from_inst is not None and shares_before_action_on(
-        conn, inp.account_id, inp.from_symbol, on=inp.date, index=walk_index
-    ) == 0:
-        add(Issue(kind="no_position_on_action_date",
-                  message=(f"{account_ref(inp.account_id)} 在 {inp.date.isoformat()} 沒有 "
-                           f"{inp.from_symbol} 的持倉，無法套用公司行動。"
-                           "請先補登該日之前的買進或期初庫存")))
+    source_shares = (
+        shares_before_action_on(conn, inp.account_id, inp.from_symbol, on=inp.date,
+                                index=walk_index)
+        if from_inst is not None else _ZERO)
+    if from_inst is not None and source_shares == 0:
+        if adjust:
+            # Options spec §4.3: a NON-ZERO signed position at the (date, CORPORATE_ACTION)
+            # cut — a short counts — in the action's own words.
+            add(Issue(kind="no_position_on_action_date",
+                      message=(f"{account_ref(inp.account_id)} 在 {inp.date.isoformat()} "
+                               f"沒有 {inp.from_symbol} 的部位，無法登錄選擇權合約調整。"
+                               "請先補登該日之前的交易")))
+        else:
+            add(Issue(kind="no_position_on_action_date",
+                      message=(f"{account_ref(inp.account_id)} 在 {inp.date.isoformat()} "
+                               f"沒有 {inp.from_symbol} 的持倉，無法套用公司行動。"
+                               "請先補登該日之前的買進或期初庫存")))
+    if adjust and to_inst is not None and source_shares != 0:
+        # §4.3: the destination is flat or in the SAME direction — this replaces E5 / E18,
+        # which refuse any short and would refuse every adjustment of a sold contract.
+        dest_shares = shares_before_action_on(
+            conn, inp.account_id, inp.to_symbol, on=inp.date, index=walk_index)
+        if dest_shares != 0 and (dest_shares < 0) != (source_shares < 0):
+            add(Issue(kind="option_adjust_opposite_direction",
+                      message=(f"選擇權合約調整：目的合約 {inp.to_symbol} 已有反方向的部位"
+                               f"（{_DIRECTION_ZH[dest_shares < 0]}），"
+                               "買方與賣方部位不能合併")))
+    if kind is CorporateActionKind.SPLIT and from_inst is not None and not from_inst.is_option:
+        if _has_open_options_on(conn, inp.from_symbol, inp.date, walk_index):
+            add(Issue(kind="split_with_open_options", needs_confirm=True,
+                      message="此標的有未平倉選擇權，合約調整請另行登錄（選擇權合約調整）"))
 
     # --- D3 (soft): an opening dated ON the action date is PRE-action ---
     # Sits with E1a because both answer "what does the action date mean for the source
@@ -1433,7 +1852,8 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
         add(Issue(kind="oversold_source",
                   message=(f"{inp.from_symbol} 目前是賣超（待釐清）部位，成本基礎已被捨棄，"
                            "無法套用公司行動。請先補登缺少的買進或期初庫存")))
-    if kind is not CorporateActionKind.SPLIT and source is not None and source.short_open:
+    if (kind is not CorporateActionKind.SPLIT and not adjust and source is not None
+            and source.short_open):
         add(Issue(kind="short_source",
                   message=(f"{inp.from_symbol} 目前有未回補的放空部位，換股／分拆沒有"
                            "可誠實記錄的分錄。請先回補後再登錄")))
@@ -1450,8 +1870,8 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
                            "把成本移轉過去會讓已被捨棄的成本基礎「復活」，"
                            "算出一個看起來正常、實際上沒有依據的均價。"
                            "請先處理該部位的賣超")))
-    if (kind is not CorporateActionKind.SPLIT and dest is not None and not same_symbol
-            and dest.short_open):
+    if (kind is not CorporateActionKind.SPLIT and not adjust and dest is not None
+            and not same_symbol and dest.short_open):
         add(Issue(kind="short_destination",
                   message=(f"目的標的 {inp.to_symbol} 目前有未回補的放空部位。"
                            "多頭與空頭部位在本系統是互斥的，移轉過去會讓兩者混在一起，"
@@ -1512,7 +1932,7 @@ def validate_corporate_action(  # noqa: C901, PLR0912 - one check per §5 edge r
     # about to be created has NO prices by definition, which is precisely what this warns
     # about. Dropping the term would make the newest source of unpriced holdings the one
     # case that never warns.
-    if (kind is not CorporateActionKind.SPLIT
+    if (kind is not CorporateActionKind.SPLIT and not adjust   # an option is never quoted
             and (to_inst is not None or autoreg_child)
             and not _has_prices(conn, inp.to_symbol)):
         zh_kind = "換股" if kind is CorporateActionKind.EXCHANGE else "分拆"
@@ -2351,7 +2771,12 @@ def _dividend_findings(
         issues.append(unknown_account_issue(inp.account_id))
 
     res = resolve(conn, inp.symbol)
-    if res.status is ResolutionStatus.NEEDS_AI:
+    if option_terms_of(res.instrument, inp.symbol) is not None:
+        # Options spec §4.2: a contract pays no dividend — the underlying does. HARD, and the
+        # registry / model checks below do not apply to it.
+        issues.append(Issue(kind="dividend_on_option",
+                            message="選擇權合約不會配發股利，請改登錄於標的股票"))
+    elif res.status is ResolutionStatus.NEEDS_AI:
         # Unregistered symbol -> soft; no coherence check (its market is unknown until it is
         # registered).
         issues.append(Issue(kind="symbol_unresolved", needs_confirm=True,

@@ -75,7 +75,10 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     # had nothing to do with corporate actions and routed the owner to hunt for a missing
     # action row that does not exist. It is never inferred (domain-ledger.md: the system cannot
     # distinguish a genuine short from a missing buy), so an explicit column is the only way in.
-    "transactions": frozenset({"fee", "tax", "daytrade", "short_sale", "note"}),
+    # close_reason (options spec §8): blank on every ordinary trade; expired / assigned /
+    # exercised only on an option's price-0 closing row.
+    "transactions": frozenset({"fee", "tax", "daytrade", "short_sale", "note",
+                               "close_reason"}),
     # ex_date (M4-04, 2026-09-02): appended to DIVIDEND_COLUMNS by R6 (review ⑧) and never
     # mirrored here, so the ONE blank-able column in any template carried no (選填) marker —
     # while the example rows below did not carry the cell at all. A template is a product the
@@ -104,23 +107,29 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
 # column — it comes from the instrument registry (hence the MY-ETF row's note).
 _TRANSACTION_ROWS: list[list[str]] = [
     # TW buy — fee/tax auto-computed (blank -> account fee-rule set fills them).
-    ["tw_broker", "2330", "buy", "2026-07-10", "1000", "612.5", "", "", "", "", ""],
+    ["tw_broker", "2330", "buy", "2026-07-10", "1000", "612.5", "", "", "", "", "", ""],
     # TW sell, day-trade (當沖) -> 0.15% sell tax; daytrade flag = 1.
-    ["tw_broker", "2330", "sell", "2026-07-13", "1000", "620", "", "", "1", "", "當沖"],
+    ["tw_broker", "2330", "sell", "2026-07-13", "1000", "620", "", "", "1", "", "當沖", ""],
     # Schwab US sell — SEC/TAF regulatory fees auto-computed on the sell side.
-    ["schwab", "AAPL", "sell", "2026-07-13", "5", "210", "", "", "", "", ""],
+    ["schwab", "AAPL", "sell", "2026-07-13", "5", "210", "", "", "", "", "", ""],
     # Moomoo MY, US-market buy (settles USD; US fee/dividend rules bound to this market).
-    ["moomoo_my", "AAPL", "buy", "2026-07-14", "3", "205", "", "", "", "", ""],
+    ["moomoo_my", "AAPL", "buy", "2026-07-14", "3", "205", "", "", "", "", "", ""],
     # Moomoo MY, MY-market ETF buy — the ETF stamp exemption keys off the registry flag.
     ["moomoo_my", "0800EA", "buy", "2026-07-14", "100", "1.25", "", "", "", "",
-     "ETF 以標的登錄為準"],
+     "ETF 以標的登錄為準", ""],
     # Manual fee + tax override — both columns supplied -> auto-compute skipped for this row.
     ["tw_broker", "2330", "sell", "2026-07-15", "500", "620", "20", "5", "", "",
-     "手動覆寫費稅"],
+     "手動覆寫費稅", ""],
     # A DECLARED short sale (short_sale = 1). Without this column the row books as an
     # ordinary sell, the 賣超 guard flags it and the position's cost basis is DISCARDED —
     # the exact failure §10.5 surfaced on the owner's real export. Never inferred.
-    ["schwab", "AAPL", "sell", "2026-07-16", "10", "215", "", "", "", "1", "宣告放空"],
+    ["schwab", "AAPL", "sell", "2026-07-16", "10", "215", "", "", "", "1", "宣告放空", ""],
+    # A US equity option (options spec §8): the OCC symbol is created from itself on commit
+    # (no quote lookup), ``shares`` is in SHARE-EQUIVALENTS — 2 contracts = 200 (OPT-D8) —
+    # and price is the premium PER SHARE. Selling to open is a declared short (short_sale 1).
+    # An expiry / assignment / exercise is a price-0 row with ``close_reason`` set.
+    ["schwab", "XYZ261218P00050000", "sell", "2026-07-16", "200", "1.50", "", "", "", "1",
+     "賣出開倉 Put，2 口＝200", ""],
 ]
 
 # ⚠ TEN cells per row, one per DIVIDEND_COLUMNS entry — the last is ``ex_date`` (M4-04).

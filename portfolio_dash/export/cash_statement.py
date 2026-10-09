@@ -138,7 +138,10 @@ def build_cash_statement_csv(
     if account not in {a.account_id for a in list_accounts(conn)}:
         return None
     movements, fx, txs, divs, instruments, unbooked, refusals = _load(conn)
+    # Options spec §9: W6 computes ``option_side_of`` once per export and renders each option
+    # line's description from it; until then the export lists option lines unlabelled.
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy,
+                                   option_side_of={},
                                    unbooked_dividends=unbooked,
                                    unbooked_reason=refusals.reason)
     today = now.date()
@@ -349,6 +352,7 @@ def build_cash_statement_report_html(
         return None
     movements, fx, txs, divs, instruments, unbooked, refusals = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy,
+                                   option_side_of={},   # W6 labels the option lines (§9)
                                    unbooked_dividends=unbooked,
                                    unbooked_reason=refusals.reason)
     # One clock for the whole page: the header's ``now`` dates the balances too (M5-06).

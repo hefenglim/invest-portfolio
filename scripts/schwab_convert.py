@@ -227,7 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Convert a Schwab transaction export into this app's import CSVs.",
         epilog=(
             "stdout carries only labels, counts and issue codes, so it is safe to paste. "
-            "stderr and the report file are NOT — they name files and amounts."
+            "stderr and the report file are NOT — they name files and amounts. "
+            "Options: this offline run has no ledger, so it converts with NO known option "
+            "positions (known_positions={}) — an expiry whose opening trade is not in these "
+            "files stops the run (option_expiry_no_opening); the web import door reads the "
+            "ledger's positions instead."
         ),
     )
     # No defaults, by design (D27): a defaulted path is a path that can be read by accident,
@@ -284,7 +288,14 @@ def main(argv: list[str] | None = None) -> int:
     if owner_aliases:
         events = apply_aliases(events, owner_aliases)
 
-    conv, grouped, report = convert(events, args.account, args.currency)
+    try:
+        # Offline: no ledger, so no known option positions (options spec §8, OPT-D19).
+        conv, grouped, report = convert(events, args.account, args.currency,
+                                        known_positions={})
+    except UnmappedRow as exc:
+        # An option row the converter cannot express (spec §8) — same refusal as the parse.
+        _problem(str(exc))
+        return 2
 
     leaks = account_for_output(grouped, conv)
     for message in leaks:

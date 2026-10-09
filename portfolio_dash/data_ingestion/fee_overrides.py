@@ -51,13 +51,21 @@ _AMOUNT_FIELDS: frozenset[str] = frozenset({
     "min_fee", "commission_min", "platform_fee", "settlement_per_share", "cat_per_share",
     "sec_min", "taf_per_share", "taf_min", "broker_assisted_surcharge",
     "stamp_unit", "stamp_per_unit",
+    "option_reg_per_contract",   # OPT-D6: default 0 — an ordinary amount
 })
 _CAP_FIELDS: frozenset[str] = frozenset({
     "taf_cap", "clearing_cap", "stamp_cap_stock", "stamp_cap_etf",
 })
+#: Nullable AMOUNTS (options spec OPT-D6): ``None`` means UNSET — not 0 and not "no cap". A
+#: value is validated like an amount (>= 0); ``null`` in a PUT reverts to the v2 default as for
+#: every field, which for ``moomoo_us`` is unset again. A class of its own, rather than a cap,
+#: because the engine reads unset as "refuse to compute" where it reads a null cap as "no
+#: limit" — two meanings of ``None`` that must not share one bucket.
+_NULLABLE_AMOUNT_FIELDS: frozenset[str] = frozenset({"option_per_contract"})
 _ROUNDING_FIELD = "rounding"
 
-EDITABLE_FIELDS: frozenset[str] = _RATE_FIELDS | _AMOUNT_FIELDS | _CAP_FIELDS
+EDITABLE_FIELDS: frozenset[str] = (
+    _RATE_FIELDS | _AMOUNT_FIELDS | _CAP_FIELDS | _NULLABLE_AMOUNT_FIELDS)
 
 # READ-ONLY fields (QA-07, Master ruling 2026-08-29): shown so the owner can see which regime
 # applies, never writable. ``rounding`` is a MARKET FACT the engine hard-codes per branch —
@@ -84,6 +92,8 @@ EDITABLE_FIELD_ORDER: tuple[str, ...] = (
     "commission_rate", "commission_min", "platform_fee",
     "settlement_per_share", "settlement_cap_rate", "cat_per_share",
     "sec_rate", "sec_min", "taf_per_share", "taf_min", "taf_cap", "broker_assisted_surcharge",
+    # US equity options (OPT-D6)
+    "option_per_contract", "option_reg_per_contract",
     # MY commission / clearing / SST
     "clearing_rate", "clearing_cap", "sst_rate",
     # Stamp duty (MY native / US cross-currency)
@@ -170,7 +180,7 @@ def validate_field(field: str, value: object) -> str:
     if field in _RATE_FIELDS:
         if d < _ZERO or d > _ONE:
             raise FeeOverrideError(f"{field} 須介於 0 與 1 之間（比率）：{value!r}", field=field)
-    elif d < _ZERO:  # amount or cap
+    elif d < _ZERO:  # amount, cap or nullable amount
         raise FeeOverrideError(f"{field} 不可為負：{value!r}", field=field)
     return format(d, "f")
 

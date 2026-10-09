@@ -168,6 +168,35 @@ def _opening_gaps(
     return out
 
 
+def _known_option_positions(
+    conn: sqlite3.Connection, account: str, through: date | None
+) -> dict[str, Decimal]:
+    """OPT-D19: the ledger's signed position in every option contract of *account*, in
+    share-equivalents, at the close of *through* — the day before the request's earliest row.
+
+    Injected into the (pure) converter so an expiry whose opening trade was imported in an
+    EARLIER request still gets its side; rows already imported inside the request's own
+    window are not counted here (they are in the file), and a re-import of them is caught by
+    the CSV door's duplicate detection. The same date-aware share count the sell guard and
+    :func:`_opening_gaps` use. Empty with no window, and on an account with no contract."""
+    if through is None:
+        return {}
+    symbols = [str(r[0]) for r in conn.execute(
+        "SELECT symbol FROM instruments WHERE asset_type='option' AND symbol IN ("
+        "  SELECT symbol FROM transactions WHERE account_id=?"
+        "  UNION SELECT to_symbol FROM corporate_actions WHERE account_id=?)",
+        (account, account))]
+    if not symbols:
+        return {}
+    index = load_action_index(conn)
+    out: dict[str, Decimal] = {}
+    for symbol in symbols:
+        held = shares_through(conn, account, symbol, on=through, index=index)
+        if held != Decimal(0):
+            out[symbol] = held
+    return out
+
+
 def _conversion_wire(
     conv: Conversion,
     report: ReconcileReport,
@@ -337,20 +366,26 @@ def broker_convert(
         for f in body.exports:
             events += parse_export(
                 body.broker, f.text, source_file=f.name, aliases=body.aliases)
+        # The opening rows' build date — the day before the first statement row — is ALSO
+        # the day the ledger's existing holdings are measured at (DEF-027): what the file
+        # needs minus what the account already held when the statement starts. The option
+        # positions handed to the converter are measured at the same day (OPT-D19).
+        earliest = min((e.trade_date for e in events), default=None)
+        build = earliest - timedelta(days=1) if earliest is not None else None
+        conv, _grouped, report = convert(
+            events, body.account, body.currency,
+            known_positions=_known_option_positions(conn, body.account, build))
     except UnmappedRow as exc:
         # Rule 7: an unmapped (action, description) pair STOPS the run with the pair quoted.
         # There is no catch-all bucket — a default is the same defect wearing a name — so
         # this is a refusal the owner can act on, not a crash. It is 422 and not 500 for
-        # exactly that reason: the file is the input, and the input is answerable.
-        return JSONResponse(status_code=422, content=error_body(
-            "broker_row_unmapped", str(exc), field="exports"))
-
-    conv, _grouped, report = convert(events, body.account, body.currency)
-    # The opening rows' build date — the day before the first statement row — is ALSO the
-    # day the ledger's existing holdings are measured at (DEF-027): what the file needs
-    # minus what the account already held when the statement starts.
-    earliest = min((e.trade_date for e in events), default=None)
-    build = earliest - timedelta(days=1) if earliest is not None else None
+        # exactly that reason: the file is the input, and the input is answerable. Caught
+        # around BOTH the parse and the conversion (options spec §8): an option row the
+        # converter cannot express raises inside ``convert`` with its ``reason`` and line.
+        content = error_body("broker_row_unmapped", str(exc), field="exports")
+        content["error"]["reason"] = exc.reason
+        content["error"]["line"] = exc.line
+        return JSONResponse(status_code=422, content=content)
     return _conversion_wire(
         conv, report,
         openings=_opening_gaps(conn, body.account, conv.openings, build),

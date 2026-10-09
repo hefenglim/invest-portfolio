@@ -195,8 +195,8 @@ def test_a_blocking_issue_withholds_EVERY_csv(
 
     real = mod.convert  # type: ignore[attr-defined]
 
-    def poisoned(events: Any, account: str, currency: str) -> Any:
-        conv, grouped, report = real(events, account, currency)
+    def poisoned(events: Any, account: str, currency: str, **kwargs: Any) -> Any:
+        conv, grouped, report = real(events, account, currency, **kwargs)
         bad = ReconcileIssue(code="cash_not_conserved", severity="blocking",
                              refs=("f.csv:1",), detail="forced")
         return conv, grouped, type(report)(
@@ -300,8 +300,10 @@ def test_every_source_row_is_either_a_row_or_named_as_dropped_with_its_destinati
         overlap = set(d["refs"]) & in_rows
         assert bool(overlap) == bool(d["into"]) or d["why"] == "action_needs_input", d
     whys = {d["why"] for d in dropped}
-    assert {"suppressed", "merged_dividend", "option_row_unsupported",
-            "unconvertible", "action_needs_input"} <= whys
+    # Options spec §8: the corpus's option leg is a ROW now (an ``option_row_unsupported``
+    # drop no longer exists); the other four destinations are unchanged.
+    assert {"suppressed", "merged_dividend", "unconvertible", "action_needs_input"} <= whys
+    assert "option_row_unsupported" not in whys
     [merged] = [d for d in dropped if d["why"] == "merged_dividend"]
     assert merged["into"] == "dividends:0" and len(merged["refs"]) == 3
     assert body["rows"]["dividends"][0]["refs"] == merged["refs"]
