@@ -110,8 +110,6 @@ _ALLOWLIST: dict[str, str] = {
         "the manual preview mirrors the replay for every position, contracts included (W3)"),
     "api/routers/ledgers.py::_by_key": (
         "a correction door's replay guard compares every position, contracts included"),
-    "data_ingestion/validate.py::validate_corporate_action": (
-        "OPTION_ADJUST moves a contract position, so the corporate-action validator reads it"),
     # -- the registry 「持有」 of one row, or its definition ---------------------------------
     "data_ingestion/holdings.py::held_among": "the definition (over holds_position)",
     "data_ingestion/store.py::_reactivate_if_held": (

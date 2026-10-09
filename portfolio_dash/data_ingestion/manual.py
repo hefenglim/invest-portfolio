@@ -30,6 +30,9 @@ from portfolio_dash.data_ingestion.fees import (
 )
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import shares_through
+from portfolio_dash.data_ingestion.register import (
+    option_contract_draft as option_contract_draft,
+)
 from portfolio_dash.data_ingestion.register import register_option_contract
 from portfolio_dash.data_ingestion.resolve import (
     ResolutionStatus,
@@ -45,15 +48,12 @@ from portfolio_dash.data_ingestion.validate import (
     option_terms_of,
     validate_transaction,
 )
-from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.options import (
-    ASSET_OPTION,
     CloseReason,
     OptionTerms,
-    option_display_name,
-    option_symbol,
     shares_to_contracts,
 )
 from portfolio_dash.shared.wire import decimal_str
@@ -84,19 +84,6 @@ class TxnDraft(BaseModel):
     written: bool = False
     transaction_id: int | None = None
     registers_contract: bool = False
-
-
-def option_contract_draft(terms: OptionTerms) -> Instrument:
-    """The instrument row ``register.register_option_contract`` WILL write for *terms* —
-    built in memory so a preview can name it, value it and pick its fee rule without writing.
-
-    ⚠ It restates that function's spec §3 defaults (market US, USD, the display name, empty
-    sector / board, not an ETF, nothing unanswered, ``asset_type='option'``); the two must stay
-    equal — ``tests/data_ingestion/test_options_w3_manual.py`` pins them together. A candidate
-    to move next to the registrar (``register.py``) so the defaults have one home."""
-    return Instrument(symbol=option_symbol(terms), market=Market.US, quote_ccy=Currency.USD,
-                      sector="", name=option_display_name(terms), board="", is_etf=False,
-                      etf_flag_unknown=False, asset_type=ASSET_OPTION)
 
 
 def option_intent_issues(

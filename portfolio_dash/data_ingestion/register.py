@@ -19,6 +19,7 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.options import (
     ASSET_OPTION,
     OptionSymbolError,
+    OptionTerms,
     option_display_name,
     option_symbol,
     parse_option_symbol,
@@ -142,6 +143,16 @@ def spinoff_child_draft(parent: Instrument, child_symbol: str) -> Instrument:
                       etf_flag_unknown=True)
 
 
+def option_contract_draft(terms: OptionTerms) -> Instrument:
+    """The instrument row :func:`register_option_contract` writes for *terms* — the ONE home
+    of spec §3's defaults (market US, USD, the display name, empty sector / board, not an ETF,
+    nothing unanswered, ``asset_type='option'``). Pure, no I/O: a preview builds it in memory
+    to name, value and price a contract it must not register yet."""
+    return Instrument(symbol=option_symbol(terms), market=Market.US, quote_ccy=Currency.USD,
+                      sector="", name=option_display_name(terms), board="", is_etf=False,
+                      etf_flag_unknown=False, asset_type=ASSET_OPTION)
+
+
 def register_option_contract(
     conn: sqlite3.Connection, symbol: str, *, commit: bool = True,
 ) -> Instrument:
@@ -180,12 +191,8 @@ def register_option_contract(
         upsert_instrument(conn, existing.model_copy(update={"asset_type": ASSET_OPTION}),
                           commit=commit)
     else:
-        register_instrument(
-            conn,
-            Instrument(symbol=canonical, market=Market.US, quote_ccy=Currency.USD,
-                       sector="", name=option_display_name(terms), board="",
-                       is_etf=False, etf_flag_unknown=False, asset_type=ASSET_OPTION),
-            prober=None, confirm=True, commit=commit)
+        register_instrument(conn, option_contract_draft(terms), prober=None, confirm=True,
+                            commit=commit)
     stored = get_instrument(conn, canonical)
     assert stored is not None  # written above, on this connection
     return stored
