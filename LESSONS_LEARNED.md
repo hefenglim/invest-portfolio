@@ -2152,3 +2152,29 @@ tree and ~1 h of gates had to be re-run.
 5. **Worktree agents: check the base first** (`git log -1`, reset to the target sha, report the
    merge-base) and re-run every count / contract test of the seams after merging parallel work.
 6. **The final review belongs to the round.** Merge → review → fix → THEN the heavy gates once.
+
+## 2026-10-10 — v0.1.29 release: what the real data and the rehearsal caught after the gates
+
+**What happened.** (a) The options final review fixed "two underlyings adjusted on one day" by
+keying the converter's adjustment pairs by underlying. The real-data acceptance had passed BEFORE
+that review, and nobody re-ran it after: re-running the owner's full Schwab history for the import
+files found that a merger's RENAME pair (VACQ → RKLB, one leg per root) now split into two
+one-leg groups and stopped the whole statement. (b) DEF-065's guard ("a GET never writes") boots a
+FRESH database; the release rehearsal booted a v0.1.28 database, called every GET and dumped it —
+and `GET /api/notify/config` had written `notify_config` (`load_config` persists the default for a
+rule newer than the stored config). A fresh seed already carries every rule, so the guard could
+not see it. (c) The e2e gate was run as one 2-hour background job; Claude Code reaped it under
+memory pressure while the session was idle. (d) A stray bare `.venv/Scripts/python.exe` at the
+head of a command opened a REPL that waited on stdin for 20 minutes, which read as a hung test.
+
+**Rules.**
+1. **Re-run the real-data acceptance after every review-fix round**, not only after the build: a
+   fix that narrows a rule for a synthetic case can break the real shape the rule was written for.
+2. **A migration rehearsal calls every GET on the OLD database and diffs the dump.** "A read never
+   writes" must be proven on an upgraded database too — self-healing config is a write that only
+   happens there.
+3. **Run long gates in the foreground, in batches that each finish inside one tool call** (e2e:
+   ≤ 11 tests per batch, stop before a batch could pass 600 s). A background job can be reaped
+   when the machine is short of memory and the session is idle.
+4. **When a batch "hangs", look at the process tree before suspecting the test.** A bare
+   interpreter waiting on stdin looks exactly like a stuck browser test from the outside.
