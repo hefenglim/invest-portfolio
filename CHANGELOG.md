@@ -17,9 +17,29 @@ and pre-merge CR rounds, and US equity options in the ledger (owner instruction 
 merge into `main`, cut the version, deploy to the demo site and to prod). Gate results and
 the deploy record: **Release record** directly below.
 
+### Fixed — found by the release rehearsal
+
+- **A GET wrote on an upgraded database (DEF-065).** `ops/notify.load_config` fills in a rule
+  newer than the stored config and persists it, and its callers are reads — so on a database
+  written by v0.1.28 the first `GET /api/notify/config` wrote `notify_config` (two rules of this
+  release, `portfolio_drawdown` / `currency_weight`, were missing). DEF-065's guard boots a FRESH
+  database, whose seed already carries every rule, and could not see it. The lifespan now heals
+  the config at boot (`notify.heal_config`), so every later read finds nothing to write
+  (`tests/contract/test_get_never_writes_on_an_upgraded_db.py`).
+
 ### Release record
 
-- (filled in as the release runs)
+- **Migration rehearsal** (a database built by v0.1.28 — prod's commit 734833b — booted on this
+  release): 58 / 58 tables, 0 column-definition differences and identical indexes against a
+  fresh database (column ORDER differs on `insights` / `instruments`, read by name only),
+  `integrity_check` ok, the carried prices / FX rows byte-equal, 74 GET routes with 0 × 5xx, and
+  a boot followed by every GET changes 0 lines of the dump (after the fix above).
+- **Real-data acceptance** (the owner's full Schwab history, 1,593 broker lines, imported by hand
+  through the CSV doors on a throw-away database, files and scripts git-ignored): shares 17 / 17,
+  market value at the broker's prices 17 / 17 and cash 522.20 equal the broker's 2026-10-06
+  positions; the open SPCX put and the option realized 14,847.42 equal the statement; no 賣超,
+  refused row or unapplied action. Cost equals the broker on 9 / 17 positions — the other 8
+  differ only by the broker's LIFO / specific-lot relief against the app's moving average.
 
 ### Added — US equity options in the ledger (P3, approach ④; branch `feat/options-ledger`)
 

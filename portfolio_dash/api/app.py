@@ -198,6 +198,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_signal_history_table(conn)  # signal_history per-day states (W6, AI-D27)
         ensure_llm_fail_log_table(conn)  # llm_fail_log capture ring (AI-D64)
         notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)
+        # DEF-065 on an upgraded database: a rule newer than the stored config is filled in
+        # HERE, so GET /api/notify/config never persists the self-heal (v0.1.29 release rehearsal).
+        notify_ops.heal_config(conn)
         digest_ops.ensure_seeded(conn)  # digests + digest_config single-row (P3 batch 3)
         # DEF-065: every table a GET reads is created HERE, never by the GET. These six were
         # created (and ui_prefs / whatsnew SEEDED) by their first request — a write on a read
