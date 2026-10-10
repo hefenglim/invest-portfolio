@@ -66,6 +66,21 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.30 (broker import: reinvested shares as printed) — shipped 2026-10-11 --------
+    Feature(
+        version="0.1.30",
+        id="drip-printed-shares",
+        title="券商對帳單的股利再投資，股數改用對帳單印出的數字",
+        desc="嘉信對帳單上每一筆股利再投資都印了股數、價格、金額，三者乘不起來。轉換器以前用"
+        "「金額 ÷ 價格」當股數，比券商帳上少一點點；等到整檔賣光那天，app 就會把那筆賣出判成"
+        "賣超、永久捨棄成本並停算 XIRR。現在改用印出的股數（和券商的持倉報表一致），"
+        "印出的股數也會先和「金額 ÷ 價格」核對，對不上就整批擋下。"
+        "注意：交易檔先匯入時還看不到再投資的股數，賣光的那一列仍會請你勾選一次；"
+        "股利檔匯入後帳本就不會有賣超",
+        href="trades.html#tab-csv",
+        area="交易輸入 → CSV 匯入 → 券商對帳單",
+        target="#bk-report",
+    ),
     # --- v0.1.29 (broker import, corporate actions, US equity options) — shipped 2026-10-10 --
     # --- v0.1.29, US equity options in the ledger (options spec §8, 2026-10-09) -----------
     Feature(
@@ -1977,6 +1992,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.30": "2026-10-11",
     "0.1.29": "2026-10-10",
     "0.1.28": "2026-08-09",
     "0.1.27": "2026-08-05",

@@ -9,6 +9,74 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.30] - 2026-10-11
+
+One change, on the owner's ruling: the Schwab converter writes a reinvested dividend's share
+count as the broker PRINTED it (owner chose option B on 2026-10-11, after a demo of both; owner
+instruction the same day: verify the full import, run every gate, then commit, push and deploy
+the same tag to the demo site and to prod).
+
+### Changed — a reinvested dividend imports at the broker's printed share count
+
+- **`grouping.fold_dividends` takes the printed quantity**, summed over the reinvest legs, and
+  carries the printed AMOUNT as `DividendEvent.reinvest_amount`. Until now the count was
+  `amount / price` (spec 2026-08-11 §2a). Every reinvest row prints three figures that do not
+  multiply out — measured on the owner's full 2020–2026 history: 250 of 250 rows, each quantity
+  being `round(amount / price)` at the 3–4 places it is printed with — so one row fits both
+  readings. The rows AFTER a reinvestment decide it, and all say the printed figure is the one
+  the broker books: a later sale closes the printed sum exactly, and the broker's positions
+  report equals the printed sums on 18 of 18 reinvesting symbols (the derived sums on 0).
+  Under the derived count, an import of that history made 17 sale rows on 7 positions a 賣超
+  the owner had to tick: sticky, cost basis discarded, no realized row (the realized total
+  rose because the losses vanished), XIRR withheld, and a currently held position lost its
+  market value. The demo of both readings is in the git-ignored `sample-trade-data/`.
+- **The reconciler measures each column by itself.** Share conservation counts the printed
+  quantity (`_check_shares_conserved` no longer special-cases a reinvest leg); the cash checks
+  (`over_reinvested`, `cash_not_conserved`) count the printed amount, never shares × price —
+  0.0105 × 950.00 overshoots a 9.95 payout by 2.5 cents, past the one-cent tolerance.
+- **New blocking check `reinvest_quantity_mismatch`** (`reconcile._check_reinvest_rows`): the
+  printed quantity is now written to the ledger, so it must be `amount / price` within the two
+  roundings the statement applies (half a unit of its last printed place × the price, plus half
+  a cent); a reinvest with no quantity or no price blocks too. All 250 real rows pass (the
+  closest uses 97% of the bound — the bound is the exact sum of the two roundings, not a
+  margin). The import page explains it in Chinese (`web/broker-import.js`), and a new guard
+  holds every blocking code the reconciler can raise to having that sentence
+  (`tests/contract/test_broker_blocking_codes_have_zh.py`).
+- **No data to backfill.** Prod's ledger is empty; the demo ledger is synthetic; the owner's
+  hand-import set (`IMPORT_FULL/`, git-ignored) already used the printed counts and rebuilds
+  byte-identical on this change.
+- **Known, unchanged:** the converter commits the transactions file before the dividends file
+  (a dividend needs its position first, CR-02), so a sale of reinvested shares is still named
+  as a 賣超 row to tick in the transactions preview — the preview cannot see the DRIP rows yet.
+  Once the dividends file lands, the replay books the sale normally; under the old count it
+  stayed 賣超 for good.
+- Tests: `tests/contract/test_broker_drip_printed_shares.py` (convert → commit per file → the
+  book: no 賣超, the position closed, the realized row written; a 3-dp and a 4-dp shape, plus
+  the old count pinned as the sticky 賣超 it caused); reconciler cases for the printed baseline,
+  the D-shaped sale of two reinvests, the mismatch, a missing quantity or price, and the
+  high-priced rounding; the adapter and e2e expectations moved to the printed 1.8137.
+- Docs: `docs/reference/broker-import.md` (the new code; "it never re-derives a reinvested share
+  count"), spec 2026-08-11 §2a marked SUPERSEDED with the measurement.
+
+### Release record
+
+- **Gates** (dev machine, on the release commit): `ruff check portfolio_dash tests scripts`
+  clean; `mypy --strict` 1,080 files, 0 issues; pytest non-e2e 7,628 passed / 5 skipped /
+  0 failed; e2e 369 / 369 passed in 34 foreground batches of ≤ 11; stress audit phase 1
+  `ops=164 pass=19,948 fail=0` (UI read-back included), oracle independence grep empty. Two
+  test-side assumptions were corrected on the way: the what's-new API test took the newest
+  version to have at least two features (this one has one), and the settled-notional scan's
+  reviewed list named the removed `_reinvest_cash` (its successor `_check_reinvest_rows` is the
+  same kind of site — a tolerance check against the row's own amount, never booked).
+- **Real-data acceptance** (the owner's full Schwab history, git-ignored): the converter on this
+  release reconciles with 0 blocking issues, every reinvest leg inside the new check's bound,
+  every DRIP row carrying the printed count, and final shares equal to the broker's positions
+  on every stock line; the hand-import set rebuilds byte-identical, and importing it through
+  the CSV doors on a throw-away database reconciles exactly as for v0.1.29 — shares, cash and
+  the open option equal the broker's, no 賣超, refused row or unapplied action.
+- **Deploy**: demo first, then prod, both from the tag; the record is in the VM operation log
+  (git-ignored).
+
 ## [v0.1.29] - 2026-10-10
 
 First release since v0.1.28. It ships everything recorded below: the Schwab broker-statement
