@@ -82,6 +82,14 @@ INSTRUMENTS = [
     ("VCO", "TW", "TWD", "Vacated Source", "Industrials", False),     # EXCHANGEd -> VCN
     ("VCN", "TW", "TWD", "Vacated Successor", "Industrials", False),  # carries E24's flag
     ("ORP", "TW", "TWD", "Orphan Payer", "Industrials", False),       # never held (legacy row)
+    # ---- US equity options (spec 2026-10-09). The CONTRACTS are never seeded: an option is
+    # created from its OCC symbol by the trade door (OPT-D7), so registration is part of what
+    # the scenario exercises. OPA is the one REGISTERED underlying: the sold-put assignment's
+    # and the call exercise's stock legs buy it (the pair refuses an unregistered
+    # underlying), and OPT-D17 shows its
+    # price beside the strike of every open OPA contract. OPB / OPC / OPD stay unregistered —
+    # "the underlying need not be registered" is the other half of OPT-D7.
+    ("OPA", "US", "USD", "Option Underlying A", "Technology", False),
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -109,6 +117,12 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # price is what Y3's "the carrier keeps its value" is measured with; VCO and ORP are
     # never held at a checkpoint and are priced for fixture uniformity.
     "VCO": D("52"), "VCN": D("54"), "ORP": D("30"),
+    # The options block's one registered underlying. Held only after the call exercise (100 at
+    # the 42 strike) and the sold-put assignment (200 at the 40 strike), so this price values
+    # those legs AND is OPT-D17's
+    # 「標的現價」 beside the strike of every open OPA contract. Contracts are NEVER priced
+    # here: an option is valued at its last ledger trade (spec §5), never at a stored quote.
+    "OPA": D("45"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -191,7 +205,8 @@ class Ops:
         finally:
             conn.close()
 
-    def _fee_check(self, txn_id, account_id, side, qty, price, symbol, d, daytrade=False):
+    def _fee_check(self, txn_id, account_id, side, qty, price, symbol, d, daytrade=False,
+                   *, supplied_fee=None, supplied_tax=None, close_reason=None):
         # is_etf + market come from the instrument REGISTRY (found-bug: entry paths must honour
         # is_etf, not default False); daytrade is the per-transaction TW same-day flag (0.15%).
         # Batch B: the merged dual-market moomoo_my routes fees by the instrument's market (US ->
@@ -199,6 +214,11 @@ class Ops:
         reg = {i[0]: i for i in INSTRUMENTS}
         is_etf = bool(reg[symbol][5]) if symbol in reg else False
         market = reg[symbol][1] if symbol in reg else None
+        # Options (spec §3): a contract is never in the fixture registry — it is registered from
+        # its OCC symbol by the trade door — and is always US / USD, never an ETF.
+        option = O.parse_occ(symbol) is not None
+        if option:
+            market, is_etf = "US", False
         # FE-D2: the Moomoo US MY stamp needs the trade-date USD/MYR rate. It applies only when
         # the (account, market)-resolved rule is moomoo_us (a moomoo_my US trade). Resolve it from
         # the harness-owned seeded schedule (on-or-before), mirroring the app's caller seam.
@@ -209,9 +229,18 @@ class Ops:
             except KeyError:
                 stamp_fx = None
         fee, tax, notes = O.fee_tax(account_id, side.upper(), dec(qty), dec(price),
-                                    is_etf, daytrade, stamp_fx, market=market)
+                                    is_etf, daytrade, stamp_fx, market=market,
+                                    is_option=option, close_reason=close_reason)
+        # A statement-supplied fee / tax WINS over the engine (OPT-D6; the manual door's
+        # override and the CSV `fee` column) — on a rule set with no per-contract rate it is
+        # the ONLY answer (the engine returned None above).
+        if supplied_fee is not None:
+            fee = dec(supplied_fee)
+        if supplied_tax is not None:
+            tax = dec(supplied_tax)
         got_fee, got_tax = C.read_fee_tax_from_db(self.db, txn_id)
-        tag = "daytrade" if daytrade else ("etf" if is_etf else "normal")
+        tag = ("daytrade" if daytrade else "etf" if is_etf else
+               f"close:{close_reason}" if close_reason else "option" if option else "normal")
         self.ev.check("fee_engine.fee",
                       f"{account_id}/{symbol} {side} {qty}@{price} id={txn_id} [{tag}]",
                       fee, got_fee, self.phase)
@@ -251,6 +280,83 @@ class Ops:
         if txn_id and fee_check:
             self._fee_check(txn_id, account_id, side, shares, price, symbol, d,
                             daytrade=daytrade)
+        return resp
+
+    # ---- US equity options (spec 2026-10-09) -------------------------------------------
+    def option_trade(self, account_id, symbol, d, intent, contracts, price, *, fee=None,
+                     expect_status=201, fee_check=True):
+        """One option-mode manual entry (spec §4.2 / §8): ``option_intent`` (STO / BTC / BTO /
+        STC) + ``contracts`` (口數) — the browser never sends ``shares`` or ``side``; the
+        server converts 口數 to share-equivalents and derives the side (and STO's declared
+        short) from the intent. ``fee`` is the statement fee (``fee_override``), REQUIRED on
+        a rule set with no per-contract rate (OPT-D6)."""
+        body = {"account_id": account_id, "symbol": symbol, "date": d,
+                "option_intent": intent, "contracts": str(contracts), "price": str(price)}
+        if fee is not None:
+            body["fee_override"] = str(fee)
+        r = self.api.post("/api/input/manual/commit", body)
+        resp = {"status": r.status_code, "json": _json(r)}
+        self.ev.op(self.phase, "API", f"option.{intent}", body, resp,
+                   note=f"{account_id} {symbol}")
+        if resp["status"] != expect_status:
+            return resp
+        txn_id = resp["json"].get("txn_id") if isinstance(resp.get("json"), dict) else None
+        if txn_id and fee_check:
+            side = "SELL" if intent in ("STO", "STC") else "BUY"
+            self._fee_check(txn_id, account_id, side, D(contracts) * O.OPTION_MULTIPLIER,
+                            price, symbol, d, supplied_fee=fee)
+        return resp
+
+    def option_close(self, account_id, symbol, d, reason, contracts, *, stock_price=None,
+                     expect_status=201):
+        """A §4.1 price-0 closing row through the manual door — 到期作廢 (``expired``) or
+        被指派／履約 (``assigned`` / ``exercised``, which writes the option close AND the stock
+        leg in one transaction). Side and price are the SERVER's (derived from the position);
+        the fee and tax of the close row are 0 / 0 without the engine (spec §4.2)."""
+        body = {"account_id": account_id, "symbol": symbol, "date": d,
+                "close_reason": reason, "contracts": str(contracts)}
+        if stock_price is not None:
+            body["stock_price"] = str(stock_price)
+        r = self.api.post("/api/input/manual/commit", body)
+        resp = {"status": r.status_code, "json": _json(r)}
+        self.ev.op(self.phase, "API", f"option.close.{reason}", body, resp,
+                   note=f"{account_id} {symbol}")
+        if resp["status"] != expect_status or not isinstance(resp.get("json"), dict):
+            return resp
+        j = resp["json"]
+        ids = j.get("txn_ids") or [j.get("txn_id")]
+        qty = D(contracts) * O.OPTION_MULTIPLIER
+        terms = O.parse_occ(symbol)
+        conn = sqlite3.connect(str(self.db))
+        try:
+            side_of = {i: conn.execute("SELECT side FROM transactions WHERE id=?",
+                                       (i,)).fetchone()[0] for i in ids if i}
+        finally:
+            conn.close()
+        if ids and ids[0]:
+            self._fee_check(ids[0], account_id, side_of[ids[0]], qty, "0", symbol, d,
+                            close_reason=reason)
+        if len(ids) > 1 and ids[1] and terms is not None:
+            # The stock leg: the underlying at the strike (or the given stock price), shares =
+            # contracts × 100, fee by the ENGINE like any stock trade (spec §4.2).
+            self._fee_check(ids[1], account_id, side_of[ids[1]], qty,
+                            stock_price if stock_price is not None else terms.strike,
+                            terms.underlying, d)
+        return resp
+
+    def option_adjust(self, account_id, d, from_symbol, to_symbol, ratio_to, *,
+                      expect_status=201):
+        """``OPTION_ADJUST`` through the REAL corporate-action door (spec §4.3), not the DB
+        fixture the equity actions above use: ``ratio_from`` is always 1 (OPT-D16), the
+        destination contract is registered from its symbol by the door (E10)."""
+        body = {"account_id": account_id, "date": d, "kind": "OPTION_ADJUST",
+                "from_symbol": from_symbol, "to_symbol": to_symbol,
+                "ratio_to": str(ratio_to), "ratio_from": "1", "ack_warnings": True,
+                "note": "stress: standard option contract adjustment"}
+        r = self.api.post("/api/ledgers/corporate-actions", body)
+        resp = {"status": r.status_code, "json": _json(r)}
+        self.ev.op(self.phase, "API", "corporate_action.OPTION_ADJUST", body, resp,
+                   note=f"{account_id} {from_symbol}->{to_symbol}")
         return resp
 
     def daytrade_csv(self, account_id, symbol, d, shares, buy_price, sell_price):
@@ -530,11 +636,26 @@ def _day_incomplete(res_d, day: date) -> bool:
     """
     if res_d.refused_dividends:
         return True
+    if res_d.refused_closes:
+        # Options spec §4.4: a refused close is a RECORD "like orphan_dividends" — XIRR and
+        # B are withheld while it stands, B through the same day rule as K3: every day from
+        # the close's own date is incomplete (`res_d` holds only closes dated on or before
+        # *day*), whether or not its position is still held. The value stays judgeable — the
+        # refused row booked nothing, so every share is right (Y3's reading).
+        return True
     for h in res_d.holdings.values():
         if h.shares == O.ZERO:
             continue
-        if h.oversold or h.unbookable_dividend or h.unbookable_action:
+        # Options spec §4.4: every reader of unbookable_action reads unbookable_close the
+        # same way (timeseries.py named among them).
+        if (h.oversold or h.unbookable_dividend or h.unbookable_action
+                or h.unbookable_close):
             return True
+        if O.is_option(h.symbol):
+            # Options spec §5 / R3: the trend EXCLUDES an open contract's value "without
+            # marking the day incomplete" — it is never priced from `prices`, so it can
+            # never be the unpriced position below.
+            continue
         if h.symbol not in PRICES:
             # No seeded close AT ALL. Written as a derivation rather than assumed: without
             # this a future scenario symbol with no price would CRASH this family on the
@@ -562,8 +683,8 @@ def _day_value_judgeable(res_d) -> bool:
     unpriced symbol cannot be valued either (see :func:`_day_incomplete`).
     """
     for h in res_d.holdings.values():
-        if h.shares == O.ZERO:
-            continue
+        if h.shares == O.ZERO or O.is_option(h.symbol):
+            continue      # R3: an open contract's value is not in the trend at all
         if h.oversold or h.unbookable_action or h.symbol not in PRICES:
             return False
     return True
@@ -649,7 +770,10 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
             continue
         total = O.ZERO
         for h in res_d.holdings.values():
-            if h.shares == O.ZERO:
+            if h.shares == O.ZERO or O.is_option(h.symbol):
+                # R3 / OPT-D4: the trend EXCLUDES an open contract's value (its premium is in
+                # the cash series, so net worth is overstated by a sold contract's value and
+                # understated by a bought one's — the note the options block carries).
                 continue
             # The close for THIS day, as traded on it. `_ensure_daily_prices` seeded one
             # per symbol per day at exactly this value, so the app reads the same number and
@@ -695,11 +819,20 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     res = O.replay(facts)
     sp = spots()
     prices = dict(PRICES)
-    # Any negative-share position (賣超 OR an open declared short) gates the blended
+    # Options (spec §5, R2): an open contract is valued at its LAST LEDGER TRADE, never at a
+    # stored quote — the oracle's own derivation, keyed by symbol like every other price.
+    for sym, (px, _on) in O.option_prices(facts, as_of).items():
+        prices[sym] = px
+    # Any negative-share STOCK position (賣超 OR an open declared short) gates the blended
     # KPI/XIRR comparison off at this checkpoint: the app computes them differently in
     # that state (oversold -> not computable; short -> negative terminal value) and the
     # scenario always closes the short before the final full-KPI reconcile.
-    oversold = any(h.shares < O.ZERO for h in res.holdings.values())
+    # An open SOLD OPTION does not gate it (OPT-D4): it is a priced point-in-time position
+    # whose negative value KPI 總市值 / 總報酬 / XIRR must carry — reconciling them while one is
+    # open is the point. Only an option 賣超 (no honest basis) would gate.
+    oversold = any((h.shares < O.ZERO and not O.is_option(h.symbol))
+                   or (h.oversold and O.is_option(h.symbol))
+                   for h in res.holdings.values())
     # YQ1 (owner ruling 2026-10-05): the TREND family has its own, narrower gate. A declared
     # short is a real, priced position the series carries (2026-07-31), and a refused
     # dividend on it keeps that value (Y3) — so the trend is judged while a declared short is
@@ -718,11 +851,14 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
               {"refusals": [f"{c}: {s}" for c, s in res.action_refusals]})
 
     # ---- A. Holdings cost basis (per account+symbol) ----
+    # Options spec §6.2 / OPT-D5: `holdings` is STOCK-ONLY — a contract is reconciled in the
+    # `options` block (section O below), never as a holdings row.
+    stock_holdings = {k: h for k, h in res.holdings.items() if not O.is_option(k[1])}
     app_hold = {(h["account_id"], h["symbol"]): h for h in dash["holdings"]}
-    orc_keys = set(res.holdings.keys())
+    orc_keys = set(stock_holdings.keys())
     ev.check("holdings.keyset", label, sorted("|".join(k) for k in orc_keys),
              sorted("|".join(k) for k in app_hold), phase)
-    for key, h in res.holdings.items():
+    for key, h in stock_holdings.items():
         a = app_hold.get(key)
         if a is None:
             ev.check("holdings.present", "|".join(key), True, False, phase)
@@ -761,9 +897,11 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
                          a.get("unrealized_pct"), phase)
 
     # ---- B. Realized rows (dashboard + CSV) ----
+    # Stock-only (spec §6.2): an option's realized rows live in `options.realized.rows`.
+    stock_realized = [rr for rr in res.realized_rows if not O.is_option(rr.symbol)]
     app_real = dash["realized"]["rows"]
-    ev.check("realized.count", label, len(res.realized_rows), len(app_real), phase)
-    for i, rr in enumerate(res.realized_rows):
+    ev.check("realized.count", label, len(stock_realized), len(app_real), phase)
+    for i, rr in enumerate(stock_realized):
         if i >= len(app_real):
             break
         a = app_real[i]
@@ -791,6 +929,9 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     # ---- D. FX pools + realized/unrealized ----
     _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation)
 
+    # ---- O. The `options` block (spec §7.1) — presence, keys, open contracts, realized ----
+    _reconcile_options(ev, dash, raw, facts, res, prices, sp, as_of, phase, valuation)
+
     # ---- E. KPI totals + XIRR scalar ----
     if valuation and not oversold:
         _reconcile_kpis(ev, res, dash, facts, prices, sp, phase)
@@ -815,6 +956,13 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     # ---- H. Print reports (HTML) ----
     if reports:
         _reconcile_reports(ev, api, res, prices, sp, phase, valuation)
+
+    # ---- I. Registry ↔ symbol (options spec §3): asset_type is set FROM the parse, so the
+    # two never disagree. The oracle parses with its OWN parser and checks the stored fact.
+    for sym, inst in sorted(raw.instruments.items()):
+        want = "option" if O.is_option(sym) else "stock"
+        if want == "option" or inst.asset_type != "stock":
+            ev.check("instrument.asset_type_matches_symbol", sym, want, inst.asset_type, phase)
 
     return res
 
@@ -907,8 +1055,9 @@ def _reconcile_integrity(ev, res, facts, phase):
     for check, scope in findings:
         ev.check(check, scope, "clean", "VIOLATION", phase)
     if not findings:
-        ev.check("ledger.integrity", "no negative position / orphan sell", "clean", "clean",
-                 phase)
+        ev.check("ledger.integrity",
+                 "no negative position / orphan sell / price-0 row outside a close row",
+                 "clean", "clean", phase)
 
 
 def _reconcile_fx(ev, res, dash, facts, prices, sp, phase, valuation):
@@ -971,6 +1120,12 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
         for (acct, sym), h in res.holdings.items():
             if acct == aid and h.quote_ccy == settle and h.shares > O.ZERO and sym in prices:
                 stock_val += prices[sym] * h.shares
+            elif (acct == aid and h.quote_ccy == settle and O.is_option(sym)
+                  and h.shares != O.ZERO and sym in prices):
+                # OPT-D4: the FX pool is a POINT-IN-TIME figure, so an open contract's value at
+                # its last trade price is part of the foreign exposure — on its SIGNED quantity
+                # (a sold contract is a liability that offsets the premium cash it brought in).
+                stock_val += prices[sym] * h.shares
         fcash = res.fx_foreign_cash.get(aid, O.ZERO)
         # spec 2026-07-30 F2/F3: one coverage ratio scales the WHOLE foreign exposure
         # (cash AND stocks), because avg came from the basis-known population only.
@@ -998,7 +1153,10 @@ def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
         unreal_total += amt if ccy == REPORTING else amt * sp.rate(ccy, REPORTING)
     mv_total = O.ZERO
     for (_acct, sym), h in res.holdings.items():
-        if h.shares > O.ZERO and sym in prices:
+        # OPT-D4 / §6.2: KPI 總市值 = the stock grand subtotal + options.market_value — an open
+        # contract counts on its SIGNED quantity (a sold contract lowers it).
+        counted = (h.shares > O.ZERO) or (O.is_option(sym) and h.shares != O.ZERO)
+        if counted and sym in prices:
             v = prices[sym] * h.shares
             mv_total += v if h.quote_ccy == REPORTING else v * sp.rate(h.quote_ccy, REPORTING)
     # total_return mirrors returns.total_return: per-ccy (realized+unrealized) THEN convert
@@ -1023,12 +1181,21 @@ def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
     # replay as at the app's as_of — which `res` is). B's VALUE is pinned through
     # `trend.total_value` / `trend.net_invested` at the last point; this pins whether it exists.
     as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
-    b_withheld = _day_incomplete(res, as_of)
+    # Options spec §4.4: "XIRR and B are withheld whenever Book.refused_closes is non-empty —
+    # the record, like orphan_dividends". A RECORD, so it holds on a flat carrier too.
+    b_withheld = _day_incomplete(res, as_of) or bool(res.refused_closes)
     ev.check("kpi.fx_complete_withheld", "TWD", b_withheld,
              kpis.get("total_return_fx_complete") is None, phase)
     ev.check("kpi.trading_financing_cost", "TWD",
              None if b_withheld else O.trading_financing_cost(facts, REPORTING, fx_on_resolver()),
              kpis.get("trading_financing_cost"), phase)
+    # OPT-D20: while an option position is open on the valuation day, B excludes its value
+    # (R3) and A includes its unrealized, so B − A would absorb the option's value as an "FX
+    # effect" — 本金匯率效果 is WITHHELD. (Its value when no option is open is outside this
+    # family; only the withholding is the options rule.)
+    if any(O.is_option(h.symbol) and h.shares != O.ZERO for h in res.holdings.values()):
+        ev.check("kpi.principal_fx_withheld_option_open", "TWD", None,
+                 kpis.get("principal_fx_effect"), phase)
 
 
 def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
@@ -1058,6 +1225,19 @@ def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
             ev.check("xirr.orphan_reason_names_row", f"{acct}/{sym}@{eff.isoformat()}", True,
                      (sym in reason and acct in reason and eff.isoformat() in reason), phase)
         return
+    if res.refused_closes:
+        # Options spec §4.4: a close the replay could not book withholds XIRR "with a reason
+        # naming the row". The row is named by its contract — the OCC code or its display
+        # name — and its date.
+        ev.check("xirr.withheld_for_refused_close", "TWD", None, app_xirr, phase)
+        reason = (dash.get("freshness") or {}).get("xirr_unavailable_reason") or ""
+        for rc in res.refused_closes:
+            terms = O.parse_occ(rc.symbol)
+            named = rc.symbol in reason or (terms is not None and terms.name in reason)
+            ev.check("xirr.refused_close_reason_names_row",
+                     f"{rc.account_id}/{rc.symbol}@{rc.d.isoformat()}", True,
+                     named and rc.d.isoformat() in reason, phase)
+        return
     try:
         dates, amounts = O.xirr_cashflows(res, facts, prices, REPORTING, fx_on, fx_now, as_of)
     except KeyError:
@@ -1068,11 +1248,310 @@ def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
     ev.check_close("kpi.xirr", "TWD", orc, app_xirr, O.XIRR_TOL, phase)
 
 
+# ---------------------------------------------------------------- options (spec 2026-10-09)
+#: Spec §7.1 — every new dashboard wire field lives inside `options`, and these are its keys.
+OPTIONS_BLOCK_KEYS = frozenset({
+    "open", "obligation_subtotals", "market_value", "unrealized", "refused_closes",
+    "realized", "trend_excludes_value", "note", "principal_fx_note"})
+#: Spec §7.1 `open[]` (`underlying_price` / `_date` are "omitted when unpriced", so they are
+#: checked by value on a registered underlying, not by presence).
+OPTION_OPEN_ROW_KEYS = frozenset({
+    "account_id", "symbol", "contract", "underlying", "expiry", "days_to_expiry", "strike",
+    "right", "direction", "contracts", "share_equivalents", "average_premium", "premium_total",
+    "last_price", "last_price_date", "market_value", "unrealized", "obligation", "past_expiry",
+    "unbookable_close"})
+OPTION_REALIZED_KEYS = frozenset({
+    "rows", "by_contract", "by_year", "by_underlying", "realized_total"})
+#: Spec §3 `RefusedClose`.
+REFUSED_CLOSE_KEYS = frozenset({
+    "txn_id", "account_id", "symbol", "date", "side", "quantity", "close_reason", "reason",
+    "remedy"})
+#: Spec §5 (R3) — the trend note, verbatim.
+OPTION_TREND_NOTE = ("走勢不含未平倉選擇權的市值；權利金已計入現金，未平倉期間淨值高估（賣方）"
+                     "或低估（買方）該部位市值")
+#: Spec §5 (OPT-D20) — the 本金匯率效果 note, verbatim.
+OPTION_PRINCIPAL_FX_NOTE = ("有未平倉選擇權時，含匯兌總損益不含其市值而資產損益含其未實現，"
+                            "兩者相減無法拆出本金匯率效果；平倉或到期後恢復顯示")
+#: Spec §4.4 — the remedy every surface prints beside a refused close, verbatim.
+REFUSED_CLOSE_REMEDY = "刪除該筆到期作廢／被指派／履約列，或補回被刪除的交易"
+
+
+def _money(block: dict | None) -> tuple[dict, object]:
+    """``{by_currency, reporting}`` -> (non-zero by_currency as Decimals, reporting)."""
+    block = block or {}
+    by = {c: dec(v) for c, v in (block.get("by_currency") or {}).items() if dec(v) != O.ZERO}
+    return by, block.get("reporting")
+
+
+def _cv(x):
+    """Canonical form for a STRUCTURED comparison: ``Evidence.check`` compares a list by its
+    string, where ``Decimal('281.90')`` and ``Decimal('281.9')`` differ although the money is
+    equal. Every Decimal inside becomes its normalized fixed-point text, nothing else moves —
+    exact-value comparison is kept, only the spelling of a trailing zero is not compared."""
+    if isinstance(x, Decimal):
+        return format(x.normalize(), "f") if x != O.ZERO else "0"
+    if isinstance(x, (list, tuple)):
+        return [_cv(v) for v in x]
+    return x
+
+
+def _reconcile_options(ev, dash, raw, facts, res, prices, sp, as_of, phase, valuation):
+    """The `options` block (spec §7.1) against the oracle's own replay — section O.
+
+    What it proves, each derived from the SPEC by this harness (never read off the app):
+
+    * presence — the block exists iff the UNCUT ledger names an option (a transaction or an
+      action), and is otherwise absent from the payload (the golden is untouched, D38);
+    * `open[]` — every non-zero option position: terms from the oracle's own OCC parse,
+      direction, 口數, last-trade price and its date (§5, incl. the predecessor ÷ ratio after
+      an `OPTION_ADJUST`), market value and unrealized on the SIGNED quantity, the sold put's
+      履約義務, `past_expiry`, and OPT-D17's underlying price on a registered underlying;
+    * `realized` — the replay's option rows in emission order with their close reason and
+      contract name, and the four roll-ups (total, by contract, by year, by underlying);
+    * `refused_closes` (§4.4) with the verbatim remedy;
+    * the KPI decomposition 「其中選擇權」: KPI − the block's part == the oracle's STOCK part,
+      for 總市值 (the spec's own identity), 未實現 and 已實現;
+    * R3 / OPT-D20: `trend_excludes_value` + its note, and `principal_fx_note`.
+    """
+    named = (any(O.is_option(t.symbol) for t in raw.txs)
+             or any(a.kind == O.OPTION_ADJUST or O.is_option(a.from_symbol)
+                    or O.is_option(a.to_symbol) for a in raw.actions))
+    ev.check("options.block_present", "the uncut ledger names an option contract",
+             named, "options" in dash, phase)
+    block = dash.get("options")
+    if not named or not isinstance(block, dict):
+        return
+    ev.check("options.block_keys", "spec §7.1", sorted(OPTIONS_BLOCK_KEYS), sorted(block), phase)
+
+    open_pos = {k: h for k, h in res.holdings.items() if O.is_option(k[1])}
+    priced = O.option_prices(facts, as_of)
+    app_open = {(r.get("account_id"), r.get("symbol")): r for r in block.get("open") or []}
+    ev.check("options.open.keyset", "open contracts", sorted("|".join(k) for k in open_pos),
+             sorted(f"{a}|{s}" for a, s in app_open), phase)
+    obligations: dict[tuple[str, str], Decimal] = {}
+    mv_by: dict[str, Decimal] = {}
+    unreal_by: dict[str, Decimal] = {}
+    for key, h in sorted(open_pos.items()):
+        terms = O.parse_occ(key[1])
+        a = app_open.get(key)
+        sc = "|".join(key)
+        if a is None or terms is None:
+            ev.check("options.open.present", sc, True, False, phase)
+            continue
+        ev.check("options.open.row_keys", sc, [], sorted(OPTION_OPEN_ROW_KEYS - set(a)), phase)
+        short = h.shares < O.ZERO
+        n_contracts = abs(h.shares) / O.OPTION_MULTIPLIER
+        ev.check("options.open.contract", sc, terms.name, a.get("contract"), phase)
+        ev.check("options.open.underlying", sc, terms.underlying, a.get("underlying"), phase)
+        ev.check("options.open.expiry", sc, terms.expiry.isoformat(), a.get("expiry"), phase)
+        ev.check("options.open.strike", sc, terms.strike, a.get("strike"), phase)
+        ev.check("options.open.right", sc, terms.right, a.get("right"), phase)
+        ev.check("options.open.direction", sc, "short" if short else "long",
+                 a.get("direction"), phase)
+        ev.check("options.open.contracts", sc, n_contracts, a.get("contracts"), phase)
+        ev.check("options.open.days_to_expiry", sc, (terms.expiry - as_of).days,
+                 a.get("days_to_expiry"), phase)
+        ev.check("options.open.past_expiry", sc, terms.expiry < as_of,
+                 a.get("past_expiry"), phase)
+        ev.check("options.open.unbookable_close", sc, h.unbookable_close,
+                 a.get("unbookable_close"), phase)
+        # The spec names these three without a sign convention; the MAGNITUDE is the money
+        # fact (premium per share / total premium of the position, all-in, net of fees for a
+        # short), so the magnitude is what is asserted. The sign-carrying figures (market
+        # value, unrealized) are asserted signed below.
+        ev.check("options.open.share_equivalents_abs", sc, abs(h.shares),
+                 abs(dec(a["share_equivalents"])) if a.get("share_equivalents") is not None
+                 else None, phase)
+        ev.check("options.open.premium_total_abs", sc, abs(h.adjusted_total),
+                 abs(dec(a["premium_total"])) if a.get("premium_total") is not None
+                 else None, phase)
+        ev.check("options.open.average_premium_abs", sc, abs(h.adjusted_total / h.shares),
+                 abs(dec(a["average_premium"])) if a.get("average_premium") is not None
+                 else None, phase)
+        # Spec §7.1 (final review R1-M1 / N2): a 待釐清 contract (賣超 / a refused close) states
+        # no price, no value and no 履約義務 — its count is the thing in question.
+        unresolved = h.oversold or h.unbookable_close
+        obligation = (terms.strike * O.OPTION_MULTIPLIER * n_contracts
+                      if short and terms.right == "P" and not unresolved else None)
+        ev.check("options.open.obligation", sc, obligation, a.get("obligation"), phase)
+        if obligation is not None:
+            k2 = (key[0], h.quote_ccy)
+            obligations[k2] = obligations.get(k2, O.ZERO) + obligation
+        # OPT-D17: the underlying's latest stored price, dated, when it is registered AND
+        # priced — in this fixture that is the seeded series, whose last row is ASOF.
+        u_px = PRICES.get(terms.underlying)
+        ev.check("options.open.underlying_price", sc, u_px, a.get("underlying_price"), phase)
+        ev.check("options.open.underlying_price_date", sc,
+                 ASOF.isoformat() if u_px is not None else None,
+                 a.get("underlying_price_date"), phase)
+        if valuation and unresolved:
+            for fld in ("last_price", "last_price_date", "market_value", "unrealized"):
+                ev.check(f"options.open.{fld}", f"{sc} (待釐清)", None, a.get(fld), phase)
+        elif valuation and key[1] in priced:
+            p, on = priced[key[1]]
+            ev.check("options.open.last_price", sc, p, a.get("last_price"), phase)
+            ev.check("options.open.last_price_date", sc, on.isoformat(),
+                     a.get("last_price_date"), phase)
+            mv = p * h.shares
+            unreal = (p - h.adjusted_avg) * h.shares
+            ev.check("options.open.market_value", sc, mv, a.get("market_value"), phase)
+            ev.check("options.open.unrealized", sc, unreal, a.get("unrealized"), phase)
+            mv_by[h.quote_ccy] = mv_by.get(h.quote_ccy, O.ZERO) + mv
+            unreal_by[h.quote_ccy] = unreal_by.get(h.quote_ccy, O.ZERO) + unreal
+
+    app_obl = {(r.get("account_id"), r.get("ccy")): dec(r["amount"])
+               for r in block.get("obligation_subtotals") or [] if dec(r["amount"]) != O.ZERO}
+    ev.check("options.obligation_subtotals", "per account",
+             _cv(sorted((f"{k[0]}|{k[1]}", v) for k, v in obligations.items())),
+             _cv(sorted((f"{k[0]}|{k[1]}", v) for k, v in app_obl.items())), phase)
+
+    def to_rep(by: dict[str, Decimal]) -> Decimal:
+        return sum((v if c == REPORTING else v * sp.rate(c, REPORTING) for c, v in by.items()),
+                   O.ZERO)
+
+    if valuation:
+        for name, exp_by in (("market_value", mv_by), ("unrealized", unreal_by)):
+            got_by, got_rep = _money(block.get(name))
+            exp_nz = {c: v for c, v in exp_by.items() if v != O.ZERO}
+            ev.check(f"options.{name}.by_currency", "block", _cv(sorted(exp_nz.items())),
+                     _cv(sorted(got_by.items())), phase)
+            if open_pos:
+                # Whenever a contract is open — a total that happens to net to 0 (a sold
+                # contract's value against a bought one's) is still a figure to agree on.
+                ev.check(f"options.{name}.reporting", "block", to_rep(exp_by), got_rep, phase)
+
+    # ---- realized: the replay's own option rows, emission order (spec §7.1) ----
+    rblock = block.get("realized") or {}
+    ev.check("options.realized.keys", "spec §7.1", sorted(OPTION_REALIZED_KEYS),
+             sorted(rblock), phase)
+    orc_rows = [rr for rr in res.realized_rows if O.is_option(rr.symbol)]
+    app_rows = rblock.get("rows") or []
+    ev.check("options.realized.count", "rows", len(orc_rows), len(app_rows), phase)
+    for i, rr in enumerate(orc_rows):
+        if i >= len(app_rows):
+            break
+        a = app_rows[i]
+        sc = f"{rr.account_id}/{rr.symbol}@{rr.sell_date} #{i}"
+        ev.check("options.realized.symbol", sc, rr.symbol, a.get("symbol"), phase)
+        ev.check("options.realized.sell_date", sc, rr.sell_date.isoformat(),
+                 a.get("sell_date"), phase)
+        ev.check("options.realized.shares_sold", sc, rr.shares_sold, a.get("shares_sold"), phase)
+        ev.check("options.realized.proceeds_net", sc, rr.proceeds_net,
+                 a.get("proceeds_net"), phase)
+        ev.check("options.realized.adjusted_removed", sc, rr.adjusted_cost_removed,
+                 a.get("adjusted_cost_removed"), phase)
+        ev.check("options.realized.original_removed", sc, rr.original_cost_removed,
+                 a.get("original_cost_removed"), phase)
+        ev.check("options.realized.realized", sc, rr.realized, a.get("realized"), phase)
+        ev.check("options.realized.kind", sc, rr.kind, a.get("kind"), phase)
+        ev.check("options.realized.close_reason", sc, rr.close_reason,
+                 a.get("close_reason"), phase)
+        terms = O.parse_occ(rr.symbol)
+        ev.check("options.realized.contract", sc, terms.name if terms else None,
+                 a.get("contract"), phase)
+    total_by: dict[str, Decimal] = {}
+    by_contract: dict[str, Decimal] = {}
+    by_year: dict[str, dict[str, Decimal]] = {}
+    by_underlying: dict[str, dict[str, Decimal]] = {}
+    for rr in orc_rows:
+        terms = O.parse_occ(rr.symbol)
+        total_by[rr.quote_ccy] = total_by.get(rr.quote_ccy, O.ZERO) + rr.realized
+        ck = f"{rr.account_id}|{rr.symbol}"
+        by_contract[ck] = by_contract.get(ck, O.ZERO) + rr.realized
+        yb = by_year.setdefault(str(rr.sell_date.year), {})
+        yb[rr.quote_ccy] = yb.get(rr.quote_ccy, O.ZERO) + rr.realized
+        ub = by_underlying.setdefault(terms.underlying if terms else rr.symbol, {})
+        ub[rr.quote_ccy] = ub.get(rr.quote_ccy, O.ZERO) + rr.realized
+    got_by, got_rep = _money(rblock.get("realized_total"))
+    exp_nz = {c: v for c, v in total_by.items() if v != O.ZERO}
+    ev.check("options.realized_total.by_currency", "block", _cv(sorted(exp_nz.items())),
+             _cv(sorted(got_by.items())), phase)
+    if orc_rows:
+        ev.check("options.realized_total.reporting", "block", to_rep(total_by), got_rep, phase)
+    ev.check("options.realized.by_contract", "realized per contract",
+             _cv(sorted(by_contract.items())),
+             _cv(sorted((f"{r.get('account_id')}|{r.get('symbol')}", dec(r["realized"]))
+                        for r in rblock.get("by_contract") or [])), phase)
+    ev.check("options.realized.by_year", "by_currency per year",
+             _cv(sorted((y, sorted(v.items())) for y, v in by_year.items())),
+             _cv(sorted((str(r.get("year")), sorted(_money(r)[0].items()))
+                        for r in rblock.get("by_year") or [])), phase)
+    ev.check("options.realized.by_underlying", "by_currency per underlying",
+             _cv(sorted((u, sorted(v.items())) for u, v in by_underlying.items())),
+             _cv(sorted((str(r.get("underlying")), sorted(_money(r)[0].items()))
+                        for r in rblock.get("by_underlying") or [])), phase)
+
+    # ---- §4.4 refused closes (the record) ----
+    app_ref = block.get("refused_closes") or []
+    ev.check("options.refused_closes", "§4.4 record",
+             _cv([(rc.txn_id, rc.account_id, rc.symbol, rc.d.isoformat(), rc.side,
+                   rc.quantity, rc.close_reason) for rc in res.refused_closes]),
+             _cv([(r.get("txn_id"), r.get("account_id"), r.get("symbol"), r.get("date"),
+                   r.get("side"),
+                   dec(r["quantity"]) if r.get("quantity") is not None else None,
+                   r.get("close_reason")) for r in app_ref]), phase)
+    for r in app_ref:
+        sc = f"id={r.get('txn_id')}"
+        ev.check("options.refused_close.keys", sc, [], sorted(REFUSED_CLOSE_KEYS - set(r)), phase)
+        ev.check("options.refused_close.remedy", sc, REFUSED_CLOSE_REMEDY, r.get("remedy"), phase)
+
+    # ---- KPI 「其中選擇權」: the KPI minus the block's part is the STOCK part ----
+    kpis = dash.get("kpis") or {}
+    stock_gate = any(h.shares < O.ZERO and not O.is_option(h.symbol)
+                     for h in res.holdings.values())
+    if valuation and not stock_gate and kpis.get("total_market_value") is not None:
+        stock_mv = O.ZERO
+        stock_unreal: dict[str, Decimal] = {}
+        for (_acct, sym), h in res.holdings.items():
+            if O.is_option(sym) or h.shares <= O.ZERO or sym not in prices:
+                continue
+            v = prices[sym] * h.shares
+            stock_mv += v if h.quote_ccy == REPORTING else v * sp.rate(h.quote_ccy, REPORTING)
+            stock_unreal[h.quote_ccy] = (stock_unreal.get(h.quote_ccy, O.ZERO)
+                                         + (prices[sym] - h.adjusted_avg) * h.shares)
+        # check_rel, not check: KPI − part is a SUBTRACTION of two app figures each rounded at
+        # 28 significant digits; the operands are each pinned exactly elsewhere (kpi.* and
+        # options.*.reporting), so only the association can differ here (Evidence.ULP_REL_TOL).
+        opt_mv = _money(block.get("market_value"))[1]
+        ev.check_rel("options.kpi_total_mv_minus_options_is_stock_part", "其中選擇權 總市值",
+                     stock_mv, dec(kpis["total_market_value"]) - dec(opt_mv or "0"), phase)
+        opt_un = _money(block.get("unrealized"))[1]
+        if kpis.get("unrealized_total") is not None:
+            ev.check_rel("options.kpi_unrealized_minus_options_is_stock_part",
+                         "其中選擇權 未實現", to_rep(stock_unreal),
+                         dec(kpis["unrealized_total"]) - dec(opt_un or "0"), phase)
+    if kpis.get("realized_total") is not None:
+        stock_real: dict[str, Decimal] = {}
+        for rr in res.realized_rows:
+            if not O.is_option(rr.symbol):
+                stock_real[rr.quote_ccy] = stock_real.get(rr.quote_ccy, O.ZERO) + rr.realized
+        opt_real = _money(rblock.get("realized_total"))[1]
+        ev.check_rel("options.kpi_realized_minus_options_is_stock_part", "其中選擇權 已實現",
+                     to_rep(stock_real), dec(kpis["realized_total"]) - dec(opt_real or "0"),
+                     phase)
+
+    # ---- R3 / OPT-D20 ----
+    pts = ((dash.get("trend") or {}).get("points")) or []
+    if pts:
+        first = date.fromisoformat(min(p["date"] for p in pts))
+        last = date.fromisoformat(max(p["date"] for p in pts))
+        skips = O.trend_skips_an_option(raw, first, last)
+        ev.check("options.trend_excludes_value", "R3", skips,
+                 block.get("trend_excludes_value"), phase)
+        ev.check("options.note", "R3", OPTION_TREND_NOTE if skips else None,
+                 block.get("note"), phase)
+    is_open = any(h.shares != O.ZERO for h in open_pos.values())
+    ev.check("options.principal_fx_note", "OPT-D20", OPTION_PRINCIPAL_FX_NOTE if is_open else None,
+             block.get("principal_fx_note"), phase)
+
+
 def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
     # transactions: /api/ledgers/transactions returns rows desc; compare set by id
     rows = api.get("/api/ledgers/transactions", limit=500).json()["rows"]
     app = {r["id"]: r for r in rows}
     ev.check("ledger.tx.count", "count", len(facts.txs), len(rows), phase)
+    refused_close_ids = {rc.txn_id for rc in O.replay(facts).refused_closes}
+    stock_rows_with_option_marks: list[int] = []
     for t in facts.txs:
         a = app.get(t.id)
         if a is None:
@@ -1086,6 +1565,23 @@ def _reconcile_ledger_api(ev, api, facts: O.Facts, phase):
         gross = O.settled(t.qty, t.price, facts.instruments[t.symbol].quote_ccy)
         exp_total = -(gross + t.fee + t.tax) if t.side == "BUY" else (gross - t.fee - t.tax)
         ev.check("ledger.tx.total", f"id={t.id}", exp_total, a["total"], phase)
+        if O.is_option(t.symbol):
+            # Options spec §6.2: an option row carries its close_reason, its 口數 (the
+            # share-equivalents ÷ the oracle's own multiplier) and whether the replay refused it
+            # (§4.4 — the oracle's own replay of the whole stored ledger, not a valuation cut).
+            sc = f"id={t.id} {t.account_id}/{t.symbol}"
+            ev.check("ledger.tx.close_reason", sc, t.close_reason, a.get("close_reason"), phase)
+            ev.check("ledger.tx.contracts", sc, t.qty / O.OPTION_MULTIPLIER,
+                     a.get("contracts"), phase)
+            ev.check("ledger.tx.refused_close", sc, t.id in refused_close_ids,
+                     a.get("refused_close"), phase)
+        elif (a.get("close_reason") is not None or a.get("contracts") is not None
+              or a.get("option_side") is not None or a.get("refused_close")):
+            stock_rows_with_option_marks.append(t.id)
+    # §10 (4): on a STOCK row the four additive keys are null / false. One assertion per
+    # checkpoint (the offending ids), not one per row — a thousand identical passes are noise.
+    ev.check("ledger.tx.stock_rows_carry_no_option_marks", "stock rows", [],
+             stock_rows_with_option_marks, phase)
     # dividends
     drows = api.get("/api/ledgers/dividends", limit=500).json()["rows"]
     dapp = {r["id"]: r for r in drows}
@@ -1126,8 +1622,12 @@ def _reconcile_exports(ev, api, res, prices, phase, valuation):
     # holdings CSV
     raw = api.download("/api/export/holdings").decode("utf-8-sig")
     hrows = _parse_csv(raw)
-    hkey = {(r["account_id"], r["symbol"]): r for r in hrows}
+    hkey = {(r.get("account_id"), r.get("symbol")): r for r in hrows}
+    # Stock rows only: the holdings CSV is the stock table, and an open contract leaves in its
+    # own options CSV (spec §9, owner ruling 2026-10-10: B), which this family does not read.
     for key, h in res.holdings.items():
+        if O.is_option(key[1]):
+            continue
         r = hkey.get(key)
         if r is None:
             ev.check("export.holdings.present", "|".join(key), True, False, phase)
@@ -1141,14 +1641,25 @@ def _reconcile_exports(ev, api, res, prices, phase, valuation):
     # realized CSV
     raw = api.download("/api/export/realized").decode("utf-8-sig")
     rrows = _parse_csv(raw)
-    ev.check("export.realized.count", "count", len(res.realized_rows), len(rrows), phase)
-    for i, rr in enumerate(res.realized_rows):
+    # Spec §9: the realized CSV is the stock `realized.rows` FOLLOWED BY `options.realized.rows`
+    # with `asset_type` and `contract` appended. That door is W6's; until its `asset_type`
+    # column exists the CSV is the stock rows alone and only those are compared — a known,
+    # README-disclosed gap (not op-logged per checkpoint: `ops` is the scenario signal).
+    stock_rows = [rr for rr in res.realized_rows if not O.is_option(rr.symbol)]
+    option_rows = [rr for rr in res.realized_rows if O.is_option(rr.symbol)]
+    carries_options = bool(rrows) and "asset_type" in rrows[0]
+    expected = stock_rows + (option_rows if carries_options else [])
+    ev.check("export.realized.count", "count", len(expected), len(rrows), phase)
+    for i, rr in enumerate(expected):
         if i >= len(rrows):
             break
         r = rrows[i]
         sc = f"{rr.account_id}/{rr.symbol} #{i}"
         ev.check("export.realized.realized", sc, rr.realized, r["realized"], phase)
         ev.check("export.realized.proceeds_net", sc, rr.proceeds_net, r["proceeds_net"], phase)
+        if carries_options:
+            ev.check("export.realized.asset_type", sc,
+                     "option" if O.is_option(rr.symbol) else "stock", r.get("asset_type"), phase)
     # ledger CSV (transactions)
     raw = api.download("/api/export/ledger", {"kind": "transactions"}).decode("utf-8-sig")
     ev.check("export.ledger.tx.nonempty", "transactions", True, len(_parse_csv(raw)) >= 0, phase)
@@ -1183,19 +1694,23 @@ def _reconcile_reports(ev, api, res, prices, sp, phase, valuation):
                  True, _contains_number(html, realized_total), phase)
         mv = O.ZERO
         for (_a, s), h in res.holdings.items():
-            if h.shares > O.ZERO and s in prices:
+            # The KPI 總市值 card: stocks + every open contract on its signed quantity (OPT-D4).
+            counted = h.shares > O.ZERO or (O.is_option(s) and h.shares != O.ZERO)
+            if counted and s in prices:
                 v = prices[s] * h.shares
                 mv += v if h.quote_ccy == REPORTING else v * sp.rate(h.quote_ccy, REPORTING)
         ev.check("report.holdings.total_mv_present", "KPI 總市值",
                  True, _contains_number(html, mv), phase)
     n = sum(1 for (a, s), h in res.holdings.items()
-            if h.shares > O.ZERO and s in html and _contains_number(html, h.shares))
+            if h.shares > O.ZERO and not O.is_option(s)
+            and s in html and _contains_number(html, h.shares))
     ev.check("report.holdings.shares_present", "持倉股數", True, n >= 3, phase)
 
     lhtml = api.download("/api/export/ledgers-report").decode("utf-8")
     ev.check("report.ledgers.renders", "帳本報告",
              True, "<!doctype html>" in lhtml.lower() and len(lhtml) > 500, phase)
-    held_syms = {s for (a, s), h in res.holdings.items() if h.shares > O.ZERO}
+    held_syms = {s for (a, s), h in res.holdings.items()
+                 if h.shares > O.ZERO and not O.is_option(s)}
     present = sum(1 for s in list(held_syms)[:4] if s in lhtml)
     ev.check("report.ledgers.symbols_present", "帳本標的",
              True, present >= min(3, len(held_syms)), phase)

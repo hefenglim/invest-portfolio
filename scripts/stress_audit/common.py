@@ -468,6 +468,36 @@ def write_legacy_dividend(db_path: Path, account_id: str, symbol: str, pay_date:
         conn.close()
 
 
+def write_legacy_transaction(db_path: Path, account_id: str, symbol: str, side: str,
+                             trade_date: str, quantity: Decimal, price: Decimal, *,
+                             close_reason: str | None = None) -> int:
+    """Write ONE transaction row straight into the ledger — a LEGACY-DATA fixture — and
+    return its id. Fee and tax are 0 (a close row carries neither).
+
+    Why not a door: options spec §4.2 refuses, at every door, a ``close_reason`` row whose
+    side / quantity does not match the open position, so a close the replay must REFUSE
+    (§4.4: it would open or extend a lot) can only exist as data written below the
+    validators — a pre-options import, a hand-edited database, a correction that slipped
+    past the replay guard. The replay must still refuse it without a 500. This writes exactly
+    that, through the app's own store insert, like :func:`write_legacy_dividend`.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from portfolio_dash.data_ingestion.store import insert_transaction
+    from portfolio_dash.shared.models.enums import Side
+    conn = sqlite3.connect(str(db_path))
+    try:
+        tid = insert_transaction(
+            conn, account_id=account_id, symbol=symbol, side=Side(side.upper()),
+            quantity=quantity, price=price, fees=Decimal("0"), tax=Decimal("0"),
+            trade_date=date.fromisoformat(trade_date),
+            fee_rule_snapshot={"source": "stress-legacy-fixture"},
+            close_reason=close_reason)
+        conn.commit()
+        return int(tid)
+    finally:
+        conn.close()
+
+
 def delete_corporate_action_row(db_path: Path, action_id: int) -> bool:
     """Delete one corporate action (E16: editing/deleting re-computes history)."""
     sys.path.insert(0, str(REPO_ROOT))
@@ -511,14 +541,20 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
         for r in conn.execute("SELECT * FROM instruments"):
             f.instruments[r["symbol"]] = O.Instrument(
                 symbol=r["symbol"], market=r["market"], quote_ccy=r["quote_ccy"],
-                is_etf=bool(r["is_etf"]), sector=r["sector"] or "")
+                is_etf=bool(r["is_etf"]), sector=r["sector"] or "",
+                # Options spec §3: additive column; a pre-options DB reads as all-stock.
+                asset_type=(r["asset_type"] if "asset_type" in r.keys() and r["asset_type"]
+                            else "stock"))
         for r in conn.execute("SELECT * FROM transactions ORDER BY trade_date, id"):
             f.txs.append(O.TxFact(
                 id=r["id"], account_id=r["account_id"], symbol=r["symbol"],
                 side=r["side"], qty=dec(r["quantity"]), price=dec(r["price"]),
                 fee=dec(r["fees"]), tax=dec(r["tax"]),
                 trade_date=date.fromisoformat(r["trade_date"]),
-                short_sale=bool(r["short_sale"]) if "short_sale" in r.keys() else False))
+                short_sale=bool(r["short_sale"]) if "short_sale" in r.keys() else False,
+                # Options spec §3 / §4.1: the price-0 closing row's reason (additive column).
+                close_reason=(r["close_reason"] if "close_reason" in r.keys()
+                              and r["close_reason"] else None)))
         for r in conn.execute("SELECT * FROM dividends ORDER BY date, id"):
             f.divs.append(O.DivFact(
                 id=r["id"], account_id=r["account_id"], symbol=r["symbol"],
@@ -611,11 +647,15 @@ def load_facts_from_api(api: Api) -> O.Facts:
     fact loader is indistinguishable from a bug in the app.
     """
     f = O.Facts()
-    insts = api.get("/api/instruments").json().get("list", [])
+    # Options spec §6.2: contracts are hidden from the watchlist list unless asked for, and a
+    # loader that dropped them would silently drop every option trade below (the `known`
+    # filter) — a missing input that reads as an app defect.
+    insts = api.get("/api/instruments", include_options=1).json().get("list", [])
     for i in insts:
         f.instruments[i["symbol"]] = O.Instrument(
             symbol=i["symbol"], market=i["market"], quote_ccy=i["ccy"],
-            is_etf=bool(i.get("is_etf")), sector=i.get("sector") or "")
+            is_etf=bool(i.get("is_etf")), sector=i.get("sector") or "",
+            asset_type=i.get("asset_type") or "stock")
     known = set(f.instruments)
     for r in _page(api, "/api/ledgers/transactions"):
         if r["symbol"] not in known:
@@ -627,7 +667,8 @@ def load_facts_from_api(api: Api) -> O.Facts:
             id=r["id"], account_id=r["account_id"], symbol=r["symbol"],
             side=str(r["side"]).upper(), qty=dec(r["shares"]), price=dec(r["price"]),
             fee=dec(r["fee"]), tax=dec(r["tax"]),
-            trade_date=date.fromisoformat(r["date"]), short_sale=short))
+            trade_date=date.fromisoformat(r["date"]), short_sale=short,
+            close_reason=r.get("close_reason") or None))
     for r in _page(api, "/api/ledgers/dividends"):
         if r["symbol"] not in known:
             continue

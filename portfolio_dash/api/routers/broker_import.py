@@ -48,7 +48,7 @@ from portfolio_dash.data_ingestion.broker.convert import (
     convert,
     render_kind,
 )
-from portfolio_dash.data_ingestion.broker.ir import RawEvent, UnmappedRow
+from portfolio_dash.data_ingestion.broker.ir import EventKind, RawEvent, UnmappedRow
 from portfolio_dash.data_ingestion.broker.reconcile import ReconcileIssue, ReconcileReport
 from portfolio_dash.data_ingestion.broker.registry import (
     BROKER_IDS,
@@ -60,6 +60,7 @@ from portfolio_dash.data_ingestion.store import list_accounts
 from portfolio_dash.data_ingestion.validate import unknown_account_message
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.assets import Account
+from portfolio_dash.shared.options import from_broker_option, option_symbol
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -165,6 +166,58 @@ def _opening_gaps(
             "satisfied": (held >= needed) if not unknown else held > Decimal(0),
             "as_of": build.isoformat() if build is not None else "",
         })
+    return out
+
+
+def _expiries_in(events: list[RawEvent]) -> dict[str, date]:
+    """The OCC symbol → expiry of every contract the request EXPIRES (an ``OPT_EXPIRED`` row:
+    Schwab's ``Expired`` or TD's removal journal). A contract string that is not a standard
+    one is left out — the converter refuses it with its own reason."""
+    out: dict[str, date] = {}
+    for e in events:
+        if e.kind is EventKind.OPT_EXPIRED and (
+                terms := from_broker_option(e.option_symbol)) is not None:
+            out[option_symbol(terms)] = terms.expiry
+    return out
+
+
+def _known_option_positions(
+    conn: sqlite3.Connection, account: str, through: date | None,
+    expiries: dict[str, date],
+) -> dict[str, Decimal]:
+    """OPT-D19: the ledger's signed position in every option contract of *account*, in
+    share-equivalents, at the close of the day BEFORE the first date the request touches that
+    contract — *through* (the day before the request's earliest row), or, for a contract the
+    request expires (*expiries*), the day before its expiry when that is earlier.
+
+    Injected into the (pure) converter so an expiry whose opening trade was imported in an
+    EARLIER request still gets its side; rows already imported inside the request's own
+    window are not counted here (they are in the file), and a re-import of them is caught by
+    the CSV door. The per-contract day is R2 M2: the converter dates an expiry on the
+    contract's EXPIRY, which precedes the statement's first row when the expiry posts later
+    (Schwab posts it the next business day). Measured at *through*, a ledger that already held
+    the ``expired`` row read flat and the whole convert answered 422
+    ``option_expiry_no_opening`` with a wrong remedy; measured the day before the expiry, the
+    converter re-derives the row and the CSV door refuses the overlap in zh (the stored-expiry
+    and same-day rules, spec §8). The same date-aware share count the sell guard and
+    :func:`_opening_gaps` use. Empty with no window, and on an account with no contract."""
+    if through is None:
+        return {}
+    symbols = [str(r[0]) for r in conn.execute(
+        "SELECT symbol FROM instruments WHERE asset_type='option' AND symbol IN ("
+        "  SELECT symbol FROM transactions WHERE account_id=?"
+        "  UNION SELECT to_symbol FROM corporate_actions WHERE account_id=?)",
+        (account, account))]
+    if not symbols:
+        return {}
+    index = load_action_index(conn)
+    out: dict[str, Decimal] = {}
+    for symbol in symbols:
+        expiry = expiries.get(symbol)
+        on = min(through, expiry - timedelta(days=1)) if expiry is not None else through
+        held = shares_through(conn, account, symbol, on=on, index=index)
+        if held != Decimal(0):
+            out[symbol] = held
     return out
 
 
@@ -337,20 +390,28 @@ def broker_convert(
         for f in body.exports:
             events += parse_export(
                 body.broker, f.text, source_file=f.name, aliases=body.aliases)
+        # The opening rows' build date — the day before the first statement row — is ALSO
+        # the day the ledger's existing holdings are measured at (DEF-027): what the file
+        # needs minus what the account already held when the statement starts. The option
+        # positions handed to the converter are measured at the same day (OPT-D19) — or, for
+        # a contract the request expires, the day before its expiry when earlier (R2 M2).
+        earliest = min((e.trade_date for e in events), default=None)
+        build = earliest - timedelta(days=1) if earliest is not None else None
+        conv, _grouped, report = convert(
+            events, body.account, body.currency,
+            known_positions=_known_option_positions(
+                conn, body.account, build, _expiries_in(events)))
     except UnmappedRow as exc:
         # Rule 7: an unmapped (action, description) pair STOPS the run with the pair quoted.
         # There is no catch-all bucket — a default is the same defect wearing a name — so
         # this is a refusal the owner can act on, not a crash. It is 422 and not 500 for
-        # exactly that reason: the file is the input, and the input is answerable.
-        return JSONResponse(status_code=422, content=error_body(
-            "broker_row_unmapped", str(exc), field="exports"))
-
-    conv, _grouped, report = convert(events, body.account, body.currency)
-    # The opening rows' build date — the day before the first statement row — is ALSO the
-    # day the ledger's existing holdings are measured at (DEF-027): what the file needs
-    # minus what the account already held when the statement starts.
-    earliest = min((e.trade_date for e in events), default=None)
-    build = earliest - timedelta(days=1) if earliest is not None else None
+        # exactly that reason: the file is the input, and the input is answerable. Caught
+        # around BOTH the parse and the conversion (options spec §8): an option row the
+        # converter cannot express raises inside ``convert`` with its ``reason`` and line.
+        content = error_body("broker_row_unmapped", str(exc), field="exports")
+        content["error"]["reason"] = exc.reason
+        content["error"]["line"] = exc.line
+        return JSONResponse(status_code=422, content=content)
     return _conversion_wire(
         conv, report,
         openings=_opening_gaps(conn, body.account, conv.openings, build),

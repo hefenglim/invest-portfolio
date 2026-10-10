@@ -23,7 +23,17 @@ import re
 from decimal import Decimal  # noqa: F401  (referenced via the annotation string check)
 from pathlib import Path
 
-from portfolio_dash.portfolio.dashboard_models import HoldingRow, KpiSummary
+from portfolio_dash.portfolio.dashboard_models import (
+    HoldingRow,
+    KpiSummary,
+    OptionContractRealized,
+    OptionMoney,
+    OptionObligationSubtotal,
+    OptionOpenRow,
+    OptionRealizedRow,
+    OptionRealizedUnderlying,
+    OptionRealizedYear,
+)
 
 _WEB = Path(__file__).resolve().parents[2] / "web"
 
@@ -31,7 +41,11 @@ _WEB = Path(__file__).resolve().parents[2] / "web"
 def _money_fields() -> set[str]:
     """Every Decimal-typed field on the dashboard wire — the values JS must not do math on."""
     names: set[str] = set()
-    for model in (HoldingRow, KpiSummary):
+    # The 選擇權 block (options spec §7.1, 2026-10-09): premiums, 口數, the obligation and the
+    # option totals are server strings too — 口 ↔ 股當量 and every premium total included.
+    for model in (HoldingRow, KpiSummary, OptionOpenRow, OptionObligationSubtotal,
+                  OptionContractRealized, OptionRealizedRow, OptionMoney, OptionRealizedYear,
+                  OptionRealizedUnderlying):
         names |= {n for n, f in model.model_fields.items()
                   if "Decimal" in str(f.annotation)}
     return names
@@ -88,6 +102,8 @@ def test_the_field_list_is_real_and_the_pattern_bites() -> None:
     an empty list, or a pattern that never matches — so pin both."""
     fields = _money_fields()
     assert {"unrealized_pnl", "adjusted_cost_total", "weight", "xirr"} <= fields, fields
+    assert {"contracts", "share_equivalents", "premium_total", "obligation",
+            "premium_in", "premium_out"} <= fields, fields
     assert len(fields) >= 20, len(fields)
 
     names = "|".join(sorted(fields))

@@ -22,30 +22,42 @@ from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_
 from portfolio_dash.data_ingestion.fees import (
     ETF_FLAG_UNKNOWN_MESSAGE,
     FeeComputationError,
+    close_row_fees,
     compute_fees,
     etf_flag_issue_applies,
+    option_trade_fees,
     resolve_etf_flag,
     supplied_snapshot,
 )
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow
+from portfolio_dash.data_ingestion.register import register_option_contract
 from portfolio_dash.data_ingestion.resolve import (
     ResolutionStatus,
     resolve,
     suggestion_tail,
 )
 from portfolio_dash.data_ingestion.rules_binding import fee_rule_for
-from portfolio_dash.data_ingestion.store import insert_transaction
+from portfolio_dash.data_ingestion.store import get_instrument, insert_transaction
 from portfolio_dash.data_ingestion.validate import (
     Issue,
     TxnInput,
     advisory_issue,
     alias_import_account,
+    option_terms_of,
     validate_transaction,
 )
 from portfolio_dash.shared.corporate_actions import ActionIndex
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.models.enums import Side
+from portfolio_dash.shared.options import (
+    CLOSE_REASON_ZH,
+    CloseReason,
+    option_display_name,
+    option_symbol,
+    parse_option_symbol,
+)
 
 # Canonical CSV column order for the transactions import — the SINGLE SOURCE the downloadable
 # template header is built from (see data_ingestion.import_templates). These names MUST match
@@ -55,6 +67,10 @@ from portfolio_dash.shared.models.enums import Side
 TRANSACTION_COLUMNS: list[str] = [
     "account", "symbol", "side", "date", "shares", "price",
     "fee", "tax", "daytrade", "short_sale", "note",
+    # Options spec §8 / §10 (2): the price-0 closing row of an option contract — expired /
+    # assigned / exercised (OPT-D2). Optional, last, so every pre-options file and template
+    # still parses; ``shares`` of an option row is in SHARE-EQUIVALENTS (口數 × 100, OPT-D8).
+    "close_reason",
 ]
 
 #: Columns the transaction door reads BEYOND its template (DEF-026, 2026-09-23). Not in
@@ -294,7 +310,15 @@ def txn_preview_row(
     # appended to the message — the resolver never coerces a code to a near neighbour.
     res = resolve(conn, inp.symbol)
     symbol = inp.symbol
-    if res.status is ResolutionStatus.NEEDS_AI:
+    # Options spec §8 / OPT-D7: an OCC symbol is created FROM ITS SYMBOL in the commit's
+    # transaction (``write_transaction_row``) — never here, a preview writes nothing.
+    terms = option_terms_of(res.instrument, inp.symbol)
+    if res.status is ResolutionStatus.NEEDS_AI and terms is not None:
+        symbol = option_symbol(terms)
+        issues.append(advisory_issue(
+            "option_contract_autoregister",
+            f"將建立選擇權合約 {option_display_name(terms)}（{symbol}）"))
+    elif res.status is ResolutionStatus.NEEDS_AI:
         message = f"未註冊標的 {inp.symbol} — 請先至「標的管理」註冊"
         message += suggestion_tail(res.candidates)
         issues.append(
@@ -306,6 +330,14 @@ def txn_preview_row(
         )
     elif res.instrument is not None:  # EXACT
         symbol = res.instrument.symbol
+    if (terms is not None and terms.right == "P" and inp.close_reason is None
+            and inp.price > terms.strike):
+        # A put is never worth more than its strike — the classic slip is the TOTAL premium
+        # typed into the per-share price column (spec §8). Asked, never refused.
+        issues.append(Issue(
+            kind="option_premium_exceeds_strike", needs_confirm=True,
+            message=(f"權利金（每股）{inp.price} 高於履約價 {terms.strike}，"
+                     "請確認填的是每股權利金，不是總權利金")))
 
     # --- fee / tax auto-fill (only when account exists and values are missing) ---
     fee: Decimal | None = inp.fee
@@ -316,7 +348,30 @@ def txn_preview_row(
         "SELECT fee_rule_set FROM accounts WHERE account_id=?",
         (inp.account_id,),
     ).fetchone()
-    if acc is not None and (fee is None or tax is None):
+    if acc is not None and inp.close_reason is not None:
+        # §4.2: a close row costs nothing and never reaches the engine — one definition
+        # (``fees.close_row_fees``). A supplied non-zero fee / tax is refused by the structural
+        # prefix; a carried export snapshot is the row's own provenance and is kept.
+        closed = close_row_fees()
+        fee = fee if fee is not None else closed.fee
+        tax = tax if tax is not None else closed.tax
+        snap = dict(carried_snapshot) if carried_snapshot is not None else closed.snapshot
+    elif acc is not None and terms is not None and (fee is None or tax is None):
+        # OPT-D6: the option branch — per contract + SEC on sells; no stamp, no ETF question.
+        rules = get_fee_rule_set(fee_rule_for(conn, inp.account_id, Market.US), conn)
+        try:
+            opt = option_trade_fees(rules, inp.side, inp.quantity, inp.price,
+                                    fee=inp.fee, tax=inp.tax)
+        except FeeComputationError as exc:
+            issues.append(Issue(kind="fee_overflow", message=str(exc)))
+        else:
+            fee, tax, snap = opt.fee, opt.tax, dict(opt.snapshot)
+            if carried_snapshot is not None:
+                issues.append(advisory_issue(
+                    "snapshot_not_carried",
+                    "已忽略欄位：fee_rule_snapshot（手續費或稅額有空白，改由費用規則計算，"
+                    "並記錄這次計算的快照）"))
+    elif acc is not None and (fee is None or tax is None):
         # Registry-authoritative ETF flag + its third state — ONE definition, shared with
         # manual.py (fees.resolve_etf_flag). Stress-audit 2026-07-15 made the registry win
         # over the input flag; AI-D40 (2026-08-24) closed the hole underneath it, where the
@@ -399,6 +454,9 @@ def txn_preview_row(
         "note": inp.note or "",
         **{f"snap.{k}": v for k, v in snap.items()},
     }
+    if inp.close_reason is not None:
+        # Only on a close row, so a stock row's payload (and its preview ``data``) is unchanged.
+        payload["close_reason"] = inp.close_reason
 
     return PreviewRow(
         index=index,
@@ -528,6 +586,29 @@ def _side_cell(raw: dict[str, str], column: str) -> Side:
         raise _CellError(column, value, _NOT_A_SIDE) from None
 
 
+_NOT_A_CLOSE_REASON = ("不是有效的平倉原因（請填 expired／assigned／exercised，"
+                       "或 到期作廢／被指派／履約，一般交易請留空）")
+#: The statement's words and ours (spec §6.1's zh labels), both accepted — the owner reads
+#: 到期作廢 on a statement; ``expired`` is OUR vocabulary.
+_CLOSE_REASON_WORDS: dict[str, CloseReason] = {
+    "expired": "expired", "assigned": "assigned", "exercised": "exercised",
+    CLOSE_REASON_ZH["expired"]: "expired",
+    CLOSE_REASON_ZH["assigned"]: "assigned",
+    CLOSE_REASON_ZH["exercised"]: "exercised",
+}
+
+
+def _close_reason_cell(raw: dict[str, str], column: str) -> CloseReason | None:
+    """``close_reason``: absent or blank = an ordinary trade; otherwise one of the three."""
+    value = raw.get(column, "").strip()
+    if not value:
+        return None
+    reason = _CLOSE_REASON_WORDS.get(value.lower(), _CLOSE_REASON_WORDS.get(value))
+    if reason is None:
+        raise _CellError(column, value, _NOT_A_CLOSE_REASON)
+    return reason
+
+
 def build_transaction_preview(
     conn: sqlite3.Connection,
     csv_text: str,
@@ -597,6 +678,8 @@ def build_transaction_preview(
             account_id, alias_issue = alias_import_account(_cell(raw, "account"))
             inp = TxnInput(
                 account_id=account_id,
+                # An OCC contract comes out of the model in its ONE spelling (R2 M1), so every
+                # rule below — and every sibling of the batch — reads the stored spelling.
                 symbol=_cell(raw, "symbol"),
                 side=_side_cell(raw, "side"),
                 quantity=_decimal_cell(raw, "shares"),
@@ -613,6 +696,7 @@ def build_transaction_preview(
                 # dangerous failure mode domain-ledger.md names, a wrong number that looks right.
                 short_sale=raw.get("short_sale", "").lower() in ("1", "true", "y", "yes"),
                 note=raw.get("note") or None,
+                close_reason=_close_reason_cell(raw, "close_reason"),
             )
             carried = _snapshot_cell(raw, "fee_rule_snapshot")
         except _CellError as exc:
@@ -692,6 +776,12 @@ def write_transaction_row(
     """
     p = row.payload
     snapshot = {k[5:]: v for k, v in p.items() if k.startswith("snap.")}
+    # OPT-D7: an OCC symbol the preview said it would create is registered HERE, inside the
+    # commit's transaction (``commit`` forwarded), so a batch that rolls back takes the
+    # contract with it. Idempotent: a contract registered by an earlier row is returned.
+    if get_instrument(conn, p["symbol"]) is None and parse_option_symbol(p["symbol"]):
+        register_option_contract(conn, p["symbol"], commit=commit)
+    close = p.get("close_reason") or None
     return insert_transaction(
         conn,
         account_id=p["account_id"],
@@ -706,5 +796,17 @@ def write_transaction_row(
         note=p["note"] or None,
         daytrade=p.get("daytrade") == "1",
         short_sale=p.get("short_sale") == "1",
+        close_reason=_close_reason_value(close),
         commit=commit,
     )
+
+
+def _close_reason_value(raw: str | None) -> CloseReason | None:
+    """A payload's ``close_reason`` back to its typed value (the parser already vetted it)."""
+    if raw == "expired":
+        return "expired"
+    if raw == "assigned":
+        return "assigned"
+    if raw == "exercised":
+        return "exercised"
+    return None

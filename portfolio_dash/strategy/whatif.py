@@ -27,11 +27,16 @@ from portfolio_dash.portfolio.dashboard import RateResolver, build_dashboard
 from portfolio_dash.portfolio.results import Holding
 from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
 from portfolio_dash.shared.fx import convert
+from portfolio_dash.shared.instrument_scope import is_option_symbol
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
+from portfolio_dash.strategy.stock_scope import stock_market_value
 
 _ZERO = Decimal("0")
+#: The drawer's own sentence for a contract (options spec §6.2): 試算 models a stock trade —
+#: its fee engine, its weight and its averages — and v1 keeps options out of it (OPT-D10).
+OPTION_WHATIF_REFUSAL = "選擇權不提供試算"
 
 
 class WhatIfError(ValueError):
@@ -156,8 +161,13 @@ def compute_whatif(
     """Simulate a buy/sell of *symbol* and return the projected position (compute-only).
 
     Raises:
-        WhatIfError: symbol is unheld and no *account_id* was given (cannot infer account).
+        WhatIfError: symbol is unheld and no *account_id* was given (cannot infer account);
+            or *symbol* is an option contract — 「選擇權不提供試算」 (options spec OPT-D10 /
+            §6.2), refused before the ledger is read and before any fee is computed, so
+            ``compute_fees`` never prices a contract from here.
     """
+    if is_option_symbol(symbol):
+        raise WhatIfError(OPTION_WHATIF_REFUSAL, field="symbol")
     from portfolio_dash.data_ingestion.fees import (  # local: avoid cycle risk
         compute_fees,
         etf_flag_issue_applies,
@@ -464,13 +474,17 @@ def _new_weight(
     less than a signed percentage that needs a paragraph. The MONEY fields (shares, both
     averages, realized, covered) are computed for the short in every branch above; only the
     weight/剩餘市值 pair abstains, and it abstained before this fix too.
+
+    The total is Σ STOCK market value (``strategy/stock_scope.py``, options spec OPT-D5): the
+    dashboard's weights are stock MV / Σ stock MV, while the KPI 總市值 also carries open option
+    contracts. On a ledger with no option the two are the same figure byte for byte.
     """
     if inst is None:
         return None, None, None
     quote_ccy: Currency = inst.quote_ccy  # type: ignore[attr-defined]
 
     dash = build_dashboard(conn, now=now, reporting=reporting)
-    current_total = dash.kpis.total_market_value
+    current_total = stock_market_value(dash)
     if current_total is None:
         return None, None, None
 

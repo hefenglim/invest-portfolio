@@ -203,7 +203,10 @@ def test_two_first_seeds_at_once_both_succeed_and_seed_once(tmp_path: Path) -> N
 # --- 3. the class --------------------------------------------------------------------------
 
 _PARAMS = {"symbol": "2330", "account": "tw_broker", "job_id": "alert_scan"}
-_QUERY = {"/api/cash/statement": {"account": "tw_broker"}}
+_QUERY = {"/api/cash/statement": {"account": "tw_broker"},
+          # the recognition form (owner ruling 2026-10-10) reads the registry; the compose
+          # form with no terms is refused before it reads anything
+          "/api/input/option-symbol": {"text": "XYZ 12/18/2026 50.00 P"}}
 
 
 def _get_routes(app: Any) -> list[tuple[str, str]]:

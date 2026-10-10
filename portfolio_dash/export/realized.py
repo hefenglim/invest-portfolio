@@ -10,6 +10,13 @@ Retires the client-side display dump (``web/export.js`` ``pdExport`` over the re
 (zh-TW account names, presentation formatting) read out of the DOM. Per the owner
 directive (2026-07-14) every 匯出 CSV must go through this backend channel so numbers
 come straight from the Decimal core, not from rendered cells.
+
+Options (spec §9, §10 (3)): the dashboard's ``realized`` section is STOCK-only (OPT-D5) and
+the option rows live in ``options.realized.rows`` — the replay's own ``RealizedRow``s, same
+shape. This export lists both, stock rows first, one row per closing event, and APPENDS two
+columns so every earlier column keeps its index: ``asset_type`` (``stock`` / ``option``) and
+``contract`` (the display name 「XYZ 2026-12-18 50 Put」; empty on a stock row). On a ledger
+with no option those are the only change (``stock`` and an empty cell on every row).
 """
 
 import sqlite3
@@ -17,29 +24,37 @@ from datetime import datetime
 
 from portfolio_dash.export.artifact import ExportArtifact, csv_artifact
 from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.results import RealizedRow
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.options import ASSET_OPTION, ASSET_STOCK
 from portfolio_dash.shared.wire import decimal_str
 
 _COLUMNS = [
     "account_id", "symbol", "quote_ccy", "kind", "sell_date", "shares_sold",
     "proceeds_net", "original_cost_removed", "adjusted_cost_removed", "realized",
+    # Options spec §10 (3): appended LAST so every earlier column keeps its index.
+    "asset_type", "contract",
 ]
+
+
+def _row(r: RealizedRow, asset_type: str, contract: str) -> list[str]:
+    # `kind` distinguishes a sale from a post-close cash dividend (audit H2): both are
+    # realized, but only the former is a capital gain. Self-describing for reconciliation.
+    return [
+        r.account_id, r.symbol, r.quote_ccy.value, r.kind, r.sell_date.isoformat(),
+        decimal_str(r.shares_sold), decimal_str(r.proceeds_net),
+        decimal_str(r.original_cost_removed), decimal_str(r.adjusted_cost_removed),
+        decimal_str(r.realized), asset_type, contract,
+    ]
 
 
 def build_realized_csv(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency
 ) -> ExportArtifact:
     data = build_dashboard(conn, now=now, reporting=reporting)
-    rows: list[list[str]] = []
-    for r in data.realized.rows:
-        # `kind` distinguishes a sale from a post-close cash dividend (audit H2): both are
-        # realized, but only the former is a capital gain. Self-describing for reconciliation.
-        rows.append([
-            r.account_id, r.symbol, r.quote_ccy.value, r.kind, r.sell_date.isoformat(),
-            decimal_str(r.shares_sold), decimal_str(r.proceeds_net),
-            decimal_str(r.original_cost_removed), decimal_str(r.adjusted_cost_removed),
-            decimal_str(r.realized),
-        ])
+    rows: list[list[str]] = [_row(r, ASSET_STOCK, "") for r in data.realized.rows]
+    if data.options is not None:
+        rows.extend(_row(r, ASSET_OPTION, r.contract) for r in data.options.realized.rows)
     as_of = data.as_of.date().isoformat()
     footer = [f"as_of={as_of}, generated={now.isoformat()}"]
     return csv_artifact(f"realized_pnl_{as_of}.csv",

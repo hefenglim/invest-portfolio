@@ -23,6 +23,10 @@ def value_holdings(holdings: list[Holding], price_map: dict[str, Decimal]) -> li
       it would hide a real position from every aggregate over a cost-side gap. It carries
       the display flag only.
     * ``short_open`` — a real, priced position with a signed quantity. Never suppressed.
+    * ``unbookable_close`` (options spec §4.4) — a close row (expiry / assignment / exercise)
+      was refused, so the contract count still carries a lot the ledger says was closed, or
+      lacks one it says was opened: the shares are NOT known to be right. SUPPRESS, exactly
+      as ``unbookable_action``.
 
     A new flag is decided against THAT question, not by copying the neighbouring branch.
 
@@ -36,9 +40,10 @@ def value_holdings(holdings: list[Holding], price_map: dict[str, Decimal]) -> li
     out: list[Holding] = []
     for h in holdings:
         price = price_map.get(h.symbol)
-        if h.oversold or h.unbookable_action:
-            # 賣超 / 無法套用的公司行動: value + P&L are 待釐清 (not computed). Keep the
-            # current price for display, but null the value fields so all aggregate code
+        if h.oversold or h.unbookable_action or h.unbookable_close:
+            # 賣超 / 無法套用的公司行動 / 無法入帳的選擇權平倉列: value + P&L are 待釐清 (not
+            # computed). Keep the current price for display, but null the value fields so all
+            # aggregate code
             # that gates on `market_value is not None` excludes this position automatically.
             out.append(
                 h.model_copy(

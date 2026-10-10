@@ -310,6 +310,12 @@ _SPEC_4_4_FIELDS = (
     "oversold_held",
     "unbookable_dividend",
     "unbookable_action",
+    # Options spec §4.4, 2026-10-09 — a close row (expiry / assignment / exercise) on this
+    # position was refused. Transfer rule: OR-ed into the destination by EXCHANGE and SPINOFF
+    # exactly like `unbookable_action` (and by OPTION_ADJUST, options spec §4.3), untouched by
+    # SPLIT. Pinned by tests/portfolio/test_options_w2_replay.py
+    # (test_unbookable_close_travels_through_exchange_and_spinoff and the §4.3 tests).
+    "unbookable_close",
     # QA-06, 2026-09-01 — the position exists only because a share-adding dividend landed on a
     # flat lot, so its basis is zero. Transfer rule: OR-ed into the destination by BOTH
     # EXCHANGE and SPINOFF (an action must not launder the doubt onto a position the owner

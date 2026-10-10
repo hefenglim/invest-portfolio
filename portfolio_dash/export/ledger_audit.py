@@ -40,6 +40,7 @@ from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.corporate_actions import KIND_ZH
 from portfolio_dash.shared.ledger_registry import LEDGER_TABLES
+from portfolio_dash.shared.options import ASSET_TYPE_ZH, CLOSE_REASON_ZH
 from portfolio_dash.shared.wire import stored_decimal_str
 
 #: Audited table -> zh name. The six ledgers carry their registry label (what 資料庫統計 on
@@ -113,6 +114,9 @@ FIELD_LABELS: dict[str, str] = {
     "industry": "產業",
     "target_set_at": "目標帶設定日",
     "aliases": "別名",  # item 8 (owner 2026-09-30)
+    # options (spec 2026-10-09 §3); values read through the §6.1 words in ``_display``
+    "close_reason": "到期／指派／履約",
+    "asset_type": "資產類別",
 }
 
 #: Columns stored as Decimal TEXT — printed in the canonical fixed-point form.
@@ -212,6 +216,10 @@ def _display(table: str, field: str, value: object) -> str | None:
         return text
     if field == "side":
         return _SIDE_ZH.get(text.upper(), text)
+    if field == "close_reason":
+        return CLOSE_REASON_ZH.get(text, text)
+    if field == "asset_type":
+        return ASSET_TYPE_ZH.get(text, text)
     if field == "kind":
         vocab = CASH_KIND_ZH if table == "cash_movements" else KIND_ZH
         return vocab.get(text.upper(), text)

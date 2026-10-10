@@ -91,3 +91,30 @@ def test_an_attempted_rounding_override_is_refused_in_chinese(
     assert any("一" <= ch <= "鿿" for ch in err["message"]), err["message"]
     field = _field(api_client, "tw", "rounding")
     assert field is not None and field["effective"] == "floor"
+
+
+def test_the_option_fee_fields_are_on_the_wire_with_a_default_everywhere(
+    api_client: TestClient,
+) -> None:
+    """Options OPT-D6 (spec §10 (4)): every rule set lists the two option fields. Owner ruling
+    2026-10-10: every US rule set has a default per-contract rate — there is no ``null``
+    ("unset") any more — and a null PUT reverts the field to that default."""
+    schwab = _field(api_client, "schwab", "option_per_contract")
+    assert schwab is not None
+    assert (schwab["default"], schwab["effective"], schwab["editable"]) == ("0.65", "0.65", True)
+    moomoo = _field(api_client, "moomoo_us", "option_per_contract")
+    assert moomoo is not None
+    assert (moomoo["default"], moomoo["effective"]) == ("0.8633", "0.8633")
+    reg = _field(api_client, "schwab", "option_reg_per_contract")
+    assert reg is not None and reg["default"] == "0" and reg["editable"] is True
+    r = api_client.put("/api/fee-rules/moomoo_us",
+                       json={"overrides": {"option_per_contract": "0.5"}})
+    assert r.status_code == 200, r.text
+    after = _field(api_client, "moomoo_us", "option_per_contract")
+    assert after is not None and after["effective"] == "0.5" and after["overridden"] is True
+    r = api_client.put("/api/fee-rules/moomoo_us",
+                       json={"overrides": {"option_per_contract": None}})
+    assert r.status_code == 200, r.text
+    back = _field(api_client, "moomoo_us", "option_per_contract")
+    assert back is not None
+    assert (back["effective"], back["overridden"]) == ("0.8633", False)

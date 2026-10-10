@@ -42,11 +42,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Final
 
 from portfolio_dash.data_ingestion.broker.ir import (
+    OPTION_ASSIGNED_UNMAPPED,
     EventKind,
     RawEvent,
     UnmappedRow,
     looks_like_cusip,
 )
+from portfolio_dash.shared.options import from_broker_option
 
 #: The broker's own header, in its own order. A file whose header differs is refused rather
 #: than read positionally: a silently mis-mapped column is a wrong ledger, not an error.
@@ -92,7 +94,7 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Cash In Lieu", _ANY, EventKind.CASH_IN_LIEU),
     ("Stock Merger", _ANY, EventKind.NAME_CHANGE),
     ("Reverse Split", _ANY, EventKind.REVERSE_SPLIT),
-    # --- options (P3: recognised, not supported)
+    # --- options (options spec §8: converted to option rows by convert.py)
     ("Buy to Open", _ANY, EventKind.OPT_BUY_OPEN),
     ("Sell to Open", _ANY, EventKind.OPT_SELL_OPEN),
     ("Buy to Close", _ANY, EventKind.OPT_BUY_CLOSE),
@@ -119,8 +121,27 @@ _RULES: tuple[tuple[str, str | None, EventKind], ...] = (
     ("Journaled Shares", "SPIN OFF", EventKind.SPINOFF),
     ("Journaled Shares", "OPTION ODD SPLIT REORGANIZATION", EventKind.OPT_ADJUST),
     ("Journaled Shares", "OPTION POSITION CHANGE", EventKind.OPT_ADJUST),
-    ("Journaled Shares", "REMOVAL OF OPTION DUE TO EXPIRATION", EventKind.OPT_ADJUST),
+    # TD's expiry journal: an EXPIRY, not an adjustment (options spec §8 — re-mapped; it
+    # becomes the price-0 ``expired`` row like Schwab's own ``Expired``).
+    ("Journaled Shares", "REMOVAL OF OPTION DUE TO EXPIRATION", EventKind.OPT_EXPIRED),
 )
+
+#: Rules that apply ONLY to a row whose ``Symbol`` is a standard option contract
+#: (``from_broker_option`` parses it). The inbound leg of a platform transfer (options spec §8:
+#: dropped with a reason when it does not cancel against its OUT leg). Scoped to contracts
+#: (R2 m3): as a general rule it mapped a STOCK in-transfer to ``TRANSFER_OUT`` too, where
+#: ``main`` stopped the run with ``UnmappedRow`` — no stock row of that shape has been seen
+#: behind a rule, so it stays the loud first encounter it was.
+_OPTION_ONLY_RULES: tuple[tuple[str, str | None, EventKind], ...] = (
+    ("Journaled Shares", "TRANSFER OF SECURITY OR OPTION IN", EventKind.TRANSFER_OUT),
+)
+
+#: Assignment / exercise rows (OPT-D9): RECOGNISED and refused — never mapped blind. The
+#: converter has no real row of either shape behind a rule yet, so the run stops with the
+#: reason and the line instead (``UnmappedRow.reason``), and the owner enters the pair through
+#: the manual form's 被指派／履約.
+_ASSIGNMENT_ACTIONS: frozenset[str] = frozenset({"Assigned", "Exchange or Exercise",
+                                                 "Exercise"})
 
 #: ``... (TICKER)`` at the end of the description, optionally followed by the broker's own
 #: ``@<price>`` suffix — ``TDA TRAN - Bought 10 (TICKER) @4.4400``.
@@ -161,15 +182,18 @@ def newest_first(posted_dates: list[date]) -> bool:
 
 
 
-def classify(action: str, description: str) -> EventKind | None:
+def classify(action: str, description: str, *, option_contract: bool = False) -> EventKind | None:
     """The ``(action, description)`` verdict, or ``None`` when no rule matches.
 
     ``None`` is not a kind — the caller turns it into :class:`~.ir.UnmappedRow` with the
     line number attached. Kept separate so the table stays a pure lookup and the error
-    carries the context only the reader has.
+    carries the context only the reader has. *option_contract* — the row's ``Symbol`` is a
+    standard option contract — also admits :data:`_OPTION_ONLY_RULES` (after the general
+    table, which no option-only description matches).
     """
     upper = description.upper()
-    for rule_action, pattern, kind in _RULES:
+    rules = (*_RULES, *_OPTION_ONLY_RULES) if option_contract else _RULES
+    for rule_action, pattern, kind in rules:
         if rule_action != action:
             continue
         if pattern is None or pattern in upper:
@@ -295,7 +319,15 @@ def parse(
         if not action:
             continue
 
-        kind = classify(action, description)
+        if action in _ASSIGNMENT_ACTIONS:
+            raise UnmappedRow(
+                source_file=source_file, line_no=offset,
+                action=action, description=description,
+                reason=OPTION_ASSIGNED_UNMAPPED,
+                detail="assignment / exercise rows are entered through the manual form",
+            )
+        kind = classify(action, description,
+                        option_contract=from_broker_option(data["Symbol"]) is not None)
         if kind is None:
             raise UnmappedRow(
                 source_file=source_file, line_no=offset,

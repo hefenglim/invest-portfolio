@@ -30,6 +30,7 @@ from portfolio_dash.data_ingestion.config_seed import FeeRuleSet
 from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Market
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import shares_to_contracts
 
 if TYPE_CHECKING:  # annotation only — fees.py stays a pure calculation module
     from portfolio_dash.shared.models.assets import Instrument
@@ -62,6 +63,38 @@ class FeeResult(BaseModel):
     fee: Decimal
     tax: Decimal
     snapshot: dict[str, str]
+
+
+def close_row_fees() -> FeeResult:
+    """The fee, tax and provenance of a ``close_reason`` row (options spec §4.2) — ONE
+    definition for every door (manual, CSV / AI / broker, 更正, the expiry inbox).
+
+    An expiry, an assignment or an exercise moves no money on the option leg: fee = tax = 0,
+    and the engine is NOT called — its option branch would answer 0 / 0 at notional 0 too, but
+    the snapshot must say which rule produced the zeros, and it was this one, not a rate."""
+    return FeeResult(fee=_ZERO, tax=_ZERO, snapshot={"source": "close_reason"})
+
+
+def option_trade_fees(
+    rules: FeeRuleSet, side: Side, quantity: Decimal, price: Decimal, *,
+    fee: Decimal | None, tax: Decimal | None,
+) -> FeeResult:
+    """The fee resolution of an ordinary (non-close) option trade — ONE definition, every door
+    that auto-fills a fee (manual, CSV / AI / broker, 更正). Call it only when *fee* or *tax* is
+    blank; a row supplying both keeps the doors' existing supplied-provenance path.
+
+    The engine's option branch fills the blank one(s); a supplied one wins and is named in the
+    snapshot (``supplied``). Every rule set has a per-contract rate (owner ruling 2026-10-10),
+    so an option trade always carries a fee — there is no "unset" outcome any more.
+
+    Raises :class:`FeeComputationError` on an overflow-sized notional, like the engine."""
+    fr = compute_fees(rules, side, quantity, price, is_option=True)
+    snap = dict(fr.snapshot)
+    supplied = [k for k, v in (("fee", fee), ("tax", tax)) if v is not None]
+    if supplied:
+        snap["supplied"] = ",".join(supplied)
+    return FeeResult(fee=fee if fee is not None else fr.fee,
+                     tax=tax if tax is not None else fr.tax, snapshot=snap)
 
 
 def resolve_etf_flag(
@@ -255,6 +288,41 @@ def _us(
     return FeeResult(fee=fee, tax=tax, snapshot=snap)
 
 
+def _us_option(
+    rules: FeeRuleSet, side: Side, quantity: Decimal, notional: Decimal,
+    snap: dict[str, str],
+) -> FeeResult:
+    """A US equity option (OPT-D6): per contract + optional regulatory per contract + SEC on
+    sells (the stock formula, on the premium notional). No TAF, no MY stamp, tax 0.
+
+    *quantity* is in share-equivalents (OPT-D1); the contract count is ``quantity / 100``
+    through ``shared/options.py``, the one owner of the multiplier. Bypasses :func:`_us`
+    entirely — commission / platform / settlement / CAT are per-SHARE stock components and
+    would charge an option as if it were 100 shares per contract."""
+    snap["engine"] = "v2"
+    snap["rounding"] = _REGIME_HALF_UP   # every component goes through _cent
+    snap["option"] = "true"
+    contracts = shares_to_contracts(quantity)
+    snap["contracts"] = format(contracts.normalize(), "f")
+    if notional <= _ZERO:
+        return FeeResult(fee=_ZERO, tax=_ZERO, snapshot=snap)
+    per_contract = _cent(rules.option_per_contract * contracts)
+    fee = per_contract
+    snap["option_per_contract"] = str(rules.option_per_contract)
+    snap["option_commission"] = str(per_contract)
+    if rules.option_reg_per_contract > _ZERO:
+        reg = _cent(rules.option_reg_per_contract * contracts)
+        fee += reg
+        snap["option_reg"] = str(reg)
+        snap["option_reg_per_contract"] = str(rules.option_reg_per_contract)
+    if side is Side.SELL and rules.sec_rate > _ZERO:
+        sec = _cent(max(rules.sec_rate * notional, rules.sec_min))
+        fee += sec
+        snap["sec"] = str(sec)
+        snap["sec_rate"] = str(rules.sec_rate)
+    return FeeResult(fee=fee, tax=_ZERO, snapshot=snap)
+
+
 def _my(
     rules: FeeRuleSet, notional: Decimal, is_etf: bool, snap: dict[str, str],
 ) -> FeeResult:
@@ -303,6 +371,7 @@ def compute_fees(
     is_etf: bool = False,
     daytrade: bool = False,
     stamp_fx: Decimal | None = None,
+    is_option: bool = False,
 ) -> FeeResult:
     """Compute the fee and tax for a transaction given the account's FeeRuleSet (v2).
 
@@ -315,6 +384,8 @@ def compute_fees(
         daytrade:  True if this is a same-day round-trip trade (TW sell tax rate).
         stamp_fx:  Trade-date USD/MYR rate for the Moomoo US MY stamp (FE-D2). Resolved and
                    passed by the caller seam; ``None`` -> stamp 0 (seam surfaces a soft issue).
+        is_option: A US equity option contract (OPT-D6) — :func:`_us_option`, *quantity* in
+                   share-equivalents. Default ``False``: every stock caller is unchanged.
 
     Returns:
         FeeResult with fee, tax (both Decimal) and the rate/component snapshot (``engine="v2"``).
@@ -331,6 +402,8 @@ def compute_fees(
         return _tw(rules, side, notional, is_etf, daytrade, snap)
 
     if rules.market is Market.US:
+        if is_option:
+            return _us_option(rules, side, quantity, notional, snap)
         return _us(rules, side, quantity, notional, is_etf, stamp_fx, snap)
 
     return _my(rules, notional, is_etf, snap)

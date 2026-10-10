@@ -48,9 +48,28 @@
   let twrSeq = 0;               // stale-fetch guard (only the newest request renders)
   let modeWired = false;        // one-time listener wiring (idempotent across initAll)
 
+  /* Options spec §5 (R3): the trend — and the 績效比較 (TWR) view drawn in the same panel —
+     leaves an open option's market value out. The server says so once
+     (`options.note`, set only when a trend day actually skipped a contract); the line is
+     CREATED under both charts on such a ledger and nowhere else (invariant 1). */
+  function renderOptionTrendNote() {
+    const note = D.options && D.options.note;
+    const old = document.getElementById('trend-opt-note');
+    if (old) old.remove();
+    if (!note) return;
+    const cap = document.getElementById('twr-caption') || document.getElementById('trend-chart');
+    if (!cap || !cap.parentNode) return;
+    const line = document.createElement('div');
+    line.className = 'trend-opt-note';
+    line.id = 'trend-opt-note';
+    line.textContent = note;
+    cap.parentNode.insertBefore(line, cap.nextSibling);
+  }
+
   /* ============ C. Trend ============ */
   function initTrend() {
     buildPalette();
+    renderOptionTrendNote();
     const host = document.getElementById('trend-chart');
     host.classList.remove('is-loading');  // M1-01: the answer is in — before any branch
     const t = D.trend;

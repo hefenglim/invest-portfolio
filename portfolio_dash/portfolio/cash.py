@@ -42,8 +42,8 @@ Two views are exposed:
   computed server-side; the frontend never computes money.
 """
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from typing import Protocol
@@ -54,6 +54,7 @@ from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import counts_by
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import OptionAdjustRow, OptionRow, classify_option_rows
 
 _ZERO = Decimal("0")
 
@@ -198,6 +199,12 @@ class CashLine:
     of this module's views — a refused line that reached a guard's timeline could not move it
     either. ``reason`` (X1, 2026-10-05) is the replay's own sentence for that refusal, when the
     listing that built the line was handed one (``pool_lines``' ``unbooked_reason``).
+
+    ``txn_id`` (options spec §3, 2026-10-09) is the ``transactions.id`` a ``buy`` / ``sell``
+    line settles — an identity :func:`pool_lines` copies from the row when the row has one
+    (a draft does not), never a label. ``option_side`` is the §6.1 label of an option trade
+    line, set ONLY by ``account_statement`` (keyed by ``txn_id``): the balances and the
+    guards' timelines never see a label.
     """
 
     date: date
@@ -216,6 +223,8 @@ class CashLine:
     counter_amount: Decimal | None = None
     booked: bool = True
     reason: str | None = None
+    txn_id: int | None = None
+    option_side: str | None = None
 
 
 #: ⑪ — how every listing marks a ``booked=False`` line: the 現金收支明細 screen (sent on the
@@ -284,9 +293,13 @@ def pool_lines(
         gross = settled_notional(t.quantity, t.price, ccy)
         delta = (-(gross + t.fees + t.tax) if t.side is Side.BUY
                  else gross - t.fees - t.tax)
+        # The row's ledger id when it has one (a stored row, or a ``Transaction`` read by
+        # ``load_ledger_bundle``); a draft or a protocol-only test row has none.
+        row_id = getattr(t, "id", None)
         lines.append(CashLine(t.trade_date, kind, t.symbol, delta, symbol=t.symbol,
                               name=inst.name, qty=t.quantity, price=t.price,
-                              fee=t.fees, tax=t.tax))
+                              fee=t.fees, tax=t.tax,
+                              txn_id=row_id if isinstance(row_id, int) else None))
     for booked, rows in ((True, dividends), (False, unbooked_dividends)):
         for d in rows:
             inst = instruments.get(d.symbol)
@@ -364,6 +377,7 @@ def account_statement(
     dividends: Sequence[_DivRow],
     instruments: dict[str, Instrument],
     *,
+    option_side_of: Mapping[int, str],
     ccy: Currency | None = None,
     unbooked_dividends: Sequence[_DivRow] = (),
     unbooked_reason: Callable[[_DivRow], str | None] | None = None,
@@ -379,7 +393,16 @@ def account_statement(
     The one shared source for the single-pool statement, the account-wide combined view,
     and the CSV/report exports (so all three read identical numbers). ``dividends`` /
     ``unbooked_dividends`` as in :func:`pool_lines` (⑪): a refused payout is listed, with the
-    running balance it did not move."""
+    running balance it did not move.
+
+    ``option_side_of`` (options spec §6.2, REQUIRED): the §6.1 label of every option trade
+    row, keyed by ``transactions.id`` — :func:`option_sides_of`, computed ONCE by the caller
+    over the whole ledger (one classifier walk, never per line, never in JS). Each statement
+    line whose ``txn_id`` it names gets ``option_side`` set (``dataclasses.replace``); a stock
+    line keeps ``None``. Required, with no default, so a caller that forgets it is a mypy error
+    and a ``TypeError`` — never a statement that silently lost its option labels. Only the
+    LISTING carries a label: :func:`pool_lines` / :func:`cash_balances` (the guards'
+    arithmetic) never see one."""
     candidates = [ccy] if ccy is not None else list(Currency)
     result: list[tuple[Currency, list[tuple[CashLine, Decimal]]]] = []
     for c in candidates:
@@ -388,5 +411,94 @@ def account_statement(
             unbooked_dividends=unbooked_dividends, unbooked_reason=unbooked_reason))
         if ccy is None and not stmt:
             continue  # skip currencies this account never touched
+        if option_side_of:
+            stmt = [(_labelled(ln, option_side_of), bal) for ln, bal in stmt]
         result.append((c, stmt))
     return result
+
+
+def _labelled(ln: CashLine, option_side_of: Mapping[int, str]) -> CashLine:
+    side = option_side_of.get(ln.txn_id) if ln.txn_id is not None else None
+    return ln if side is None else replace(ln, option_side=side)
+
+
+class _OptionTradeRow(Protocol):
+    """A stored trade row as :func:`option_sides_of` reads it (``StoredTransaction``)."""
+
+    @property
+    def id(self) -> int: ...
+    @property
+    def account_id(self) -> str: ...
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def trade_date(self) -> date: ...
+    @property
+    def side(self) -> Side: ...
+    @property
+    def quantity(self) -> Decimal: ...
+    @property
+    def short_sale(self) -> bool: ...
+    @property
+    def close_reason(self) -> str | None: ...
+
+
+class _ActionRow(Protocol):
+    """A stored corporate-action row as :func:`option_sides_of` reads it."""
+
+    @property
+    def id(self) -> int: ...
+    @property
+    def account_id(self) -> str: ...
+    @property
+    def date(self) -> date: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def from_symbol(self) -> str: ...
+    @property
+    def to_symbol(self) -> str: ...
+    @property
+    def ratio_to(self) -> Decimal: ...
+    @property
+    def ratio_from(self) -> Decimal: ...
+
+
+def option_sides_of(
+    transactions: Iterable[_OptionTradeRow],
+    actions: Iterable[_ActionRow],
+    instruments: Mapping[str, Instrument],
+) -> dict[int, str]:
+    """``{transactions.id: §6.1 label}`` for every OPTION trade row of the ledger — the ONE
+    adapter from stored rows to ``shared.options.classify_option_rows`` (spec §6.1: one walk
+    over the option rows and the readable ``OPTION_ADJUST`` rows). Empty — and no walk at all —
+    on a ledger with no option, so a stock ledger pays nothing.
+
+    *transactions* / *actions* are the WHOLE stored ledgers (every account: each (account,
+    contract) walks on its own); *instruments* the registry, whose ``is_option`` decides which
+    rows are options. An ``OPTION_ADJUST`` the model cannot read (``ratio_from != 1``,
+    ``from == to``) is left out, as ``convert_stored`` leaves it out of the replay.
+
+    ⚠ Lives here because its first readers (the cash statement and its export) are this
+    module's callers and ``export/`` may import ``portfolio`` but not ``api``; a natural home is
+    ``shared/options.py`` beside the classifier, where the main session may move it."""
+    options = {s for s, i in instruments.items() if i.is_option}
+    if not options:
+        return {}
+    rows = [
+        OptionRow(id=t.id, account_id=t.account_id, symbol=t.symbol, trade_date=t.trade_date,
+                  side=t.side.value, quantity=t.quantity, short_sale=t.short_sale,
+                  close_reason=t.close_reason)
+        for t in transactions if t.symbol in options
+    ]
+    if not rows:
+        return {}
+    adjusts = [
+        OptionAdjustRow(id=a.id, account_id=a.account_id, date=a.date,
+                        from_symbol=a.from_symbol, to_symbol=a.to_symbol,
+                        ratio_to=a.ratio_to)
+        for a in actions
+        if a.kind.strip().upper() == "OPTION_ADJUST" and a.ratio_from == 1
+        and a.from_symbol != a.to_symbol
+    ]
+    return {k: v.value for k, v in classify_option_rows(rows, adjusts).items()}

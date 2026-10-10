@@ -120,7 +120,9 @@ def test_the_cost_the_proceeds_and_the_cash_pool_book_one_amount(
 # --- the class: every quantity × price in the package ---------------------------------------
 
 _QTY = {"quantity", "shares", "qty", "shares_sold", "reinvest_shares"}
-_PRICE = {"price", "close", "px", "trade_price", "reinvest_price"}
+#: ``strike`` (options, 2026-10-09): an option's strike times a share count is money too — the
+#: assignment's stock leg (a settlement) or a sold put's 履約義務 (an exposure).
+_PRICE = {"price", "close", "px", "trade_price", "reinvest_price", "strike"}
 
 #: Products of a quantity and a price that are NOT a settlement — each with why. Every other
 #: one must be ``settled_notional``.
@@ -131,6 +133,10 @@ _NOT_A_SETTLEMENT = {
     ("portfolio/pnl.py", "value_holdings"): 1,
     ("portfolio/returns.py", "xirr_reporting"): 1,     # the final market-value inflow
     ("portfolio/timeseries.py", "daily_value_series"): 1,
+    # a sold put's 履約義務 — strike × share-equivalents still open: an exposure shown beside
+    # the position (options spec §7.1), never booked; the assignment's own stock leg is a
+    # separate trade row that settles like any other
+    ("portfolio/options.py", "_open_row"): 1,
     # a PROJECTION at today's price (a suggested order), never booked
     ("strategy/rebalance.py", "amount"): 1,
     # CHECKS with a tolerance band against a statement's own amount, never booked

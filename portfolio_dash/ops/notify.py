@@ -568,6 +568,17 @@ def load_config(conn: sqlite3.Connection) -> NotifyConfig:
     return cfg
 
 
+def heal_config(conn: sqlite3.Connection) -> None:
+    """Boot-time: seed, then apply :func:`load_config`'s self-heal and persist it ONCE.
+
+    ``load_config`` heals a stored config that predates a rule (or lost its topic) and writes
+    the fix — and its callers are reads, ``GET /api/notify/config`` among them. On a database
+    written by an older version the first read of the 通知 page therefore WROTE (DEF-065: a GET
+    never writes; measured in the v0.1.29 release rehearsal on a v0.1.28 database). Run from
+    the lifespan, so every later read finds nothing to heal."""
+    load_config(conn)
+
+
 def save_config(conn: sqlite3.Connection, cfg: NotifyConfig, *, now: datetime) -> NotifyConfig:
     """Persist *cfg* (caller has already validated + resolved masked secrets). Returns it."""
     ensure_seeded(conn)
@@ -674,6 +685,7 @@ __all__ = [
     "format_event",
     "frontend_url",
     "generate_topic",
+    "heal_config",
     "in_quiet_hours",
     "load_config",
     "normalize_base_url",

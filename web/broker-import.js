@@ -94,6 +94,8 @@
     merged_dividend: '配息分錄，已合併為一筆股利',
     folded_interest_tax: '利息預扣稅，已併入同日的利息收入',
     option_row_unsupported: '選擇權腿，本系統不支援',
+    /* options spec §8: a contract moved between the broker's own platforms — no trade */
+    option_transfer: '選擇權在券商平台之間移轉（不是交易），已丟棄',
     unrouted_row: '已分類但不屬於任何帳本',
     unconvertible: '無法轉換為帳本列',
     action_needs_input: '公司行動的比例待補',
@@ -129,8 +131,22 @@
     return typeof entry === 'function' ? entry(i) : (entry || i.code);
   };
 
+  /* Options spec §8: why the converter stopped on an option row (`err.reason` on the 422) —
+     what it means and what to do, beside the statement line it stopped at (`err.line`). */
+  const UNMAPPED_REMEDY = {
+    option_assigned_unmapped: '對帳單有一筆選擇權「被指派／履約」列。轉換器不自動對應這類列（股票腿用猜的會讓'
+      + '一筆錢安靜地跑錯地方）：請從匯出檔刪除這一列後重新轉換，再到「交易輸入 → 手動交易」以選擇權'
+      + '模式按「被指派／履約」登錄 —— 選擇權腿與股票腿會一起寫入。',
+    option_nonstandard_adjust: '這組選擇權合約調整不是標準調整（每口 100 股、1 口換 N 口、到期日與買權／賣權'
+      + '相同、履約價×口數不變），本系統 v1 不支援非標準交割：請從匯出檔刪除這組列後重新轉換，'
+      + '並在交易帳本另行處理該合約。',
+    option_expiry_no_opening: '這筆選擇權到期列找不到它要結清的部位 —— 開倉交易不在這次的檔案裡，帳本裡也沒有：'
+      + '請先匯入包含開倉交易的較早對帳單（或在交易帳本補登開倉），再重新轉換。',
+  };
+
   const ADVISORY_ZH = {
     option_row_unsupported: '選擇權腿',
+    option_transfer_dropped: '券商平台之間的選擇權移轉（已丟棄，不是交易）',
     prehistory_position: '匯出區間之前就持有的部位',
     overlap_duplicate: '兩份匯出檔區間重疊、可能重複的列',
     unrouted_row: '沒有對應到任何帳本的列',
@@ -402,9 +418,14 @@
       const card = el('div', 'result-banner');
       card.appendChild(el('div', null, '✗ 無法轉換：' + ((err && err.message) || '未知錯誤')));
       if (err && err.code === 'broker_row_unmapped') {
-        card.appendChild(el('div', 'panel-sub',
-          '這個檔案裡有一種本系統還不認得的交易類型。系統不會用猜的把它歸到某一類 — '
-          + '猜錯會讓一筆錢安靜地跑進錯的地方。請把上面那行訊息回報。'));
+        const remedy = err.reason ? UNMAPPED_REMEDY[err.reason] : null;
+        if (err.line !== undefined && err.line !== null && err.line !== '') {
+          /* `file:line` — the server's own reference to the statement row */
+          card.appendChild(el('div', 'hint bk-unmapped-line', '停在：' + err.line));
+        }
+        card.appendChild(el('div', 'panel-sub bk-unmapped-remedy', remedy
+          || ('這個檔案裡有一種本系統還不認得的交易類型。系統不會用猜的把它歸到某一類 — '
+            + '猜錯會讓一筆錢安靜地跑進錯的地方。請把上面那行訊息回報。')));
       }
       box.appendChild(card);
       return;

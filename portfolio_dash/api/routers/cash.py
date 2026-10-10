@@ -51,6 +51,7 @@ from portfolio_dash.data_ingestion.store import (
     insert_fx_conversion,
     list_accounts,
     list_cash_movements,
+    list_corporate_actions,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -76,6 +77,7 @@ from portfolio_dash.portfolio.cash import (
     CashLine,
     account_statement,
     cash_balances,
+    option_sides_of,
     pool_lines,
     running_eod,
     running_low,
@@ -91,6 +93,7 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.ledger import counts_by, pending_from
+from portfolio_dash.shared.options import shares_to_contracts
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -650,6 +653,11 @@ def _stmt_row_wire(
         "fx_rate": _d(ln.fx_rate),
         "counter_ccy": ln.counter_ccy,
         "counter_amount": _d(ln.counter_amount),
+        # Options spec §10 (4): the §6.1 label of an option trade line (account_statement sets
+        # it from the request's one classifier walk) and its 口數 — null on every other line.
+        "option_side": ln.option_side,
+        "contracts": (decimal_str(shares_to_contracts(ln.qty))
+                      if ln.option_side is not None and ln.qty is not None else None),
     }
 
 
@@ -691,9 +699,17 @@ def cash_statement(
             "not_found", unknown_account_message(account), field="account"))
     as_of = now.date()
     ledgers = load_cash_ledgers(conn)
+    # Options spec §6.2: ONE classifier walk per request over the whole ledger (an empty map
+    # and no walk at all on a ledger with no option); the statement lines carry the label.
+    option_sides = option_sides_of(
+        ledgers.transactions,
+        list_corporate_actions(conn) if any(
+            i.is_option for i in ledgers.instruments.values()) else (),
+        ledgers.instruments)
     statements = account_statement(
         account, ledgers.movements, ledgers.fx, ledgers.transactions, ledgers.dividends,
-        ledgers.instruments, ccy=ccy, unbooked_dividends=ledgers.unbooked,
+        ledgers.instruments, option_side_of=option_sides, ccy=ccy,
+        unbooked_dividends=ledgers.unbooked,
         unbooked_reason=ledgers.refusals.reason,   # X1: the replay's sentence per row
     )
 

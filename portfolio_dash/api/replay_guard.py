@@ -57,17 +57,19 @@ from portfolio_dash.data_ingestion.store import (
     transaction_order_key,
 )
 from portfolio_dash.portfolio.cost_basis import build_book
-from portfolio_dash.portfolio.results import Book, OversoldPosition
+from portfolio_dash.portfolio.results import Book, OversoldPosition, RefusedClose
 from portfolio_dash.portfolio.returns import dividend_refusals
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.ledger import LedgerBundle, dividend_effective_date
+from portfolio_dash.shared.options import CLOSE_REASON_ZH, contract_name
 from portfolio_dash.shared.wire import decimal_str
 
 
 class _ReplayBlock(BaseModel):
-    """A reason a correction is refused: an ``oversell`` (ack-bypassable) or an
-    ``orphan`` (a dividend/opening record stranded by the mutation — hard).
+    """A reason a correction is refused: an ``oversell`` (ack-bypassable), an ``orphan`` (a
+    dividend/opening record stranded by the mutation — hard) or a ``refused_close`` (an option
+    close row the mutation leaves with no lot to close — hard, options spec §4.4).
 
     ``message`` names the FIRST stranded position — the sentence the row doors have always
     shown. ``orphans`` / ``oversold`` (DEF-049) carry EVERY position the mutation strands, so
@@ -75,9 +77,12 @@ class _ReplayBlock(BaseModel):
     that produced them is the same.
     """
 
-    code: str  # "oversell" | "orphan"
+    code: str  # "oversell" | "orphan" | "refused_close"
     message: str
     orphans: list[tuple[str, str]] = Field(default_factory=list)   # (account, symbol)
+    # Options spec §4.4: EVERY close row this mutation newly strands, in replay order — the
+    # 422 lists each one so the delete dialog can render the list.
+    refused_closes: list[RefusedClose] = Field(default_factory=list)
     # CR-11: the BOOK's record, not ``Holding`` — a 賣超 netted back to exactly zero shares has
     # no Holding at all, and it is still a 賣超 the owner must be asked about.
     oversold: list[OversoldPosition] = Field(default_factory=list)
@@ -245,6 +250,59 @@ def _orphan_rows(
                 dividend_effective_date(r.type, r.date, r.ex_date)) in triples}
 
 
+_CloseKey = tuple[object, ...]
+
+
+def _close_key(rc: RefusedClose) -> _CloseKey:
+    """A refused close's identity: its ROW (``transactions.id``) — an edit keeps the id, so a
+    close that was already refused stays as correctable as before (the H3 rule), and one the
+    mutation newly strands is named. The value tuple is only a fallback for a draft row."""
+    if rc.txn_id is not None:
+        return (rc.txn_id,)
+    return (rc.account_id, rc.symbol, rc.date, rc.side, str(rc.quantity), rc.close_reason)
+
+
+def _introduced_refused_closes(pre_book: Book | None,
+                               post_book: Book | None) -> list[RefusedClose]:
+    """Options spec §4.4: the close rows the would-be ledger refuses and the current one books
+    (or does not hold). Judged only when BOTH ledgers can be replayed — an un-bookable side has
+    no record to compare, and the replay-failure arm below already answers for it."""
+    if pre_book is None or post_book is None:
+        return []
+    before = {_close_key(rc) for rc in pre_book.refused_closes}
+    return [rc for rc in post_book.refused_closes if _close_key(rc) not in before]
+
+
+def _close_phrase(rc: RefusedClose) -> str:
+    """「XYZ 2026-12-18 50 Put（{account:…}・2026-12-18・到期作廢）」 — one stranded close row."""
+    word = CLOSE_REASON_ZH.get(rc.close_reason, rc.close_reason)
+    return (f"{contract_name(rc.symbol) or rc.symbol}（{account_ref(rc.account_id)}・"
+            f"{rc.date.isoformat()}・{word}）")
+
+
+def _refused_close_message(closes: Sequence[RefusedClose], *, what: str) -> str:
+    names = "、".join(_close_phrase(rc) for rc in closes)
+    return (f"{what}會使下列選擇權到期作廢／被指派／履約列沒有可結清的部位（無法入帳）："
+            f"{names} — 請先刪除或修改該列")
+
+
+def _refused_close_wire(rc: RefusedClose) -> dict[str, Any]:
+    """One stranded close row on the 422 — the delete dialog renders the list from these."""
+    return {
+        "kind": "refused_close", "txn_id": rc.txn_id, "account_id": rc.account_id,
+        "symbol": rc.symbol, "contract": contract_name(rc.symbol) or rc.symbol,
+        "date": rc.date.isoformat(), "side": rc.side.value,
+        "quantity": decimal_str(rc.quantity), "close_reason": rc.close_reason,
+        "reason": rc.reason, "remedy": rc.remedy,
+    }
+
+
+def _refused_close_response(block: "_ReplayBlock", message: str) -> JSONResponse:
+    return JSONResponse(status_code=422, content=error_body(
+        "refused_close_correction", message,
+        issues=[_refused_close_wire(rc) for rc in block.refused_closes]))
+
+
 def _oversold_shares(book: Book | None) -> dict[tuple[str, str], OversoldPosition] | None:
     """Map of (account, symbol) → the 賣超 position, read off ``Book.oversold_positions``.
 
@@ -335,6 +393,14 @@ def _replay_block(
             orphans=ordered,
         )
 
+    # Options spec §4.4: a close row this mutation leaves with no lot to close (its opening
+    # trade deleted, an adjustment removed, a quantity shrunk) — per ROW, hard.
+    stranded_closes = _introduced_refused_closes(pre_book, post_book)
+    if stranded_closes:
+        return _ReplayBlock(code="refused_close",
+                            message=_refused_close_message(stranded_closes, what="此更正"),
+                            refused_closes=stranded_closes)
+
     post_over = _oversold_shares(post_book)
     pre_over_raw = _oversold_shares(pre_book)
     if post_over is None:
@@ -391,6 +457,8 @@ def _replay_guard(
                           read=read)
     if block is None:
         return None
+    if block.code == "refused_close":
+        return _refused_close_response(block, block.message)
     if block.code == "orphan":
         return JSONResponse(status_code=422, content=error_body(
             "orphan_correction", block.message))
@@ -402,6 +470,11 @@ def _replay_guard(
 # ---------------------------------------------------------------------------
 # DEF-049: the import-batch undo — the same guard, over every row the batch removes
 # ---------------------------------------------------------------------------
+
+#: The blocks no acknowledgement passes, and each block's 422 error code.
+_HARD_BLOCKS = frozenset({"orphan", "refused_close"})
+_BLOCK_CODE = {"orphan": "orphan_correction", "refused_close": "refused_close_correction",
+               "oversell": "oversell"}
 
 #: The consequence an acknowledged 賣超 has, in the batch undo's own sentence. The ledger
 #: tab's dialog names one row the owner just clicked; an undo can strand sells the owner is
@@ -443,6 +516,9 @@ def _named_refusal(block: _ReplayBlock, *, what: str, then: str) -> JSONResponse
     ``then`` the step to take once the stranded record is dealt with. The DECISION is
     :func:`_replay_block`'s; only the wording is per door.
     """
+    if block.code == "refused_close":
+        return _refused_close_response(
+            block, f"{_refused_close_message(block.refused_closes, what=what)}，{then}")
     if block.code == "orphan":
         if block.orphans:
             names = "、".join(f"{account_ref(a)} {s}" for a, s in block.orphans)
@@ -573,10 +649,9 @@ def batch_undo_guard(
     block = _replay_block(conn, txs=would_txs, divs=would_divs, actions=would_acts, read=read,
                           replays=replays)
     if block is not None:
-        if block.code == "orphan" or not ack_oversell:
-            return BatchUndoVerdict(
-                refusal=_batch_refusal(block),
-                code="orphan_correction" if block.code == "orphan" else "oversell")
+        if block.code in _HARD_BLOCKS or not ack_oversell:
+            return BatchUndoVerdict(refusal=_batch_refusal(block),
+                                    code=_BLOCK_CODE.get(block.code, "oversell"))
         verdict.acked_oversell = True
     negative = _batch_cash_refusal(conn, rows, would_txs, would_divs, read=read,
                                    replays=replays)
@@ -631,7 +706,7 @@ def action_change_guard(
         read = _read_ledgers(conn)   # R10: the replay and the fee's pool check share ONE read
     replays = _replays(conn, actions=would_be, read=read)   # ⑪: shared with the fee check
     block = _replay_block(conn, actions=would_be, read=read, replays=replays)
-    if block is not None and (block.code == "orphan" or not ack_oversell):
+    if block is not None and (block.code in _HARD_BLOCKS or not ack_oversell):
         return _named_refusal(block, what=what, then=then)
     if leaving and not ack_negative:
         ids = {a.id for a in leaving}

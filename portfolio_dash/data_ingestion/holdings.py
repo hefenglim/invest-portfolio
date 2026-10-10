@@ -298,6 +298,29 @@ class _Walk:
             # exist). The delta form — new minus old — keeps the caller's `+=` uniform.
             held = self.shares(account_id, symbol, before)
             return apply_ratio(held, action) - held
+        if action.kind is CorporateActionKind.OPTION_ADJUST:
+            # Options spec §4.3: the contract moves WHOLE onto its successor, long or short —
+            # a sold contract is exactly what an adjustment must carry, so D33's negative-side
+            # skip below (which exists because EXCHANGE / SPINOFF refuse a short, E5 / E18)
+            # does not apply. The signed count moves × ratio_to (ratio_from is 1, OPT-D16).
+            # The one refusal this walker can see without the replay is the OPPOSITE-direction
+            # merge — a long onto a short or the reverse, which the replay refuses — so that is
+            # skipped and noted exactly as D33 skips. What it still cannot see is an OVERSOLD
+            # end (E3 / E22): a negative count reads as a short here, a permitted divergence
+            # on a 待釐清 ledger like D33's sticky E3 / E22 (spec §4.3), and the walker also
+            # does not replay §4.4's refused closes.
+            src_before = self.shares(account_id, action.from_symbol, before)
+            dest_before = self.shares(account_id, action.to_symbol, before)
+            if (src_before > _ZERO > dest_before) or (src_before < _ZERO < dest_before):
+                self.index.note_negative_side_skip(account_id, action.from_symbol)
+                self.index.note_negative_side_skip(account_id, action.to_symbol)
+                return _ZERO
+            moved = _ZERO
+            if symbol == action.from_symbol:
+                moved -= src_before
+            if symbol == action.to_symbol:
+                moved += apply_ratio(src_before, action)
+            return moved
         # --- D33 (owner ruling 2026-08-10, widened by task #62): skip an action with a
         # NEGATIVE SIDE ---
         # The one exception to §6.3's "the share path applies every action unconditionally".
@@ -673,7 +696,10 @@ def position_exists_by(
     # an event, and an action naming an UNREGISTERED symbol at either end is dropped with every
     # other such row (``LedgerBundle.without_unregistered``). Counting those by kind alone let
     # this check pass a dividend the replay then refused.
-    created_by = {CorporateActionKind.EXCHANGE.value, CorporateActionKind.SPINOFF.value}
+    # OPTION_ADJUST (options spec §4.3) lands its source's lots on the destination exactly as
+    # an EXCHANGE does, so it opens the destination too — the replay's rule.
+    created_by = {CorporateActionKind.EXCHANGE.value, CorporateActionKind.SPINOFF.value,
+                  CorporateActionKind.OPTION_ADJUST.value}
     candidates = [a for a in list_corporate_actions(conn, account_id=account_id, symbol=symbol)
                   if a.to_symbol == symbol and a.date <= on and a.kind in created_by]
     if not candidates:

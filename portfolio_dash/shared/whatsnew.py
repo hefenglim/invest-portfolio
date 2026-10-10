@@ -66,10 +66,23 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
-    # --- v0.1.29 (broker import) — NOT YET SHIPPED; hidden until __version__ reaches it ----
-    # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
-    # delivery date and this has not been delivered; it is set at ship time, in the same edit
-    # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29 (broker import, corporate actions, US equity options) — shipped 2026-10-10 --
+    # --- v0.1.29, US equity options in the ledger (options spec §8, 2026-10-09) -----------
+    Feature(
+        version="0.1.29",
+        id="us-equity-options",
+        title="可以登錄美股選擇權了：賣出 Put、到期、被指派、合約調整都進帳本",
+        desc="美股帳戶的手動交易多了「＋選擇權合約」：輸入標的、到期日、履約價與買權／賣權即可"
+        "建立合約，以口數與每股權利金登錄賣出開倉、買進平倉、買進開倉、賣出平倉，也能一鍵登錄"
+        "到期作廢與被指派／履約（股票腿同時寫入）。儀表板新增「選擇權」區：未平倉合約依剩餘天數"
+        "排列，賣出 Put 列出履約義務，已實現依合約、年度、標的分組；到期日已過而尚未登錄的合約"
+        "會出現在收件匣的「待確認到期」。代號欄直接貼上合約代號（或嘉信對帳單的寫法，如 "
+        "XYZ 12/18/2026 50.00 P）會自動辨識為選擇權。CSV 匯入與嘉信對帳單轉換也支援選擇權列；"
+        "選擇權持倉另有自己的 CSV 匯出",
+        href="trades.html",
+        area="交易帳本 → 交易輸入／儀表板 → 選擇權",
+        target="#m-sym-foot",
+    ),
     # --- v0.1.29, instrument aliases (post-closure item 8, 2026-09-30) ---------------------
     Feature(
         version="0.1.29",
@@ -1964,6 +1977,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.29": "2026-10-10",
     "0.1.28": "2026-08-09",
     "0.1.27": "2026-08-05",
     "0.1.26": "2026-08-03",

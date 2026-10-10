@@ -9,6 +9,131 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.29] - 2026-10-10
+
+First release since v0.1.28. It ships everything recorded below: the Schwab broker-statement
+import, corporate actions (W0–W8), the investment-logic review waves R1–R7, the functional-test
+and pre-merge CR rounds, and US equity options in the ledger (owner instruction 2026-10-10:
+merge into `main`, cut the version, deploy to the demo site and to prod). Gate results and
+the deploy record: **Release record** directly below.
+
+### Fixed — found by the release rehearsal
+
+- **A GET wrote on an upgraded database (DEF-065).** `ops/notify.load_config` fills in a rule
+  newer than the stored config and persists it, and its callers are reads — so on a database
+  written by v0.1.28 the first `GET /api/notify/config` wrote `notify_config` (two rules of this
+  release, `portfolio_drawdown` / `currency_weight`, were missing). DEF-065's guard boots a FRESH
+  database, whose seed already carries every rule, and could not see it. The lifespan now heals
+  the config at boot (`notify.heal_config`), so every later read finds nothing to write
+  (`tests/contract/test_get_never_writes_on_an_upgraded_db.py`).
+
+### Release record
+
+- **Gates** (dev machine, on the release commit): `ruff check portfolio_dash tests scripts`
+  clean; `mypy --strict` 1,078 files, 0 issues (fresh cache); pytest non-e2e 7,598 passed /
+  2 skipped / 0 failed; e2e 369 / 369 passed in 34 foreground batches of ≤ 11; stress audit
+  phase 1 `ops=164 pass=19,948 fail=0` (UI read-back included), oracle independence grep empty.
+- **Migration rehearsal** (a database built by v0.1.28 — prod's commit 734833b — booted on this
+  release): 58 / 58 tables, 0 column-definition differences and identical indexes against a
+  fresh database (column ORDER differs on `insights` / `instruments`, read by name only),
+  `integrity_check` ok, the carried prices / FX rows byte-equal, 74 GET routes with 0 × 5xx, and
+  a boot followed by every GET changes 0 lines of the dump (after the fix above).
+- **Real-data acceptance** (the owner's full Schwab history, 1,593 broker lines, imported by hand
+  through the CSV doors on a throw-away database, files and scripts git-ignored): shares 17 / 17,
+  market value at the broker's prices 17 / 17 and cash 522.20 equal the broker's 2026-10-06
+  positions; the open SPCX put and the option realized 14,847.42 equal the statement; no 賣超,
+  refused row or unapplied action. Cost equals the broker on 9 / 17 positions — the other 8
+  differ only by the broker's LIFO / specific-lot relief against the app's moving average.
+
+### Added — US equity options in the ledger (P3, approach ④; branch `feat/options-ledger`)
+
+Spec `docs/spec/2026-10-09-options-ledger.md` (APPROVED 2026-10-09), plan
+`docs/superpowers/plans/2026-10-09-options-ledger.md`. **Owner rulings (in chat, 2026-10-09):**
+R1 approach ④ — each contract is an instrument in the trade ledger, sell-to-open is the existing
+declared short; R2 an open contract is valued at its last trade price; R3 the historical trend
+excludes option value, with a note; R4 a separate 選擇權 section; R5 on assignment / exercise the
+premium stays option P&L; R6 US only; R7 approach ⑤ (a dedicated sub-ledger) kept as a TODO
+(spec §12, `TODO(options-⑤)` in `shared/options.py`). **Decisions OPT-D1..D22** confirmed by the
+owner across four review rounds and a pre-build review (spec §2); the OPT-D21 mirror (買進開倉 while
+short refused) was confirmed with the plan approval.
+
+- **Ledger.** `instruments.asset_type` ('stock' | 'option') and `transactions.close_reason`
+  (`expired` / `assigned` / `exercised`) — both additive, every existing row migrates as a stock /
+  NULL. A contract's terms are parsed from its OCC symbol (`XYZ261218P00050000`), never stored
+  twice (OPT-D22); quantity is in share-equivalents (OPT-D1). Expiry / assignment / exercise are
+  price-0 closing rows with no fee (OPT-D2); assignment / exercise also write the stock leg at the
+  strike, both rows in one transaction. The replay refuses a close row that would open or extend a
+  lot (spec §4.4) — `Book.refused_closes`, sticky `unbookable_close`, XIRR and B withheld, the
+  correction doors refuse to strand one (`refused_close_correction`). New corporate-action kind
+  `OPTION_ADJUST` (選擇權合約調整, 1 → N contracts only, OPT-D3 / D11 / D16).
+- **Valuation.** Last-trade price from the ledger (never a quote, never in `prices`); point-in-time
+  figures include an open contract, trend-derived figures exclude its value (OPT-D4); KPI 總市值 =
+  stock grand subtotal + `options.market_value` (「其中選擇權」); holdings, weights, allocation and
+  the stock realized rows stay stock-only (OPT-D5); 本金匯率效果 withheld while an option is open
+  (OPT-D20). Every new dashboard field lives in `DashboardData.options`, absent on a ledger with no
+  option — **the golden payload is unchanged**.
+- **Doors.** Manual entry option mode (`option_intent` STO / BTC / BTO / STC, `contracts`, 到期作廢,
+  被指派／履約 with both legs; OPT-D14 / D18 / D21), the compose endpoint
+  `GET /api/input/option-symbol`, the CSV `close_reason` column, the edit door on a close row, the
+  corporate-action doors, the Schwab converter (option rows mapped, `known_positions` injected —
+  OPT-D19; assignment rows not mapped blind — OPT-D9). Option fees per rule set (`schwab` 0.65 per
+  contract, `moomoo_us` 0.8633 per contract — see the 2026-10-10 ruling below; + SEC on sells; OPT-D6).
+- **Surfaces.** A 選擇權 section, the 待確認到期 expiry inbox (third 收件匣 panel, OPT-D13), §6.1
+  side labels derived on the server by one classifier (OPT-D15), the drawer for a contract, the
+  watchlist filter, every export (spec §9). Options are excluded from quotes and from every
+  stock-only reader — AI insights, signals, alerts, digest, news, fundamentals, target weights,
+  rebalance, what-if (OPT-D10).
+- **Exports — two files (owner ruling 2026-10-10, B):** the 持股 CSV
+  (`POST /api/export/holdings`, `holdings_snapshot_*.csv`) is the stock table only; on a ledger
+  with options its footer adds `options_market_value`. The open contracts are their own export,
+  `POST /api/export/options` → `options_snapshot_*.csv` (the §7.1 open-row columns, the same
+  account / market filter), with a 匯出 CSV button in the dashboard's 選擇權 section and a
+  「選擇權持倉 CSV」 card in the export centre.
+- **Option fees — one default per rule set (owner ruling 2026-10-10):** there is no "unset"
+  any more, so an option trade always carries a fee: `schwab` 0.65, `moomoo_us` **0.8633** per
+  contract (the Moomoo schedule's fixed per-contract items summed; its 0.99 per-order minimum, the
+  free commission on a premium ≤ 0.10, the clearing cap and the option TAF are not modelled) + SEC
+  on sells; a statement fee still wins, and a blank settings field reverts to the default. The
+  `option_fee_unset` refusal is gone.
+- **A pasted contract code is recognised (owner ruling 2026-10-10):** on the manual page a code
+  the page does not know yet — an OCC symbol in any case, or a Schwab statement string such as
+  `XYZ 12/18/2026 50.00 P` — is recognised by the server (`GET /api/input/option-symbol?text=`,
+  `200 {symbol | null}`, read-only) and switches the form to option mode, exactly as the builder
+  does; an unknown stock ticker keeps the stock form.
+- **Stock ledger blast radius (spec §10, invariant 1):** additive keys only — the raw transactions
+  dump / per-tab CSV gain `close_reason`, the transaction template gains `close_reason（選填）`, the
+  realized CSV gains `asset_type`, `contract`, and the wire keys spec §10 lists read null / false /
+  "stock". Every other export of a stock ledger is byte-identical (digest-pinned).
+- **Verification.** Stress-audit oracle extended from the spec (independent; phase 1 163 ops /
+  19,948 assertions / 0 fail with the UI read-back, 2026-10-10 — new baseline); accounting manual v1.12 §4.5; rule files
+  updated (`domain-ledger.md`, `markets-and-fees.md`, `data-and-pricing.md`, `architecture.md`).
+- **Fixed on the way (owner ruling 2026-10-10 widened it to stocks):** `/api/input/holdings`
+  now lists a position a corporate action created that has no row of its own yet — an EXCHANGE's
+  new ticker, a SPINOFF's child, an OPTION_ADJUST's successor contract — so the sell hints and the
+  dividend picker see it (an action after today does not count yet, DEF-056).
+- **Final review (three xhigh reviewers, 2026-10-10) — fixed before merge:** OCC symbols are
+  canonicalised at every door before validation (a lower-case contract skipped the close rules and
+  stored a dead OPTION_ADJUST); a statement posted after an already-booked expiry re-derives the
+  row for the CSV door to refuse instead of blocking the whole conversion (`known_positions`
+  measured per contract); an OPTION_ADJUST that would strand a stored close row is refused at
+  every door (`option_adjust_strands_close`); the edit preview of a stored close row no longer
+  reports a false side mismatch; the manual door requires a direction for an option; an advisory
+  no longer gates the corporate-action form; the Schwab option IN-transfer rule no longer catches
+  stock transfers; same-day adjustments of two underlyings convert as two pairs; after an
+  adjustment the destination is priced by the LATER of its own trade and the derived price, never
+  from a refused adjustment (spec §5 clarified); a 待釐清 contract shows no price, value or
+  obligation; the inbox / dashboard close prefill loads the contract's own account; the watchlist
+  labels contracts 「以最後成交價估值」; the OPTION_ADJUST source is a held-contract picker; a blank
+  fee field reverts to the default instead of failing the card.
+- **Real-data rerun (2026-10-10) — a regression of the review's own fix:** keying the converter's
+  adjustment pairs by underlying (the "two underlyings" fix above) split a merger's RENAME pair —
+  the owner's VACQ → RKLB put, one leg per root — into two one-leg groups, and the whole statement
+  stopped with 「1 adjustment legs on one day」. Two same-day legs of one expiry and right now pair
+  whatever their roots; more than two still split by underlying. Found by re-running the owner's
+  full Schwab history (1,593 lines) through the converter and the CSV doors on a throw-away
+  database: shares 17/17, cash 522.20 and the open SPCX put equal the broker's 2026-10-06
+  positions (`test_a_renamed_underlying_adjusts_as_one_pair`).
+
 **Owner rulings 2026-10-05 (in chat, one by one; 24 items).** The open questions of the CR round
 were put to the owner as choices; the kept-as-built answers need no code.
 

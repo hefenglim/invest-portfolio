@@ -23,19 +23,52 @@ that holds a position today or on any later ledger date, and every ledger write 
 a symbol shares re-activates it (``data_ingestion/holdings.py::holds_position``, used by both).
 That is what lets ``pricing/`` (which may not replay the book) filter on the flag alone.
 
+**An option contract is never tracked** (options spec §6.2, 2026-10-09): an open contract is
+valued at its last trade price from the ledger (R2), so no provider is ever asked for its quote,
+history, dividends, news, chips or fundamentals. ``TRACKED_SQL`` therefore also reads
+``asset_type = 'stock'`` — a HELD contract stays out, and that is the point: unlike archiving,
+this exclusion is by kind, not by the owner's choice. The bypasses that reach a provider for ONE
+symbol (the quick-add, a restore, the gap backfill, ``refresh_instrument_quote``, the Alpha
+Vantage held universe, the held-only news run) refuse a contract themselves, through
+:func:`is_option_symbol` / :func:`stock_instruments` and :data:`OPTION_REGISTRATION_REFUSAL`;
+``tests/contract/test_options_excluded_from_stock_readers.py`` scans for every other reader.
+
 Borrowed table (``architecture.md`` table-read convention): ``instruments``, owned by
 ``data_ingestion/store.py``, read here by direct SQL. ``shared/`` imports nothing internal
 except itself, so every layer — ``pricing/`` included — reaches this without a lateral import.
 """
 
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.options import is_option_symbol
 
-#: The one SQL spelling of "tracked" (not archived). ``COALESCE`` keeps a row written before
-#: the column existed (NULL on a hand-migrated DB) tracked, which is the column's own default.
-TRACKED_SQL = "COALESCE(archived, 0) = 0"
+#: The refusal of every stock registration door for an option contract (options spec §6.2):
+#: a contract is created by the trade door (``register_option_contract``, OPT-D7), never by
+#: the quote-gated quick-add or a restore.
+OPTION_REGISTRATION_REFUSAL = "選擇權合約由交易登錄建立"
+
+
+#: Re-exported: :func:`shared.options.is_option_symbol` is the one definition.
+__all__ = ["OPTION_REGISTRATION_REFUSAL", "TRACKED_SQL", "TrackedInstrument",
+           "is_option_symbol", "stock_instruments", "tracked_instruments"]
+
+
+def stock_instruments(instruments: Iterable[Instrument]) -> list[Instrument]:
+    """*instruments* without the option contracts, order kept — the registry read every stock
+    reader takes (OPT-D10: target weights, the held universes, the quote-job threshold)."""
+    return [i for i in instruments if not i.is_option]
+
+
+#: The one SQL spelling of "tracked": not archived, and a stock. ``COALESCE`` keeps a row
+#: written before the ``archived`` column existed (NULL on a hand-migrated DB) tracked, which
+#: is the column's own default; ``asset_type`` is ``NOT NULL DEFAULT 'stock'`` (options spec §3),
+#: so every pre-options row migrated in as a stock and only ``register_option_contract`` writes
+#: ``'option'``.
+TRACKED_SQL = "COALESCE(archived, 0) = 0 AND asset_type = 'stock'"
 
 
 @dataclass(frozen=True)
@@ -50,7 +83,8 @@ class TrackedInstrument:
 def tracked_instruments(
     conn: sqlite3.Connection, *, market: Market | None = None
 ) -> list[TrackedInstrument]:
-    """Every NON-archived registered instrument (optionally one market), ordered by symbol.
+    """Every NON-archived registered STOCK (optionally one market), ordered by symbol — never
+    an option contract (:data:`TRACKED_SQL`).
 
     Reads ``instruments`` (a ``data_ingestion`` table) by direct SQL — see the module doc.
     """

@@ -45,6 +45,10 @@ def dashboard(
 ) -> dict[str, Any]:
     data = build_dashboard(conn, now=now, reporting=reporting)
     payload: dict[str, Any] = to_wire(data.model_dump())
+    # Options spec §7.1 / invariant 1: the 選擇權 block exists only on a ledger with an option;
+    # without one the key is ABSENT, so a stock ledger's payload is the golden byte for byte.
+    if payload.get("options") is None:
+        payload.pop("options", None)
 
     # spark_30d: recent daily closes per held symbol (spec 01 add-on; batch-friendly read).
     # §5.1(d) / W6c: the sparkline is a shape drawn from points compared to EACH OTHER, and

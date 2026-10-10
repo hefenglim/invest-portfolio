@@ -18,8 +18,10 @@ from portfolio_dash.shared.wire import decimal_str
 from tests.conftest import GOLDEN_NOW, _seed_golden, init_golden_base
 
 # `kind` added 2026-07-26 (audit H2) — see tests/contract/test_export_realized.py.
+# `asset_type`, `contract` appended 2026-10-09 (options spec §10 (3)): `stock` and an empty
+# cell on every row of a stock ledger; option rows from `options.realized.rows`.
 _COLS = ("account_id,symbol,quote_ccy,kind,sell_date,shares_sold,proceeds_net,"
-         "original_cost_removed,adjusted_cost_removed,realized")
+         "original_cost_removed,adjusted_cost_removed,realized,asset_type,contract")
 
 
 def _conn_with_sell() -> sqlite3.Connection:

@@ -12,8 +12,10 @@ from portfolio_dash.shared.models.enums import Side
 # `kind` added 2026-07-26 (audit H2): "sale" | "dividend" — a cash dividend paid AFTER the
 # position closed is realized income and now appears in these rows, so the export must say
 # which it is (the tax package's capital-gains sheet filters on it).
+# `asset_type`, `contract` appended 2026-10-09 (options spec §10 (3)) — the one additive change
+# a stock ledger's realized CSV takes; option rows carry `option` and the contract's name.
 _HEADER = ("account_id,symbol,quote_ccy,kind,sell_date,shares_sold,proceeds_net,"
-           "original_cost_removed,adjusted_cost_removed,realized")
+           "original_cost_removed,adjusted_cost_removed,realized,asset_type,contract")
 
 
 def test_export_realized_empty_golden_header_only(api_client: TestClient) -> None:

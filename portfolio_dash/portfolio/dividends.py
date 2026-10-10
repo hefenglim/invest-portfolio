@@ -67,6 +67,9 @@ def project_dividends(
     * ``oversold`` — the basis was discarded and the ledger is known to be missing a buy or
       an opening, so the count is not the owner's position. STICKY, so a later buy can leave
       it POSITIVE and inside the ``shares > 0`` filter below.
+    * ``unbookable_close`` (options spec §4.4) — read exactly as ``unbookable_action``: a
+      refused close row leaves the count untrustworthy. (A contract never meets a dividend
+      calendar entry — OPT-D10 — so this is the mirror, not a live branch.)
     * ``unbookable_dividend`` / ``short_open`` are NOT excluded, for the reasons
       ``value_holdings`` gives: the first has right shares and a cost-side gap only, and the
       second is a real position (its negative shares fail ``shares > 0`` on their own).
@@ -82,7 +85,7 @@ def project_dividends(
     for h in holdings:
         # Same predicate, same order, same reason as portfolio/pnl.py::value_holdings —
         # a share count that may not be valued may not be multiplied by a dividend either.
-        if h.oversold or h.unbookable_action:
+        if h.oversold or h.unbookable_action or h.unbookable_close:
             continue
         if h.shares > _ZERO:
             by_symbol[h.symbol].append(h)

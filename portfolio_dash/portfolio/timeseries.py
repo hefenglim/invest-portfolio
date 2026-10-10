@@ -336,6 +336,10 @@ def daily_value_series(
         converted: list[tuple[date, Decimal]] = [(f.on, f.amount) for f in reporting_flows]
 
         points: list[TrendPoint] = []
+        # Options spec §5 / R3: an open contract has no daily price series (R2 values it at its
+        # last trade, a point-in-time figure), so its value is left OUT of every day — without
+        # marking the day incomplete — and the series says so once.
+        options_excluded = False
         day = start
         while day <= end:
             # allow_oversell (2026-07-02): an acked-oversold ledger must NEVER 500 the
@@ -379,8 +383,16 @@ def daily_value_series(
             # caught by `h.unbookable_dividend`; this makes the flat one agree with it.
             if book.oversold_positions or book.orphan_dividends or book.unbookable_dividends:
                 incomplete = True  # 賣超 / 股利無對應持倉 / 股利無法入帳 — 當日估值待釐清
+            # Options spec §4.4: a close row the replay refused is on the BOOK (it may have no
+            # position at all), and B is withheld while one exists — date-scoped like the rest.
+            if book.refused_closes:
+                incomplete = True  # 選擇權平倉列無法入帳 — 當日估值待釐清
             for h in book.holdings:
                 if h.shares == _ZERO:
+                    continue
+                inst = bundle.instruments.get(h.symbol)
+                if inst is not None and inst.is_option:
+                    options_excluded = True   # R3: excluded, NOT incomplete
                     continue
                 # `unbookable_action` belongs here for a STRONGER reason than 賣超: a skipped
                 # corporate action leaves `shares` in PRE-action terms while `price_history` is
@@ -388,7 +400,7 @@ def daily_value_series(
                 # it is wrong by the action's whole ratio (a 3-for-1 understates the position
                 # threefold). Omitting it let that product into the trend and net-worth series
                 # as though valid, and unflagged.
-                if h.oversold or h.unbookable_action:
+                if h.oversold or h.unbookable_action or h.unbookable_close:
                     incomplete = True  # 賣超 / 股數待釐清 — value undefined, so not counted
                     continue
                 # Y3 (owner ruling 2026-10-05): `unbookable_dividend` is NOT in that branch any
@@ -439,6 +451,7 @@ def daily_value_series(
                                      net_invested=net_invested, incomplete=incomplete))
             day += timedelta(days=1)
 
-        return TrendSeries(points=points, reporting_currency=reporting, available=True)
+        return TrendSeries(points=points, reporting_currency=reporting, available=True,
+                           options_value_excluded=options_excluded)
     except ArithmeticError as exc:
         raise UnbookableLedgerError(_uncomputable_message(None)) from exc

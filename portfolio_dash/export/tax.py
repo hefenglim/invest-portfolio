@@ -2,6 +2,14 @@
 
 Year-cut by trade date (sell date / dividend date / conversion date). Per-currency
 rows are never summed across currencies. Reporting conversion uses trade-date FX.
+
+Options (spec §9): an option close is a capital gain or loss like any sale — the replay's own
+``sale`` / ``short_cover`` rows on a contract already land on the capital-gains sheet (an
+expiry, an assignment and an exercise included: R5 keeps the premium as option P&L). On a
+ledger that carries an option (the dashboard's condition, on the uncut ledger) the sheet
+APPENDS ``asset_type`` and ``contract`` (the display name) and ``summary.md`` prints a
+「其中選擇權」 subtotal under the filing subtotal. A stock ledger's package is byte-identical
+(spec §10).
 """
 
 import sqlite3
@@ -19,11 +27,13 @@ from portfolio_dash.data_ingestion.store import (
 from portfolio_dash.export.artifact import ExportArtifact, csv_blob, zip_artifact
 from portfolio_dash.forex.fx_pnl import realized_fx_rows_as_of
 from portfolio_dash.portfolio.cost_basis import build_book
+from portfolio_dash.portfolio.options import ledger_has_options
 from portfolio_dash.portfolio.results import RealizedRow
 from portfolio_dash.pricing.store import get_fx_on
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import FXConversion, valued_rows_as_of
+from portfolio_dash.shared.options import ASSET_OPTION, ASSET_STOCK, contract_name
 from portfolio_dash.shared.wire import decimal_str
 
 _ONE = Decimal("1")
@@ -40,6 +50,8 @@ _REALIZED_COLS = ["sell_date", "account_id", "symbol", "quote_ccy", "shares_sold
                   "proceeds_net", "original_cost_removed", "adjusted_cost_removed",
                   "realized_original", "realized_adjusted",
                   "rate_used", "reporting_realized_original"]
+#: Options spec §9: appended to the capital-gains sheet ONLY on a ledger with an option.
+_OPTION_COLS = ["asset_type", "contract"]
 _DIV_COLS = ["date", "account_id", "symbol", "type", "gross", "withholding", "net", "ccy"]
 _FX_COLS = ["date", "account_id", "home_ccy", "foreign_ccy", "foreign_sold",
             "home_received", "rate_used", "realized"]
@@ -73,7 +85,10 @@ def build_tax_package_zip(
     dashboard figure (DEF-001) for a package generated before a future-dated row lands.
     """
     today = now.date()
-    bundle = load_ledger_bundle(conn).valued_as_of(today)
+    uncut = load_ledger_bundle(conn)
+    # Decided on the UNCUT ledger, as the dashboard decides its 選擇權 block (spec §7.1).
+    has_options = ledger_has_options(uncut)
+    bundle = uncut.valued_as_of(today)
     divs = bundle.dividends
     instruments = bundle.instruments
     convs = [FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
@@ -87,6 +102,9 @@ def build_tax_package_zip(
     realized_rows: list[list[str]] = []
     realized_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     adjusted_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
+    # The 「其中選擇權」 part of the filing subtotal — the same ``realized_original`` figure,
+    # summed over the contract rows only (options spec §9).
+    option_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     # ⚠ The RECONCILIATION figure is summed BEFORE the capital-gains filter below, over every
     # realized row of the year and in the replay's own row order (DEF-001, 2026-09-23). Its
     # only job is to equal the dashboard's ``returns.by_currency.<ccy>.realized``, which is
@@ -123,15 +141,23 @@ def build_tax_package_zip(
         # a quotient, and an exact zero from one is ``0E-24`` in str()'s form. Value-
         # preserving — the two forms differ only where str() would print an exponent.
         reporting_realized = "" if rate is None else decimal_str(realized_original * rate)
-        realized_rows.append([
+        row = [
             r.sell_date.isoformat(), r.account_id, r.symbol, r.quote_ccy.value,
             decimal_str(r.shares_sold), decimal_str(r.proceeds_net),
             decimal_str(r.original_cost_removed), decimal_str(r.adjusted_cost_removed),
             decimal_str(realized_original), decimal_str(r.realized),
             "" if rate is None else decimal_str(rate), reporting_realized,
-        ])
+        ]
         realized_subtotal[r.quote_ccy] += realized_original
         adjusted_subtotal[r.quote_ccy] += r.realized
+        if has_options:
+            inst = instruments.get(r.symbol)
+            is_option = inst is not None and inst.is_option
+            row += [ASSET_OPTION if is_option else ASSET_STOCK,
+                    (contract_name(r.symbol) or r.symbol) if is_option else ""]
+            if is_option:
+                option_subtotal[r.quote_ccy] += realized_original
+        realized_rows.append(row)
 
     div_rows: list[list[str]] = []
     div_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
@@ -172,8 +198,9 @@ def build_tax_package_zip(
                             decimal_str(fr.realized)])
             fx_subtotal[fr.home_ccy] += fr.realized
 
+    realized_cols = _REALIZED_COLS + _OPTION_COLS if has_options else _REALIZED_COLS
     files: dict[str, bytes] = {
-        f"realized_gains_{year}.csv": csv_blob(_REALIZED_COLS, realized_rows),
+        f"realized_gains_{year}.csv": csv_blob(realized_cols, realized_rows),
         f"dividends_{year}.csv": csv_blob(_DIV_COLS, div_rows),
         f"fx_realized_{year}.csv": csv_blob(_FX_COLS, fx_rows),
         "summary.md": _summary_md(year, realized_subtotal, div_subtotal, fx_subtotal,
@@ -181,7 +208,8 @@ def build_tax_package_zip(
                                       year=recon_year, sales=adjusted_subtotal,
                                       post_close_dividends=post_close_divs,
                                       other_years=recon_other_years,
-                                      cumulative=book.realized.by_currency)),
+                                      cumulative=book.realized.by_currency),
+                                  option_part=option_subtotal if has_options else None),
     }
     return zip_artifact(f"tax_package_{year}.zip", files)
 
@@ -273,7 +301,9 @@ def _reconciliation_md(recon: _Reconciliation) -> str:
 def _summary_md(year: int, realized: dict[Currency, Decimal],
                 dividends: dict[Currency, Decimal],
                 fx: dict[Currency, Decimal],
-                recon: _Reconciliation) -> bytes:
+                recon: _Reconciliation,
+                *,
+                option_part: dict[Currency, Decimal] | None = None) -> bytes:
     """The filing subtotal is the ORIGINAL-basis one; the adjusted basis rides along, labelled.
 
     Both figures are true, of different questions. Printing only the adjusted one (as this
@@ -281,13 +311,19 @@ def _summary_md(year: int, realized: dict[Currency, Decimal],
     dividends netted out of it, next to a dividends sheet declaring those same dividends.
     The 對帳 section is the dashboard's own figure and names every step between it and the
     filing one (DEF-001) — see :class:`_Reconciliation`.
+
+    *option_part* (options spec §9) is the option contracts' share of the filing subtotal, on a
+    ledger that carries an option; ``None`` leaves the file exactly as it was.
     """
+    options = ("" if option_part is None else
+               "其中選擇權（已含於上列，依合約名稱見 realized_gains 之 contract 欄）：\n"
+               f"{_wire_lines(option_part)}")
     md = (
         f"# Tax Package {year}\n\n"
         "Per-currency subtotals (never summed across currencies).\n\n"
         "申報用的已實現損益是「原始成本基礎」那一欄。\n\n"
         f"## Realized gains — 申報用（原始成本基礎 original_cost）\n"
-        f"{_subtotal_lines(realized)}\n"
+        f"{_subtotal_lines(realized)}{options}\n"
         f"## Dividends (net)\n{_subtotal_lines(dividends)}\n"
         f"## Realized FX P&L\n{_subtotal_lines(fx)}\n"
         f"{_reconciliation_md(recon)}"

@@ -39,6 +39,23 @@ New in CR-01 / CR-02 (2026-10-04):
   · ``ledger_issues`` — a 賣超 netted back to zero shares, and a dividend with no position:
     the two trade / dividend ledger problems no holding row can carry.
 
+New in options W5 (spec §6.2 Drawer, 2026-10-09) — ONLY on a ledger that carries an option
+(``DashboardData.options`` present), so a stock ledger's drawer payload is byte-identical
+(invariant 1):
+  · ``options`` — for a CONTRACT: its terms (parsed from the symbol, OPT-D22), its open rows
+    from ``options.open``, the refused closes of §4.4 with their remedy, and the 「選擇權不提供
+    試算」 note; for a STOCK: the open contracts written on it (「未平倉選擇權：…→ 選擇權區」).
+  · a contract's ``activity`` rows carry 口數 (``contracts``), the §6.1 ``option_side`` (the ONE
+    classifier walk), ``close_reason`` + its word, and ``refused_close``; its ``realized_rows``
+    are the block's own option rows (reason chips); and its reconciliation footer's
+    ``book_shares`` is the signed share-equivalent count of ``options.open`` — a contract has no
+    ``holdings`` row (OPT-D5), so the stock source would read every open contract as 0.
+  · a REGISTERED contract with no ledger row (its rows deleted, or opened from the watchlist's
+    「顯示選擇權合約」) gets the contract shape too — the branch is the instrument's own
+    ``is_option``, never the block's presence (final review R3 n3: it got the STOCK drawer, a
+    price chart for an instrument that is never quoted and a 試算 the what-if then refused). On
+    a stock ledger that is the one drawer carrying ``options``; a stock's drawer is unchanged.
+
 ``cost_basis`` binds to the account holding the most shares of the symbol (Q1); ``null`` for
 a non-held / watchlist symbol.
 """
@@ -73,16 +90,23 @@ from portfolio_dash.data_ingestion.store import (
     list_transactions,
     load_ledger_bundle,
 )
+from portfolio_dash.portfolio.cash import option_sides_of
 from portfolio_dash.portfolio.cost_basis import (
     CASH_MOVEMENT_REMEDY,
     ORPHAN_DIVIDEND_REMEDY,
     orphan_dividend_message,
 )
 from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.dashboard_models import DashboardData, HoldingRow
+from portfolio_dash.portfolio.dashboard_models import (
+    DashboardData,
+    HoldingRow,
+    OptionOpenRow,
+    OptionRealizedRow,
+    OptionsBlock,
+)
 from portfolio_dash.portfolio.position_aggregate import aggregate_position
 from portfolio_dash.portfolio.price_basis import series_in
-from portfolio_dash.portfolio.results import RealizedRow, UnappliedAction
+from portfolio_dash.portfolio.results import RealizedRow, RefusedClose, UnappliedAction
 from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.corporate_actions import ActionIndex, kind_label
@@ -99,6 +123,18 @@ from portfolio_dash.shared.models.ledger import (
     pending_from,
 )
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import (
+    CLOSE_REASON_ZH,
+    DIRECTION_ZH,
+    MULTIPLIER,
+    REFUSED_CLOSE_REMEDY,
+    RIGHT_ZH,
+    UNIT_SHARE_EQUIVALENT,
+    OptionSide,
+    OptionTerms,
+    option_display_name,
+    shares_to_contracts,
+)
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
@@ -512,6 +548,7 @@ def _reconcile(
     corporate_delta: Decimal,
     *,
     refused: list[Dividend],
+    book_shares: Decimal | None = None,
 ) -> dict[str, Any]:
     """The 期初＋買−賣(＋配股/DRIP)(＋公司行動)＝部位摘要 share identity, computed server-side.
 
@@ -541,6 +578,10 @@ def _reconcile(
     dividend's remedy, not 補登公司行動. ``gap_is_refused_dividends`` says whether the WHOLE gap
     is those shares, so the drawer chooses its remedies from a server fact rather than from a
     reading of the activity rows; any other share of the gap keeps the corporate-action door.
+
+    *book_shares* (options W5): the book's count when it does not live in *holdings* — an option
+    contract has no ``holdings`` row (OPT-D5), so its count is the signed share-equivalents of
+    ``options.open``. ``None`` = the holding rows, as for every stock.
     """
     opening_sh = _sum([o.shares for o in opening])
     buy_sh = _sum([t.quantity for t in txs if t.side is Side.BUY])
@@ -550,7 +591,7 @@ def _reconcile(
         for d in divs
         if DividendType(d.type) in _REINVEST_TYPES and d.reinvest_shares is not None
     ])
-    book_sh = _sum([h.shares for h in holdings])
+    book_sh = _sum([h.shares for h in holdings]) if book_shares is None else book_shares
     net = opening_sh + buy_sh - sell_sh + reinvest_sh + corporate_delta
     diff = net - book_sh
     refused_sh = _sum([
@@ -583,6 +624,116 @@ def _reconcile(
     }
 
 
+def _contract_terms_wire(terms: OptionTerms) -> dict[str, Any]:
+    """The drawer header of a contract (spec §6.2): every term read from its symbol."""
+    return {
+        "name": option_display_name(terms),
+        "underlying": terms.underlying,
+        "expiry": terms.expiry.isoformat(),
+        "strike": decimal_str(terms.strike),
+        "right": terms.right,
+        "right_label": RIGHT_ZH[terms.right],
+        "multiplier": terms.multiplier,
+    }
+
+
+def _short_contract_text(row: OptionOpenRow) -> str:
+    """「2 口 2026-12-18 50 Put（賣方）」 — the stock drawer's line names the contract without
+    repeating the underlying it is already about (spec §6.2)."""
+    name = row.contract
+    prefix = row.underlying + " "
+    if name.startswith(prefix):
+        name = name[len(prefix):]
+    return f"{decimal_str(row.contracts)} 口 {name}（{DIRECTION_ZH[row.direction]}）"
+
+
+def _open_contract_wire(row: OptionOpenRow) -> dict[str, Any]:
+    """One open contract position (``options.open``) as the drawer prints it — server strings
+    only; ``text`` is the stock drawer's 「未平倉選擇權」 line."""
+    return {
+        "account_id": row.account_id,
+        "symbol": row.symbol,
+        "contract": row.contract,
+        "direction": row.direction,
+        "direction_label": DIRECTION_ZH[row.direction],
+        "contracts": decimal_str(row.contracts),
+        "share_equivalents": decimal_str(row.share_equivalents),
+        "average_premium": decimal_str(row.average_premium),
+        "premium_total": decimal_str(row.premium_total),
+        "last_price": _dstr_or_none(row.last_price),
+        "last_price_date": _iso_or_none(row.last_price_date),
+        "market_value": _dstr_or_none(row.market_value),
+        "unrealized": _dstr_or_none(row.unrealized),
+        "obligation": _dstr_or_none(row.obligation),
+        "days_to_expiry": row.days_to_expiry,
+        "past_expiry": row.past_expiry,
+        "unbookable_close": row.unbookable_close,
+        "oversold": row.oversold,
+        "text": _short_contract_text(row),
+    }
+
+
+def _refused_close_wire(rc: RefusedClose) -> dict[str, Any]:
+    """A §4.4-refused close row of this contract — the replay's own sentence and remedy."""
+    return {
+        "txn_id": rc.txn_id, "account_id": rc.account_id, "date": rc.date.isoformat(),
+        "close_reason": rc.close_reason,
+        "close_reason_label": CLOSE_REASON_ZH.get(rc.close_reason, rc.close_reason),
+        "quantity": decimal_str(rc.quantity), "reason": rc.reason, "remedy": rc.remedy,
+    }
+
+
+def _options_wire(
+    symbol: str, inst: Instrument | None, block: OptionsBlock | None,
+) -> dict[str, Any]:
+    """The drawer's ``options`` key (spec §6.2) — on an option ledger, and for any registered
+    contract.
+
+    A contract gets its header, its open rows, its refused closes and the 試算 note; a stock
+    gets the open contracts written on it, which the drawer prints as 「未平倉選擇權：…→ 選擇權
+    區」. Both read the dashboard's ONE ``options`` block — never a second valuation. ``block``
+    is ``None`` only for a registered contract on a ledger with no option row (R3 n3): no open
+    row and no refused close, by definition."""
+    terms = inst.option if inst is not None else None
+    open_rows = list(block.open) if block is not None else []
+    if terms is None:
+        return {
+            "is_contract": False,
+            "open": [_open_contract_wire(r) for r in open_rows if r.underlying == symbol],
+        }
+    refused = list(block.refused_closes) if block is not None else []
+    return {
+        "is_contract": True,
+        "contract": _contract_terms_wire(terms),
+        "whatif_note": "選擇權不提供試算",
+        "unit": UNIT_SHARE_EQUIVALENT,
+        "multiplier": MULTIPLIER,
+        "open": [_open_contract_wire(r) for r in open_rows if r.symbol == symbol],
+        "refused_closes": [_refused_close_wire(rc) for rc in refused if rc.symbol == symbol],
+        "remedy": REFUSED_CLOSE_REMEDY,
+    }
+
+
+def _option_realized_wire(r: OptionRealizedRow) -> dict[str, Any]:
+    """A contract's realized row: the stock shape + how it closed (spec §6.2 reason chips).
+
+    ``closed_how`` is the chip's §6.1 word: the close reason's (到期作廢／被指派／履約), or — for a
+    closing TRADE — 買進平倉 on a short cover and 賣出平倉 on a sale, the same reading as the
+    section's ``by_contract[].closed_how``."""
+    if r.close_reason is not None:
+        how = CLOSE_REASON_ZH.get(r.close_reason, r.close_reason)
+    else:
+        how = (OptionSide.BTC if r.kind == "short_cover" else OptionSide.STC).value
+    return {
+        **_realized_wire(r),
+        "close_reason": r.close_reason,
+        "close_reason_label": (CLOSE_REASON_ZH.get(r.close_reason, r.close_reason)
+                               if r.close_reason is not None else None),
+        "closed_how": how,
+        "contract": r.contract,
+    }
+
+
 @router.get("/symbol/{symbol}/detail")
 def symbol_detail(
     symbol: str,
@@ -602,6 +753,13 @@ def symbol_detail(
     # per-account rows here are byte-identical to the dashboard's and the aggregate below is a
     # provable re-sum of them (round-8.1 Wave A: one definition, never a parallel calc).
     data = build_dashboard(conn, now=now, reporting=reporting)
+    # Options W5: a contract is read from the option block, never from `holdings` (stock-only,
+    # OPT-D5). None on a stock ledger, where every STOCK branch below keeps its old shape.
+    # R3 n3: whether this symbol IS a contract is the instrument's own fact — a registered
+    # contract with no ledger row has no block (the ledger may carry no option row at all) and
+    # still gets the contract drawer, never the stock one.
+    opt_block = data.options
+    is_contract = inst is not None and inst.is_option
     sym_holdings = sorted(
         (h for h in data.holdings if h.symbol == symbol),
         key=lambda h: h.shares,
@@ -624,13 +782,23 @@ def symbol_detail(
     position_accounts = [_account_wire(h) for h in sym_holdings]
 
     # This symbol's ledgers (typed models) — for the unified activity + trade_events.
+    all_stored = list_transactions(conn)
     sym_txs = [
         Transaction(account_id=s.account_id, symbol=s.symbol, side=s.side,
                     quantity=s.quantity, price=s.price, fees=s.fees, tax=s.tax,
                     trade_date=s.trade_date,
-                    short_sale=s.short_sale)
-        for s in list_transactions(conn) if s.symbol == symbol
+                    short_sale=s.short_sale, id=s.id, close_reason=s.close_reason)
+        for s in all_stored if s.symbol == symbol
     ]
+    # Options W5 (spec §6.1): the §6.1 side of every row of this contract, from the ONE
+    # classifier walk over the WHOLE ledger (an OPTION_ADJUST moves a position in from another
+    # contract), and the rows the valuation-day replay refused (§4.4). Never read for a stock.
+    option_sides: dict[int, str] = {}
+    refused_ids: set[int] = set()
+    if is_contract and opt_block is not None:
+        option_sides = option_sides_of(all_stored, list_corporate_actions(conn), instruments)
+        refused_ids = {rc.txn_id for rc in opt_block.refused_closes
+                       if rc.symbol == symbol and rc.txn_id is not None}
     sym_opening = [
         OpeningInventory(account_id=s.account_id, symbol=s.symbol, shares=s.shares,
                          original_cost_total=s.original_cost_total,
@@ -775,6 +943,18 @@ def symbol_detail(
         # product below is the unreachable fallback, not a second definition.
         gross = (settled_notional(tx.quantity, tx.price, inst.quote_ccy) if inst is not None
                  else tx.quantity * tx.price)
+        # A contract's row says what it did in the option's own words (§6.1) and in 口 —
+        # additive keys that exist only on a contract, so a stock row is unchanged.
+        opt_keys: dict[str, Any] = {}
+        if is_contract:
+            opt_keys = {
+                "contracts": decimal_str(shares_to_contracts(tx.quantity)),
+                "option_side": option_sides.get(tx.id) if tx.id is not None else None,
+                "close_reason": tx.close_reason,
+                "close_reason_label": (CLOSE_REASON_ZH.get(tx.close_reason)
+                                       if tx.close_reason is not None else None),
+                "refused_close": tx.id in refused_ids,
+            }
         if tx.side is Side.BUY:
             total = -(gross + tx.fees + tx.tax)
             aev.append((tx.trade_date, int(EventPriority.BUY), {
@@ -783,7 +963,8 @@ def symbol_detail(
                 "account": acct_names.get(tx.account_id, tx.account_id),
                 "side": "buy", "shares": decimal_str(tx.quantity),
                 "price": decimal_str(tx.price), "fee": decimal_str(tx.fees),
-                "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy}))
+                "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy,
+                **opt_keys}))
         else:
             total = gross - tx.fees - tx.tax
             aev.append((tx.trade_date, int(EventPriority.SELL), {
@@ -792,7 +973,8 @@ def symbol_detail(
                 "account": acct_names.get(tx.account_id, tx.account_id),
                 "side": "sell", "shares": decimal_str(tx.quantity),
                 "price": decimal_str(tx.price), "fee": decimal_str(tx.fees),
-                "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy}))
+                "tax": decimal_str(tx.tax), "total": decimal_str(total), "ccy": ccy,
+                **opt_keys}))
     # Only what has been RECEIVED moves the position (DEF-016, owner ruling 2026-09-24): the
     # book behind 部位摘要 is cut at the valuation day (``build_dashboard``), so a DRIP / 配股
     # whose effective date is still ahead is neither a share event here nor a term of the
@@ -841,9 +1023,21 @@ def symbol_detail(
     deltas = {aid: _corporate_delta(conn, action_index, aid, symbol, as_of=as_of)
               for aid in acct_ids}
     refused = _refused_dividends(symbol, data)
+    # Options W5: a contract's book count is the signed share-equivalents of its open rows
+    # (`options.open`); a stock keeps its holding rows (``None``).
+    open_rows = ([r for r in opt_block.open if r.symbol == symbol]
+                 if is_contract and opt_block is not None else [])
+
+    def _book(aid: str | None) -> Decimal | None:
+        if not is_contract:
+            return None
+        return _sum([r.share_equivalents for r in open_rows
+                     if aid is None or r.account_id == aid])
+
     activity_reconcile = {
         "total": _reconcile(sym_holdings, act_opening, act_txs, received_divs,
-                            _sum(list(deltas.values())), refused=refused),
+                            _sum(list(deltas.values())), refused=refused,
+                            book_shares=_book(None)),
         "by_account": {
             aid: _reconcile(
                 [h for h in sym_holdings if h.account_id == aid],
@@ -852,10 +1046,14 @@ def symbol_detail(
                 [d for d in received_divs if d.account_id == aid],
                 deltas[aid],
                 refused=[d for d in refused if d.account_id == aid],
+                book_shares=_book(aid),
             )
             for aid in acct_ids
         },
     }
+    if is_contract and not price_history["available"]:
+        # A contract is never quoted (R2): say so instead of 「尚無…的歷史價格資料」.
+        price_history["note"] = "選擇權合約不抓取報價；未平倉部位以最後一筆成交價估值"
 
     # action_issues — the three channels that EXPLAIN a red footer (audit F-17). Read AFTER
     # the walks above, because two of them are sinks those walks write into.
@@ -863,10 +1061,16 @@ def symbol_detail(
         symbol, data.unapplied_actions, action_index, acct_names
     )
 
-    # realized_rows — dashboard realized.rows shape, filtered to this symbol.
-    realized_rows = [_realized_wire(r) for r in data.realized.rows if r.symbol == symbol]
+    # realized_rows — dashboard realized.rows shape, filtered to this symbol. A contract's rows
+    # live in the option block (OPT-D5), with how each closed (the reason chips).
+    realized_rows: list[dict[str, Any]]
+    if is_contract:
+        realized_rows = ([_option_realized_wire(r) for r in opt_block.realized.rows
+                          if r.symbol == symbol] if opt_block is not None else [])
+    else:
+        realized_rows = [_realized_wire(r) for r in data.realized.rows if r.symbol == symbol]
 
-    return {
+    out: dict[str, Any] = {
         "symbol": symbol,
         "as_of": as_of.isoformat(),
         # Registry enrichment (FU-D24): name/market from the instruments registry so the
@@ -895,9 +1099,14 @@ def symbol_detail(
         "position_opened": any(p.symbol == symbol for p in data.opened_positions),
         "realized_rows": realized_rows,
     }
+    if opt_block is not None or is_contract:
+        # Options W5 (spec §6.2): additive — on a ledger that carries an option, and for every
+        # registered contract (R3 n3); a stock on a stock ledger never sees the key.
+        out["options"] = _options_wire(symbol, inst, opt_block)
+    return out
 
 
-def _realized_wire(r: RealizedRow) -> dict[str, str]:
+def _realized_wire(r: RealizedRow) -> dict[str, Any]:
     """Serialize a RealizedRow to the dashboard realized.rows wire shape."""
     return {
         "account_id": r.account_id,

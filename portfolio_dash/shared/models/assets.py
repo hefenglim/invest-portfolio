@@ -6,6 +6,13 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.options import (
+    ASSET_OPTION,
+    ASSET_STOCK,
+    AssetType,
+    OptionTerms,
+    parse_option_symbol,
+)
 
 
 class MarketRule(BaseModel):
@@ -68,3 +75,18 @@ class Instrument(BaseModel):
     aliases: list[str] = []
     industry: str | None = None  # GICS industry (R6): nullable free text, filled by the
     # next wave's AI service; backend plumbing only this wave (no frontend form yet).
+    # Options spec §3 (2026-10-09): ``"stock"`` | ``"option"``. Stored, and set by every
+    # registering door from the symbol's parse (``register_option_contract``), so the type and
+    # the symbol never disagree. The contract's terms are NOT a second copy anywhere — they are
+    # read from the symbol (:attr:`option`, OPT-D22).
+    asset_type: AssetType = ASSET_STOCK
+
+    @property
+    def is_option(self) -> bool:
+        """An option contract — exactly ``asset_type == "option"`` (spec §3)."""
+        return self.asset_type == ASSET_OPTION
+
+    @property
+    def option(self) -> OptionTerms | None:
+        """The contract's terms, parsed from the symbol; ``None`` for a stock (OPT-D22)."""
+        return parse_option_symbol(self.symbol) if self.is_option else None

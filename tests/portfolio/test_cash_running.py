@@ -14,6 +14,7 @@ from portfolio_dash.portfolio.cash import (
     CashLine,
     account_statement,
     cash_balances,
+    option_sides_of,
     pool_lines,
     running_min,
     running_statement,
@@ -131,7 +132,7 @@ def test_account_statement_all_ccy_groups_pools_with_own_balance() -> None:
     fx = StoredFxConversion(id=1, account_id="acc", date=date(2026, 1, 8),
                             from_ccy=Currency.TWD, from_amount=Decimal("32000"),
                             to_ccy=Currency.USD, to_amount=Decimal("1000"))
-    stmts = dict(account_statement("acc", movements, [fx], [], [], {}))
+    stmts = dict(account_statement("acc", movements, [fx], [], [], {}, option_side_of={}))
     assert Currency.TWD in stmts and Currency.USD in stmts and Currency.MYR not in stmts
     # each pool's running balance stays within its own currency (never blended)
     assert stmts[Currency.TWD][-1][1] == Decimal("18000")   # 50000 − 32000
@@ -141,6 +142,50 @@ def test_account_statement_all_ccy_groups_pools_with_own_balance() -> None:
 def test_account_statement_single_ccy_returns_only_that_pool() -> None:
     movements = [_mv("2026-01-01", "DEPOSIT", "50000", ccy=Currency.TWD),
                  _mv("2026-02-01", "DEPOSIT", "1000", ccy=Currency.USD)]
-    stmts = account_statement("acc", movements, [], [], [], {}, ccy=Currency.USD)
+    stmts = account_statement("acc", movements, [], [], [], {}, option_side_of={},
+                              ccy=Currency.USD)
     assert [c for c, _ in stmts] == [Currency.USD]
     assert stmts[0][1][-1][1] == Decimal("1000")
+
+
+# --- options spec §6.2: the statement lines carry the §6.1 label -----------------------------
+
+_PUT = "XYZ261218P00050000"
+
+
+def _opt_inst() -> Instrument:
+    return Instrument(symbol=_PUT, market=Market.US, quote_ccy=Currency.USD, sector="",
+                      name="XYZ 2026-12-18 50 Put", asset_type="option")
+
+
+def _opt_tx(tid: int, side: Side, qty: str, price: str, d: date, *, short: bool = False,
+            close: str | None = None) -> StoredTransaction:
+    return StoredTransaction(id=tid, account_id="acc", symbol=_PUT, side=side,
+                             quantity=Decimal(qty), price=Decimal(price), fees=Decimal("0"),
+                             tax=Decimal("0"), trade_date=d, short_sale=short,
+                             close_reason=close)  # type: ignore[arg-type]
+
+
+def test_account_statement_labels_option_lines_by_txn_id() -> None:
+    txs = [_opt_tx(7, Side.SELL, "200", "1.5", date(2026, 11, 2), short=True),
+           _opt_tx(9, Side.BUY, "200", "0", date(2026, 12, 18), close="expired"),
+           StoredTransaction(id=3, account_id="acc", symbol="AAPL", side=Side.BUY,
+                             quantity=Decimal("1"), price=Decimal("100"), fees=Decimal("0"),
+                             tax=Decimal("0"), trade_date=date(2026, 1, 2))]
+    insts = {_PUT: _opt_inst(), "AAPL": _inst()}
+    sides = option_sides_of(txs, [], insts)
+    assert sides == {7: "賣出開倉", 9: "到期作廢"}
+    ((ccy, stmt),) = account_statement("acc", [], [], txs, [], insts, option_side_of=sides)
+    assert ccy is Currency.USD
+    assert {ln.txn_id: ln.option_side for ln, _bal in stmt} == {
+        3: None, 7: "賣出開倉", 9: "到期作廢"}
+    # The guards' arithmetic never sees a label (spec §6.2 / plan invariant 5).
+    assert all(ln.option_side is None
+               for ln in pool_lines("acc", Currency.USD, [], [], txs, [], insts))
+
+
+def test_option_sides_of_is_empty_on_a_stock_ledger() -> None:
+    tx = StoredTransaction(id=1, account_id="acc", symbol="AAPL", side=Side.BUY,
+                           quantity=Decimal("1"), price=Decimal("1"), fees=Decimal("0"),
+                           tax=Decimal("0"), trade_date=date(2026, 1, 2))
+    assert option_sides_of([tx], [], {"AAPL": _inst()}) == {}

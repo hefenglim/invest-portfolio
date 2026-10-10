@@ -6,8 +6,9 @@ All money/quantity/rate fields are Decimal at full precision; display formatting
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.results import (
@@ -15,6 +16,8 @@ from portfolio_dash.portfolio.results import (
     OpenedPosition,
     OversoldPosition,
     RealizedPnL,
+    RealizedRow,
+    RefusedClose,
     ReturnSummary,
     SectorAllocation,
     UnappliedAction,
@@ -145,8 +148,11 @@ class HoldingSubtotal(BaseModel):
     A re-AGGREGATION of the SAME per-holding computed values that feed ``KpiSummary`` —
     NOT a new money-of-record formula. ``account_id`` / ``market`` are the filter
     selectors; ``None`` on an axis means "all" on that axis, so ``(None, None)`` is the
-    grand cell and EQUALS ``KpiSummary.total_market_value`` / ``.unrealized_total`` by
-    construction (identical terms, merely regrouped). 缺價 (missing-price) holdings are
+    grand cell. On a ledger without an option contract it EQUALS
+    ``KpiSummary.total_market_value`` / ``.unrealized_total`` by construction (identical
+    terms, merely regrouped); on an option ledger the cells are STOCK-ONLY (OPT-D5) and the
+    KPI is the grand cell PLUS ``OptionsBlock.market_value`` / ``.unrealized`` (spec §6.2,
+    「其中選擇權」). 缺價 (missing-price) holdings are
     excluded per cell exactly as the KPI excludes them; oversold positions carry a null
     market value and drop out the same way. Every figure is in the reporting currency via
     the shared FX helper. Money is ``Decimal | None`` — None honours the same
@@ -227,6 +233,11 @@ class TrendSeries(BaseModel):
     points: list[TrendPoint]
     reporting_currency: Currency
     available: bool = True
+    # Options spec §5 / R3: True when at least one day skipped an open option contract's value
+    # (the trend excludes it WITHOUT marking the day incomplete). ``exclude=True`` — never on
+    # the wire (the golden payload is unchanged); the dashboard copies it into
+    # ``options.trend_excludes_value``, the one place the note is published.
+    options_value_excluded: bool = Field(default=False, exclude=True)
 
 
 class PriceFreshness(BaseModel):
@@ -376,6 +387,145 @@ class InsightCardStub(BaseModel):
     generated_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# The 選擇權 section (options spec §7.1). EVERY new dashboard wire field lives in this block,
+# so a ledger with no option serves the golden payload byte-identically (invariant 1).
+# ---------------------------------------------------------------------------
+
+
+class OptionMoney(BaseModel):
+    """A per-currency amount and its reporting-currency total (``None`` when FX is missing)."""
+
+    by_currency: dict[Currency, Decimal] = Field(default_factory=dict)
+    reporting: Decimal | None = None
+
+
+class OptionOpenRow(BaseModel):
+    """One open contract position, per account (spec §7.1 ``open[]``)."""
+
+    account_id: str
+    symbol: str
+    #: The display name 「XYZ 2026-12-18 50 Put」.
+    contract: str
+    underlying: str
+    expiry: date
+    days_to_expiry: int
+    strike: Decimal
+    right: Literal["C", "P"]
+    direction: Literal["long", "short"]
+    contracts: Decimal
+    share_equivalents: Decimal
+    average_premium: Decimal
+    premium_total: Decimal
+    #: R2: the last ordinary trade's price (never a quote, never written to ``prices``).
+    #: ``None`` only on a degenerate ledger with no ordinary trade behind the position.
+    last_price: Decimal | None = None
+    last_price_date: date | None = None
+    #: ``None`` when the position is 待釐清 (賣超 / a refused close — ``pnl.value_holdings``
+    #: suppresses it exactly as it does a stock) or has no last price.
+    market_value: Decimal | None = None
+    unrealized: Decimal | None = None
+    #: A sold put's strike × 100 × contracts; ``None`` otherwise.
+    obligation: Decimal | None = None
+    #: OPT-D17 — the registered underlying's latest price and its date; both keys are
+    #: OMITTED from the wire when the underlying is unregistered or unpriced.
+    underlying_price: Decimal | None = None
+    underlying_price_date: date | None = None
+    past_expiry: bool = False
+    unbookable_close: bool = False
+    #: 賣超 (an undeclared sell beyond the long lot — ``Holding.oversold``): the count is
+    #: negative but this is NOT a sold contract, and its value is 待釐清. Added in W2 beyond the
+    #: §7.1 list because a contract has no ``holdings`` row to wear the stock 賣超 badge.
+    oversold: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_unpriced_underlying(self, handler: SerializerFunctionWrapHandler) -> Any:
+        out = handler(self)
+        if isinstance(out, dict) and self.underlying_price is None:
+            out.pop("underlying_price", None)
+            out.pop("underlying_price_date", None)
+        return out
+
+
+class OptionObligationSubtotal(BaseModel):
+    """「履約義務合計」 per account and currency."""
+
+    account_id: str
+    ccy: Currency
+    amount: Decimal
+
+
+class OptionRealizedRow(RealizedRow):
+    """One of the replay's own realized rows on an option symbol — the stock
+    ``realized.rows`` shape, plus the close reason and the contract's display name."""
+
+    close_reason: str | None = None
+    contract: str
+
+
+class OptionContractRealized(BaseModel):
+    """``realized.by_contract[]`` — one contract's life in one account."""
+
+    account_id: str
+    symbol: str
+    contract: str
+    ccy: Currency
+    opened: date | None = None
+    closed: date | None = None
+    #: How it closed: ``expired`` / ``assigned`` / ``exercised``, or ``None`` for a trade.
+    close_reason: str | None = None
+    #: The zh word for how it closed (§6.1), or ``None`` while it is still open.
+    closed_how: str | None = None
+    premium_in: Decimal
+    premium_out: Decimal
+    realized: Decimal
+
+
+class OptionRealizedYear(BaseModel):
+    """``realized.by_year[]``."""
+
+    year: int
+    by_currency: dict[Currency, Decimal] = Field(default_factory=dict)
+    reporting: Decimal | None = None
+
+
+class OptionRealizedUnderlying(BaseModel):
+    """``realized.by_underlying[]``."""
+
+    underlying: str
+    by_currency: dict[Currency, Decimal] = Field(default_factory=dict)
+    reporting: Decimal | None = None
+
+
+class OptionRealized(BaseModel):
+    """The section's 已實現 — separate from the stock ``realized``, never summed into it."""
+
+    rows: list[OptionRealizedRow] = Field(default_factory=list)
+    by_contract: list[OptionContractRealized] = Field(default_factory=list)
+    by_year: list[OptionRealizedYear] = Field(default_factory=list)
+    by_underlying: list[OptionRealizedUnderlying] = Field(default_factory=list)
+    realized_total: OptionMoney = Field(default_factory=OptionMoney)
+
+
+class OptionsBlock(BaseModel):
+    """``DashboardData.options`` (spec §7.1) — present only when the UNCUT ledger has at
+    least one transaction or action on an option instrument."""
+
+    open: list[OptionOpenRow] = Field(default_factory=list)
+    obligation_subtotals: list[OptionObligationSubtotal] = Field(default_factory=list)
+    market_value: OptionMoney = Field(default_factory=OptionMoney)
+    unrealized: OptionMoney = Field(default_factory=OptionMoney)
+    refused_closes: list[RefusedClose] = Field(default_factory=list)
+    realized: OptionRealized = Field(default_factory=OptionRealized)
+    #: R3 — True when at least one trend day skipped an option holding's value.
+    trend_excludes_value: bool = False
+    #: ``shared/options.py::TREND_EXCLUDES_OPTIONS_NOTE`` when ``trend_excludes_value``.
+    note: str | None = None
+    #: OPT-D20 — ``shared/options.py::PRINCIPAL_FX_OPTION_NOTE`` while an option is open on
+    #: the valuation day (本金匯率效果 is then withheld); ``None`` otherwise.
+    principal_fx_note: str | None = None
+
+
 class DashboardData(BaseModel):
     """One complete dashboard data model — the contract the UI binds to."""
 
@@ -441,3 +591,6 @@ class DashboardData(BaseModel):
     # the reconciliation footer reads them; excluded from the wire like the fields above (the
     # dashboard names them through the FX-complete reason and the trend's incomplete days).
     unbookable_dividends: list[UnbookableDividend] = Field(default_factory=list, exclude=True)
+    # The 選擇權 section (options spec §7.1). ``None`` on a ledger with no option, and the
+    # dashboard router REMOVES the key then — so the golden payload is unchanged (invariant 1).
+    options: OptionsBlock | None = None

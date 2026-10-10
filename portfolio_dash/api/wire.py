@@ -2,10 +2,13 @@
 
 import sqlite3
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 
+from portfolio_dash.api.errors import error_body
 from portfolio_dash.data_ingestion.config_seed import FeeRuleSet, get_fee_rule_set
 from portfolio_dash.data_ingestion.csv_import import _CellError, _side_cell
 from portfolio_dash.data_ingestion.validate import Issue
@@ -27,6 +30,15 @@ _ISSUE_FIELD = {
     "negative_fee": "fee",
     "negative_tax": "tax",
     "fee_overflow": "shares",
+    # Options spec §4.2 / OPT-D6 — the field each option finding is about.
+    "option_quantity_not_contract_multiple": "shares",
+    "option_expiry_quantity": "shares",
+    "option_close_quantity": "shares",
+    "option_after_expiry": "date",
+    "option_expiry_date": "date",
+    "close_row_price": "price",
+    "close_row_fee": "fee",
+    "option_premium_exceeds_strike": "price",
 }
 
 _DIV_MODEL = {"cash_cost_reduction": "tw", "drip_us": "drip", "cash": "net"}
@@ -158,6 +170,33 @@ def _my_label(r: FeeRuleSet) -> str:
         f"清算 {r.clearing_rate * 100}%・SST {r.sst_rate * 100}%・"
         f"印花 ceil(金額/{r.stamp_unit})×RM{r.stamp_per_unit}"
     )
+
+
+def option_fee_label(r: FeeRuleSet) -> str:
+    """The manual preview's fee label on an OPTION trade (options spec §8, OPT-D6) — a separate
+    helper, so :func:`fee_rules_wire`'s ``label`` (the rule set's stock schedule) is unchanged.
+
+    「每口 0.65＋SEC（賣出）」 (schwab), 「每口 0.8633＋SEC（賣出）」 (moomoo_us); with a regulatory
+    per-contract fee 「每口 0.65＋監管費每口 0.04＋SEC（賣出）」. Every rule set has a rate (owner
+    ruling 2026-10-10), so the label always reads the rule set's own value."""
+    reg = (f"＋監管費每口 {decimal_str(r.option_reg_per_contract)}"
+           if r.option_reg_per_contract > 0 else "")
+    return f"每口 {decimal_str(r.option_per_contract)}{reg}＋SEC（賣出）"
+
+
+#: Options final review R2, nit (b): a door that takes 口數 (the manual door's option mode, the
+#: ledger edit door) names a fraction in 口數 — not with the CSV door's share-equivalent hint
+#: 「若填的是口數，請改為 口數×100」, which tells someone who typed 口數 to multiply by 100.
+WHOLE_CONTRACTS_MESSAGE = "口數須為正整數"
+
+
+def whole_contracts_refusal(contracts: Decimal | None) -> JSONResponse | None:
+    """The 400 for a fractional ``contracts`` (口數), or ``None`` for a whole or absent one.
+    The field itself is already ``> 0`` on both bodies that carry it."""
+    if contracts is None or contracts == contracts.to_integral_value():
+        return None
+    return JSONResponse(status_code=400, content=error_body(
+        "validation_error", WHOLE_CONTRACTS_MESSAGE, field="contracts"))
 
 
 def fee_rules_wire(r: FeeRuleSet) -> dict[str, Any]:

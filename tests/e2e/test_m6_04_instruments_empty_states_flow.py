@@ -25,6 +25,7 @@ the live rows through the real PUT …/archive door and reloading).
 """
 
 import json
+import re
 import sqlite3
 import urllib.request
 from collections.abc import Iterator
@@ -41,6 +42,10 @@ from tests.e2e.conftest import FlowServerFactory
 
 _NO_DATA = "尚無標的"
 _TOGGLE = "顯示已移除／封存"
+#: The list request — with or without its query. Options W5 (spec §6.2): the watchlist asks
+#: for the option contracts too (`?include_options=1`, kept behind 「顯示選擇權合約」), so a glob
+#: on the bare path no longer matches it; `/api/instruments/lookup` and friends never do.
+_LIST = re.compile(r"/api/instruments(\?[^/]*)?$")
 
 
 @pytest.fixture(autouse=True)
@@ -103,8 +108,8 @@ def test_an_unknown_list_draws_nothing_and_an_empty_one_says_so(
     console_errors, page_errors = _watch(page)
 
     held: list[Route] = []
-    page.route("**/api/instruments", lambda r: held.append(r))   # hold, do not answer
-    with page.expect_request("**/api/instruments"):
+    page.route(_LIST, lambda r: held.append(r))   # hold, do not answer
+    with page.expect_request(_LIST):
         page.goto(base + "/instruments.html", wait_until="load")
     page.wait_for_function(
         "() => document.readyState === 'complete' && !!document.querySelector('#inst-body')")
@@ -123,7 +128,7 @@ def test_an_unknown_list_draws_nothing_and_an_empty_one_says_so(
     assert _NO_DATA not in page.inner_text("body"), "case 2 claims 尚無標的 after a failed fetch"
 
     # (3) genuinely empty: now — and only now — say so, without the archived hint.
-    page.unroute("**/api/instruments")
+    page.unroute(_LIST)
     page.reload(wait_until="load")
     page.wait_for_selector("#inst-empty")
     text3 = _note(page) or ""

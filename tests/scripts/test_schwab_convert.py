@@ -283,6 +283,29 @@ def test_neither_path_argument_has_a_default() -> None:
         assert action.default is None
 
 
+def test_the_help_says_the_offline_run_knows_no_option_positions() -> None:
+    """Options spec §8 / OPT-D19: the CLI has no ledger and converts with
+    ``known_positions={}``; the help says so, so an ``option_expiry_no_opening`` stop is
+    explained before it happens."""
+    assert "known_positions={}" in (script.build_parser().epilog or "")
+
+
+def test_an_option_row_the_converter_cannot_express_stops_the_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    export = tmp_path / "options.csv"
+    export.write_text(
+        '"Date","Action","Symbol","Description","Quantity","Price","Fees & Comm","Amount"\n'
+        '12/21/2026,Expired,XYZ 12/18/2026 50.00 P,"OPTION EXPIRATION",2,,,$0.00\n',
+        encoding="utf-8")
+    out = tmp_path / "out"
+    code, _stdout, stderr = _run(
+        ["--export", str(export), "--out", str(out), "--account", "schwab"], capsys)
+    assert code == 2
+    assert "option_expiry_no_opening" in stderr
+    assert not out.exists()
+
+
 # ============================================================ stdout must stay pasteable
 
 
@@ -355,9 +378,11 @@ def test_a_builder_that_drops_a_row_is_caught_and_nothing_is_written(
     events; this proves nothing is lost between those events and the CSVs. Simulated the way it
     would really happen — someone adds a condition to a row builder — because the guard is only
     worth its runtime if it has been watched to fire."""
-    real = conv_mod._transaction_rows
+    # The equity builder the conversion calls (options spec §8: it hands back keyed rows so the
+    # option rows can be merged into the same date order).
+    real = conv_mod._keyed_trade_rows
     monkeypatch.setattr(
-        conv_mod, "_transaction_rows",
+        conv_mod, "_keyed_trade_rows",
         lambda grouped, account, currency, suspect: real(grouped, account, currency, suspect)[:-1],
     )
     out = tmp_path / "out"

@@ -156,7 +156,10 @@ def test_holdings_held_carries_shares_and_adjusted_avg(
     assert aapl["shares"] == "10"
     assert aapl["adjusted_avg"] == "110"          # 10 × 110 / 10 — no dividend here
     closed = {h["symbol"]: h for h in b["closed"]}["2317"]
-    assert set(closed.keys()) == {"symbol", "name"}
+    # Options spec §10 (4): every row gains asset_type / direction / contracts — "stock" /
+    # null / null on a stock; the closed entry carries nothing else beyond its identity.
+    assert closed == {"symbol": "2317", "name": closed["name"], "asset_type": "stock",
+                      "direction": None, "contracts": None}
 
 
 def test_holdings_unbookable_ledger_degrades_adjusted_avg_to_null(

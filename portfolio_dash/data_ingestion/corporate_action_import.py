@@ -36,9 +36,13 @@ from decimal import Decimal, InvalidOperation
 from portfolio_dash.data_ingestion.csv_import import unread_columns_issues
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.preview import ImportPreview, PreviewRow, Writer
-from portfolio_dash.data_ingestion.register import autoregister_spinoff_child
+from portfolio_dash.data_ingestion.register import (
+    autoregister_spinoff_child,
+    register_option_contract,
+)
 from portfolio_dash.data_ingestion.store import (
     MovedWeight,
+    get_instrument,
     insert_corporate_action,
     load_ledger_bundle,
     move_target_band,
@@ -53,6 +57,7 @@ from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book
 from portfolio_dash.shared.corporate_actions import ActionIndex, CorporateActionKind, kind_label
 from portfolio_dash.shared.models.ledger import LedgerBundle
+from portfolio_dash.shared.options import parse_option_symbol
 
 # Canonical CSV column order — SINGLE SOURCE for the downloadable template header
 # (see data_ingestion.import_templates) and for scripts/verify_corporate_actions.py's
@@ -73,6 +78,8 @@ _KIND_ALIASES: dict[str, CorporateActionKind] = {
     "股票分割": CorporateActionKind.SPLIT,
     "換股": CorporateActionKind.EXCHANGE,
     "分拆": CorporateActionKind.SPINOFF,
+    # Options spec §8: the fourth kind, in the ledger's own word (``KIND_ZH``).
+    "選擇權合約調整": CorporateActionKind.OPTION_ADJUST,
 }
 
 
@@ -150,6 +157,8 @@ def _parse_row(raw: dict[str, str]) -> tuple[CorporateActionInput | None, Issue 
             account_id=account_id,
             date=action_date,
             kind=_canonical_kind(raw.get("kind", "")),
+            # An OCC contract comes out of the model in its ONE spelling (R2 M1): the payload
+            # the writer registers AND inserts is the symbol the replay looks up.
             from_symbol=raw.get("from_symbol", "").strip(),
             to_symbol=raw.get("to_symbol", "").strip(),
             ratio_to=_decimal(raw, "ratio_to", "換得股數"),
@@ -389,6 +398,12 @@ def write_corporate_action_row(
     if p["kind"] == CorporateActionKind.SPINOFF.value:
         autoregister_spinoff_child(conn, parent_symbol=p["from_symbol"],
                                    child_symbol=p["to_symbol"], commit=commit)
+    if (p["kind"] == CorporateActionKind.OPTION_ADJUST.value
+            and get_instrument(conn, p["to_symbol"]) is None
+            and parse_option_symbol(p["to_symbol"]) is not None):
+        # Options spec §4.3: the adjusted contract is registered FROM ITS SYMBOL (no quote),
+        # inside the batch's one transaction like the SPINOFF child above.
+        register_option_contract(conn, p["to_symbol"], commit=commit)
     return insert_corporate_action(
         conn,
         account_id=p["account_id"],

@@ -32,7 +32,8 @@ from portfolio_dash.shared.corporate_actions import KIND_ZH, CorporateActionKind
 
 _WEB = Path(__file__).resolve().parents[2] / "web"
 #: `SPLIT: '分割'` / `['SPLIT', '分割']` — a kind paired with a zh label, in any web file.
-_PAIR = re.compile(r"""\b(SPLIT|EXCHANGE|SPINOFF)['"]?\s*[:,]\s*['"]([^'"]*[一-鿿][^'"]*)['"]""")
+_PAIR = re.compile(
+    r"""\b(SPLIT|EXCHANGE|SPINOFF|OPTION_ADJUST)['"]?\s*[:,]\s*['"]([^'"]*[一-鿿][^'"]*)['"]""")
 #: Files allowed to carry literal kind labels, and why. Every label they carry must still
 #: EQUAL the server's word (asserted below), so an allowlisted file cannot drift either.
 _ALLOWED: dict[str, str] = {
@@ -78,6 +79,14 @@ def test_the_guard_bites() -> None:
 def test_the_helper_reads_like_the_ledger() -> None:
     assert kind_label("SPLIT") == "分割" and kind_label(" spinoff ") == "分拆"
     assert kind_label(CorporateActionKind.EXCHANGE) == "換股"
+    # options spec §6.1: the fourth kind's one spelling
+    assert kind_label(CorporateActionKind.OPTION_ADJUST) == "選擇權合約調整"
+
+
+def test_the_guard_sees_the_fourth_kind() -> None:
+    src = "const K = { OPTION_ADJUST: '合約調整' };"
+    assert _PAIR.findall(src) == [("OPTION_ADJUST", "合約調整")]
+    assert set(KIND_ZH) == {k.value for k in CorporateActionKind}
     assert kind_label("MERGER") == "MERGER"          # unknown: echoed, never guessed
 
 

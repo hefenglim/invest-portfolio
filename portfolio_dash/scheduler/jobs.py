@@ -45,7 +45,7 @@ from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
 from portfolio_dash.shared.db import session
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.instrument_scope import tracked_instruments
+from portfolio_dash.shared.instrument_scope import is_option_symbol, tracked_instruments
 from portfolio_dash.shared.llm import UsageTally, usage_tally
 from portfolio_dash.shared.money import to_db
 from portfolio_dash.strategy.alerts import Alert, compute_alerts
@@ -1592,7 +1592,14 @@ def refresh_instrument_quote(
     symbol gets a price immediately instead of waiting for its market's next
     post-close cron. Idempotent upserts; a provider failure raises (the caller
     treats the fetch as best-effort and never fails the registration over it).
+
+    An option contract is never quoted (options spec §6.2, R2: valued at its last trade
+    price from the ledger, and ``prices`` is never written for one): the call answers a zh
+    skip sentence and asks no provider anything — not even the reporting FX pairs, which the
+    market jobs refresh on their own schedule.
     """
+    if is_option_symbol(symbol):
+        return f"{symbol} 是選擇權合約，不抓報價（以最後成交價估值）"
     ref = InstrumentRef(symbol=symbol, market=market, board=board or _DEFAULT_BOARD[market])
     summary = refresh_quotes(
         conn, default_registry(conn), [ref], _FX_PAIRS, now=now,

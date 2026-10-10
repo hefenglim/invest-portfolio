@@ -13,7 +13,8 @@ rather than writing the part that happened to work.
   source is worse than one not written at all (:mod:`.provenance`'s batch id exists so the
   refusal is clean).
 * **advisory** — rows that will NOT be written, named individually. An export legitimately
-  contains option legs, positions older than the window, and a duplicated boundary row; a
+  contains option platform transfers (the option LEGS themselves are converted since the
+  options ledger), positions older than the window, and a duplicated boundary row; a
   gate that rejected those would reject every real statement and be switched off within a
   week. They are a completeness gap for a human to close, not an arithmetic contradiction,
   so they are reported loudly and by ``ref`` — never counted and summarised away.
@@ -52,7 +53,14 @@ from portfolio_dash.data_ingestion.broker.grouping import (
     overlap_duplicates,
     prehistory_shares,
 )
-from portfolio_dash.data_ingestion.broker.ir import EventKind, RawEvent, looks_like_cusip
+from portfolio_dash.data_ingestion.broker.ir import (
+    OPTION_KINDS,
+    OPTION_TRADE_KINDS,
+    EventKind,
+    RawEvent,
+    looks_like_cusip,
+)
+from portfolio_dash.shared.options import contracts_to_shares
 
 _ZERO = Decimal(0)
 
@@ -230,6 +238,33 @@ def _check_priced_rows(grouped: GroupedImport, issues: list[ReconcileIssue]) -> 
             )
 
 
+def _check_option_rows(grouped: GroupedImport, issues: list[ReconcileIssue]) -> None:
+    """Every option TRADE leg must satisfy ``amount == ±(contracts × 100 × premium) - fees``.
+
+    Options spec §8: the converter writes the leg as share-equivalents at the per-share
+    premium the statement printed, so the CSV row's ``quantity × price`` is this same product
+    — the equity check (:func:`_check_priced_rows`) restated through the ONE multiplier
+    (``shared.options.contracts_to_shares``), never a hand-typed 100. A leg that does not tie
+    is a mis-mapped column or a premium read in the wrong unit: blocking, like the equity
+    case, because the CSV door books ``quantity × price − fee`` whatever the statement says."""
+    for e in grouped.options:
+        if e.kind not in OPTION_TRADE_KINDS or e.price <= _ZERO or e.quantity == _ZERO:
+            continue
+        notional = contracts_to_shares(abs(e.quantity)) * e.price
+        fees = abs(e.fees)
+        buys = e.kind in (EventKind.OPT_BUY_OPEN, EventKind.OPT_BUY_CLOSE)
+        expected = -(notional + fees) if buys else notional - fees
+        if abs(e.amount - expected) > _MONEY_TOL:
+            issues.append(
+                ReconcileIssue(
+                    "priced_row_mismatch", "blocking", (e.ref,),
+                    f"{e.trade_date} {e.option_symbol} {e.kind.value}: {e.quantity} contracts "
+                    f"x 100 x {e.price} less fees {fees} is {expected}, but the row states "
+                    f"{e.amount}",
+                )
+            )
+
+
 def _check_dividends(grouped: GroupedImport, issues: list[ReconcileIssue]) -> None:
     """Two invariants per folded distribution.
 
@@ -289,7 +324,18 @@ def _cash_effect(grouped: GroupedImport) -> Decimal:
     for bucket in (grouped.trades, grouped.cash, grouped.actions):
         for e in bucket:
             total += e.amount
+    # Options spec §8: the option LEGS are written now (an expiry / adjustment moves no cash).
+    for e in grouped.options:
+        if e.kind in OPTION_KINDS:
+            total += e.amount
     return total
+
+
+def _parked(grouped: GroupedImport) -> set[str]:
+    """The rows the import deliberately does NOT write: unrouted rows and the option rows
+    that are not legs (a platform transfer that did not cancel)."""
+    return ({e.ref for e in grouped.options if e.kind not in OPTION_KINDS}
+            | {e.ref for e in grouped.unrouted})
 
 
 def _share_deltas(grouped: GroupedImport) -> dict[str, Decimal]:
@@ -317,7 +363,7 @@ def _check_cash_conserved(
     advisory figure rather than folded into a total that would then silently balance.
     """
     dropped = {r for g in grouped.suppressed for r in g.refs}
-    parked = {e.ref for e in grouped.options} | {e.ref for e in grouped.unrouted}
+    parked = _parked(grouped)
     expected = sum(
         (e.amount for e in events if e.ref not in dropped and e.ref not in parked), _ZERO
     )
@@ -346,7 +392,9 @@ def _check_shares_conserved(
     opposite, so the promise is what got fixed.
     """
     dropped = {r for g in grouped.suppressed for r in g.refs}
-    parked = {e.ref for e in grouped.options} | {e.ref for e in grouped.unrouted}
+    # Option legs carry no ``symbol`` (their contract is ``option_symbol``), so the walk below
+    # skips them either way; this set is the parked rows of :func:`_check_cash_conserved`.
+    parked = _parked(grouped) | {e.ref for e in grouped.options}
 
     expected: dict[str, Decimal] = defaultdict(lambda: _ZERO)
     for e in events:
@@ -451,11 +499,13 @@ def _advise(
             )
         )
     for e in grouped.options:
+        if e.kind in OPTION_KINDS:
+            continue   # a leg: converted to a row (options spec §8)
         issues.append(
             ReconcileIssue(
-                "option_row_unsupported", "advisory", (e.ref,),
-                f"{e.trade_date} {e.kind.value}: option legs are recognised but not "
-                "supported (P3) — not imported",
+                "option_transfer_dropped", "advisory", (e.ref,),
+                f"{e.trade_date} {e.option_symbol or '(no contract)'} {e.kind.value}: an "
+                "option moved between the broker's platforms — not imported",
             )
         )
     for first, dup in overlap_duplicates(events):
@@ -500,6 +550,7 @@ def reconcile(events: list[RawEvent], grouped: GroupedImport) -> ReconcileReport
 
     _check_suppressed(grouped, by_ref, issues)
     _check_priced_rows(grouped, issues)
+    _check_option_rows(grouped, issues)
     _check_dividends(grouped, issues)
     cusips = _check_symbols(grouped, by_ref, issues)
     cash_total = _check_cash_conserved(events, grouped, issues)

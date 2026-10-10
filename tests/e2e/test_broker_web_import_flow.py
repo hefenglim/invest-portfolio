@@ -178,7 +178,9 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
 
     # --- DEF-028: every row is on the screen, with a checkbox, before anything is written --
     report = page.locator("#bk-report")
-    for kind, n in (("transactions", 11), ("dividends", 1), ("cash", 7), ("corporate_actions", 3)):
+    # 12 trades since options W3 (spec §8): the corpus's 2025-12-01 Sell to Open is no longer
+    # dropped as 「選擇權腿」 — it converts into a declared-short row on its OCC contract.
+    for kind, n in (("transactions", 12), ("dividends", 1), ("cash", 7), ("corporate_actions", 3)):
         expect(report.locator(f"details.bk-kind[data-kind='{kind}'] tbody tr")).to_have_count(n)
         expect(report.locator(f"details.bk-kind[data-kind='{kind}'] input.bk-row-tick:checked")
                ).to_have_count(n)
@@ -198,7 +200,7 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
 
     page.wait_for_function(
         "() => { const b = document.querySelector('#bk-commit'); return b && !b.disabled; }")
-    expect(page.locator("#bk-commit")).to_have_text("寫入勾選列（22）")
+    expect(page.locator("#bk-commit")).to_have_text("寫入勾選列（23）")
     with page.expect_response("**/api/import/commit") as first:
         page.click("#bk-commit")
     # ★ DEF-027: the first commit (transactions) is sent UNACKNOWLEDGED and the server refuses
@@ -227,7 +229,7 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
     assert acked.value.status == 200
     sent = _sent_body(acked.value.request.post_data_json)
     assert sent["kind"] == "transactions"
-    assert sorted(sent["select"]) == list(range(11)), "the ticked row travels as select"
+    assert sorted(sent["select"]) == list(range(12)), "the ticked row travels as select"
     # The SECOND warning the blanket ack used to swallow: NEWX (the EXCHANGE's new symbol)
     # has no price row, so the corporate-actions commit asks too — one dialog per kind.
     sent = _acknowledge_dialog(page, "公司行動", "NEWX", "2025-05-22", "沒有任何價格紀錄")
@@ -252,7 +254,7 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
     # The CLI route's own numbers, kind for kind. Counting rather than listing kinds is what
     # catches a sequencing bug that writes a file twice or drops half of one.
     assert {b["kind"]: b["row_count"] for b in batches} == {
-        "transactions": 11, "dividends": 1, "cash": 7, "corporate_actions": 3}
+        "transactions": 12, "dividends": 1, "cash": 7, "corporate_actions": 3}
     for b in batches:
         # The source file NAME rides the batch, so a year from now the list still says where
         # a row came from. (Both statements were uploaded together, so both names appear.)
@@ -320,9 +322,10 @@ def test_an_unticked_row_is_not_written_and_a_skipped_warning_row_is_not_written
     body = _drop_exports(page)
     assert body["ok"] is True
 
-    # Untick the last ALFA buy (2025-12-15, row index 10) in the table.
-    page.locator("#bk-row-transactions-10").uncheck()
-    expect(page.locator("#bk-commit")).to_have_text("寫入勾選列（21）")
+    # Untick the last ALFA buy (2025-12-15, row index 11 — index 10 is the 2025-12-01 Sell to
+    # Open the converter keeps since options W3) in the table.
+    page.locator("#bk-row-transactions-11").uncheck()
+    expect(page.locator("#bk-commit")).to_have_text("寫入勾選列（22）")
     with page.expect_response("**/api/import/commit") as first:
         page.click("#bk-commit")
     assert first.value.status == 422
@@ -332,20 +335,20 @@ def test_an_unticked_row_is_not_written_and_a_skipped_warning_row_is_not_written
         dialog.locator("button", has_text="略過所有警告列").click()
     assert skipped.value.status == 200
     sent = _sent_body(skipped.value.request.post_data_json)
-    # The warning row (index 9) and the unticked row (index 10) are both out of `select`;
+    # The warning row (index 9) and the unticked row (index 11) are both out of `select`;
     # the acknowledgement only releases the server's whole-file gate for rows not sent.
-    assert sorted(sent["select"]) == list(range(9))
+    assert sorted(sent["select"]) == [*range(9), 10]
     # The corporate-actions kind asks about NEWX's missing price next; acknowledged here so
     # the split/exchange still land (the numbers below depend on the 3-for-1 and the 1:1).
     _acknowledge_dialog(page, "公司行動", "NEWX")
     expect(page.locator("#bk-report")).to_contain_text("寫入完成", timeout=15000)
-    expect(page.locator("#bk-report")).to_contain_text("交易 寫入 9 筆")
+    expect(page.locator("#bk-report")).to_contain_text("交易 寫入 10 筆")
 
     held = _shares(base)
     assert "PREH" not in held, "the skipped 賣超 row must not reach the ledger"
     assert held["ALFA"] == Decimal("91.81366934")   # 101.81366934 without the unticked buy
     batches = _get_json(base, "/api/import/batches")["batches"]
-    assert {b["kind"]: b["row_count"] for b in batches}["transactions"] == 9
+    assert {b["kind"]: b["row_count"] for b in batches}["transactions"] == 10
 
     # Chromium logs the 422 as a console error; nothing else is allowed.
     assert _unexpected(console_errors, "status of 422") == []

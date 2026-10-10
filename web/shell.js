@@ -230,11 +230,14 @@
   const MKT_LABEL = { TW: '台股', US: '美股', MY: '馬股' };
   function pdLoadSymbols() {
     if (_symbolsPromise) return _symbolsPromise;
+    /* Options spec §6.2: /api/instruments hides contracts unless asked (the watchlist is a
+       stock list). The search asks, and keeps the contracts that are HELD — a position the
+       owner may want to open in the drawer — while a closed contract stays out of the way. */
     _symbolsPromise = pdEnsureApi()
-      .then((ok) => (ok ? window.pdApi.get('/api/instruments') : null))
+      .then((ok) => (ok ? window.pdApi.get('/api/instruments', { include_options: 1 }) : null))
       .then((resp) => {
         if (resp && Array.isArray(resp.list)) {
-          SYMBOLS = resp.list.map((i) => ({
+          SYMBOLS = resp.list.filter((i) => i.asset_type !== 'option' || i.held).map((i) => ({
             sym: i.symbol,
             name: i.name || i.symbol,
             mkt: MKT_LABEL[i.market] || i.market || '',
@@ -913,8 +916,9 @@
      the SINGLE `.sb-badge-alert` on the 收件匣 nav item — updating its text when the count
      changed and REMOVING it when the count drops to 0 — so repeated refreshes never stack
      duplicate badges (F2b/F8). Leaves any static `.sb-badge` (non-alert) untouched. */
-  function pdPaintInboxBadge(dv, rb) {
-    const n = dv + rb;
+  function pdPaintInboxBadge(dv, rb, ex) {
+    const exN = ex || 0;   // options spec §7.2: the third panel 「待確認到期」 (counts, not money)
+    const n = dv + rb + exN;
     let nav = null;
     const items = document.querySelectorAll('#sidebar .sb-item');
     for (const a of items) {
@@ -925,7 +929,8 @@
     if (!n) { if (b) b.remove(); return; }
     if (!b) { b = el('span', 'sb-badge sb-badge-alert', String(n)); nav.appendChild(b); }
     else { b.textContent = String(n); }
-    b.title = n + ' 筆待確認（配息 ' + dv + '・折讓款 ' + rb + '）';
+    b.title = n + ' 筆待確認（配息 ' + dv + '・折讓款 ' + rb
+      + (exN ? '・選擇權到期 ' + exN : '') + '）';
   }
 
   /* Fetch the two counts and repaint. Exposed as window.pdRefreshInboxBadge so any surface
@@ -939,12 +944,15 @@
       .then((ok) => (ok ? Promise.all([
         window.pdApi.get('/api/dividend-inbox/count').catch(() => null),
         window.pdApi.get('/api/rebates/count').catch(() => null),
+        /* options spec §7.2: 「待確認到期」 — 0 on a ledger with no option */
+        window.pdApi.get('/api/option-expiry/count').catch(() => null),
       ]) : null))
       .then((results) => {
         if (!results) return;
         pdPaintInboxBadge(
           (results[0] && results[0].count) || 0,
-          (results[1] && results[1].count) || 0);
+          (results[1] && results[1].count) || 0,
+          (results[2] && results[2].count) || 0);
       })
       .catch(() => { /* silent: the badge is a hint, not a gate */ });
   }

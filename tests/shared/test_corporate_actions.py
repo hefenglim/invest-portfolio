@@ -375,3 +375,67 @@ def test_event_priority_sorts_as_an_int() -> None:
     assert sorted([EventPriority.DIVIDEND, EventPriority.OPENING, EventPriority.CORPORATE_ACTION]) \
         == [EventPriority.OPENING, EventPriority.CORPORATE_ACTION, EventPriority.DIVIDEND]
     assert int(EventPriority.CORPORATE_ACTION) == 10
+
+
+# --- OPTION_ADJUST (options spec §4.3, OPT-D3 / OPT-D11 / OPT-D16) ------------------------
+
+
+def _adj(**over: object) -> dict[str, object]:
+    from datetime import date as _date
+
+    row: dict[str, object] = dict(
+        account_id="schwab", date=_date(2026, 6, 1), kind="OPTION_ADJUST",
+        from_symbol="XYZ261218P00060000", to_symbol="XYZ261218P00020000",
+        ratio_to=Decimal(3), ratio_from=Decimal(1))
+    row.update(over)
+    return row
+
+
+def test_option_adjust_is_the_fourth_kind_with_its_own_word() -> None:
+    from portfolio_dash.shared.corporate_actions import (
+        KIND_ZH,
+        CorporateAction,
+        CorporateActionKind,
+        kind_label,
+    )
+
+    assert CorporateActionKind("OPTION_ADJUST") is CorporateActionKind.OPTION_ADJUST
+    assert KIND_ZH["OPTION_ADJUST"] == "選擇權合約調整" == kind_label("option_adjust")
+    a = CorporateAction(**_adj())  # type: ignore[arg-type]
+    assert a.kind is CorporateActionKind.OPTION_ADJUST and a.cost_carry is None
+
+
+@pytest.mark.parametrize("over", [
+    {"cost_carry": Decimal("0.5")},                      # SPINOFF-only
+    {"ratio_from": Decimal(2), "ratio_to": Decimal(6)},  # OPT-D16: 1 → N only
+    {"to_symbol": "XYZ261218P00060000", "ratio_to": Decimal(1)},  # from == to
+])
+def test_option_adjust_structural_refusals(over: dict[str, object]) -> None:
+    from portfolio_dash.shared.corporate_actions import CorporateAction
+
+    with pytest.raises(ValueError):
+        CorporateAction(**_adj(**over))  # type: ignore[arg-type]
+
+
+def test_a_stored_malformed_option_adjust_is_unreadable_not_raised() -> None:
+    from types import SimpleNamespace
+
+    from portfolio_dash.shared.corporate_actions import convert_stored
+
+    ok = SimpleNamespace(**_adj(), cost_carry=None, note=None, id=1)
+    bad = SimpleNamespace(**_adj(ratio_from=Decimal(2), ratio_to=Decimal(6)),
+                          cost_carry=None, note=None, id=2)
+    good, unreadable = convert_stored([ok, bad])
+    assert [a.id for a in good] == [1]
+    assert [u.id for u in unreadable] == [2] and unreadable[0].kind == "OPTION_ADJUST"
+
+
+def test_an_unreadable_option_adjust_names_its_own_rule() -> None:
+    from types import SimpleNamespace
+
+    from portfolio_dash.shared.corporate_actions import convert_stored
+
+    bad = SimpleNamespace(**_adj(ratio_from=Decimal(2), ratio_to=Decimal(6)),
+                          cost_carry=None, note=None, id=2)
+    _good, (u,) = convert_stored([bad])
+    assert "選擇權合約調整以 1 口為基準" in u.reason and "分割的前後代號" not in u.reason

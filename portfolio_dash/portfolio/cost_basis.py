@@ -13,6 +13,7 @@ from portfolio_dash.portfolio.results import (
     OversoldPosition,
     RealizedPnL,
     RealizedRow,
+    RefusedClose,
     UnappliedAction,
     UnbookableDividend,
 )
@@ -32,6 +33,13 @@ from portfolio_dash.shared.models.ledger import (
     Transaction,
 )
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import (
+    ADJUST_KIND_ZH,
+    CLOSE_REASON_ZH,
+    REFUSED_CLOSE_REMEDY,
+    contract_name,
+    shares_to_contracts,
+)
 
 _ZERO = Decimal("0")
 
@@ -110,6 +118,12 @@ class _Position:
     # dashboard path (E1a/E2/E3/E5/E18/E22). The shares are then in PRE-action terms against
     # global post-action prices, so the position is 待釐清 rather than merely stale.
     unbookable_action: bool = False
+    # Options spec §4.4 (2026-10-09): a ``close_reason`` row (expiry / assignment / exercise)
+    # on this position was REFUSED — it would have opened or extended a lot instead of closing
+    # one. STICKY like ``unbookable_action``, and read by the same readers (valuation, the
+    # trend, the badges). The refused ROW is on the book (``Book.refused_closes``), because a
+    # close with no position at all has nothing to flag.
+    unbookable_close: bool = False
     # QA-06 (owner ruling 2026-09-01: 記錄並標記). A share-adding dividend (DRIP / STOCK)
     # landed while the LONG lot was flat, so the position exists ONLY because of it: shares
     # are added at $0 cost onto a basis of zero. Booked, not refused — you may genuinely have
@@ -263,6 +277,78 @@ def _reject(
     raise _SkipAction
 
 
+def _apply_option_adjust(
+    positions: dict[tuple[str, str], _Position],
+    action: CorporateAction,
+    source: _Position,
+    quote_ccy: Callable[[str], Currency],
+    unapplied: list[UnappliedAction],
+    *,
+    acct_ref: str,
+    allow_oversell: bool,
+) -> None:
+    """Options spec §4.3: move an option contract — long OR short — onto its adjusted successor.
+
+    Reached from :func:`_apply_action` after E1 / E2 / E3 (no source, a flat source, an oversold
+    source) and the SPLIT branch, and BEFORE the EXCHANGE / SPINOFF block: that block's E5 and
+    E18 refuse a short at either end, while a sold contract is exactly what an adjustment must
+    carry (OPT-D3). The same-direction rule replaces them, so this branch does its own
+    destination lookup and its own guards:
+
+    * **E22** — an oversold destination: its basis was discarded, and carrying a real one onto
+      it would make that basis look ordinary again;
+    * **opposite direction** — a long source onto a short destination or the reverse: long and
+      short are mutually exclusive by construction, and merging them is no booking at all.
+
+    The transfer is the §4.3 table: both lots × ``ratio_to`` (``ratio_from`` is 1 by the model,
+    OPT-D16), both totals and the short proceeds carried whole (the ε residue included — the
+    EXCHANGE rule), every 待釐清 flag OR-ed into Q, the source zeroed and vacated
+    (``P.vacated_to := to_symbol``), then ``_reopen(Q)``. ``classify_option_rows`` mirrors these
+    refusals exactly (spec §6.1), so a refused adjustment moves nothing in either.
+    """
+    dst_key = (action.account_id, action.to_symbol)
+    dest = positions.get(dst_key)
+    if dest is not None:
+        if dest.ever_oversold:
+            _reject(f"{ADJUST_KIND_ZH}：目的合約 {action.to_symbol}（{acct_ref}）是賣超"
+                    "（待釐清）部位，移轉成本過去會讓已捨棄的成本基礎「復活」，"
+                    "並算出一個看似正常、實際上沒有依據的均價",
+                    source, action, unapplied, allow_oversell=allow_oversell)
+        if ((source.shares > _ZERO and dest.short_shares > _ZERO)
+                or (source.short_shares > _ZERO and dest.shares > _ZERO)):
+            _reject(f"{ADJUST_KIND_ZH}：{action.from_symbol}（{acct_ref}）於 "
+                    f"{action.date.isoformat()} 與目的合約 {action.to_symbol} 的部位方向相反"
+                    "（一為買方、一為賣方），多空混在一個部位裡會使均價失去意義 — "
+                    "請先平倉其中一方",
+                    source, action, unapplied, allow_oversell=allow_oversell)
+    else:
+        dest = positions.setdefault(dst_key, _Position(quote_ccy(action.to_symbol)))
+    # `apply_ratio` multiplies first and divides by ``ratio_from`` (1) last — exact.
+    dest.shares += apply_ratio(source.shares, action)
+    dest.original_total += source.original_total
+    dest.adjusted_total += source.adjusted_total
+    dest.short_shares += apply_ratio(source.short_shares, action)
+    dest.short_proceeds += source.short_proceeds
+    dest.unbookable_dividend |= source.unbookable_dividend
+    dest.unbookable_action |= source.unbookable_action
+    dest.unbookable_close |= source.unbookable_close
+    dest.revived_by_dividend |= source.revived_by_dividend
+    # payback_*: as EXCHANGE — always empty on an option (no dividend reaches one), moved
+    # anyway so the table has one rule per field rather than an "unreachable" exemption.
+    if dest.payback_from is None:
+        dest.payback_from = source.payback_from
+    dest.payback_carried += source.payback_carried
+    dest.payback_own += source.payback_own
+    source.shares = _ZERO
+    source.original_total = _ZERO
+    source.adjusted_total = _ZERO
+    source.short_shares = _ZERO
+    source.short_proceeds = _ZERO
+    _clear_payback_provenance(source)
+    source.vacated_to = action.to_symbol
+    _reopen(dest)
+
+
 def _apply_action(
     positions: dict[tuple[str, str], _Position],
     action: CorporateAction,
@@ -273,7 +359,7 @@ def _apply_action(
 ) -> None:
     """Apply one corporate action to the live position map (spec §4.1-§4.4).
 
-    The field transfer is NORMATIVE and complete: `_Position` has seventeen fields and every
+    The field transfer is NORMATIVE and complete: `_Position` has eighteen fields and every
     one of them has an explicit rule in §4.4, because "the formula didn't mention it" is not
     a specification. (This sentence said *nine* while the table listed *ten*: `vacated_to`
     updated the table and the test tuple but not this line, because the count guard reads the
@@ -323,6 +409,11 @@ def _apply_action(
             source.short_shares = apply_ratio(source.short_shares, action)
             return
 
+        if action.kind is CorporateActionKind.OPTION_ADJUST:
+            _apply_option_adjust(positions, action, source, quote_ccy, unapplied,
+                                 acct_ref=acct_ref, allow_oversell=allow_oversell)
+            return
+
         # --- EXCHANGE / SPINOFF share a destination and its guards ---
         # E5: no honest booking exists for moving an open short to another symbol.
         if source.short_shares > _ZERO:
@@ -364,6 +455,7 @@ def _apply_action(
             dest.adjusted_total += source.adjusted_total
             dest.unbookable_dividend |= source.unbookable_dividend      # E19
             dest.unbookable_action |= source.unbookable_action
+            dest.unbookable_close |= source.unbookable_close            # options §4.4
             # QA-06 travels with the position: an EXCHANGE moves the zero-basis shares to Q,
             # so the destination inherits the doubt about whether they should exist at all.
             dest.revived_by_dividend |= source.revived_by_dividend
@@ -397,6 +489,7 @@ def _apply_action(
         dest.adjusted_total += carved_adjusted
         dest.unbookable_dividend |= source.unbookable_dividend          # E19
         dest.unbookable_action |= source.unbookable_action
+        dest.unbookable_close |= source.unbookable_close                # options §4.4
         dest.revived_by_dividend |= source.revived_by_dividend           # QA-06
         # M1-03 / D21: record WHOSE dividends the child's payback ratio is built on. The
         # portion carved in is exactly `carved_original − carved_adjusted` — the parent's
@@ -498,6 +591,35 @@ def _vacated_dividend_message(ev: Dividend, vacated_to: str) -> str:
             f"請{CASH_MOVEMENT_REMEDY}。")
 
 
+def _contracts_text(shares: Decimal) -> str:
+    """Share-equivalents as 口 for a sentence — ``2``, ``1.5``, never ``2E+0``."""
+    text = format(shares_to_contracts(shares), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _refused_close_message(ev: Transaction, existing: _Position | None) -> str:
+    """The sentence for a ``close_reason`` row the replay refuses (options spec §4.4).
+
+    Raised on the strict path and recorded as ``RefusedClose.reason`` on the dashboard path, so
+    both explain the refusal in the same words: the contract's display name, the account (as a
+    token the fetch layer resolves), the date, the kind of close, WHY it cannot book — the lot
+    it would have to close is missing or smaller — and the remedy (``REFUSED_CLOSE_REMEDY``).
+    """
+    name = contract_name(ev.symbol) or ev.symbol
+    word = CLOSE_REASON_ZH.get(ev.close_reason or "", ev.close_reason or "")
+    if existing is None:
+        why = "沒有對應的部位"
+    elif ev.side is Side.BUY:
+        why = (f"為買進 {_contracts_text(ev.quantity)} 口，但空頭部位只有 "
+               f"{_contracts_text(existing.short_shares)} 口")
+    else:
+        why = (f"為賣出 {_contracts_text(ev.quantity)} 口，但多頭部位只有 "
+               f"{_contracts_text(max(existing.shares, _ZERO))} 口")
+    return (f"{name}（{account_ref(ev.account_id)}）於 {ev.trade_date.isoformat()} 的{word}列"
+            f"{why} — 平倉列只能結清既有部位，入帳會開立或擴大部位，無法入帳。"
+            f"請{REFUSED_CLOSE_REMEDY}")
+
+
 def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     """Replay the ledger in date order; return open holdings, realized P&L, gross invested.
 
@@ -558,6 +680,10 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
     # K3: the subset refused on a position that DID exist (an open short, a vacated ticker),
     # with the position that carries the flag — which may be flat, and then has no Holding.
     unbookable_dividends: list[UnbookableDividend] = []
+    # Options spec §4.4: close rows refused (no lot to close), and for every realized row a
+    # close row emitted, its index → the close reason. Both stay empty without an option.
+    refused_closes: list[RefusedClose] = []
+    realized_close_reasons: dict[int, str] = {}
 
     # A stored action row the LOADER could not convert (2026-08-11). It never becomes an
     # event — there is no ratio to apply — but it must not be silent either: a dropped
@@ -709,6 +835,35 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     # fails loud, and BEFORE `setdefault` so no phantom position is created.
                     continue
                 key = (ev.account_id, ev.symbol)
+                if ev.close_reason is not None:
+                    # Options spec §4.4. A close row (expiry / assignment / exercise, price 0)
+                    # books only against the lot it closes: a BUY within the short lot, a SELL
+                    # within the long lot. One that would OPEN or EXTEND a lot — a close left
+                    # behind after its opening trade was deleted, or one against the direction
+                    # — would book a phantom position at price 0. Tested HERE, before the
+                    # position is created or `_reopen`ed, so a refused close neither creates a
+                    # position nor revives a vacated one. The same rule as
+                    # `shared/options.py::classify_option_rows` (its 未入帳（待釐清）label).
+                    existing = positions.get(key)
+                    room = (_ZERO if existing is None
+                            else existing.short_shares if ev.side is Side.BUY
+                            else max(existing.shares, _ZERO))
+                    if ev.quantity > room:
+                        message = _refused_close_message(ev, existing)
+                        if not allow_oversell:
+                            raise UnbookableLedgerError(message)
+                        refused_closes.append(RefusedClose(
+                            txn_id=ev.id, account_id=ev.account_id, symbol=ev.symbol,
+                            date=ev.trade_date, side=ev.side, quantity=ev.quantity,
+                            close_reason=ev.close_reason, reason=message,
+                            remedy=REFUSED_CLOSE_REMEDY))
+                        if existing is not None:
+                            existing.unbookable_close = True
+                        continue
+                    # Within its lot it books through the ordinary branches below at price 0:
+                    # a BUY covers (`short_cover`, the remaining premium), a SELL sells
+                    # (`sale`, minus the basis). Its realized row is chipped by reason.
+                    realized_close_reasons[len(realized_rows)] = ev.close_reason
                 pos = positions.setdefault(key, _Position(ccy))
                 _reopen(pos)                                  # CR-06
                 if ev.side is Side.BUY:
@@ -1013,7 +1168,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             # it is recorded — flags and all — before the zero-share `continue` drops it.
             opened.append(OpenedPosition(
                 account_id=account_id, symbol=symbol, shares=shares,
-                oversold=is_oversold, unbookable_action=pos.unbookable_action))
+                oversold=is_oversold, unbookable_action=pos.unbookable_action,
+                unbookable_close=pos.unbookable_close))
             if is_oversold:
                 # CR-11 (2026-10-04): recorded on the BOOK, and BEFORE the zero-share `continue`
                 # below. The sticky flag used to live only on the Holding, so a 賣超 that a later
@@ -1058,6 +1214,7 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
                     short_open=pos.short_shares > _ZERO,
                     unbookable_dividend=pos.unbookable_dividend,
                     unbookable_action=pos.unbookable_action,
+                    unbookable_close=pos.unbookable_close,
                     revived_by_dividend=pos.revived_by_dividend,
                     # M1-03 / D21: the pair is None unless a SPINOFF fed this position, so
                     # an ordinary holding's row gains three nulls and nothing else.
@@ -1083,6 +1240,8 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
             orphan_dividends=orphan_dividends,
             opened_positions=opened,
             unbookable_dividends=unbookable_dividends,
+            refused_closes=refused_closes,
+            realized_close_reasons=realized_close_reasons,
         )
     except ArithmeticError as exc:
         # The CLASS, not one cause. ``ZeroDivisionError`` is in it too, so a non-Decimal

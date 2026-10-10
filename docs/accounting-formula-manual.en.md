@@ -11,7 +11,7 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.11` (2026-10-05)
+> **Version**: `v1.12` (2026-10-10)
 > **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
 > SPLIT / EXCHANGE / SPINOFF; incl. the 2026-08-13 **seven cash-movement kinds / two-axis
 > table** and the **US cash dividend, P1b**)
@@ -49,7 +49,7 @@
 1. [General Principles & Precision Rules](#1-general-principles--precision-rules)
 2. [Account / Market / Currency Model](#2-account--market--currency-model)
 3. [Fee & Transaction-Tax Formulas](#3-fee--transaction-tax-formulas)
-4. [Cost Basis (Weighted Average, Declared Short Sale, **Corporate Actions**)](#4-cost-basis-weighted-average)
+4. [Cost Basis (Weighted Average, Declared Short Sale, **Corporate Actions**, **US Equity Options**)](#4-cost-basis-weighted-average)
 5. [Realized / Unrealized P&L](#5-realized--unrealized-pl)
 6. [The Three Dividend Models](#6-the-three-dividend-models)
 7. [Total Return & Return Rates (incl. XIRR)](#7-total-return--return-rates-incl-xirr)
@@ -1082,6 +1082,129 @@ looks arbitrary next to the ruling that cash in lieu of a fraction is an ordinar
 > D1–D39, §9 exclusions), `.claude/rules/domain-ledger.md` (Cost basis; STICKY 賣超; Declared
 > short sale), `.claude/rules/data-and-pricing.md` (precision; never store a rounded
 > quotient).
+
+### 4.5 US Equity Options (owner rulings R1–R7, OPT-D1..D22, 2026-10-09)
+
+**Spec of record**: `docs/spec/2026-10-09-options-ledger.md` (approach ④). US only (R6); single-leg
+calls and puts with the standard deliverable (100 shares per contract); a non-standard contract
+is refused (OPT-D11).
+
+**A contract is an instrument; quantity is in share-equivalents (R1, OPT-D1, OPT-D22)**
+
+Every contract is one `instruments` row in the trade ledger (`asset_type = 'option'`); its terms
+are parsed from the OCC symbol (`XYZ261218P00050000` = XYZ, 2026-12-18, Put, strike 50) and are
+**never stored a second time**. Quantity is in **share-equivalents** (contracts × 100) and the
+price is the **premium per share** — so every `quantity × price` in the repository is the correct
+premium amount **untouched**. The manual and edit forms take **contracts** and the server
+converts; the CSV takes share-equivalents.
+
+$$\text{股當量} = \text{口數}\times 100,\qquad \text{權利金金額} = \text{股當量}\times\text{每股權利金}$$
+
+**Opens and closes**
+
+| Broker event | Ledger row | Replay effect | Realized row |
+| --- | --- | --- | --- |
+| Sell to open | SELL, `short_sale = 1` (the §4.3 declared short) | sells the long lot first, the rest opens / extends the short | none for the short part |
+| Buy to close | BUY | covers the short first | `short_cover` |
+| Buy to open | BUY | opens / adds to the long | — |
+| Sell to close | SELL | sells the long | `sale` |
+| Expiry (short) | BUY, price 0, fee/tax 0, `close_reason = expired` | covers the whole short at 0 | `short_cover` = the whole remaining premium |
+| Expiry (long) | SELL, price 0, fee/tax 0, `close_reason = expired` | sells the whole long at 0 | `sale` = −remaining basis |
+| Assigned | option BUY at 0 `assigned` + an underlying BUY (put) / SELL (call) at the strike | the premium stays option P&L (R5) | option `short_cover`; the stock per its branch |
+| Exercised | option SELL at 0 `exercised` + a stock BUY (call) / SELL (put) at the strike | the premium paid is the option's realized loss (R5) | option `sale`; the stock per its branch |
+
+A close row's (`close_reason`) **side and quantity are derived from the position**: an expiry =
+the whole position, dated the expiry; assigned / exercised = 0 < quantity ≤ |position|, a multiple
+of 100, no later than the expiry. A close row **pays no fee and no tax and never calls the fee
+engine** (`fee_rule_snapshot = {"source": "close_reason"}`). **R5**: on assignment / exercise the
+premium is **never** folded into the stock's cost — the stock leg is an ordinary trade at the
+strike.
+
+**Fees (OPT-D6, `fees.py::_us_option`)**
+
+$$\text{fee} = \text{cent}(\text{option\_per\_contract}\times n) + \text{cent}(\text{option\_reg\_per\_contract}\times n)
++ [\text{SELL}]\ \text{cent}(\max(\text{sec\_rate}\times\text{權利金金額},\ 0.01)),\qquad \text{tax} = 0$$
+
+$n$ = contracts. No TAF, no per-share CAT, no MY stamp on an option (v1). Rates bind to the **rule
+set**, and **every rule set has one default value** (owner ruling 2026-10-10: there is no "unset" —
+an option trade always carries a fee): `schwab` 0.65; `moomoo_us` **0.8633** (the Moomoo schedule's
+fixed per-contract items summed: commission 0.20 + platform 0.45 + settlement 0.18 + clearing 0.02 +
+ORF 0.013 + CAT 0.0003; the 0.99 per-order platform minimum, the free commission on a premium ≤ 0.10,
+the 55.00 clearing cap and the option TAF are **not modelled**). A statement fee still wins; a blank
+settings field reverts to the rule set's default.
+
+**A close row never opens a lot (§4.4)**
+
+The replay refuses a close row that would open or extend a position: a BUY beyond the short lot,
+a SELL beyond $\max(\text{long}, 0)$ (no position at all included). The row **books nothing**, is
+recorded in `Book.refused_closes` (and sets the sticky `unbookable_close` when the position
+exists), and while the record is non-empty **XIRR and B are withheld** with a reason (the
+`orphan_dividends` posture); every trend day from that row's date is incomplete. A correction
+that would leave a close row unbookable is refused hard (`refused_close_correction`).
+
+**Contract adjustment `OPTION_ADJUST` (§4.3, OPT-D3 / D16)**
+
+1 → N contracts only (`ratio_from = 1`), same right, same expiry, and
+$\text{strike}_\text{before}\times 1 = \text{strike}_\text{after}\times N$. The source position
+(long or short) moves whole onto the destination: share-equivalents × N, cost and short proceeds
+carried as they are (so the premium per share ÷ N); a destination that was ever oversold, or open
+in the opposite direction, is refused.
+
+**Valuation (R2, R3, OPT-D4, OPT-D20)**
+
+An open contract is valued at the **last ordinary trade price in the ledger** (close rows
+excluded; the same contract across accounts; after an adjustment, the LATER by date of the
+destination's own last trade and the predecessor's last price before the adjustment ÷ N (dated the
+predecessor's trade), the destination's own trade winning a tie; an adjustment the replay refused
+propagates **no** price — clarified by final review R1-M2, 2026-10-10; a **待釐清** contract
+(oversold or with a refused close) carries no price, value or obligation) — **never** a quote, **never** written to `prices`, not in the
+freshness report. On the signed quantity the §4.3 valuation needs no change:
+
+$$\text{market\_value} = \text{last\_price}\times\text{shares},\qquad
+\text{unrealized} = (\text{last\_price} - \text{avg})\times\text{shares}$$
+
+**Point-in-time figures include it** (KPI 總市值 / 總報酬 / XIRR's terminal value / total return A /
+the FX exposure / 月度成績); **trend-derived figures exclude its value** (the trend chart, B, TWR,
+the benchmark) with one note (R3). **本金匯率效果 (B − A) is withheld while an option is open**
+(OPT-D20): B leaves the option's value out while A carries its unrealized, so their difference
+would read the option's value as an FX effect. Holdings, weights, allocation, subtotals and the
+stock `realized.rows` are **stocks only**; options are listed in the `options` block, and KPI
+總市值 = the stock grand subtotal + `options.market_value` (「其中選擇權」).
+
+**Verified worked examples (phase-1 scenario `run_options`; `schwab` 0.65 per contract, + SEC on a sell, min 0.01)**
+
+| Contract (synthetic) | Events | Computation | Realized |
+| --- | --- | --- | ---: |
+| `OPA260918P00045000` | STO 2 @1.50 → BTC 2 @0.40 | in 300 − (1.30 + SEC 0.01) = 298.69; out 80 + 1.30 = 81.30 | **217.39** |
+| `OPA260821C00055000` | STO 1 @0.80 → expiry | 80 − 0.66 = 79.34, realized whole | **79.34** |
+| `OPB260821P00025000` | BTO 2 @0.55 → expiry | the 110 + 1.30 cost lost whole | **−111.30** |
+| `OPB260821P00020000` | STO 2 @0.70 → same day BTC 1 @0.05, then 1 expires | 138.69 ÷ 2 = 69.345; 69.345 − 5.65; the other 1 expires | **63.695**, **69.345** |
+| `OPA261218P00060000` → `OPA261218P00020000` | STO 1 @3.00 → 1 → 3 adjustment → BTC 1 @0.90 | proceeds 299.34 × 100/300 = 99.78 − 90.65 | **9.13** |
+| `OPA260918P00040000` | STO 2 @1.10 → assigned 2 | 220 − 1.31 = 218.69 stays option P&L (R5); stock buy 200 OPA @40 | **218.69** |
+| `OPA260918C00042000` | BTO 2 @1.40 → exercise 1, the other expires | each contract's 140.65 cost realized as a loss on the exercise and on the expiry | **−140.65** ×2 |
+
+The adjusted position's valuation: `OPA261218P00020000` short 3 contracts, `last_price` = 3.00 ÷ 3
+= **1**, dated the predecessor's trade 2026-07-24, obligation 20 × 100 × 3 = **6,000**. The two
+stock legs (exercise 100 @42, assignment 200 @40) total OPA **300 shares, cost 12,200** — no
+premium folded in.
+
+> **Verification anchors**: `options.anchor.realized scope = schwab/OPA260918P00045000@2026-08-14 None`
+> (217.39), `schwab/OPA260821C00055000@2026-08-21 expired` (79.34),
+> `schwab/OPB260821P00025000@2026-08-21 expired` (−111.30), `schwab/OPB260821P00020000@2026-08-21 None`
+> (63.695) and `… expired` (69.345), `moomoo_my/OPB260918C00030000@2026-09-01 None` (281.90, statement
+> fees), `schwab/OPA261218P00020000@2026-09-02 None` (9.13), `schwab/OPA260918P00040000@2026-09-18 assigned`
+> (218.69), `schwab/OPA260918C00042000@2026-09-11 exercised` and `@2026-09-18 expired` (−140.65);
+> `options.anchor.open.{contracts,direction,last_price,last_price_date,obligation} scope =
+> schwab/OPA261218P00020000` (`phase1:options_open`); `options.anchor.stock_legs_shares／_cost scope =
+> schwab|OPA` (300 / 12,200); the refused close: `options.oracle_refuses_the_close`,
+> `phase1:options_refused_close`; `option_side` agreement: `options.option_side.ledger`.
+> Run: phase-1 **164 ops / 19,948 assertions / 0 fail** (2026-10-10, with the UI read-back; the final run after the exports, the final-review fixes and the owner's 2026-10-10 rulings merged).
+
+> **Implementation**: `shared/options.py` (symbol, multiplier, standard adjustment, the §6.1
+> vocabulary and the one classifier), `portfolio/cost_basis.py` (close rows, §4.4, `OPTION_ADJUST`),
+> `portfolio/options.py` (last-trade valuation, the `options` block), `data_ingestion/fees.py::_us_option`,
+> `data_ingestion/validate.py::option_close_issues`.
+> **Basis**: `docs/spec/2026-10-09-options-ledger.md`, `.claude/rules/domain-ledger.md` (US equity options).
 
 ---
 
@@ -2440,6 +2563,9 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E24 | **Degradation of an unapplied action** (CAX shares −500 unmoved, flag True; XIRR blanks portfolio-wide and the reason names the row) | §4.4.6 / §5.3 / §7.2 | `corp.anchor.e5_source_unmoved`; `corp.anchor.e5_source_flagged`; `corp.xirr_blanked_by_unapplied`; `corp.xirr_reason_names_row` |
 | E25 | **Seven cash-movement kinds / two axes** (`BROKER_FEE` 100 → pool **−100** (the old predicate gave +100); `DEPOSIT` 1,000 with cost 32,000 + `INTEREST` 7 → `covered_ratio` **1**) | §9.1.1 / §8.1 | `cash.balance scope = schwab|USD`, `fx.covered_ratio scope = schwab` (phase-1 ops 50-52, added 2026-08-13); unit `tests/shared/test_cash_kinds.py` (`test_broker_fee_reduces_the_cash_balance` / `test_interest_does_not_dilute_the_coverage_ratio`) |
 | E26 | **US cash dividend (P1b)** (`schwab/AAPL` `CASH` gross 100 / withholding 30 → `net` **70**, no issues; blank withholding → soft question and it still books `net = 100`) | §6.2b | `holding.dividend_portion scope = schwab|AAPL` (phase-1 `CASH` dividend, added 2026-08-13); unit `tests/data_ingestion/test_dividends.py::test_us_cash_dividend_is_not_a_mismatch` / `::test_us_cash_dividend_without_withholding_asks` |
+| E27 | Option sell-to-open → buy-to-close (`OPA260918P00045000` 2 contracts → **217.39**) | §4.5 | `options.anchor.realized schwab/OPA260918P00045000@2026-08-14 None` |
+| E28 | Partial close after a 1 → 3 contract adjustment (`OPA261218P00020000` → **9.13**; last_price **1**) | §4.5 | `options.anchor.realized schwab/OPA261218P00020000@2026-09-02 None`, `options.anchor.open.last_price schwab/OPA261218P00020000` |
+| E29 | Sold put assigned (`OPA260918P00040000` → premium **218.69** stays option P&L; OPA 300 shares cost **12,200**) | §4.5 | `options.anchor.realized schwab/OPA260918P00040000@2026-09-18 assigned`, `options.anchor.stock_legs_cost schwab|OPA` |
 
 ### 12.2 Glossary (Chinese term ↔ English identifier)
 
@@ -2505,6 +2631,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.9` | 2026-08-29 | **§9.3 guard semantics synchronized to the implementation (FU-D43a / FU-D34)** (QA R1 BUG-02; baseline `v0.1.28 + staged`). §9.3 still read "hard guard on cash gates (deposit/withdraw, fx.convert) = `running_min < 0` and not `ack_negative` → 422 `negative_cash`" — contradicting the implementation and the very tests the section cites: a **withdrawal** is hard-refused **422 `withdraw_insufficient_balance` (FU-D43a: `ack_negative` cannot bypass it, no financing)** and an **fx conversion** is hard-refused **422 `fx_insufficient_balance` (FU-D34, 需求五: no ack, no financing)**; both run the double check "end balance + date-aware dip", are batch-aware (a CSV file's rows are each other's siblings; the fx batch = the structurally-valid **and** selected rows), and share the pre-existing-dip rule (`after.low < min(before.low, 0)` — a dip the row does not deepen never blocks). Credit kinds still get no balance check on the way in (§9.1.1, unchanged). `negative_cash` + `ack_negative` survives **only** on the funding-shrinking correction gates (PUT / DELETE of a cash movement, DELETE of a conversion — date-aware `running_min`, **all affected pools**: an edit's old + new (account, ccy), both legs of a deleted conversion). §9.3 rewritten accordingly (three classes: hard write gates / ack-able correction gates / soft transaction gate) with fx-side and correction-gate verification anchors added; §12.1 E16 wording narrowed to match. Arbitration consequence: under the old text a §1.1 arbitration of a refused withdrawal would have concluded the app was wrong — from this version the implemented semantics (owner-signed docstring rulings + the tests §9.3 cites) govern. Mirror regenerated in the same change set. **No formula or accounting-definition change — a documentation sync of guard semantics only.** |
 | `v1.10` | 2026-09-06 | **§7.2 / §9.1.1 D1 = A leftovers synchronized to AI-D42** (QA DOC-02; baseline `v0.1.28 + feat/corporate-actions`). AI-D42 (2026-08-24) admitted `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` into XIRR (the §7.2 table and the §4.4.7 banner were updated then), but the whole "D1 = A" paragraph of §7.2 ("does not take `cash_movements` in its signature at all", verification anchor "no `cash_movements` parameter") and §9.1.1's "all seven kinds are excluded from XIRR" carried **no supersession marker** and contradicted the table directly above them; `portfolio/returns.py::xirr_reporting` in fact takes a **required** keyword argument `cash_movements` (no default, deliberately). This version: ① a supersession banner on the §7.2 D1 = A paragraph (original text kept in full); ② the §9.1.1 sentence rewritten as three-in / four-out; ③ **`INTEREST` stays out of XIRR — reconfirmed** (measured: adding one `INTEREST` 500 USD row leaves XIRR byte-identical at `0.3336061959279546`; the `BROKER_FEE` 500 USD control moves it to `0.33285721007646424`), and the one passage in the engineering rule file `.claude/rules/domain-ledger.md` that listed `INTEREST` as a flow is corrected (the only inverted statement in the repository; the `CASH_KIND_TABLE.credit` it cited does not exist — the real name is `shared/cash_kinds.py::movement_sign`). This mirror had not received AI-D42 since v1.8 (`grep -c AI-D42` = 0): regenerated in the same change set — the §4.4.7 banner, the §7.2 table and its two banners, the §7.6 AI-D48 / AI-D49 passage, the §9.1.1 sentence and the version record. **No formula or accounting definition changed; no figure moved.** |
 | `v1.11` | 2026-10-05 | **New §6.6 Refused Dividends** (owner rulings 2026-10-05; baseline `feat/corporate-actions` after the pre-merge code review CR-01..14 / R1..R12 / S1..S11): the three refusal kinds (no position / open short / exchanged away) recorded on the book, contributing 0 to every money figure, listed and marked 「未入帳（待釐清）」 but left out of every total, the trend day marked incomplete while a held carrier keeps its value, and one owner for the remedy wording; the verification anchor matches the current run (phase-1 137 ops / 11,406 assertions / 0 fail). Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than §6.6.** |
+| `v1.12` | 2026-10-10 | **New §4.5 US Equity Options** (owner rulings R1–R7, OPT-D1..D22; baseline `feat/options-ledger`): a contract as an instrument, share-equivalents, sell-to-open as the declared short, price-0 close rows (expiry / assignment / exercise) and R5, the option fee branch, §4.4 a close row never opens a lot, `OPTION_ADJUST`, last-trade valuation and the point-in-time / trend-derived split, OPT-D20; worked examples and anchors from the current run (phase-1 164 ops / 19,948 assertions / 0 fail). Mirror regenerated in the same change set. **No formula or accounting definition of a stock changed.** |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

@@ -18,6 +18,14 @@ report in the row's 說明 and in the section title, with the replay's own sente
 refused row under the table (X1). The split is the replay's own
 (``portfolio.returns.replay_dividend_refusals``), the same one ``GET /api/cash/statement``
 reads.
+
+Options (spec §6.2, §9): each export computes ``option_side_of`` ONCE (``portfolio.cash.
+option_sides_of`` — the one §6.1 classifier walk over the whole stored ledger) and hands it to
+``account_statement``, which labels the option trade lines. Such a line is DESCRIBED from its
+label — 「賣出開倉 2 口 XYZ 2026-12-18 50 Put」 (:func:`option_line_text`): in the printed
+report's 說明, and in the CSV's ``note_ref`` cell (which on a stock trade line is the bare
+symbol, already in ``symbol``). Its money columns are the trade's own, untouched. A stock
+ledger takes no walk and both files are byte-identical (spec §10).
 """
 
 import sqlite3
@@ -31,6 +39,7 @@ from portfolio_dash.data_ingestion.store import (
     StoredTransaction,
     list_accounts,
     list_cash_movements,
+    list_corporate_actions,
     list_dividends,
     list_fx_conversions,
     list_instruments,
@@ -53,6 +62,7 @@ from portfolio_dash.portfolio.cash import (
     UNBOOKED_DIVIDEND_REASON,
     CashLine,
     account_statement,
+    option_sides_of,
 )
 from portfolio_dash.portfolio.returns import DividendRefusals, replay_dividend_refusals
 from portfolio_dash.shared.account_ref import account_ref
@@ -60,6 +70,7 @@ from portfolio_dash.shared.cash_kinds import CASH_KIND_ZH
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.ledger import counts_by, pending_from
+from portfolio_dash.shared.options import UNIT_CONTRACT, contract_name, shares_to_contracts
 from portfolio_dash.shared.wire import decimal_str
 
 _ZERO = Decimal("0")
@@ -96,21 +107,25 @@ _KIND_ZH = {
 _Ledgers = tuple[
     list[StoredCashMovement], list[StoredFxConversion],
     list[StoredTransaction], list[StoredDividend], dict[str, Instrument],
-    list[StoredDividend], DividendRefusals,
+    list[StoredDividend], DividendRefusals, dict[int, str],
 ]
 
 
 def _load(conn: sqlite3.Connection) -> _Ledgers:
     """The ledger inputs ``account_statement`` needs (loaded once): the five pool ledgers,
     the dividends split by the replay's own refusal (⑪ — booked rows in the fourth slot, the
-    refused ones next, for listing only, and the refusal itself last for its reasons), exactly
-    as ``api/routers/cash.py::load_cash_ledgers`` splits them for the on-screen statement. One
-    replay per export."""
+    refused ones next, for listing only, and the refusal itself after them for its reasons),
+    exactly as ``api/routers/cash.py::load_cash_ledgers`` splits them for the on-screen
+    statement, and last the §6.1 label of every option trade row (options spec §9). One replay
+    and one classifier walk per export; a ledger with no option contract reads no corporate
+    action and walks nothing."""
     txs = list_transactions(conn)
     divs = list_dividends(conn)
     instruments = {i.symbol: i for i in list_instruments(conn)}
     refused = replay_dividend_refusals(load_ledger_bundle(
         conn, transactions=txs, dividends=divs, instruments=instruments))
+    option_side_of = (option_sides_of(txs, list_corporate_actions(conn), instruments)
+                      if any(i.is_option for i in instruments.values()) else {})
     return (
         list_cash_movements(conn),
         list_fx_conversions(conn),
@@ -119,7 +134,19 @@ def _load(conn: sqlite3.Connection) -> _Ledgers:
         instruments,
         refused.unbooked(divs),
         refused,
+        option_side_of,
     )
+
+
+def option_line_text(ln: CashLine) -> str | None:
+    """「賣出開倉 2 口 XYZ 2026-12-18 50 Put」 — an option trade line described from its §6.1
+    label (spec §6.2); ``None`` for every other line. The words are the label's, the 口數 the
+    multiplier's (``shared/options.py``), the name the symbol's own parse."""
+    if ln.option_side is None or ln.symbol is None or ln.qty is None:
+        return None
+    contracts = decimal_str(shares_to_contracts(ln.qty))
+    name = contract_name(ln.symbol) or ln.name or ln.symbol
+    return f"{ln.option_side} {contracts} {UNIT_CONTRACT} {name}"
 
 
 def _d(value: Decimal | None) -> str:
@@ -137,8 +164,10 @@ def build_cash_statement_csv(
     None). Unknown account → None (router answers 400). Raw source-precision strings."""
     if account not in {a.account_id for a in list_accounts(conn)}:
         return None
-    movements, fx, txs, divs, instruments, unbooked, refusals = _load(conn)
+    movements, fx, txs, divs, instruments, unbooked, refusals, sides = _load(conn)
+    # Options spec §9: ``option_side_of`` computed ONCE per export (in ``_load``).
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy,
+                                   option_side_of=sides,
                                    unbooked_dividends=unbooked,
                                    unbooked_reason=refusals.reason)
     today = now.date()
@@ -150,7 +179,9 @@ def build_cash_statement_csv(
                 ln.date.isoformat(), pool_ccy.value, ln.kind,
                 ln.symbol or "", ln.name or "",
                 _d(ln.qty), _d(ln.price), _d(ln.fee), _d(ln.tax),
-                ln.ref, decimal_str(ln.delta), decimal_str(bal),
+                # An option line is described from its §6.1 label; every other line keeps
+                # its ref (a trade's symbol, a movement's note, an fx pair) as before.
+                option_line_text(ln) or ln.ref, decimal_str(ln.delta), decimal_str(bal),
                 "" if ln.booked else UNBOOKED_DIVIDEND_NOTE,
                 pending.isoformat() if pending is not None else "",
             ])
@@ -200,6 +231,13 @@ def _describe(ln: CashLine, ccy: str) -> str:
 
     Every dynamic string (name / symbol / fx pair / counter ccy / note) is escaped;
     numbers come from the safe formatters. The result is trusted HTML for a ``<td>``."""
+    option = option_line_text(ln)
+    if option is not None:
+        # Options spec §6.2: the §6.1 label in words, then the trade's own premium and costs.
+        return (
+            f"{_esc(option)} @ {_fmt_price(ln.price, ccy)}"
+            f"（費 {_fmt_amount(ln.fee, ccy)}・稅 {_fmt_amount(ln.tax, ccy)}）"
+        )
     if ln.kind in ("buy", "sell"):
         verb = "買入" if ln.kind == "buy" else "賣出"
         name = f"{ln.name}（{ln.symbol}）" if ln.name else (ln.symbol or "")
@@ -347,8 +385,9 @@ def build_cash_statement_report_html(
     """Print-optimized 現金收支明細 report (one section per pool). Unknown account → None."""
     if account not in {a.account_id for a in list_accounts(conn)}:
         return None
-    movements, fx, txs, divs, instruments, unbooked, refusals = _load(conn)
+    movements, fx, txs, divs, instruments, unbooked, refusals, sides = _load(conn)
     statements = account_statement(account, movements, fx, txs, divs, instruments, ccy=ccy,
+                                   option_side_of=sides,
                                    unbooked_dividends=unbooked,
                                    unbooked_reason=refusals.reason)
     # One clock for the whole page: the header's ``now`` dates the balances too (M5-06).

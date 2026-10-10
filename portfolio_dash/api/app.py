@@ -32,6 +32,7 @@ from portfolio_dash.api.insight_service import (
 )
 from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
 from portfolio_dash.api.news_service import run_news_daily
+from portfolio_dash.api.option_expiry import ensure_tables as ensure_option_expiry_tables
 from portfolio_dash.api.rebates import ensure_tables as ensure_rebate_tables
 from portfolio_dash.api.routers import (
     accounts,
@@ -56,6 +57,7 @@ from portfolio_dash.api.routers import (
     llm_settings,
     news,
     notify,
+    option_expiry,
     performance,
     prompts,
     rebates,
@@ -196,6 +198,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_signal_history_table(conn)  # signal_history per-day states (W6, AI-D27)
         ensure_llm_fail_log_table(conn)  # llm_fail_log capture ring (AI-D64)
         notify_ops.ensure_seeded(conn)  # notify_config single-row + one-time topic (WP 3B)
+        # DEF-065 on an upgraded database: a rule newer than the stored config is filled in
+        # HERE, so GET /api/notify/config never persists the self-heal (v0.1.29 release rehearsal).
+        notify_ops.heal_config(conn)
         digest_ops.ensure_seeded(conn)  # digests + digest_config single-row (P3 batch 3)
         # DEF-065: every table a GET reads is created HERE, never by the GET. These six were
         # created (and ui_prefs / whatsnew SEEDED) by their first request — a write on a read
@@ -207,6 +212,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_whatsnew_seeded(conn)
         ensure_dividend_inbox_tables(conn)  # pending_dividend_skips
         ensure_rebate_tables(conn)  # rebate_skips
+        ensure_option_expiry_tables(conn)  # option_expiry_skips (options spec §7.2)
         ensure_snapshots_table(conn)  # portfolio_snapshots (月度快照)
         action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
     # The news library lives in its own file (news/store.py); its first open creates and
@@ -309,6 +315,7 @@ def create_app() -> FastAPI:
     app.include_router(dividend_inbox.router, prefix="/api")
     app.include_router(cash.router, prefix="/api")
     app.include_router(rebates.router, prefix="/api")
+    app.include_router(option_expiry.router, prefix="/api")
     app.include_router(actions.router, prefix="/api")
     app.include_router(accounts.router, prefix="/api")
     app.include_router(fee_rules.router, prefix="/api")

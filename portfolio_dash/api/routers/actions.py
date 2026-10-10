@@ -24,6 +24,7 @@ from portfolio_dash.scheduler.jobs import (
     run_job_outcome,
 )
 from portfolio_dash.shared.clock import app_now
+from portfolio_dash.shared.instrument_scope import stock_instruments
 from portfolio_dash.shared.oversold import oversold_position_issues, oversold_position_message
 
 router = APIRouter()
@@ -52,8 +53,11 @@ def held_symbols(conn: sqlite3.Connection) -> set[str]:
     The seam passes only a connection, so "today" is the app clock (``shared.clock``), the
     same day anchor ``get_now`` and the scheduler's cron use. Lives here because this router
     owns the door whose verdict it decides.
+
+    Stocks only (options spec §6.2): a contract is never in a quote job's worklist
+    (``TRACKED_SQL``), so it can never be a lost key and has no place in the threshold.
     """
-    symbols = [inst.symbol for inst in list_instruments(conn)]
+    symbols = [inst.symbol for inst in stock_instruments(list_instruments(conn))]
     return held_among(conn, symbols, today=app_now().date())
 
 

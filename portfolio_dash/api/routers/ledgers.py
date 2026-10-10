@@ -36,7 +36,7 @@ from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.api.errors import error_body
@@ -72,21 +72,30 @@ from portfolio_dash.api.routers.cash import (
     fx_edit_negative_guard,
     load_cash_ledgers,
 )
-from portfolio_dash.api.wire import issue_wire, parse_side, unbooked_wire
+from portfolio_dash.api.wire import (
+    issue_wire,
+    parse_side,
+    unbooked_wire,
+    whole_contracts_refusal,
+)
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.fees import (
     ETF_FLAG_UNKNOWN_MESSAGE,
     FeeComputationError,
+    close_row_fees,
     compute_fees,
     etf_flag_issue_applies,
+    option_trade_fees,
     resolve_etf_flag,
 )
 from portfolio_dash.data_ingestion.fx_lookup import resolve_stamp_fx
 from portfolio_dash.data_ingestion.holdings import load_action_index, shares_through
+from portfolio_dash.data_ingestion.manual import option_contract_draft
 from portfolio_dash.data_ingestion.markets import MARKET_ZH, account_market
 from portfolio_dash.data_ingestion.register import (
     autoregister_spinoff_child,
+    register_option_contract,
     spinoff_child_draft,
 )
 from portfolio_dash.data_ingestion.rules_binding import allowed_markets, fee_rule_for
@@ -143,6 +152,7 @@ from portfolio_dash.data_ingestion.validate import (
     DividendInput,
     Issue,
     TxnInput,
+    canonical_contract_symbol,
     identifier_change_repair,
     restated_band,
     unknown_account_message,
@@ -153,6 +163,7 @@ from portfolio_dash.data_ingestion.validate import (
     validate_opening_cost,
     validate_transaction,
 )
+from portfolio_dash.portfolio.cash import option_sides_of
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
 from portfolio_dash.portfolio.returns import replay_dividend_refusals
@@ -180,6 +191,12 @@ from portfolio_dash.shared.models.ledger import (
     pending_from,
 )
 from portfolio_dash.shared.money import settled_notional
+from portfolio_dash.shared.options import (
+    contracts_to_shares,
+    parse_option_symbol,
+    shares_to_contracts,
+    strike_products,
+)
 from portfolio_dash.shared.wire import decimal_str
 from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.target_weights import (
@@ -250,6 +267,7 @@ def transactions(
         return bad
     today = now.date()
     accts, names, ccys = _names(conn)
+    option_sides, refused = _option_row_marks(conn)
     out: list[dict[str, Any]] = []
     for t in list_transactions(conn, account_id=account_id, symbol=symbol):
         if not _in_range(t.trade_date, frm, to):
@@ -280,8 +298,43 @@ def transactions(
             "daytrade": t.daytrade,
             # DEF-056: set only while the trade date is still ahead — it does not count yet.
             "counts_from": _counts_from(t.trade_date, today),
+            # Options spec §6.2 / §10 (4), additive — null / false on a stock row: the close
+            # reason, the 口數 beside the share-equivalents (the server's conversion), the
+            # §6.1 label from the request's ONE classifier walk, and whether the replay
+            # refused this close (§4.4).
+            "close_reason": t.close_reason,
+            "contracts": (decimal_str(shares_to_contracts(t.quantity))
+                          if t.id in option_sides else None),
+            "option_side": option_sides.get(t.id),
+            "refused_close": t.id in refused,
         })
     return _page(out, limit, offset)
+
+
+def _option_row_marks(conn: sqlite3.Connection) -> tuple[dict[int, str], set[int]]:
+    """``({txn_id: §6.1 label}, {txn_id of a §4.4-refused close})`` for the transactions page.
+
+    ONE classifier walk per request (``portfolio.cash.option_sides_of``) over the WHOLE stored
+    ledger — every account, and the ``OPTION_ADJUST`` rows that move a position between
+    contracts — so a filtered page labels each row exactly as the unfiltered ledger would. The
+    refused closes come from the replay's own record (``Book.refused_closes``), read only when
+    the ledger holds a close row at all; an unbookable ledger answers "none refused" rather
+    than a 500. A ledger with no option makes neither read."""
+    instruments = {i.symbol: i for i in list_instruments(conn)}
+    if not any(i.is_option for i in instruments.values()):
+        return {}, set()
+    sides = option_sides_of(list_transactions(conn), list_corporate_actions(conn), instruments)
+    refused: set[int] = set()
+    if sides and conn.execute(
+        "SELECT 1 FROM transactions WHERE close_reason IS NOT NULL LIMIT 1"
+    ).fetchone() is not None:
+        try:
+            book = build_book(_to_models(conn), allow_oversell=True)
+        except (ValueError, KeyError, ArithmeticError):
+            book = None
+        if book is not None:
+            refused = {r.txn_id for r in book.refused_closes if r.txn_id is not None}
+    return sides, refused
 
 
 @router.get("/ledgers/dividends")
@@ -531,6 +584,32 @@ class TxEditBody(BaseModel):
     # Un-declaring a short that exceeds holdings turns it into a 賣超, which the replay guard
     # below answers with the ordinary 422 ``oversell`` + ack.
     short_sale: bool | None = None
+    # Options spec §4.2: an option row is edited in 口數 — the server converts (the browser
+    # never composes a share-equivalent); ``shares`` is then omitted.
+    contracts: Decimal | None = Field(default=None, gt=0, le=Decimal("1e10"))
+    # Absent = keep. The v1 edit door cannot CHANGE a close reason (delete and re-enter);
+    # sending a different one is refused rather than ignored.
+    close_reason: str | None = None
+
+    @field_validator("symbol")
+    @classmethod
+    def _one_contract_spelling(cls, value: str) -> str:
+        """R2 M1: a contract in its one spelling, so the edit validates and WRITES the symbol
+        the stored rows carry (a stock symbol is untouched)."""
+        return canonical_contract_symbol(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _contracts_to_shares(cls, data: Any) -> Any:
+        """口數 → share-equivalents on the way in, so every later step reads ``shares``. A
+        stock edit is untouched — a missing ``shares`` with no ``contracts`` stays the 422."""
+        if (isinstance(data, dict) and data.get("shares") is None
+                and data.get("contracts") is not None):
+            try:
+                return {**data, "shares": contracts_to_shares(Decimal(str(data["contracts"])))}
+            except (ArithmeticError, ValueError):
+                return data
+        return data
 
 
 class _EditFees(NamedTuple):
@@ -584,8 +663,30 @@ def _recompute_edit_fees(
     snapshot: dict[str, str] | None = None
     issues: list[Issue] = []
     recompute = core_changed and not (body.fee_overridden and body.tax_overridden)
+    if existing.close_reason is not None:
+        # Options spec §4.2: a close row costs nothing and never reaches the engine — its fee
+        # and tax stay 0 whatever moved (a non-zero one is refused by the validator).
+        closed = close_row_fees()
+        return _EditFees(fee, tax, closed.snapshot if recompute else None, issues)
+    edit_inst = get_instrument(conn, body.symbol)
+    if recompute and edit_inst is not None and edit_inst.is_option:
+        # OPT-D6, the doors' one definition (``fees.option_trade_fees``).
+        rules = get_fee_rule_set(fee_rule_for(conn, body.account_id, edit_inst.market), conn)
+        try:
+            opt = option_trade_fees(
+                rules, side, body.shares, body.price,
+                fee=body.fee if body.fee_overridden else None,
+                tax=body.tax if body.tax_overridden else None)
+        except FeeComputationError as exc:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", str(exc), field="shares"))
+        fee, tax = opt.fee, opt.tax
+        snapshot = dict(opt.snapshot)
+        if body.fee_overridden or body.tax_overridden:
+            snapshot["override"] = "true"
+        return _EditFees(fee, tax, snapshot, issues)
     if recompute:
-        inst = get_instrument(conn, body.symbol)
+        inst = edit_inst
         # The entry doors' ONE definition (registry-authoritative, three-state). An edit has no
         # per-trade ETF input, so the input flag is the unanswered default — exactly what an
         # unregistered symbol resolves to at the manual door.
@@ -663,9 +764,25 @@ def edit_transaction(
         prev_account_id=existing.account_id, prev_symbol=existing.symbol)
     if guard is not None:
         return guard
-    if body.shares <= 0 or body.price <= 0:
+    # Options spec §4.2: a STORED close row is priced 0 by definition, so the price gate is
+    # relaxed for it (the validator still refuses a non-zero price on it); every other row
+    # keeps the gate and its sentence.
+    closing = existing.close_reason is not None
+    if body.shares <= 0 or body.price < 0 or (body.price == 0 and not closing):
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "股數與價格必須大於 0", field="shares"))
+    if body.close_reason is not None and body.close_reason != existing.close_reason:
+        return JSONResponse(status_code=400, content=error_body(
+            "validation_error",
+            "到期作廢／被指派／履約不能在更正時變更，請刪除該列後重新登錄",
+            field="close_reason"))
+    if body.contracts is not None:
+        edited_inst = get_instrument(conn, body.symbol)
+        if edited_inst is None or not edited_inst.is_option:
+            return JSONResponse(status_code=400, content=error_body(
+                "validation_error", "口數只適用於選擇權合約", field="contracts"))
+        if (fraction := whole_contracts_refusal(body.contracts)) is not None:
+            return fraction   # R2 nit (b): named in 口數, the unit this body carries
     # None on the wire = preserve the stored flag (MED-1 for 當沖, DEF-013 for 放空).
     effective_daytrade = body.daytrade if body.daytrade is not None else existing.daytrade
     effective_short = body.short_sale if body.short_sale is not None else existing.short_sale
@@ -688,7 +805,7 @@ def edit_transaction(
         TxnInput(account_id=edited.account_id, symbol=edited.symbol, side=edited.side,
                  quantity=edited.quantity, price=edited.price, trade_date=edited.trade_date,
                  fee=fee, tax=tax, daytrade=edited.daytrade, short_sale=edited.short_sale,
-                 note=edited.note),
+                 note=edited.note, close_reason=edited.close_reason),
         today=now.date(), replacing=existing) + fee_issues   # CR-08: the fee seam's own finding
     hard = [i for i in findings if not i.needs_confirm]
     if hard:
@@ -1098,7 +1215,52 @@ def remove_opening(
 # Accepted on the wire so the form can post what the owner picked in their own words;
 # the stored value is always the enum. Mirrors corporate_action_import._KIND_ALIASES —
 # the CSV door and the form door must not disagree about what 「分割」 means.
-_KIND_ALIASES = {"分割": "SPLIT", "股票分割": "SPLIT", "換股": "EXCHANGE", "分拆": "SPINOFF"}
+_KIND_ALIASES = {"分割": "SPLIT", "股票分割": "SPLIT", "換股": "EXCHANGE", "分拆": "SPINOFF",
+                 "選擇權合約調整": "OPTION_ADJUST"}
+
+
+def _ratio_unit(kind: str) -> str:
+    """The unit a corporate action's ratio counts: 口 for ``OPTION_ADJUST``, 股 otherwise."""
+    return "口" if kind.strip().upper() == CorporateActionKind.OPTION_ADJUST.value else "股"
+
+
+def _adjust_destination_draft(
+    conn: sqlite3.Connection, inp: CorporateActionInput
+) -> Instrument | None:
+    """An ``OPTION_ADJUST``'s not-yet-registered destination contract, IN MEMORY (options spec
+    §4.3: it is registered from its symbol on save — never on a preview). ``None`` for any
+    other kind, a registered destination, or a symbol that is not a contract."""
+    if inp.kind.strip().upper() != CorporateActionKind.OPTION_ADJUST.value:
+        return None
+    if get_instrument(conn, inp.to_symbol) is not None:
+        return None
+    terms = parse_option_symbol(inp.to_symbol)
+    return None if terms is None else option_contract_draft(terms)
+
+
+def _register_adjust_destination(conn: sqlite3.Connection, inp: CorporateActionInput) -> None:
+    """Register an ``OPTION_ADJUST`` destination from its symbol inside the caller's
+    transaction (``commit=False``) — E10's registration, satisfied the §4.3 way."""
+    if _adjust_destination_draft(conn, inp) is not None:
+        register_option_contract(conn, inp.to_symbol, commit=False)
+
+
+def _strike_products_wire(
+    inp: CorporateActionInput,
+) -> tuple[dict[str, str] | None, bool | None]:
+    """The adjustment form's conservation line (spec §4.3): 「履約價×口數：60×1 ＝ 20×3 ✓」 is
+    printed from these strings with no browser arithmetic. ``(None, None)`` for every other
+    kind, and while either contract or ratio term is not readable."""
+    if inp.kind.strip().upper() != CorporateActionKind.OPTION_ADJUST.value:
+        return None, None
+    frm, to = parse_option_symbol(inp.from_symbol), parse_option_symbol(inp.to_symbol)
+    if frm is None or to is None or inp.ratio_to <= 0 or inp.ratio_from <= 0:
+        return None, None
+    before, after = strike_products(frm, to, inp.ratio_to, inp.ratio_from)
+    return ({"from_strike": decimal_str(frm.strike), "ratio_from": decimal_str(inp.ratio_from),
+             "from_product": decimal_str(before), "to_strike": decimal_str(to.strike),
+             "ratio_to": decimal_str(inp.ratio_to), "to_product": decimal_str(after)},
+            before == after)
 
 
 def reconcile_split_prices(conn: sqlite3.Connection, symbols: Iterable[str]) -> int:
@@ -1185,6 +1347,14 @@ class ActionBody(BaseModel):
     reorg_fee: str | None = None
     #: The fee's currency; defaults to the source instrument's quote currency.
     reorg_fee_ccy: str | None = None
+
+    @field_validator("from_symbol", "to_symbol")
+    @classmethod
+    def _one_contract_spelling(cls, value: str) -> str:
+        """R2 M1: an OCC contract in its one spelling BEFORE anything reads the body — the
+        E13 holder scan (``_build_batch``), the validator, the registration and the insert
+        all see the symbol the replay looks up. A stock symbol is untouched."""
+        return canonical_contract_symbol(value)
 
 
 def _num(raw: str | None, label: str) -> Decimal | None | JSONResponse:
@@ -1527,13 +1697,18 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
 
     ``acked_keys is None`` keeps the bare flag for API callers that never rendered a preview —
     they acknowledge whatever the server finds, exactly as before.
+
+    An ADVISORY (``Issue.info`` — e.g. 「將建立選擇權合約 …」) is shown, never acknowledged, so
+    it never gates (options final review R2, m2): only the soft findings are asked about, and
+    only their keys must be in ``acked_keys``. The 422 still lists every finding.
     """
-    if not issues:
+    asks = [i for i in issues if not i.info]
+    if not asks:
         return None
     wires = _issue_wires(issues)
     if not body.ack_warnings:
         return JSONResponse(status_code=422, content=error_body(
-            "warnings_unacknowledged", issues[0].message, issues=wires))
+            "warnings_unacknowledged", asks[0].message, issues=wires))
     if body.acked_warnings is not None:
         # S2: a tab still running the pre-R1 JavaScript. Its list cannot be checked (it is
         # the resolved TEXT R1 stopped trusting) and must not fall to the bare-flag path below,
@@ -1548,7 +1723,7 @@ def _ack_refusal(issues: Sequence[Issue], body: ActionBody) -> JSONResponse | No
     if body.acked_keys is None:
         return None
     acked = set(body.acked_keys)
-    unseen = [w for w in wires if w["ack_key"] not in acked]
+    unseen = [w for w in _issue_wires(asks) if w["ack_key"] not in acked]
     if not unseen:
         return None
     return JSONResponse(status_code=422, content=error_body(
@@ -1791,6 +1966,10 @@ def _preview_payload(
         # currency the save will actually assign.
         if (draft := _spinoff_child_draft(conn, batch.rows[0])) is not None:
             post_bundle.instruments[draft.symbol] = draft
+        # Options spec §4.3: an OPTION_ADJUST destination likewise exists from save — in
+        # memory here, registered from its symbol by the commit.
+        if (contract := _adjust_destination_draft(conn, batch.rows[0])) is not None:
+            post_bundle.instruments[contract.symbol] = contract
         post = build_book(post_bundle, allow_oversell=True)
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=422, content=error_body(
@@ -1855,7 +2034,11 @@ def _preview_payload(
         _band_restatement(conn, batch.rows[0])
         if any(i.kind == TARGET_BAND_PREDATES_SPLIT for i in issues) else {}
     )
+    products, conserves = _strike_products_wire(batch.rows[0])
     return {
+        # Options spec §4.3 / §10 (4): additive, null on every equity kind.
+        "strike_products": products,
+        "conserves": conserves,
         "ccy": inst.quote_ccy.value if inst is not None else "",
         "kind": kind,
         "kind_label": KIND_ZH.get(kind, kind),
@@ -1874,7 +2057,8 @@ def _preview_payload(
             _with_fix(_issue_wires(issues), fix), restate,
             code=TARGET_BAND_PREDATES_SPLIT),
         "blocking": any(not i.needs_confirm for i in issues),
-        "needs_confirm": any(i.needs_confirm for i in issues),
+        # An advisory is shown, never acknowledged (R2 m2) — it does not ask for the tick.
+        "needs_confirm": any(i.needs_confirm and not i.info for i in issues),
         "fractions": fractions,
         "unpriced_symbols": sorted({
             body.to_symbol.strip() for i in issues if i.kind == "to_symbol_unpriced"}),
@@ -1941,8 +2125,9 @@ def corporate_actions(
             "ratio_from": decimal_str(a.ratio_from),
             # Rendered server-side in the owner's own phrasing (§6.7) so the two integer
             # terms never have to be recombined in the browser.
-            "ratio_label": (f"每 {decimal_str(a.ratio_from)} 股 → "
-                            f"{decimal_str(a.ratio_to)} 股"),
+            # An OPTION_ADJUST counts CONTRACTS (options spec §6.1: units 口).
+            "ratio_label": (f"每 {decimal_str(a.ratio_from)} {_ratio_unit(a.kind)} → "
+                            f"{decimal_str(a.ratio_to)} {_ratio_unit(a.kind)}"),
             "cost_carry": (decimal_str(a.cost_carry)
                            if a.cost_carry is not None else None),
             "note": a.note, "ccy": ccys.get(a.from_symbol, ""),
@@ -2069,6 +2254,8 @@ def add_corporate_action(
         if batch.rows[0].kind.strip().upper() == CorporateActionKind.SPINOFF.value:
             autoregister_spinoff_child(conn, parent_symbol=batch.rows[0].from_symbol,
                                        child_symbol=batch.rows[0].to_symbol, commit=False)
+        # Options spec §4.3: the same rule for an OPTION_ADJUST's new contract (no quote).
+        _register_adjust_destination(conn, batch.rows[0])
         written = [
             insert_corporate_action(
                 conn, account_id=inp.account_id, action_date=inp.date,
@@ -2372,6 +2559,10 @@ def edit_corporate_action(
             "validation_error", hard[0].message, issues=_issue_wires(issues)))
     if (unacked := _ack_refusal(issues, body)) is not None:   # CR-07: bound to what was seen
         return unacked
+    # Options spec §4.3: an OPTION_ADJUST edited onto a contract not registered yet — the
+    # replay below needs its row, so it gets the in-memory draft (the save registers it).
+    if (contract := _adjust_destination_draft(conn, replacement)) is not None:
+        read.instruments[contract.symbol] = contract
     # DEF-049: the edited ledger is REPLAYED like every other correction door — a new date,
     # ratio, symbol or kind can strand a later sell (a 10:1 split edited to 2:1 under a sell
     # of 5,000) or a dividend. Same decision as the transaction edit; the ack rides the body.
@@ -2401,6 +2592,7 @@ def edit_corporate_action(
             return refused
     fee_after: StoredCashMovement | None = current
     try:
+        _register_adjust_destination(conn, replacement)   # §4.3, inside the transaction
         update_corporate_action(
             conn, action_id, account_id=replacement.account_id,
             action_date=replacement.date, kind=CorporateActionKind(replacement.kind),

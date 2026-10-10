@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
 <title>portfolio-dash — 收件匣</title>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.28"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.28"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.29"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.29"></link>
 <style>
   .divinbox-page { display: flex; flex-direction: column; gap: var(--gap); }
   /* session-only 已入帳 undo strip (3E) */
@@ -38,6 +38,12 @@
   .rbt-accruing-item { opacity: 0.86; }
   .rbt-accruing-item .inbox-main:hover { opacity: 1; }
   .rbt-caret { color: var(--text-3); font-size: 10px; margin-left: 6px; }
+  /* options spec §7.2: 待確認到期 — the per-item failures of 全部確認, and a 待釐清 item */
+  .xp-results { margin: 4px var(--pad) 0; padding: 8px 10px; border-radius: var(--radius);
+    border: 1px solid rgba(240, 84, 79, 0.4); background: var(--up-soft); font-size: 11.5px; }
+  .xp-results-head { font-weight: 700; color: var(--up); margin-bottom: 4px; }
+  .xp-result-fail { color: var(--text-2); line-height: 1.6; }
+  .xp-unbooked .badge { margin-right: 4px; }
 </style>
 </head>
 <body data-page="divinbox" data-title="收件匣">
@@ -80,6 +86,26 @@
     <div class="inbox-note">預估金額由後端依「當月各筆手續費 × 折讓率（無條件捨去）」計算，<b>僅供參考</b>；以實際入帳金額為準。確認後記入該帳戶現金池：不改變持倉成本與資產損益，但會計入 XIRR 與含匯兌總損益（交易與融資成本項）。已略過或已入帳的月份不再提示。</div>
   </section>
 
+  <!-- Options spec §7.2 (OPT-D13): the third panel. expiry-inbox.js shows it only when an
+       expired contract awaits the owner, or a skipped one exists — a stock-only ledger's inbox
+       is unchanged. -->
+  <section class="panel" id="expiry-section" data-screen-label="待確認到期" hidden="hidden">
+    <div class="panel-head">
+      <h2 class="panel-title">待確認到期</h2>
+      <span class="inbox-count-badge" id="expiry-count">0</span>
+      <span class="panel-sub">美股選擇權：到期日已過而帳本仍持有的部位 — 確認後寫入一筆到期作廢（價格 0、不收手續費與稅），絕不自動入帳</span>
+      <span class="spacer"></span>
+      <button class="btn" id="expiry-confirm-all" type="button" hidden="hidden">全部確認</button>
+    </div>
+    <div class="xp-results" id="expiry-results" hidden="hidden"></div>
+    <div class="inbox-list" id="expiry-list"></div>
+    <details class="inbox-skipped" id="expiry-skipped" hidden="hidden">
+      <summary><span id="expiry-skipped-label">已略過</span></summary>
+      <div id="expiry-skipped-list"></div>
+    </details>
+    <div class="inbox-note">賣方部位到期作廢時，已收的權利金全數實現；買方部位到期作廢時，已付的權利金全數損失。若合約實際上被指派或履約，請改按「改登錄被指派／履約」，在交易輸入登錄選擇權腿與股票腿。</div>
+  </section>
+
 </div>
 </div>
 </div>
@@ -87,12 +113,13 @@
 <!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
      tokens through window.pdNames on every response, so the resolver must exist before the
      first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
-<script src="names.js?v=0.1.28"></script>
-<script src="api.js?v=0.1.28"></script>
-<script src="shell.js?v=0.1.28"></script>
-<script src="format.js?v=0.1.28"></script>
-<script src="alerts.js?v=0.1.28"></script>
-<script src="inbox.js?v=0.1.28"></script>
-<script src="rebate-inbox.js?v=0.1.28"></script>
+<script src="names.js?v=0.1.29"></script>
+<script src="api.js?v=0.1.29"></script>
+<script src="shell.js?v=0.1.29"></script>
+<script src="format.js?v=0.1.29"></script>
+<script src="alerts.js?v=0.1.29"></script>
+<script src="inbox.js?v=0.1.29"></script>
+<script src="rebate-inbox.js?v=0.1.29"></script>
+<script src="expiry-inbox.js?v=0.1.29"></script>
 </body>
 </html>
