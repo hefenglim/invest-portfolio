@@ -314,7 +314,9 @@ option entries (6 STO, 3 BTO, 3 BTC, 4 expiries, the exercise pair, the assignme
 commits, 2 `OPTION_ADJUST`s, 2 door probes, the legacy refused-close write and its delete.
 The pass count moved by much more because the options checkpoints run every family (trend
 included) on a ledger with open contracts, and every later checkpoint carries the `options`
-block.
+block. After W6's exports merged (the realized CSV now carries the option rows, so its family
+compares them too) and the final-review fixes, the branch gate on 2026-10-10 read
+`ops=163 pass=19727 fail=0` — the current baseline.
 
 ## Must-pass assertion families
 
