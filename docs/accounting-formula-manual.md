@@ -917,8 +917,11 @@ $$\text{股當量} = \text{口數}\times 100,\qquad \text{權利金金額} = \te
 $$\text{fee} = \text{cent}(\text{option\_per\_contract}\times n) + \text{cent}(\text{option\_reg\_per\_contract}\times n)
 + [\text{SELL}]\ \text{cent}(\max(\text{sec\_rate}\times\text{權利金金額},\ 0.01)),\qquad \text{tax} = 0$$
 
-$n$ ＝口數。無 TAF、無 CAT、選擇權不課 MY 印花稅（v1）。費率綁**規則集**：`schwab` 0.65；
-`moomoo_us` **未設定**（`None` ≠ 0）——此時對帳單手續費必填，否則拒收（`option_fee_unset`）。
+$n$ ＝口數。無 TAF、無逐股 CAT、選擇權不課 MY 印花稅（v1）。費率綁**規則集**，且**每個規則集都有一個預設值**
+（owner 裁定 2026-10-10，取消「未設定」，選擇權交易必定帶手續費）：`schwab` 0.65；`moomoo_us` **0.8633**
+（Moomoo 費率表每口固定項加總：佣金 0.20＋平台 0.45＋交收 0.18＋清算 0.02＋ORF 0.013＋CAT 0.0003；
+每筆平台費最低 0.99、權利金 ≤ 0.10 免佣、清算費上限 55.00 與選擇權 TAF **不建模**）。對帳單手續費仍優先；
+設定頁留空＝還原該規則集預設。
 
 **平倉列永不開倉（§4.4）**
 
@@ -976,7 +979,7 @@ KPI 總市值 ＝ 股票總小計 ＋ `options.market_value`（「其中選擇�
 > schwab/OPA261218P00020000`（`phase1:options_open`）；`options.anchor.stock_legs_shares／_cost scope =
 > schwab|OPA`（300／12,200）；被拒平倉列：`options.oracle_refuses_the_close`、
 > `phase1:options_refused_close`；`option_side` 一致性：`options.option_side.ledger`。
-> 實跑：phase-1 **163 ops／19,727 斷言／0 fail**（2026-10-10，合併匯出與最終審查修正後之終驗）。
+> 實跑：phase-1 **164 ops／19,948 斷言／0 fail**（2026-10-10，含 UI 回讀；合併匯出、最終審查修正與 owner 2026-10-10 裁定後之終驗）。
 
 > **實作位置**：`shared/options.py`（代號、乘數、標準調整、§6.1 詞彙與唯一分類器）、
 > `portfolio/cost_basis.py`（平倉列、§4.4、`OPTION_ADJUST`）、`portfolio/options.py`（最後成交價估值、
@@ -2102,7 +2105,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.9` | 2026-08-29 | **§9.3 護欄語意同步至實作（FU-D43a／FU-D34）**（QA R1 BUG-02；基線 `v0.1.28 + staged`）。§9.3 原記「現金門（deposit/withdraw、fx.convert）之硬護欄 = `running_min < 0` 且未 `ack_negative` → 422 `negative_cash`」——與實作及其自引之測試相左：**出金**為硬拒 **422 `withdraw_insufficient_balance`（FU-D43a：`ack_negative` 不可繞過、無融資）**，**換匯**為硬拒 **422 `fx_insufficient_balance`（FU-D34，需求五：無 ack、不提供融資）**；兩者皆為「期末餘額 + date-aware dip」雙檢、批次感知（CSV 同檔互為 sibling；換匯之批 = 結構有效**且**被勾選之列），並共用「不加深既有 dip 永不阻擋」規則（`after.low < min(before.low, 0)`）。credit 型 kind 進池本就不做餘額檢查（§9.1.1，未變）。`negative_cash`＋`ack_negative` **僅**存於縮減資金面之更正門（PUT／DELETE 現金收支、DELETE 換匯——date-aware `running_min`、**所有受影響池**：編輯之舊＋新 (account, ccy)、換匯刪除之兩腿）。§9.3 依此改寫（寫入門硬拒／更正門可 ack／交易門軟警告三類）並補列換匯側與更正門驗證錨點；§12.1 E16 措辭同步限縮。仲裁意涵：此前依 §1.1 仲裁一筆被拒之出金會誤判 app 為錯——本版起以實作（owner 簽署之 docstring 裁定 + §9.3 引用之測試）為準。同 change set 重生英文鏡像。**無任何公式或會計定義變更——純為護欄語意之文件同步。** |
 | `v1.10` | 2026-09-06 | **§7.2／§9.1.1 之 D1 = A 殘留同步至 AI-D42**（QA DOC-02；基線 `v0.1.28 + feat/corporate-actions`）。2026-08-24 AI-D42 已把 `REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE` 三類納入 XIRR（§7.2 表與 §4.4.7 橫幅早已更新），但 §7.2 之「D1 = A」整段（「函式簽章根本不接收 `cash_movements`」、驗證錨點「無 `cash_movements` 參數」）與 §9.1.1 之「七種 kind 全部不是 XIRR 流量」**未加取代標記**，與同節上表自相矛盾；`portfolio/returns.py::xirr_reporting` 實際帶**必填**關鍵字參數 `cash_movements`（無預設值，刻意如此）。本版：① §7.2 D1 = A 段補取代橫幅（原文完整保留）；② §9.1.1 該句改寫為三類進、四類不進；③ **`INTEREST` 不進 XIRR 再次確認**（實測：帳本加一筆 `INTEREST` 500 USD → XIRR 逐位相同 `0.3336061959279546`；對照組加 `BROKER_FEE` 500 USD → `0.33285721007646424`），並修正工程規則檔 `.claude/rules/domain-ledger.md` 中唯一把 `INTEREST` 列為流量的段落（全倉庫唯一寫反處；其引用之 `CASH_KIND_TABLE.credit` 不存在，實名 `shared/cash_kinds.py::movement_sign`）。英文鏡像自 v1.8 起未收到 AI-D42（`grep -c AI-D42` = 0）：本版同 change set 重生 §4.4.7 橫幅、§7.2 表與兩段橫幅、§7.6 AI-D48／AI-D49 段、§9.1.1 句與版本紀錄。**無任何公式或會計定義變更；無任何數字移動。** |
 | `v1.11` | 2026-10-05 | **新增 §6.6 被拒入帳的股利**（owner 裁定 2026-10-05；基線 `feat/corporate-actions`，上線前 code review CR-01..14／R1..R12／S1..S11 之後）：三類拒絕（無持倉／放空中／已換出）逐筆記於帳本、對一切金額貢獻為 0、列表照列標示「未入帳（待釐清）」不計合計、走勢該日不完整而持有中承接部位照計市值、補救說法單一來源；驗證錨點對應當前實跑（phase-1 137 ops／11,406 斷言／0 fail）。英文鏡像於同一 change set 重生。**除 §6.6 外無既有公式或會計定義變更。** |
-| `v1.12` | 2026-10-10 | **新增 §4.5 美股選擇權**（owner 裁定 R1–R7、OPT-D1..D22；基線 `feat/options-ledger`）：合約即標的、股當量、賣出開倉即宣告式賣空、價 0 平倉列（到期／被指派／履約）與 R5、選擇權費用分支、§4.4 平倉列永不開倉、`OPTION_ADJUST`、最後成交價估值與時點型／走勢型之分、OPT-D20；工作範例與驗證錨點取自當前實跑（phase-1 163 ops／19,727 斷言／0 fail）。英文鏡像於同一 change set 重生。**既有股票之公式與會計定義無任何變更。** |
+| `v1.12` | 2026-10-10 | **新增 §4.5 美股選擇權**（owner 裁定 R1–R7、OPT-D1..D22；基線 `feat/options-ledger`）：合約即標的、股當量、賣出開倉即宣告式賣空、價 0 平倉列（到期／被指派／履約）與 R5、選擇權費用分支、§4.4 平倉列永不開倉、`OPTION_ADJUST`、最後成交價估值與時點型／走勢型之分、OPT-D20；工作範例與驗證錨點取自當前實跑（phase-1 164 ops／19,948 斷言／0 fail）。英文鏡像於同一 change set 重生。**既有股票之公式與會計定義無任何變更。** |
 
 ### 12.4 如何仲裁一個爭議金額
 

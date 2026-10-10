@@ -41,7 +41,7 @@ short refused) was confirmed with the plan approval.
   `GET /api/input/option-symbol`, the CSV `close_reason` column, the edit door on a close row, the
   corporate-action doors, the Schwab converter (option rows mapped, `known_positions` injected —
   OPT-D19; assignment rows not mapped blind — OPT-D9). Option fees per rule set (`schwab` 0.65 per
-  contract, `moomoo_us` unset → the statement fee is required; + SEC on sells; OPT-D6).
+  contract, `moomoo_us` 0.8633 per contract — see the 2026-10-10 ruling below; + SEC on sells; OPT-D6).
 - **Surfaces.** A 選擇權 section, the 待確認到期 expiry inbox (third 收件匣 panel, OPT-D13), §6.1
   side labels derived on the server by one classifier (OPT-D15), the drawer for a contract, the
   watchlist filter, every export (spec §9). Options are excluded from quotes and from every
@@ -53,12 +53,23 @@ short refused) was confirmed with the plan approval.
   `POST /api/export/options` → `options_snapshot_*.csv` (the §7.1 open-row columns, the same
   account / market filter), with a 匯出 CSV button in the dashboard's 選擇權 section and a
   「選擇權持倉 CSV」 card in the export centre.
+- **Option fees — one default per rule set (owner ruling 2026-10-10):** there is no "unset"
+  any more, so an option trade always carries a fee: `schwab` 0.65, `moomoo_us` **0.8633** per
+  contract (the Moomoo schedule's fixed per-contract items summed; its 0.99 per-order minimum, the
+  free commission on a premium ≤ 0.10, the clearing cap and the option TAF are not modelled) + SEC
+  on sells; a statement fee still wins, and a blank settings field reverts to the default. The
+  `option_fee_unset` refusal is gone.
+- **A pasted contract code is recognised (owner ruling 2026-10-10):** on the manual page a code
+  the page does not know yet — an OCC symbol in any case, or a Schwab statement string such as
+  `XYZ 12/18/2026 50.00 P` — is recognised by the server (`GET /api/input/option-symbol?text=`,
+  `200 {symbol | null}`, read-only) and switches the form to option mode, exactly as the builder
+  does; an unknown stock ticker keeps the stock form.
 - **Stock ledger blast radius (spec §10, invariant 1):** additive keys only — the raw transactions
   dump / per-tab CSV gain `close_reason`, the transaction template gains `close_reason（選填）`, the
   realized CSV gains `asset_type`, `contract`, and the wire keys spec §10 lists read null / false /
   "stock". Every other export of a stock ledger is byte-identical (digest-pinned).
 - **Verification.** Stress-audit oracle extended from the spec (independent; phase 1 163 ops /
-  19,727 assertions / 0 fail, 2026-10-10 — new baseline); accounting manual v1.12 §4.5; rule files
+  19,948 assertions / 0 fail with the UI read-back, 2026-10-10 — new baseline); accounting manual v1.12 §4.5; rule files
   updated (`domain-ledger.md`, `markets-and-fees.md`, `data-and-pricing.md`, `architecture.md`).
 - **Fixed on the way (owner ruling 2026-10-10 widened it to stocks):** `/api/input/holdings`
   now lists a position a corporate action created that has no row of its own yet — an EXCHANGE's

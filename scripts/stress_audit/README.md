@@ -322,7 +322,8 @@ refused 400 — into two ACCEPTED moomoo_us entries with no statement fee (BTO +
 of their own, literal fees 0.86 / 0.87). Same-day A/B, API-only `run_phase1.py`: **before**
 (`d208ffa`) `ops=163 pass=19720 fail=0`; **after** `ops=164 pass=19941 fail=0` — the current
 baseline (+1 op: one refused probe became two writes; the extra assertions are the new realized
-row and its flows, compared at every later checkpoint).
+row and its flows, compared at every later checkpoint). With the UI read-back
+(`run_all.py --phase 1`) on the merged branch tip the same day: `ops=164 pass=19948 fail=0`.
 
 ## Must-pass assertion families
 
