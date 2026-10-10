@@ -368,6 +368,9 @@
   const EXPORTS = [
     { group: '對帳與核對', items: [
       { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', path: '/api/export/holdings' },
+      /* Owner ruling 2026-10-10 (B): the open option contracts are their own file; the
+         持倉快照 above is the stock table only. A ledger with no option downloads the header. */
+      { name: '選擇權持倉 CSV', desc: '未平倉選擇權合約（方向、口數、權利金、最後成交價、市值、履約義務），raw Decimal 精度。', path: '/api/export/options' },
       /* `ledgers: true` -> the desc is completed from GET /api/export/ledgers after render.
          The literal below is the FALLBACK, and it deliberately names nothing: this line read
          「四帳本（期初/交易/股利/換匯）」 (ledger-count-ok: historical quote) until

@@ -28,7 +28,7 @@ from portfolio_dash.export.cash_statement import (
     build_cash_statement_csv,
     build_cash_statement_report_html,
 )
-from portfolio_dash.export.holdings import build_holdings_csv
+from portfolio_dash.export.holdings import build_holdings_csv, build_options_csv
 from portfolio_dash.export.holdings_report import build_holdings_report_html
 from portfolio_dash.export.ledger_audit import build_ledger_audit_csv
 from portfolio_dash.export.ledgers import LEDGER_KINDS, build_ledger_csv, build_ledgers_zip
@@ -47,9 +47,10 @@ router = APIRouter()
 
 
 class HoldingsFilterBody(BaseModel):
-    """Optional (account, market) filter for the holdings CSV / report exports so a download
-    follows the dashboard's active chips. Both optional; an absent or empty body ({}, or no
-    body at all) means the full, unfiltered snapshot (identical to the legacy behaviour).
+    """Optional (account, market) filter for the holdings CSV / report and the options CSV
+    exports so a download follows the dashboard's active chips. Both optional; an absent or
+    empty body ({}, or no body at all) means the full, unfiltered snapshot (identical to the
+    legacy behaviour).
 
     ``extra="forbid"`` (audit L3, 2026-07-26): a MISSPELLED filter key used to be dropped
     silently by Pydantic's default, so a caller asking for one account received the WHOLE
@@ -111,6 +112,22 @@ def export_holdings(
     account = body.account if body is not None else None
     market = body.market if body is not None else None
     return _respond(build_holdings_csv(
+        conn, now=now, reporting=reporting, account=account, market=market))
+
+
+@router.post("/export/options")
+def export_options(
+    body: HoldingsFilterBody | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Response:
+    # The open option contracts as their own CSV (owner ruling 2026-10-10: B) — the holdings
+    # CSV is the stock table only. Same body and filter as /export/holdings; a ledger with no
+    # option answers the header alone.
+    account = body.account if body is not None else None
+    market = body.market if body is not None else None
+    return _respond(build_options_csv(
         conn, now=now, reporting=reporting, account=account, market=market))
 
 

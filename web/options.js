@@ -375,6 +375,16 @@
     head.appendChild(el('span', 'panel-sub',
       '美股選擇權・原幣金額・未平倉以最後一筆成交價估值（不抓取報價）'));
     head.appendChild(el('span', 'spacer'));
+    /* 匯出 CSV: the open contracts are their own file (owner ruling 2026-10-10: B), built by
+       the backend from the same block (POST /api/export/options) — app.js's shared button and
+       the 持倉明細 chips' body, read at click time, so the active filter applies. */
+    if (window.pdCsvExportButton) {
+      const exp = window.pdCsvExportButton('匯出 CSV', '/api/export/options',
+        () => (window.pdHoldingsFilterBody ? window.pdHoldingsFilterBody() : {}));
+      exp.id = 'opt-export-csv';
+      exp.title = '匯出未平倉選擇權的對帳級 CSV（由後端計算核心產生，依持倉明細目前的帳戶／市場篩選）';
+      head.appendChild(exp);
+    }
     sec.appendChild(head);
     sec.appendChild(openBlock(O));
     const refused = refusedBlock(O);

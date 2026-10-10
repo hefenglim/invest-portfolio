@@ -1585,6 +1585,11 @@
     });
     return b;
   }
+  /* options.js's 選擇權 section exports through the SAME button and the SAME (account, market)
+     body as 持倉明細 (owner ruling 2026-10-10: B — the open contracts are their own CSV), so
+     both are shared rather than copied: the filter state lives in this file's closure. */
+  window.pdCsvExportButton = csvExportButton;
+  window.pdHoldingsFilterBody = holdingsFilterBody;
 
   function wireExports() {
     /* 持倉明細 → POST /api/export/holdings (existing reconciliation endpoint) */

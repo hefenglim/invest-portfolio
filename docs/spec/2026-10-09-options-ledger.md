@@ -412,7 +412,7 @@ detector and routes live in `api/` (they read the book).
 | Export | Change |
 | --- | --- |
 | Raw ledgers zip / per-tab CSV | `transactions.close_reason` rides `SELECT *`; the zip's `fee_rules_snapshot.json` carries the two new fee fields. `instruments` is not in the zip; an option's terms re-derive from its symbol |
-| 持股 CSV / 持股報表 | stock rows as today; a 選擇權 block (§7.1) and the 「其中選擇權」 line only when `options` is present |
+| 持股 CSV / 持股報表 | Two files (owner ruling 2026-10-10: B): `holdings_snapshot_*.csv` is the stock table only, plus the 「其中選擇權」 footer line when `options` is present, and the open contracts (the §7.1 `open[]` keys + `reporting_ccy_value`, same filter) are their own `options_snapshot_*.csv` (`POST /api/export/options`); the 持股報表 keeps its 選擇權 section (§7.1) and the 「其中選擇權」 line only when `options` is present |
 | 已實現損益 CSV | stock `realized.rows` + `options.realized.rows` (same columns, one per closing event); `asset_type`, `contract` appended |
 | 稅務包 | option closes land in capital gains (`sale` / `short_cover`); contract name and a 「其中選擇權」 subtotal |
 | 帳本報告 | 口數, §6.1 chips, refused closes marked; `OPTION_ADJUST` in the actions section |

@@ -10,6 +10,9 @@ sidebar badge reads their count on every page); the inbox panel's own flows are 
 
 from __future__ import annotations
 
+import csv
+import io
+import re
 import sqlite3
 from collections.abc import Iterator
 from datetime import date, timedelta
@@ -22,6 +25,7 @@ from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.data_ingestion.register import register_option_contract
 from portfolio_dash.data_ingestion.store import insert_transaction
+from portfolio_dash.export.holdings import OPTION_COLUMNS
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.options import TREND_EXCLUDES_OPTIONS_NOTE
 from tests.conftest import _seed_golden
@@ -107,6 +111,75 @@ def test_the_options_section_renders_from_the_block(
     assert "本金匯率效果" in band and "有未平倉選擇權時" in band
     # the 已實現損益 section's separate option line
     assert "選擇權已實現" in page.inner_text("#realized-opt-line")
+    assert not errors, errors
+
+
+def _download_rows(download: Any) -> tuple[list[list[str]], str]:
+    """(table rows, raw text) of a downloaded CSV — ``#`` footer lines kept out of the rows."""
+    path = download.path()
+    assert path is not None
+    raw = path.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), raw[:8]
+    text = raw.decode("utf-8-sig")
+    rows = [r for r in csv.reader(io.StringIO(text)) if not (r and r[0].startswith("#"))]
+    return rows, text
+
+
+@pytest.mark.e2e
+def test_the_options_section_exports_its_own_csv_and_the_holdings_csv_none(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """Owner ruling 2026-10-10 (B): the open contracts are their own CSV, downloaded from the
+    選擇權 section with the 持倉明細 chips' filter; the 持倉明細 CSV on the same ledger is the
+    stock table alone (no 「選擇權」 title row, no contract) plus the KPI's option line."""
+    base = flow_server(seed_option_ledger)
+    page = fresh_page
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    errors = _errors(page)
+    page.goto(base + "/index.html", wait_until="load")
+    page.wait_for_selector("#options-panel .panel-head #opt-export-csv")
+
+    with page.expect_download() as dl_info:
+        page.click("#opt-export-csv")
+    dl = dl_info.value
+    assert re.fullmatch(r"options_snapshot_\d{4}-\d{2}-\d{2}\.csv", dl.suggested_filename), \
+        dl.suggested_filename
+    rows, text = _download_rows(dl)
+    assert rows[0] == OPTION_COLUMNS
+    # The block's order (剩餘天數 ↑), the same three rows the section draws.
+    assert [r[1] for r in rows[1:]] == [PAST_PUT, OPEN_CALL, OPEN_PUT]
+    by_sym = {r[1]: dict(zip(OPTION_COLUMNS, r, strict=True)) for r in rows[1:]}
+    assert (by_sym[OPEN_PUT]["direction"], by_sym[OPEN_PUT]["contracts"],
+            by_sym[OPEN_PUT]["share_equivalents"]) == ("short", "2", "-200")
+    assert by_sym[OPEN_PUT]["account_id"] == "schwab"
+    assert (by_sym[OPEN_CALL]["direction"], by_sym[OPEN_CALL]["obligation"]) == ("long", "")
+    assert by_sym[PAST_PUT]["past_expiry"] == "True"
+    assert "# as_of=" in text and "filter:" not in text
+
+    # The 持倉明細 panel's 匯出 CSV on the SAME ledger: stock rows only.
+    holdings_btn = page.locator(".panel:has(#holdings-table) .panel-head .btn-export")
+    assert holdings_btn.count() == 1
+    with page.expect_download() as dl_info:
+        holdings_btn.click()
+    dl = dl_info.value
+    assert re.fullmatch(r"holdings_snapshot_\d{4}-\d{2}-\d{2}\.csv", dl.suggested_filename)
+    rows, text = _download_rows(dl)
+    assert ["選擇權"] not in rows and OPTION_COLUMNS not in rows and [] not in rows
+    assert all(len(r) == len(rows[0]) for r in rows)
+    assert sorted(r[0] for r in rows[1:]) == ["2330", "AAPL"]
+    for sym in (OPEN_PUT, OPEN_CALL, PAST_PUT):
+        assert sym not in text
+    assert "options_market_value=" in text
+
+    # The chips apply: 台股 → no contract, the filter in the filename and the footer.
+    page.click("#filter-bar .chip:text-is('台股')")
+    with page.expect_download() as dl_info:
+        page.click("#opt-export-csv")
+    dl = dl_info.value
+    assert re.fullmatch(r"options_snapshot_\d{4}-\d{2}-\d{2}_all_TW\.csv",
+                        dl.suggested_filename), dl.suggested_filename
+    rows, text = _download_rows(dl)
+    assert rows == [OPTION_COLUMNS] and "# filter: account=all, market=TW" in text
     assert not errors, errors
 
 

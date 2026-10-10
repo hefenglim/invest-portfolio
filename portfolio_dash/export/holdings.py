@@ -1,12 +1,16 @@
-"""Holdings snapshot export (spec 02). Reuses build_dashboard; computes no numbers.
+"""Holdings snapshot exports (spec 02). Reuse build_dashboard; compute no numbers.
 
-Options (spec §9): the stock rows are exactly what they were — ``data.holdings`` is stock-only
-(OPT-D5). On a ledger with an option (``data.options`` present, and ONLY then) the file gains
-two things after the stock rows: a 選擇權 block — a blank row, a 「選擇權」 title row, its own
-header and one row per open contract (the §7.1 ``open[]`` fields, same filter as the stock
-rows, plus the reporting-currency value) — and a footer line naming the KPI 總市值 and the
-「其中選擇權」 part of it (the stock rows' values do not include it). A stock ledger's file is
-byte-identical (spec §10, ``tests/export/test_options_w6_stock_exports_unchanged.py``).
+Options (spec §9; owner ruling 2026-10-10: B, two files). ``holdings_snapshot_*.csv`` is the
+stock table ONLY on every ledger — ``data.holdings`` is stock-only (OPT-D5). On a ledger with
+an option (``data.options`` present, and ONLY then) it gains one footer line naming the KPI
+總市值 and the 「其中選擇權」 part of it, because the stock rows' values do not include it. The
+open contracts leave in their OWN file, ``options_snapshot_*.csv`` (:func:`build_options_csv`):
+one row per open contract (the §7.1 ``open[]`` fields plus the reporting-currency value), the
+same (account, market) filter recorded the same way. Until the ruling the contracts rode in a
+second table appended to the holdings file (a blank row, a 「選擇權」 title, its own header),
+which a reader parsing the file as ONE table could not tell apart from stock rows. A stock
+ledger's holdings file is byte-identical (spec §10,
+``tests/export/test_options_w6_stock_exports_unchanged.py``).
 """
 
 import sqlite3
@@ -33,13 +37,9 @@ _COLUMNS = [
     "payback_from_symbol", "payback_carried_dividends", "payback_own_dividends",
 ]
 
-#: The 選擇權 block's title row (spec §9) — a one-cell row, so a reader splitting the file on
-#: blank rows finds the second table by its title.
-OPTIONS_BLOCK_TITLE = "選擇權"
-
-#: The block's columns: the §7.1 ``open[]`` keys in their wire order, then the reporting-
-#: currency value (as the stock rows carry it). ``share_equivalents`` is SIGNED (a sold
-#: contract is negative, like ``shares`` above); ``contracts`` is the unsigned 口數.
+#: The options CSV's columns: the §7.1 ``open[]`` keys in their wire order, then the
+#: reporting-currency value (as the stock rows carry it). ``share_equivalents`` is SIGNED (a
+#: sold contract is negative, like ``shares`` above); ``contracts`` is the unsigned 口數.
 OPTION_COLUMNS = [
     "account_id", "symbol", "contract", "underlying", "expiry", "days_to_expiry", "strike",
     "right", "direction", "contracts", "share_equivalents", "average_premium",
@@ -114,9 +114,9 @@ def _option_rows(
     conn: sqlite3.Connection, block: OptionsBlock, resolver: RateResolver,
     reporting: Currency, account: str | None, market: Market | None,
 ) -> list[list[str]]:
-    """The 選擇權 block: a blank row, the title, the header, one row per open contract."""
+    """One row per open contract the (account, market) filter keeps, in the block's order."""
     contracts = option_contracts(conn)
-    out: list[list[str]] = [[], [OPTIONS_BLOCK_TITLE], list(OPTION_COLUMNS)]
+    out: list[list[str]] = []
     for r in option_rows_matching(block, contracts, account, market):
         inst = contracts.get(r.symbol)
         ccy = inst.quote_ccy if inst is not None else Currency.USD
@@ -158,27 +158,63 @@ def build_holdings_csv(
             _s(h.payback_from_symbol), _s(h.payback_carried_dividends),
             _s(h.payback_own_dividends),
         ])
-    if data.options is not None:
-        rows.extend(_option_rows(conn, data.options, resolver, reporting, account, market))
     as_of = data.as_of.date().isoformat()
-    fx_rates = _fx_footer(resolver, reporting)
-    footer = [f"as_of={as_of}, fx_rates={{{fx_rates}}}, generated={now.isoformat()}"]
+    footer = [_as_of_line(as_of, resolver, reporting, now)]
     if data.options is not None:
         # The KPI 總市值 carries the open contracts' value (OPT-D5); the stock rows above do
-        # not. Say how much of the whole-portfolio figure is options, whatever the filter.
+        # not. Say how much of the whole-portfolio figure is options, whatever the filter —
+        # the contracts themselves are in the options CSV (owner ruling 2026-10-10: B).
         total = _s(data.kpis.total_market_value) or "n/a"
         opt_mv = _s(data.options.market_value.reporting) or "n/a"
         footer.append(f"total_market_value={total}, options_market_value={opt_mv}, "
                       f"reporting_ccy={reporting.value}")
-    # When a filter is active, record it in the footer AND the filename so the download is
-    # self-describing (an unfiltered export keeps the byte-identical name/footer it had).
-    suffix = ""
-    if account is not None or market is not None:
-        filt = f"account={account or 'all'}, market={market.value if market else 'all'}"
-        footer.append(f"filter: {filt}")
-        suffix = f"_{account or 'all'}_{market.value if market else 'all'}"
+    suffix = _record_filter(footer, account, market)
     return csv_artifact(f"holdings_snapshot_{as_of}{suffix}.csv",
                         header=_COLUMNS, rows=rows, footer_lines=footer)
+
+
+def build_options_csv(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    reporting: Currency,
+    account: str | None = None,
+    market: Market | None = None,
+) -> ExportArtifact:
+    """The open option contracts as their own CSV (owner ruling 2026-10-10: B).
+
+    Same source (``build_dashboard``'s ``options`` block, no re-computation), same (account,
+    market) filter, footer and filename conventions as :func:`build_holdings_csv`. A ledger
+    with no option answers what every export answers when there is nothing to list: the
+    header and the footer, no rows.
+    """
+    data = build_dashboard(conn, now=now, reporting=reporting)
+    resolver = RateResolver(conn, now=now)
+    rows: list[list[str]] = []
+    if data.options is not None:
+        rows = _option_rows(conn, data.options, resolver, reporting, account, market)
+    as_of = data.as_of.date().isoformat()
+    footer = [_as_of_line(as_of, resolver, reporting, now)]
+    suffix = _record_filter(footer, account, market)
+    return csv_artifact(f"options_snapshot_{as_of}{suffix}.csv",
+                        header=OPTION_COLUMNS, rows=rows, footer_lines=footer)
+
+
+def _as_of_line(as_of: str, resolver: RateResolver, reporting: Currency, now: datetime) -> str:
+    """The first footer line both snapshots share: valuation day, rates, generation stamp."""
+    return (f"as_of={as_of}, fx_rates={{{_fx_footer(resolver, reporting)}}}, "
+            f"generated={now.isoformat()}")
+
+
+def _record_filter(footer: list[str], account: str | None, market: Market | None) -> str:
+    """When a filter is active, record it in the footer (appended to *footer*) AND return the
+    filename suffix, so the download is self-describing. An unfiltered export keeps the
+    byte-identical name / footer it had (empty suffix, no line)."""
+    if account is None and market is None:
+        return ""
+    footer.append(f"filter: account={account or 'all'}, "
+                  f"market={market.value if market else 'all'}")
+    return f"_{account or 'all'}_{market.value if market else 'all'}"
 
 
 def _fx_footer(resolver: RateResolver, reporting: Currency) -> str:

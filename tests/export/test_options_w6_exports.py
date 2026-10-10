@@ -15,6 +15,7 @@ import zipfile
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -26,14 +27,15 @@ from portfolio_dash.data_ingestion.store import (
     list_instruments,
     list_transactions,
 )
+from portfolio_dash.export import holdings as holdings_mod
 from portfolio_dash.export.cash_statement import (
     build_cash_statement_csv,
     build_cash_statement_report_html,
 )
 from portfolio_dash.export.holdings import (
     OPTION_COLUMNS,
-    OPTIONS_BLOCK_TITLE,
     build_holdings_csv,
+    build_options_csv,
 )
 from portfolio_dash.export.holdings_report import build_holdings_report_html
 from portfolio_dash.export.ledgers_report import build_ledgers_report_html
@@ -48,6 +50,7 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.enums import Side
 from portfolio_dash.shared.options import REFUSED_CLOSE_REMEDY, OptionSide
 from portfolio_dash.shared.wire import decimal_str
+from tests.conftest import GOLDEN_NOW, _seed_golden, init_golden_base
 from tests.export.options_w6_seed import CALL, EXP, NOW, PUT, option_ledger
 
 D = Decimal
@@ -116,38 +119,175 @@ def test_the_realized_csv_lists_the_option_rows_after_the_stock_rows(
     assert [r[9] for r in body[1:]] == ["48.69", "99.3500"]
 
 
-# --- 持股 CSV ------------------------------------------------------------------------------
+# --- 持股 CSV / 選擇權持倉 CSV (owner ruling 2026-10-10: B, two files) ------------------------
+
+LONG = "XYZ261120C00070000"
+_SCI = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)[eE][+-]?\d+$")
+
+#: The open sold put, every column (the §7.1 ``open[]`` keys + the reporting-currency value).
+_PUT_ROW = {
+    "account_id": "schwab", "symbol": PUT, "contract": "XYZ 2026-12-18 50 Put",
+    "underlying": "XYZ", "expiry": "2026-12-18", "days_to_expiry": "191", "strike": "50",
+    "right": "P", "direction": "short", "contracts": "2", "share_equivalents": "-200",
+    "average_premium": "1.9935", "premium_total": "398.7000", "last_price": "2.00",
+    "last_price_date": "2026-03-02", "market_value": "-400.00", "unrealized": "-1.3000",
+    "obligation": "10000", "underlying_price": "", "underlying_price_date": "",
+    "past_expiry": "False", "unbookable_close": "False", "oversold": "False",
+    "reporting_ccy_value": "-12800.00"}
+#: A bought call, open: no obligation, a positive value.
+_CALL_ROW = {
+    "account_id": "schwab", "symbol": LONG, "contract": "XYZ 2026-11-20 70 Call",
+    "underlying": "XYZ", "expiry": "2026-11-20", "days_to_expiry": "163", "strike": "70",
+    "right": "C", "direction": "long", "contracts": "1", "share_equivalents": "100",
+    "average_premium": "1.2065", "premium_total": "120.65", "last_price": "1.20",
+    "last_price_date": "2026-03-10", "market_value": "120.00", "unrealized": "-0.6500",
+    "obligation": "", "underlying_price": "", "underlying_price_date": "",
+    "past_expiry": "False", "unbookable_close": "False", "oversold": "False",
+    "reporting_ccy_value": "3840.00"}
 
 
-def test_the_holdings_csv_appends_the_options_block_and_the_option_line(
+def _add_long_call(conn: sqlite3.Connection) -> None:
+    register_option_contract(conn, LONG)
+    insert_transaction(conn, account_id="schwab", symbol=LONG, side=Side.BUY,
+                       quantity=D("100"), price=D("1.20"), fees=D("0.65"), tax=D("0"),
+                       trade_date=date(2026, 3, 10))
+    conn.commit()
+
+
+def _footer(content: bytes) -> list[str]:
+    text = content.decode("utf-8-sig")
+    return [line for line in text.split("\r\n") if line.startswith("#")]
+
+
+def test_the_holdings_csv_is_the_stock_table_and_the_option_line(
     conn: sqlite3.Connection,
 ) -> None:
+    """B: the holdings file is the stock table ONLY — no blank row, no 「選擇權」 title, no
+    option header, no contract. The footer line naming the options' part of the KPI stays: it
+    is why the KPI 總市值 differs from the sum of the stock rows."""
     art = build_holdings_csv(conn, now=NOW, reporting=TWD)
+    assert art.filename == "holdings_snapshot_2026-06-10.csv"
     rows = _csv_rows(art.content)
-    stock_header_len = len(rows[0])
-    assert [r[0] for r in rows[1:2]] == ["AAPL"] and len(rows[1]) == stock_header_len
-    assert rows[2] == [] and rows[3] == [OPTIONS_BLOCK_TITLE] and rows[4] == OPTION_COLUMNS
-    [put] = [dict(zip(OPTION_COLUMNS, r, strict=True)) for r in rows[5:]]
-    assert {k: put[k] for k in ("account_id", "symbol", "contract", "direction", "contracts",
-                                "share_equivalents", "premium_total", "last_price",
-                                "market_value", "obligation", "past_expiry",
-                                "reporting_ccy_value")} == {
-        "account_id": "schwab", "symbol": PUT, "contract": "XYZ 2026-12-18 50 Put",
-        "direction": "short", "contracts": "2", "share_equivalents": "-200",
-        "premium_total": "398.7000", "last_price": "2.00", "market_value": "-400.00",
-        "obligation": "10000", "past_expiry": "False", "reporting_ccy_value": "-12800.00"}
+    assert [r[0] for r in rows[1:]] == ["AAPL"]
+    assert all(len(r) == len(rows[0]) for r in rows)
     text = art.content.decode("utf-8-sig")
-    assert ("# total_market_value=25600.00, options_market_value=-12800.00, "
-            "reporting_ccy=TWD") in text
+    assert "選擇權" not in text and PUT not in text and OPTION_COLUMNS not in rows
+    assert _footer(art.content)[1:] == [
+        "# total_market_value=25600.00, options_market_value=-12800.00, reporting_ccy=TWD"]
 
 
 @pytest.mark.parametrize("kwargs", [{"account": "tw_broker"}, {"market": Market.TW}])
-def test_the_options_block_follows_the_filter(conn: sqlite3.Connection,
-                                              kwargs: dict[str, object]) -> None:
-    rows = _csv_rows(build_holdings_csv(conn, now=NOW, reporting=TWD,
-                                        **kwargs).content)  # type: ignore[arg-type]
-    title = rows.index([OPTIONS_BLOCK_TITLE])
-    assert rows[title + 1] == OPTION_COLUMNS and rows[title + 2:] == []
+def test_a_filtered_holdings_csv_keeps_the_option_line_and_no_block(
+    conn: sqlite3.Connection, kwargs: dict[str, object],
+) -> None:
+    art = build_holdings_csv(conn, now=NOW, reporting=TWD, **kwargs)  # type: ignore[arg-type]
+    assert _csv_rows(art.content)[1:] == []
+    footer = _footer(art.content)
+    assert footer[1].startswith("# total_market_value=25600.00, options_market_value=")
+    assert footer[2].startswith("# filter: ")
+
+
+def test_the_options_csv_lists_every_open_contract(conn: sqlite3.Connection) -> None:
+    _add_long_call(conn)
+    art = build_options_csv(conn, now=NOW, reporting=TWD)
+    assert art.filename == "options_snapshot_2026-06-10.csv"
+    assert art.media_type == "text/csv; charset=utf-8"
+    rows = _csv_rows(art.content)
+    assert rows[0] == OPTION_COLUMNS
+    # The block's own order (剩餘天數 ↑): the call expires first.
+    assert [dict(zip(OPTION_COLUMNS, r, strict=True)) for r in rows[1:]] == [
+        _CALL_ROW, _PUT_ROW]
+    # The cells are the block's own values at source precision (the export computes nothing).
+    data = build_dashboard(conn, now=NOW, reporting=TWD)
+    assert data.options is not None
+    for r, src in zip(rows[1:], data.options.open, strict=True):
+        assert src.market_value is not None and src.unrealized is not None
+        assert (r[15], r[16]) == (decimal_str(src.market_value), decimal_str(src.unrealized))
+    # The footer convention is the holdings CSV's: as_of, the rates, the generation stamp.
+    holdings = build_holdings_csv(conn, now=NOW, reporting=TWD)
+    assert _footer(art.content) == _footer(holdings.content)[:1]
+    assert _footer(art.content)[0].startswith("# as_of=2026-06-10, fx_rates={USD:32")
+
+
+@pytest.mark.parametrize("kwargs, suffix, symbols", [
+    ({"account": "tw_broker"}, "_tw_broker_all", []),
+    ({"market": Market.TW}, "_all_TW", []),
+    ({"account": "schwab"}, "_schwab_all", [LONG, PUT]),
+    ({"market": Market.US}, "_all_US", [LONG, PUT]),
+    ({"account": "schwab", "market": Market.US}, "_schwab_US", [LONG, PUT]),
+])
+def test_the_options_csv_follows_the_holdings_filter(
+    conn: sqlite3.Connection, kwargs: dict[str, object], suffix: str, symbols: list[str],
+) -> None:
+    """The same (account, market) chips as the holdings CSV, recorded the same way: in the
+    filename and in a ``filter:`` footer line."""
+    _add_long_call(conn)
+    art = build_options_csv(conn, now=NOW, reporting=TWD, **kwargs)  # type: ignore[arg-type]
+    assert art.filename == f"options_snapshot_2026-06-10{suffix}.csv"
+    rows = _csv_rows(art.content)
+    assert rows[0] == OPTION_COLUMNS and [r[1] for r in rows[1:]] == symbols
+    holdings = build_holdings_csv(conn, now=NOW, reporting=TWD,
+                                  **kwargs)  # type: ignore[arg-type]
+    assert holdings.filename == f"holdings_snapshot_2026-06-10{suffix}.csv"
+    assert _footer(art.content)[-1] == _footer(holdings.content)[-1]
+    assert _footer(art.content)[-1].startswith("# filter: account=")
+
+
+def test_a_stock_ledger_options_csv_is_the_header_alone() -> None:
+    """A ledger with no option answers what every export answers when there is nothing to
+    list: the header and the footer, no rows."""
+    stock = sqlite3.connect(":memory:", check_same_thread=False)
+    stock.row_factory = sqlite3.Row
+    try:
+        init_golden_base(stock)
+        _seed_golden(stock)
+        art = build_options_csv(stock, now=GOLDEN_NOW, reporting=TWD)
+        assert art.filename == "options_snapshot_2026-06-11.csv"
+        assert _csv_rows(art.content) == [OPTION_COLUMNS]
+        assert [line.split(",", 1)[0] for line in _footer(art.content)] == [
+            "# as_of=2026-06-11"]
+    finally:
+        stock.close()
+
+
+def test_an_oversold_contract_is_listed_flagged_with_no_value(
+    conn: sqlite3.Connection,
+) -> None:
+    """An undeclared oversell (賣超, 待釐清) does not take the file down: the row is listed with
+    ``oversold=True`` and blank value cells — never a fabricated figure."""
+    oversold = "XYZ261218C00090000"
+    register_option_contract(conn, oversold)
+    insert_transaction(conn, account_id="schwab", symbol=oversold, side=Side.SELL,
+                       quantity=D("100"), price=D("1.00"), fees=D("0.65"), tax=D("0"),
+                       trade_date=date(2026, 3, 12))
+    conn.commit()
+    rows = _csv_rows(build_options_csv(conn, now=NOW, reporting=TWD).content)
+    by_sym = {r[1]: dict(zip(OPTION_COLUMNS, r, strict=True)) for r in rows[1:]}
+    row = by_sym[oversold]
+    assert (row["oversold"], row["market_value"], row["unrealized"],
+            row["reporting_ccy_value"]) == ("True", "", "", "")
+    assert by_sym[PUT] == _PUT_ROW
+
+
+def test_the_options_csv_never_prints_scientific_notation(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every Decimal cell goes through ``decimal_str`` (``_s``): an exact zero inherited from
+    a repeating average reads ``0.000…``, never ``0E-24``."""
+    def _tiny(*args: Any, **kwargs: Any) -> Any:
+        data = build_dashboard(*args, **kwargs)   # the real one, imported above
+        assert data.options is not None
+        row = data.options.open[0].model_copy(update={
+            "unrealized": D("0E-24"), "average_premium": D("5E-7")})
+        return data.model_copy(update={
+            "options": data.options.model_copy(update={"open": [row]})})
+
+    monkeypatch.setattr(holdings_mod, "build_dashboard", _tiny)
+    rows = _csv_rows(build_options_csv(conn, now=NOW, reporting=TWD).content)
+    put = dict(zip(OPTION_COLUMNS, rows[1], strict=True))
+    assert (put["unrealized"], put["average_premium"]) == (
+        "0.000000000000000000000000", "0.0000005")
+    assert [c for r in rows for c in r if _SCI.match(c)] == []
 
 
 # --- 持股報表 ------------------------------------------------------------------------------

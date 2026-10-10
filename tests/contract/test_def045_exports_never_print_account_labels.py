@@ -44,6 +44,7 @@ _PER_ACCOUNT: list[_Export] = [
 #: Every export route the pages call, with a body that makes it produce content.
 _EXPORTS: list[_Export] = [
     ("/api/export/holdings", {}),
+    ("/api/export/options", {}),
     ("/api/export/ledgers", {}),
     *_PER_LEDGER,
     ("/api/export/realized", {}),

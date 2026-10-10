@@ -1623,8 +1623,8 @@ def _reconcile_exports(ev, api, res, prices, phase, valuation):
     raw = api.download("/api/export/holdings").decode("utf-8-sig")
     hrows = _parse_csv(raw)
     hkey = {(r.get("account_id"), r.get("symbol")): r for r in hrows}
-    # Stock rows only: spec §9 renders an open contract in a SEPARATE 選擇權 block of the
-    # holdings export (W6), whose layout this family does not parse.
+    # Stock rows only: the holdings CSV is the stock table, and an open contract leaves in its
+    # own options CSV (spec §9, owner ruling 2026-10-10: B), which this family does not read.
     for key, h in res.holdings.items():
         if O.is_option(key[1]):
             continue
