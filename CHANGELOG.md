@@ -47,6 +47,12 @@ short refused) was confirmed with the plan approval.
   watchlist filter, every export (spec §9). Options are excluded from quotes and from every
   stock-only reader — AI insights, signals, alerts, digest, news, fundamentals, target weights,
   rebalance, what-if (OPT-D10).
+- **Exports — two files (owner ruling 2026-10-10, B):** the 持股 CSV
+  (`POST /api/export/holdings`, `holdings_snapshot_*.csv`) is the stock table only; on a ledger
+  with options its footer adds `options_market_value`. The open contracts are their own export,
+  `POST /api/export/options` → `options_snapshot_*.csv` (the §7.1 open-row columns, the same
+  account / market filter), with a 匯出 CSV button in the dashboard's 選擇權 section and a
+  「選擇權持倉 CSV」 card in the export centre.
 - **Stock ledger blast radius (spec §10, invariant 1):** additive keys only — the raw transactions
   dump / per-tab CSV gain `close_reason`, the transaction template gains `close_reason（選填）`, the
   realized CSV gains `asset_type`, `contract`, and the wire keys spec §10 lists read null / false /

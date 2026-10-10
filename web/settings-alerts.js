@@ -367,7 +367,7 @@
   /* ============ E7: 匯出中心 ============ */
   const EXPORTS = [
     { group: '對帳與核對', items: [
-      { name: '持倉快照 CSV', desc: '目前所有持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度。', path: '/api/export/holdings' },
+      { name: '持倉快照 CSV', desc: '目前所有股票持倉（原始/調整成本、現價、損益、權重），raw Decimal 精度；選擇權另見「選擇權持倉 CSV」。', path: '/api/export/holdings' },
       /* Owner ruling 2026-10-10 (B): the open option contracts are their own file; the
          持倉快照 above is the stock table only. A ledger with no option downloads the header. */
       { name: '選擇權持倉 CSV', desc: '未平倉選擇權合約（方向、口數、權利金、最後成交價、市值、履約義務），raw Decimal 精度。', path: '/api/export/options' },

@@ -130,7 +130,7 @@ _LABELS: list[tuple[str, str, str]] = [
     ("PUT", "/api/fee-rules/", "費稅規則變更"),
     # llm-fail-log's export lives OUTSIDE export.py on purpose (its router docstring: to stay
     # clear of the test_export_endpoints_have_callers contract), which is precisely why the
-    # "/api/export/" prefix above never reached it. All 15 exports now read 「匯出報表」.
+    # "/api/export/" prefix above never reached it. All 16 exports now read 「匯出報表」.
     ("POST", "/api/llm-fail-log/export", "匯出報表"),
     ("DELETE", "/api/llm-fail-log", "AI 失敗紀錄清除"),
     ("DELETE", "/api/llm/", "AI 設定刪除"),
