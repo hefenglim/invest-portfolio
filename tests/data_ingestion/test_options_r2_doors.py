@@ -103,3 +103,21 @@ def test_same_day_adjustments_of_two_underlyings_are_two_pairs() -> None:
     conv, _g, _r = convert(events, "schwab", "USD", known_positions={})
     actions = sorted((r[3], r[4], r[5]) for r in conv.rows["corporate_actions"])
     assert actions == [(A30, A15, "2"), (C60, C20, "3")]
+
+
+def test_a_renamed_underlying_adjusts_as_one_pair() -> None:
+    """A SPAC merger renames the underlying: TD prints the old contract's leg and the new
+    one's on one day. m4 keyed the pairs by underlying and so split this pair into two
+    one-leg groups — measured on the owner's real export, where the whole run stopped with
+    「1 adjustment legs on one day」 (the options acceptance had passed before m4)."""
+    old, new = "AAA220121P00007500", "BBB220121P00007500"
+    events = _parse(
+        '08/13/2021,Sell to Open,AAA 01/21/2022 7.50 P,"SOLD TO OPEN",2,$1.10,$1.32,$218.68',
+        '08/25/2021,Journaled Shares,AAA 01/21/2022 7.50 P,'
+        '"TDA TRAN - OPTION POSITION CHANGE ...Q.ML20007500)",2,,,',
+        '08/25/2021,Journaled Shares,BBB 01/21/2022 7.50 P,'
+        '"TDA TRAN - OPTION POSITION CHANGE (BBB Jan 21 2022 7.5 Put)",-2,,,',
+    )
+    conv, _g, _r = convert(events, "schwab", "USD", known_positions={})
+    assert [(r[2], r[3], r[4], r[5], r[6]) for r in conv.rows["corporate_actions"]] == [
+        ("OPTION_ADJUST", old, new, "1", "1")]

@@ -262,14 +262,23 @@ def _convert_options(  # noqa: C901, PLR0912 - one branch per option row shape (
                 symbol=e.option_symbol, kinds=(e.kind.value,), into="",
                 detail="選擇權在券商平台之間移轉（未互相抵銷），不入帳；移轉不改變部位",
             ))
-    # --- adjustment pairs, per day: (date, underlying, expiry, right) groups of exactly two
-    # legs. The underlying is part of the key (R2 m4): same-day adjustments of two underlyings
-    # sharing an expiry and a right are two pairs, not one group of four legs. ---
-    groups: dict[tuple[date, str, date, str], list[tuple[RawEvent, str, OptionTerms]]] = {}
+    # --- adjustment pairs, per day: (date, expiry, right) groups of exactly two legs. Two
+    # legs pair whatever their underlyings, because a merger RENAMES the underlying (the
+    # owner's real VACQ → RKLB put: one pair, two roots). More than two legs split by
+    # underlying (R2 m4): same-day adjustments of two underlyings sharing an expiry and a
+    # right are two pairs, not one group of four legs. ---
+    by_day: dict[tuple[date, date, str], list[tuple[RawEvent, str, OptionTerms]]] = {}
     for e in adjusts:
         symbol, terms = _contract_of(e)
-        groups.setdefault((e.trade_date, terms.underlying, terms.expiry, terms.right),
-                          []).append((e, symbol, terms))
+        by_day.setdefault((e.trade_date, terms.expiry, terms.right), []).append(
+            (e, symbol, terms))
+    groups: dict[tuple[date, str, date, str], list[tuple[RawEvent, str, OptionTerms]]] = {}
+    for (day, expiry, right), legs in by_day.items():
+        if len(legs) == 2:
+            groups[(day, "", expiry, right)] = legs
+            continue
+        for leg in legs:
+            groups.setdefault((day, leg[2].underlying, expiry, right), []).append(leg)
     # --- expiries, merged per (contract, expiry) ---
     merged: dict[tuple[str, date], list[tuple[RawEvent, OptionTerms]]] = {}
     for e in expiries:

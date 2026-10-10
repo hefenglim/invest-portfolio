@@ -89,6 +89,14 @@ short refused) was confirmed with the plan approval.
   obligation; the inbox / dashboard close prefill loads the contract's own account; the watchlist
   labels contracts 「以最後成交價估值」; the OPTION_ADJUST source is a held-contract picker; a blank
   fee field reverts to the default instead of failing the card.
+- **Real-data rerun (2026-10-10) — a regression of the review's own fix:** keying the converter's
+  adjustment pairs by underlying (the "two underlyings" fix above) split a merger's RENAME pair —
+  the owner's VACQ → RKLB put, one leg per root — into two one-leg groups, and the whole statement
+  stopped with 「1 adjustment legs on one day」. Two same-day legs of one expiry and right now pair
+  whatever their roots; more than two still split by underlying. Found by re-running the owner's
+  full Schwab history (1,593 lines) through the converter and the CSV doors on a throw-away
+  database: shares 17/17, cash 522.20 and the open SPCX put equal the broker's 2026-10-06
+  positions (`test_a_renamed_underlying_adjusts_as_one_pair`).
 
 **Owner rulings 2026-10-05 (in chat, one by one; 24 items).** The open questions of the CR round
 were put to the owner as choices; the kept-as-built answers need no code.
