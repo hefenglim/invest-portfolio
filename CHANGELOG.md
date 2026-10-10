@@ -29,6 +29,10 @@ the deploy record: **Release record** directly below.
 
 ### Release record
 
+- **Gates** (dev machine, on the release commit): `ruff check portfolio_dash tests scripts`
+  clean; `mypy --strict` 1,078 files, 0 issues (fresh cache); pytest non-e2e 7,598 passed /
+  2 skipped / 0 failed; e2e 369 / 369 passed in 34 foreground batches of ≤ 11; stress audit
+  phase 1 `ops=164 pass=19,948 fail=0` (UI read-back included), oracle independence grep empty.
 - **Migration rehearsal** (a database built by v0.1.28 — prod's commit 734833b — booted on this
   release): 58 / 58 tables, 0 column-definition differences and identical indexes against a
   fresh database (column ORDER differs on `insights` / `instruments`, read by name only),
