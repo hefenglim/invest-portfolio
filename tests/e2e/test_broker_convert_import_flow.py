@@ -7,8 +7,8 @@ closes the loop the owner actually walks:
     broker CSV → converter → import_*.csv → the 匯入 upload control → the ledger → the report
 
 and it is the only test that asserts the converter's OUTPUT is something the IMPORTER accepts.
-The two live in different packages with different validators, so "the converter produced 11
-transaction rows" and "the app imported 11 transaction rows" are separate facts — a column
+The two live in different packages with different validators, so "the converter produced 12
+transaction rows" and "the app imported 12 transaction rows" are separate facts — a column
 renamed on either side, a kind spelled the broker's way, a ratio written as a decimal, and the
 files convert perfectly into something no door will take.
 
@@ -226,7 +226,10 @@ def test_a_converted_schwab_export_imports_through_the_browser(
     # The survivor is honest — the PREH sell really has no position, because its 期初庫存 is
     # the worksheet the export cannot fill in.
     txns = _import_file(page, "交易", out_dir / "import_transactions.csv", warn_rows=1)
-    assert txns["written"] == 11 and txns["skipped"] == 0
+    # 12 since options W3 (spec §8): the corpus's 2025-12-01 Sell to Open is no longer dropped
+    # as an option leg — it converts into a declared-short row on its OCC contract (the same
+    # re-pin as test_broker_web_import_flow.py).
+    assert txns["written"] == 12 and txns["skipped"] == 0
 
     divs = _import_file(page, "股利", out_dir / "import_dividends.csv", warn_rows=0)
     assert divs["written"] == 1
@@ -262,7 +265,7 @@ def test_a_converted_schwab_export_imports_through_the_browser(
     # Four uploads, four undoable batches (one per kind) — the whole import is reversible.
     batches = _get_json(base, "/api/import/batches")["batches"]
     assert {b["kind"]: b["row_count"] for b in batches} == {
-        "transactions": 11, "dividends": 1, "cash": 7, "corporate_actions": 3}
+        "transactions": 12, "dividends": 1, "cash": 7, "corporate_actions": 3}
 
     assert _unexpected(console_errors, "status of 422") == []
     assert page_errors == []
