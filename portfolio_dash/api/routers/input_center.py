@@ -131,7 +131,6 @@ from portfolio_dash.data_ingestion.validate import (
 from portfolio_dash.export.artifact import content_disposition
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.results import Book, Holding
-from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import MARKET_QUOTE_CCY, Currency, Market
 from portfolio_dash.shared.image_types import is_supported_image
 from portfolio_dash.shared.ledger_events import EventPriority
@@ -451,14 +450,14 @@ def input_holdings(
         "SELECT DISTINCT symbol FROM dividends WHERE account_id=? AND date<=?", (account, day)
     ):
         symbols.add(row["symbol"])
-    # Options spec §4.3 (W7b cross test): an OPTION_ADJUST hands the position to a contract
-    # that may have no row of its own yet — the adjusted short is exactly what the owner closes
-    # next, so it must be in the picker with its direction and 口數. Scoped to OPTION_ADJUST so
-    # a stock ledger's payload is unchanged (invariant 1).
+    # A corporate action can hand a position to a symbol with no row of its own yet: an
+    # EXCHANGE's new ticker, a SPINOFF's child, an OPTION_ADJUST's successor contract. Each is
+    # exactly what the owner sells, collects a dividend on or closes next, so each must be in
+    # the picker (owner ruling 2026-10-10; found by the options W7b cross test). Dated like the
+    # ledger rows above (DEF-056): an action after today does not count yet.
     for row in conn.execute(
-        "SELECT DISTINCT to_symbol FROM corporate_actions "
-        "WHERE account_id=? AND date<=? AND kind=?",
-        (account, day, CorporateActionKind.OPTION_ADJUST.value),
+        "SELECT DISTINCT to_symbol FROM corporate_actions WHERE account_id=? AND date<=?",
+        (account, day),
     ):
         symbols.add(row["to_symbol"])
     registry = {i.symbol: i for i in list_instruments(conn)}

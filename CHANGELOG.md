@@ -54,8 +54,10 @@ short refused) was confirmed with the plan approval.
 - **Verification.** Stress-audit oracle extended from the spec (independent; phase 1 163 ops /
   19,727 assertions / 0 fail, 2026-10-10 — new baseline); accounting manual v1.12 §4.5; rule files
   updated (`domain-ledger.md`, `markets-and-fees.md`, `data-and-pricing.md`, `architecture.md`).
-- **Fixed on the way:** `/api/input/holdings` now lists a contract that received its position
-  through an `OPTION_ADJUST` and has no row of its own yet.
+- **Fixed on the way (owner ruling 2026-10-10 widened it to stocks):** `/api/input/holdings`
+  now lists a position a corporate action created that has no row of its own yet — an EXCHANGE's
+  new ticker, a SPINOFF's child, an OPTION_ADJUST's successor contract — so the sell hints and the
+  dividend picker see it (an action after today does not count yet, DEF-056).
 - **Final review (three xhigh reviewers, 2026-10-10) — fixed before merge:** OCC symbols are
   canonicalised at every door before validation (a lower-case contract skipped the close rules and
   stored a dead OPTION_ADJUST); a statement posted after an already-booked expiry re-derives the
