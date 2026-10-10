@@ -91,10 +91,13 @@ the structures below are the schema; exact rates are filled/verified at setup.
 - **Dividend:** 30% US withholding (W-8BEN), applies to both Schwab and Moomoo US.
 - **Equity options (OPT-D6, 2026-10-09):** per contract `option_per_contract` × contracts +
   optional `option_reg_per_contract` × contracts + **SEC on sells** (the stock formula, on the
-  premium notional); **no TAF, no CAT, no stamp** (the MY stamp is not applied to an option in
-  v1), tax 0. Rates are per RULE SET: `schwab` 0.65, `moomoo_us` **unset** (`None` ≠ 0) — an
-  option trade on an unset rule set is refused only when the FEE is not supplied
-  (`option_fee_unset`: 「此帳戶未設定選擇權手續費…」); a statement-supplied fee always wins. A
+  premium notional); **no TAF, no per-share CAT, no stamp** (the MY stamp is not applied to an option in
+  v1), tax 0. Rates are per RULE SET, and **every rule set has one default value** (owner ruling
+  2026-10-10 — there is no "unset"; it replaced the `option_fee_unset` refusal): `schwab` 0.65,
+  `moomoo_us` **0.8633** (Moomoo's fixed per-contract items summed — commission 0.20 + platform
+  0.45 + settlement 0.18 + clearing 0.02 + ORF 0.013 + CAT 0.0003; its 0.99 per-order platform
+  minimum, the free commission on a premium ≤ 0.10, the 55.00 clearing cap and the option TAF are
+  deliberately not modelled). A statement-supplied fee always wins. A
   `close_reason` row (expiry / assignment / exercise) is fee = tax = 0 WITHOUT calling the engine
   (snapshot `{"source": "close_reason"}`), and a supplied non-zero fee or tax on one is refused.
   `fees.py::_us_option` bypasses `_us` entirely — its per-share components would charge one

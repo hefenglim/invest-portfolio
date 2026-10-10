@@ -299,6 +299,8 @@ def run_options(ev: C.Evidence, api: C.Api, db_path, op: Ops):
     CALL35 = "OPB260904C00035000"   # STO 1 -> never closed: past expiry at `final`
     CALL42 = "OPA260918C00042000"   # BTO 2 -> EXERCISE 1 (option close + buy 100 OPA @ 42),
     #                                  then the other 1 expires (a partial exercise, §4.2)
+    PUTM = "OPB260918P00028000"     # BTO 1 -> STC 1 (moomoo_my, NO statement fee: the
+    #                                  moomoo_us default rate, owner ruling 2026-10-10)
 
     def wrote(resp, label: str, scope: str) -> int | None:
         ev.check("options.door_accepts", scope, 201, resp.get("status"), ph)
@@ -320,21 +322,28 @@ def run_options(ev: C.Evidence, api: C.Api, db_path, op: Ops):
     ev.check("options.fee_param.option_per_contract", "schwab",
              O.FEE_RULES["schwab"]["option_per_contract"],
              (eff.get("schwab") or {}).get("option_per_contract"), ph)
-    ev.check("options.fee_param.option_per_contract", "moomoo_us (unset, not 0)", None,
+    # Owner ruling 2026-10-10: one default per rule set — moomoo_us is 0.8633, not "unset".
+    ev.check("options.fee_param.option_per_contract", "moomoo_us (default 0.8633)",
+             O.FEE_RULES["moomoo_us"]["option_per_contract"],
              (eff.get("moomoo_us") or {}).get("option_per_contract"), ph)
 
     # No funding op on purpose: schwab's USD pool already holds ~17,000 (the assignment's leg
     # is 8,000) and moomoo_my's ~830 (the BTO is 631.50). A USD deposit would be an UNBASED
     # foreign acquisition and move schwab's covered_ratio (F2/F3) — a different feature.
 
-    # ---- door probe: OPT-D6 — no per-contract rate and no statement fee -> refused ---------
-    before = tx_count()
-    r = op.option_trade("moomoo_my", CALL30, "2026-07-22", "BTO", 3, "2.10",
-                        expect_status=400)
-    ev.check("guard.option_fee_unset_refused", "moomoo_my (moomoo_us, rate unset), no fee",
-             400, r.get("status"), ph)
-    ev.check("guard.option_fee_unset_writes_nothing", "moomoo_my BTO without fee",
-             before, tx_count(), ph)
+    # ---- door probe: OPT-D6, owner ruling 2026-10-10 — every rule set has ONE default
+    # per-contract rate, so a moomoo_us option trade with NO statement fee is ACCEPTED and
+    # priced at it (the probe used to expect 400 `option_fee_unset`). A contract of its own,
+    # bought and sold back, so it leaves no open position behind for the anchors below.
+    # Literal fees: BTO 1 @ 0.50 -> 1 x 0.8633 = 0.86; STC 1 @ 0.65 -> 0.86 + SEC
+    # max(0.0000206 x 65, 0.01) = 0.01 -> 0.87 (op.option_trade also checks both vs the oracle).
+    bto_m = wrote(op.option_trade("moomoo_my", PUTM, "2026-07-22", "BTO", 1, "0.50"),
+                  "買進開倉", "BTO PUTM (moomoo_us, no statement fee)")
+    stc_m = wrote(op.option_trade("moomoo_my", PUTM, "2026-07-29", "STC", 1, "0.65"),
+                  "賣出平倉", "STC PUTM (moomoo_us, no statement fee)")
+    for tid, want in ((bto_m, "0.86"), (stc_m, "0.87")):
+        got = C.read_fee_tax_from_db(db_path, tid)[0] if tid else None
+        ev.check("options.default_fee.moomoo_us", f"PUTM id={tid} (literal)", want, got, ph)
 
     # ---- opens -------------------------------------------------------------------------
     wrote(op.option_trade("schwab", PUT45, "2026-07-20", "STO", 2, "1.50"), "賣出開倉",

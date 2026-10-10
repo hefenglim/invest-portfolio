@@ -82,7 +82,6 @@ from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dividend_model import apply_dividend_model
 from portfolio_dash.data_ingestion.fees import (
     ETF_FLAG_UNKNOWN_MESSAGE,
-    OPTION_FEE_UNSET_MESSAGE,
     FeeComputationError,
     close_row_fees,
     compute_fees,
@@ -681,10 +680,7 @@ def _recompute_edit_fees(
         except FeeComputationError as exc:
             return JSONResponse(status_code=400, content=error_body(
                 "validation_error", str(exc), field="shares"))
-        if opt.unset:
-            issues.append(Issue(kind="option_fee_unset", message=OPTION_FEE_UNSET_MESSAGE))
-            return _EditFees(fee, tax, None, issues)
-        fee, tax = opt.fee if opt.fee is not None else fee, opt.tax
+        fee, tax = opt.fee, opt.tax
         snapshot = dict(opt.snapshot)
         if body.fee_overridden or body.tax_overridden:
             snapshot["override"] = "true"

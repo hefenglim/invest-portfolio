@@ -241,7 +241,7 @@ oracle's docstring):
 | §4.1 / OPT-D2 | price-0 close rows go through the ordinary branches (a BUY at 0 covers the short → the whole remaining premium; a SELL at 0 of the long → `−basis`); `close_reason` rides on the realized row |
 | §4.4 | `_close_refused`: a close that would OPEN OR EXTEND a lot books nothing, creates no position, sets the sticky `unbookable_close` on an existing one, and is recorded on `OracleResult.refused_closes` — which withholds XIRR and B |
 | §4.3 / OPT-D11 / D16 | `OPTION_ADJUST` in `_apply_action`, after SPLIT's checks and before E5: the standard-adjustment check (`ratio_from == 1`, strike conserved, same right / expiry), E22, the opposite-direction refusal, the full field table (long AND short lot × `ratio_to`, proceeds carried, flags OR-ed, `vacated_to`) |
-| OPT-D6 / §4.2 | `fee_tax(..., is_option=, close_reason=)`: close rows 0 / 0; `option_per_contract` × 口數 (+ reg) + SEC on a sell over the premium notional; no TAF, no tax, no MY stamp; an unset rate (`moomoo_us`) returns `None` — the statement fee is the only answer |
+| OPT-D6 / §4.2 | `fee_tax(..., is_option=, close_reason=)`: close rows 0 / 0; `option_per_contract` × 口數 (+ reg) + SEC on a sell over the premium notional; no TAF, no tax, no MY stamp; every rule set has a rate (`schwab` 0.65, `moomoo_us` 0.8633 — owner ruling 2026-10-10, no "unset"), and a statement fee wins at the caller |
 | §5 / R2 | `option_price_on`: the last ORDINARY trade per symbol across accounts ≤ the valuation day, dated that trade; after an `OPTION_ADJUST` with no trade since, the predecessor's price ÷ `ratio_to` |
 | OPT-D4 / R3 | point-in-time figures (KPI 總市值 / 未實現 / 已實現 / 總報酬, XIRR's terminal value, the FX pool's exposure) include an open contract on its SIGNED quantity; the trend excludes its value without marking the day incomplete; `trend_skips_an_option` derives `trend_excludes_value` |
 | OPT-D20 | `principal_fx_effect` is `None` and `principal_fx_note` set whenever a contract is open on the valuation day |
@@ -267,7 +267,7 @@ entry (`close_reason`, side and price derived by the server), and `OPTION_ADJUST
 | same-day BTC + expiry | `OPB260821P00020000` | 63.695 then 69.345, write order |
 | left open past expiry | `OPB260904C00035000` | `past_expiry`, still valued at its last trade (R2) |
 | §4.4 refused close (legacy data) | `OPB260918C00030000` BUY 100 `expired` on a flat contract | `refused_closes`, `refused_close`, XIRR withheld + reason names the row, B withheld, trend days from its date incomplete, remedy text; then deleted through the door |
-| door probes | — | OPT-D6 `option_fee_unset` (400, nothing written), OPT-D14 BTC beyond the short (400, nothing written) |
+| door probes | — | OPT-D6 (ruling 2026-10-10): a `moomoo_us` BTO / STC with NO statement fee is ACCEPTED at the default rate (literal fees 0.86 / 0.87); OPT-D14 BTC beyond the short (400, nothing written) |
 | cash tie per USD pool | schwab · moomoo_my | the statement's option lines = the oracle's net premiums line for line, with the same §6.1 label as the ledger wire |
 
 New families: `options.*` (presence, block / row / realized keys, `open[]` fields, roll-ups,
@@ -316,7 +316,13 @@ The pass count moved by much more because the options checkpoints run every fami
 included) on a ledger with open contracts, and every later checkpoint carries the `options`
 block. After W6's exports merged (the realized CSV now carries the option rows, so its family
 compares them too) and the final-review fixes, the branch gate on 2026-10-10 read
-`ops=163 pass=19727 fail=0` — the current baseline.
+`ops=163 pass=19727 fail=0`. Owner ruling 2026-10-10 (one default option fee per rule set,
+`moomoo_us` 0.8633) turned the OPT-D6 door probe — a moomoo_us BTO with no statement fee,
+refused 400 — into two ACCEPTED moomoo_us entries with no statement fee (BTO + STC of a contract
+of their own, literal fees 0.86 / 0.87). Same-day A/B, API-only `run_phase1.py`: **before**
+(`d208ffa`) `ops=163 pass=19720 fail=0`; **after** `ops=164 pass=19941 fail=0` — the current
+baseline (+1 op: one refused probe became two writes; the extra assertions are the new realized
+row and its flows, compared at every later checkpoint).
 
 ## Must-pass assertion families
 

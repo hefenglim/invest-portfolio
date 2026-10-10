@@ -315,6 +315,7 @@
   let previewTimer = null;
   function schedulePreview() {
     syncOptionMode();            // options spec §8: which fields this 代號 needs
+    scheduleRecognition();       // ruling 2026-10-10: a pasted contract the page does not know
     renderSymbolHint();          // local, instant
     renderSellHints();           // FU-D44: instant from cache; async fill on a cache miss
     if (previewTimer) clearTimeout(previewTimer);
@@ -649,10 +650,22 @@
       msg.classList.add('opt-builder-msg-err');
       return;
     }
-    optState.built[resp.symbol] = { name: resp.name, underlying: und, right: right };
     msg.classList.remove('opt-builder-msg-err');
     msg.textContent = '已建立：' + resp.name + '（' + resp.symbol + '）';
-    if (!window.pdField.writeIfUntouched(symIn, before, resp.symbol)) return;
+    adoptContract({ symbol: resp.symbol, name: resp.name, underlying: und, right: right },
+                  before);
+  }
+
+  /* The ONE path a server-answered contract takes into the form — the builder's 建立合約
+     above and the 代號 box's own recognition below (owner ruling 2026-10-10) alike: remember
+     the server's name and terms, write the canonical symbol into 代號 (only over `before`, what
+     the box held when the request left — anything typed meanwhile is the owner's), close the
+     builder, apply a pending 轉倉, preview (→ syncOptionMode: option mode on, the side buttons
+     defaulted by position) and focus 口數. False when the box had moved on. */
+  function adoptContract(c, before) {
+    optState.built[c.symbol] = { name: c.name, underlying: c.underlying, right: c.right };
+    if (!window.pdField.writeIfUntouched($('#m-symbol'), before, c.symbol)) return false;
+    if (manualPicker) manualPicker.close();
     $('#m-opt-builder').hidden = true;
     const roll = optState.roll;
     optState.roll = null;
@@ -664,8 +677,54 @@
       window.pdField.autoFill($('#m-date'), roll.date);
     }
     schedulePreview();
-    const c = $('#m-contracts');
-    if (c) c.focus();
+    const n = $('#m-contracts');
+    if (n) n.focus();
+    return true;
+  }
+
+  /* ---- Owner ruling 2026-10-10: the 代號 box recognises a pasted contract by itself ----
+     A value the page's own instrument list does not know — not registered yet, or registered
+     in another tab after this page loaded — is asked of the server:
+     GET /api/input/option-symbol?text=… answers `{symbol, name, underlying, right}` for an OCC
+     symbol (any case, padded) or a statement string (`XYZ 12/18/2026 50.00 P`), and
+     `{symbol: null}` (200, never a 4xx) for anything else. The browser never parses the
+     shape. Debounced, and asked ONCE per distinct value — the answer is remembered, a
+     contract or not; a remembered contract whose text is typed again is adopted again.
+     While the value is unanswered no preview is sent: a contract code previewed as a STOCK
+     body was a 400 (「選擇權請選擇方向…」) with no side buttons on screen — the defect this
+     rule fixes. A contract takes EXACTLY the builder's path (adoptContract); `null` leaves
+     the stock form exactly as before. */
+  const RECOGNISE_WAIT_MS = 300;
+  const recog = { answers: Object.create(null), timer: null, pending: null };
+  const recogKey = (raw) => (raw || '').trim().toUpperCase();
+  /* Does this 代號 value still need the server's answer (or a remembered contract adopted)? */
+  function recognitionOwed(raw) {
+    const k = recogKey(raw);
+    if (!k || inst(k) || optInst(k)) return false;
+    return !(k in recog.answers) || recog.answers[k] !== null;
+  }
+  function scheduleRecognition() {
+    if (recog.timer) { clearTimeout(recog.timer); recog.timer = null; }
+    const raw = $('#m-symbol').value;
+    if (!recognitionOwed(raw)) return;
+    recog.timer = setTimeout(() => { recog.timer = null; recognise(raw); }, RECOGNISE_WAIT_MS);
+  }
+  function recognise(raw) {
+    const k = recogKey(raw);
+    if ($('#m-symbol').value !== raw || !recognitionOwed(raw)) return;   // the box moved on
+    const known = recog.answers[k];
+    if (known) { adoptContract(known, raw); return; }
+    if (recog.pending === k) return;
+    recog.pending = k;
+    api.get('/api/input/option-symbol', { text: raw })
+      .then((resp) => resp, () => null)   // a failed ask degrades to the stock path, as before
+      .then((resp) => {
+        if (recog.pending === k) recog.pending = null;
+        const contract = resp && resp.symbol ? resp : null;
+        recog.answers[k] = contract;
+        if (contract) adoptContract(contract, raw);
+        else if ($('#m-symbol').value === raw) schedulePreview();   // the stock preview, now
+      });
   }
 
   /* A contract's underlying / right: the builder's own record, else the drawer wire's terms
@@ -976,6 +1035,15 @@
     const shares = Number($('#m-shares').value) || 0;
     const price = Number($('#m-price').value) || 0;
 
+    /* Ruling 2026-10-10: the 代號 is still being recognised — stock or contract is the
+       server's answer, and a contract sent as a stock body is a 400. Hold the preview (the
+       neutral card keeps 確認寫入 disabled); the answer re-runs it. */
+    if (recognitionOwed($('#m-symbol').value)) {
+      mPreview = null;
+      renderManual(null, [], false);
+      return;
+    }
+
     if (optState.on) {
       /* Option mode (spec §8): 口數 + 權利金 (a close row has no premium — price 0 by
          definition, so only 口數 is asked for). The checks below are on the owner's own
@@ -1280,13 +1348,6 @@
       const div = el('div', 'issue issue-error');
       div.appendChild(el('span', null, '✕'));
       div.appendChild(el('span', null, i.text));
-      /* OPT-D6: an option on a rule set with no per-contract rate needs the statement's fee —
-         the sentence names both repairs; the second one is a link. */
-      if (i.code === 'option_fee_unset') {
-        const link = el('a', 'opt-fee-link', '前往 系統設定 → 費率');
-        link.href = 'settings.html#accounts';
-        div.appendChild(link);
-      }
       issueBox.appendChild(div);
     });
     infos.forEach((i) => {

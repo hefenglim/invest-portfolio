@@ -22,7 +22,7 @@ the stamp is 0 and the seam surfaces the soft issue 「無 USD/MYR 匯率,印花
 
 from collections.abc import Mapping
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
@@ -57,70 +57,6 @@ class FeeComputationError(ValueError):
     """
 
 
-class OptionFeeUnset(Exception):  # noqa: N818 - a state the caller must handle, not a fault
-    """An option trade on a rule set whose ``option_per_contract`` is unset (OPT-D6).
-
-    The engine never guesses a rate it was not given. The doors check
-    :func:`option_fee_unset_applies` first and raise the ``option_fee_unset`` finding instead
-    of calling the engine; this exception is the backstop for a caller that forgot, so the
-    forgetting is an error and never a silent 0 fee written into cost basis.
-    """
-
-
-#: OPT-D6 — the finding's one sentence, every door (manual / CSV / 更正).
-OPTION_FEE_UNSET_MESSAGE = ("此帳戶未設定選擇權手續費：請按 ✎ 覆寫填入對帳單手續費，"
-                            "或到 系統設定 → 費率 設定每口費率")
-
-
-def option_fee_unset_applies(rules: "FeeRuleSet", *, fee_supplied: bool) -> bool:
-    """Is the ``option_fee_unset`` finding raised for an option trade on *rules*?
-
-    Only when the FEE is not supplied (OPT-D6): a statement-supplied fee wins, and the tax of
-    an option is 0, so a blank tax beside a supplied fee is not a reason to stop."""
-    return rules.option_per_contract is None and not fee_supplied
-
-
-class OptionFees(NamedTuple):
-    """An ordinary option trade's fee / tax / provenance at an entry door (OPT-D6).
-
-    ``unset`` is the ``option_fee_unset`` finding: the fee was not supplied and the rule set
-    has no per-contract rate, so no fee is computed (``fee`` is ``None``) — never a guess."""
-
-    fee: Decimal | None
-    tax: Decimal
-    snapshot: dict[str, str]
-    unset: bool
-
-
-def option_trade_fees(
-    rules: "FeeRuleSet", side: Side, quantity: Decimal, price: Decimal, *,
-    fee: Decimal | None, tax: Decimal | None,
-) -> OptionFees:
-    """The fee resolution of an ordinary (non-close) option trade — ONE definition, every door
-    that auto-fills a fee (manual, CSV / AI / broker, 更正). Call it only when *fee* or *tax* is
-    blank; a row supplying both keeps the doors' existing supplied-provenance path.
-
-    * fee blank and no per-contract rate → ``unset`` (the door raises ``option_fee_unset``);
-    * fee supplied, tax blank, no rate → tax 0 (an option has no transaction tax), provenance
-      ``supplied`` with ``supplied: fee`` so the record says the tax was not stated;
-    * otherwise the engine's option branch, the blank one(s) filled from it.
-
-    Raises :class:`FeeComputationError` on an overflow-sized notional, like the engine."""
-    if option_fee_unset_applies(rules, fee_supplied=fee is not None):
-        return OptionFees(None, tax if tax is not None else _ZERO, {}, True)
-    if rules.option_per_contract is None:
-        assert fee is not None   # option_fee_unset_applies covered the blank fee
-        snap = {**supplied_snapshot(fee, _ZERO), "option": "true", "supplied": "fee"}
-        return OptionFees(fee, tax if tax is not None else _ZERO, snap, False)
-    fr = compute_fees(rules, side, quantity, price, is_option=True)
-    snap = dict(fr.snapshot)
-    supplied = [k for k, v in (("fee", fee), ("tax", tax)) if v is not None]
-    if supplied:
-        snap["supplied"] = ",".join(supplied)
-    return OptionFees(fee if fee is not None else fr.fee, tax if tax is not None else fr.tax,
-                      snap, False)
-
-
 class FeeResult(BaseModel):
     """Computed fee + tax for a single transaction, with the rate snapshot used."""
 
@@ -137,6 +73,28 @@ def close_row_fees() -> FeeResult:
     and the engine is NOT called — its option branch would answer 0 / 0 at notional 0 too, but
     the snapshot must say which rule produced the zeros, and it was this one, not a rate."""
     return FeeResult(fee=_ZERO, tax=_ZERO, snapshot={"source": "close_reason"})
+
+
+def option_trade_fees(
+    rules: FeeRuleSet, side: Side, quantity: Decimal, price: Decimal, *,
+    fee: Decimal | None, tax: Decimal | None,
+) -> FeeResult:
+    """The fee resolution of an ordinary (non-close) option trade — ONE definition, every door
+    that auto-fills a fee (manual, CSV / AI / broker, 更正). Call it only when *fee* or *tax* is
+    blank; a row supplying both keeps the doors' existing supplied-provenance path.
+
+    The engine's option branch fills the blank one(s); a supplied one wins and is named in the
+    snapshot (``supplied``). Every rule set has a per-contract rate (owner ruling 2026-10-10),
+    so an option trade always carries a fee — there is no "unset" outcome any more.
+
+    Raises :class:`FeeComputationError` on an overflow-sized notional, like the engine."""
+    fr = compute_fees(rules, side, quantity, price, is_option=True)
+    snap = dict(fr.snapshot)
+    supplied = [k for k, v in (("fee", fee), ("tax", tax)) if v is not None]
+    if supplied:
+        snap["supplied"] = ",".join(supplied)
+    return FeeResult(fee=fee if fee is not None else fr.fee,
+                     tax=tax if tax is not None else fr.tax, snapshot=snap)
 
 
 def resolve_etf_flag(
@@ -348,8 +306,6 @@ def _us_option(
     snap["contracts"] = format(contracts.normalize(), "f")
     if notional <= _ZERO:
         return FeeResult(fee=_ZERO, tax=_ZERO, snapshot=snap)
-    if rules.option_per_contract is None:
-        raise OptionFeeUnset(OPTION_FEE_UNSET_MESSAGE)
     per_contract = _cent(rules.option_per_contract * contracts)
     fee = per_contract
     snap["option_per_contract"] = str(rules.option_per_contract)
@@ -430,8 +386,6 @@ def compute_fees(
                    passed by the caller seam; ``None`` -> stamp 0 (seam surfaces a soft issue).
         is_option: A US equity option contract (OPT-D6) — :func:`_us_option`, *quantity* in
                    share-equivalents. Default ``False``: every stock caller is unchanged.
-                   Raises :class:`OptionFeeUnset` when the rule set has no per-contract rate
-                   (a caller checks :func:`option_fee_unset_applies` first).
 
     Returns:
         FeeResult with fee, tax (both Decimal) and the rate/component snapshot (``engine="v2"``).

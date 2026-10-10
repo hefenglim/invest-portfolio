@@ -34,14 +34,15 @@
     stamp_cap_stock: '印花稅上限（股票）', stamp_cap_etf: '印花稅上限（ETF）',
     option_per_contract: '選擇權每口手續費', option_reg_per_contract: '選擇權每口監管費'
   };
-  /* Options spec §8 / OPT-D6: the two per-CONTRACT option fees, US rule sets only. They are
-     shown even when unset or 0 — `option_per_contract` UNSET is not 0: it means the engine has
-     no rate, so an option trade must carry the statement's fee (the 選擇權 rows' ✎ 覆寫). A
-     per-contract amount is not a ratio, so it is never capped at 1 like the rates around it. */
+  /* Options spec §8 / OPT-D6: the two per-CONTRACT option fees, US rule sets only, shown even
+     at 0. Owner ruling 2026-10-10: every rule set has ONE default per-contract rate (schwab
+     0.65, moomoo_us 0.8633), so an option trade always carries a fee — there is no 「未設定」
+     state any more; a blank field reverts to the rule set's default like every other field.
+     A per-contract amount is not a ratio, so it is never capped at 1 like the rates around it. */
   const OPTION_KEYS = new Set(['option_per_contract', 'option_reg_per_contract']);
   const OPTION_NOTES = {
-    option_per_contract: '未設定＝選擇權交易須填對帳單手續費（✎ 覆寫）；填 0 表示每口免手續費',
-    option_reg_per_contract: '每口額外的監管費（ORF 等）；預設 0',
+    option_per_contract: (f) => '留空＝還原系統預設 ' + f.default + '；填 0 表示每口免手續費',
+    option_reg_per_contract: () => '每口額外的監管費（ORF 等）；預設 0',
   };
   /* Fields relevant per market — keeps each card scannable (a US card never shows MY-only
      fields). Within the list, zero-default numeric fields that are NOT overridden are hidden
@@ -66,7 +67,7 @@
 
   function isMeaningful(f) {
     if (f.key === 'rounding') return true;
-    if (OPTION_KEYS.has(f.key)) return true;   // unset is a state the owner must see (OPT-D6)
+    if (OPTION_KEYS.has(f.key)) return true;   // a 0 option fee is a rate the owner must see
     if (f.overridden) return true;
     if (CAP_KEYS.has(f.key)) return f.default !== null && f.default !== undefined; // 0-cap is meaningful (exempt)
     return f.default !== null && f.default !== undefined && Number(f.default) !== 0;
@@ -75,9 +76,8 @@
   /* Change detection: does the input value differ from the field default? For numeric fields
      compare as numbers (a UI routing decision, never money of record — the value SENT is the
      input's own string). Blank input = revert: `collect()` sends it as null, which the server
-     reads as "drop the override" — the rule set's default again, which for a NULLABLE field
-     whose default is unset (moomoo_us `option_per_contract`) is 「未設定」. R3 n1: a blank used
-     to be sent as '' whenever the default was not null, and the server refused the whole card
+     reads as "drop the override" — the rule set's default again. R3 n1: a blank used to be
+     sent as '' whenever the default was not null, and the server refused the whole card
      (400 「非有效數值：''」). */
   function differsFromDefault(f, raw) {
     if (f.key === 'rounding') return raw !== f.default;
@@ -125,19 +125,13 @@
     if (!CAP_KEYS.has(f.key) && !OPTION_KEYS.has(f.key) && Number(f.default) <= 1) input.max = '1';
     input.value = f.effective === null || f.effective === undefined ? '' : f.effective;
     if (CAP_KEYS.has(f.key)) input.placeholder = f.default === null ? '無上限' : '';
-    /* What a blank field means here: 「未設定」 only where the default IS unset; elsewhere a
-       blank reverts to the rule set's default (the server has no "unset" override). */
-    const optUnsetDefault = f.default === null || f.default === undefined;
-    if (f.key === 'option_per_contract') {
-      input.placeholder = optUnsetDefault ? '未設定' : '預設 ' + f.default;
-    }
+    /* A blank option field reverts to the rule set's default (ruling 2026-10-10: there is no
+       "unset" — every rule set has one), so the placeholder names that default. */
+    if (f.key === 'option_per_contract') input.placeholder = '預設 ' + f.default;
     input.dataset.key = f.key;
     ctrl.appendChild(input);
     if (OPTION_NOTES[f.key]) {
-      const note = f.key === 'option_per_contract' && !optUnsetDefault
-        ? '留空＝還原系統預設 ' + f.default + '；填 0 表示每口免手續費'
-        : OPTION_NOTES[f.key];
-      ctrl.appendChild(el('span', 'panel-sub fee-opt-note', note));
+      ctrl.appendChild(el('span', 'panel-sub fee-opt-note', OPTION_NOTES[f.key](f)));
     }
 
     const revert = el('button', 'fee-revert', '還原');

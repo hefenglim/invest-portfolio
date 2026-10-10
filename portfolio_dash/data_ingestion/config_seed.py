@@ -54,11 +54,14 @@ class FeeRuleSet(BaseModel):
     broker_assisted_surcharge: Decimal = Decimal("0")  # Schwab $25 (config; not applied)
 
     # --- US equity options (options spec OPT-D6) ---
-    # Per contract, per RULE SET. ``None`` is UNSET, which is not 0: the engine never guesses a
-    # rate it was not given, so an option trade on an unset rule set needs the statement's fee
-    # (``fees.option_fee_unset_applies``). SEC on sells is the stock formula on the premium
-    # notional; no TAF and no MY stamp on an option in v1.
-    option_per_contract: Decimal | None = None
+    # Per contract, per RULE SET. Owner ruling 2026-10-10: every rule set has ONE default value,
+    # so an option trade always carries a fee — there is no "unset" any more (a statement fee
+    # still wins at every door). SEC on sells is the stock formula on the premium notional; no
+    # TAF and no MY stamp on an option in v1. Options are US only: ``compute_fees`` reaches the
+    # option branch only on a ``Market.US`` rule set, so the TW / MY rule sets keep this inert
+    # 0 and never read it. Every US rule set states its rate explicitly (pinned by
+    # ``tests/data_ingestion/test_options_w3_fees.py``), so a new one cannot inherit the 0.
+    option_per_contract: Decimal = Decimal("0")
     option_reg_per_contract: Decimal = Decimal("0")  # optional regulatory fee per contract
 
     # --- MY commission / clearing / SST (Moomoo MY market) ---
@@ -170,6 +173,15 @@ FEE_RULES: dict[str, FeeRuleSet] = {
         stamp_per_unit=Decimal("1"),
         stamp_cap_stock=Decimal("1000"),
         stamp_cap_etf=Decimal("200"),
+        # OPT-D6, owner ruling 2026-10-10: the Moomoo US options schedule's FIXED per-contract
+        # items, summed — commission 0.20 + platform 0.45 + settlement 0.18 + clearing 0.02 +
+        # ORF 0.013 + CAT 0.0003 = 0.8633 (reference doc 壹.三). SEC on a sell is the engine's
+        # stock formula, as for every US rule set. Deliberately NOT modelled: the platform
+        # fee's 0.99 per-ORDER minimum, the free commission on a premium <= 0.10, the clearing
+        # cap (55.00 per fill) and the option TAF — a statement fee (✎ 覆寫 / the CSV column)
+        # is the exact figure whenever one of them applies. The ORF is inside this sum, so
+        # ``option_reg_per_contract`` stays 0 here.
+        option_per_contract=Decimal("0.8633"),
     ),
     # Moomoo MY (MY) — commission + platform + clearing + SST (both sides); stamp step
     # function ceil(amount/1000)×RM1 capped RM1,000, ETF exempt (cap 0).

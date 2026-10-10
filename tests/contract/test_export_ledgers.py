@@ -25,10 +25,10 @@ def test_export_ledgers_zip_members(api_client: TestClient) -> None:
         assert manifest["as_of"] == "2026-06-11"
         fee = json.loads(zf.read("fee_rules_snapshot.json"))
         assert "tw" in fee and "schwab" in fee
-        # Options OPT-D6 (spec §10 (5)): the two new fields ride the snapshot; an unset
-        # per-contract rate is null, not "0".
+        # Options OPT-D6 (spec §10 (5)): the two new fields ride the snapshot; every US rule
+        # set has a per-contract rate (owner ruling 2026-10-10 — no "unset" null any more).
         assert fee["schwab"]["option_per_contract"] == "0.65"
-        assert fee["moomoo_us"]["option_per_contract"] is None
+        assert fee["moomoo_us"]["option_per_contract"] == "0.8633"   # ruling 2026-10-10
         assert fee["tw"]["option_reg_per_contract"] == "0"
 
 

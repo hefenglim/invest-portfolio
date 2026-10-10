@@ -146,8 +146,10 @@ from portfolio_dash.shared.options import (
     OptionTerms,
     contract_name,
     contracts_to_shares,
+    from_broker_option,
     option_display_name,
     option_symbol,
+    parse_option_symbol,
     shares_to_contracts,
 )
 from portfolio_dash.shared.wire import decimal_str
@@ -228,9 +230,34 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
 _RIGHT_WORDS = {"C": "C", "CALL": "C", "買權": "C", "P": "P", "PUT": "P", "賣權": "P"}
 
 
+def _recognise_contract(conn: sqlite3.Connection, text: str) -> dict[str, Any]:
+    """Owner ruling 2026-10-10: is *text* — whatever was typed or pasted into the manual form's
+    代號 box — an option contract? An OCC symbol in any case, padded or not, or a broker
+    statement's contract string (``XYZ 12/18/2026 50.00 P``) → the canonical OCC symbol, its
+    display name and the two terms the form's 轉倉 reuses; anything else → ``{"symbol": None}``.
+
+    Never a 4xx: the page asks this for every ticker its own list does not know, and an error
+    status is a console error in the browser. The shape is parsed HERE (``shared/options.py``),
+    never in the browser. A root registered in another market is not offered as a contract —
+    the compose form refuses it (options are US only, R6)."""
+    terms = from_broker_option(text) or parse_option_symbol("".join(text.split()))
+    if terms is None:
+        return {"symbol": None}
+    try:
+        symbol = option_symbol(terms)
+    except OptionSymbolError:
+        return {"symbol": None}
+    registered = get_instrument(conn, terms.underlying)
+    if registered is not None and registered.market is not Market.US:
+        return {"symbol": None}
+    return {"symbol": symbol, "name": contract_name(symbol),
+            "underlying": terms.underlying, "right": terms.right}
+
+
 @router.get("/input/option-symbol")
 def compose_option_symbol(
     underlying: str = "", expiry: str = "", strike: str = "", right: str = "",
+    text: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
     """The compose endpoint (options spec §8): 標的／到期日／履約價／買權｜賣權 → the OCC
@@ -240,7 +267,12 @@ def compose_option_symbol(
 
     Refusals (400, zh): a malformed date; the composer's own (a digit root, a malformed
     strike, a right that is neither C nor P); an underlying REGISTERED in another market
-    (options are US only, R6)."""
+    (options are US only, R6).
+
+    ``text=`` (owner ruling 2026-10-10) is the recognition form — :func:`_recognise_contract`,
+    always 200; when it is present the four term parameters are not read."""
+    if text is not None:
+        return _recognise_contract(conn, text)
     root = underlying.strip().upper()
     try:
         exp = date.fromisoformat(expiry.strip())
@@ -1324,8 +1356,12 @@ def manual_preview(
 
 def _fee_label(rule: FeeRuleSet | None, *, option: bool) -> str | None:
     """The preview's fee-rule label: the rule set's own, or — on an option — the separate
-    option label (「每口 0.65＋SEC（賣出）」); ``fee_rules_wire()["label"]`` is unchanged."""
-    if rule is None:
+    option label (「每口 0.65＋SEC（賣出）」); ``fee_rules_wire()["label"]`` is unchanged.
+
+    An option on a non-US rule set has NO label: options are US only, and the TW / MY rule
+    sets' ``option_per_contract`` is an inert 0 (ruling 2026-10-10) that must never read as a
+    rate — such a draft is a hard ``market_mismatch`` anyway."""
+    if rule is None or (option and rule.market is not Market.US):
         return None
     return option_fee_label(rule) if option else fee_rules_wire(rule)["label"]
 

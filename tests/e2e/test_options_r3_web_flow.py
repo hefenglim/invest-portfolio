@@ -220,7 +220,8 @@ def test_a_blank_fee_field_reverts_instead_of_failing_the_card(
     page.wait_for_selector("#fee-rules-wrap .fee-field[data-key='option_per_contract']",
                            state="attached")
 
-    # moomoo_us: unset by default — set a rate, then blank it: back to 未設定.
+    # moomoo_us: default 0.8633 (owner ruling 2026-10-10) — set a rate, then blank it: back
+    # to the default.
     moomoo = page.locator("#fee-rules-wrap details", has_text="moomoo_us").first
     moomoo.locator("summary").click()
     field = moomoo.locator(".fee-field[data-key='option_per_contract'] input")
@@ -241,7 +242,8 @@ def test_a_blank_fee_field_reverts_instead_of_failing_the_card(
     assert sent["option_per_contract"] is None
     moomoo = page.locator("#fee-rules-wrap details", has_text="moomoo_us").first
     field = moomoo.locator(".fee-field[data-key='option_per_contract'] input")
-    assert field.input_value() == "" and field.get_attribute("placeholder") == "未設定"
+    assert field.input_value() == "0.8633"
+    assert field.get_attribute("placeholder") == "預設 0.8633"
 
     # schwab: default 0.65 — a blank field reverts to it; the save never fails the card.
     schwab = page.locator("#fee-rules-wrap details", has_text="schwab").first

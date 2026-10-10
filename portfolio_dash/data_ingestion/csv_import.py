@@ -21,7 +21,6 @@ from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.dateparse import DateCandidate, resolve_date_column
 from portfolio_dash.data_ingestion.fees import (
     ETF_FLAG_UNKNOWN_MESSAGE,
-    OPTION_FEE_UNSET_MESSAGE,
     FeeComputationError,
     close_row_fees,
     compute_fees,
@@ -366,10 +365,8 @@ def txn_preview_row(
         except FeeComputationError as exc:
             issues.append(Issue(kind="fee_overflow", message=str(exc)))
         else:
-            if opt.unset:
-                issues.append(Issue(kind="option_fee_unset", message=OPTION_FEE_UNSET_MESSAGE))
             fee, tax, snap = opt.fee, opt.tax, dict(opt.snapshot)
-            if carried_snapshot is not None and not opt.unset:
+            if carried_snapshot is not None:
                 issues.append(advisory_issue(
                     "snapshot_not_carried",
                     "已忽略欄位：fee_rule_snapshot（手續費或稅額有空白，改由費用規則計算，"

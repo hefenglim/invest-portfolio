@@ -38,7 +38,6 @@ _ISSUE_FIELD = {
     "option_expiry_date": "date",
     "close_row_price": "price",
     "close_row_fee": "fee",
-    "option_fee_unset": "fee",
     "option_premium_exceeds_strike": "price",
 }
 
@@ -177,10 +176,9 @@ def option_fee_label(r: FeeRuleSet) -> str:
     """The manual preview's fee label on an OPTION trade (options spec §8, OPT-D6) — a separate
     helper, so :func:`fee_rules_wire`'s ``label`` (the rule set's stock schedule) is unchanged.
 
-    「每口 0.65＋SEC（賣出）」; with a regulatory per-contract fee 「每口 0.65＋監管費每口
-    0.04＋SEC（賣出）」; an unset rate says so — the engine computes nothing for it."""
-    if r.option_per_contract is None:
-        return "未設定選擇權每口手續費（請填對帳單手續費）"
+    「每口 0.65＋SEC（賣出）」 (schwab), 「每口 0.8633＋SEC（賣出）」 (moomoo_us); with a regulatory
+    per-contract fee 「每口 0.65＋監管費每口 0.04＋SEC（賣出）」. Every rule set has a rate (owner
+    ruling 2026-10-10), so the label always reads the rule set's own value."""
     reg = (f"＋監管費每口 {decimal_str(r.option_reg_per_contract)}"
            if r.option_reg_per_contract > 0 else "")
     return f"每口 {decimal_str(r.option_per_contract)}{reg}＋SEC（賣出）"

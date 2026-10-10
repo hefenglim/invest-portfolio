@@ -162,16 +162,21 @@ def test_the_close_reason_cell_accepts_the_zh_words_and_refuses_others(
 # --- fees (OPT-D6) ---------------------------------------------------------------------------
 
 
-def test_an_unset_rate_needs_the_statement_fee(conn: sqlite3.Connection) -> None:
+def test_moomoo_us_fills_its_default_rate_and_a_statement_fee_wins(
+    conn: sqlite3.Connection,
+) -> None:
+    """Owner ruling 2026-10-10: every rule set has a per-contract rate, so a blank fee on a
+    moomoo_us option row is computed (0.8633 × 1 → 0.86, + SEC 0.01 on the sell) — never
+    refused; a supplied fee still wins."""
     rows = _preview(conn, (
         f"moomoo_my,{PUT},sell,2026-11-02,100,1.50,,,,1,,\n"
         f"moomoo_my,{PUT},sell,2026-11-03,100,1.50,1.99,,,1,,\n")).rows
-    unset = [i for i in rows[0].issues if i.kind == "option_fee_unset"]
-    assert unset and not unset[0].needs_confirm
-    assert unset[0].message.startswith("此帳戶未設定選擇權手續費")
+    assert "option_fee_unset" not in _kinds(rows[0])
+    assert (rows[0].fee, rows[0].tax) == (Decimal("0.87"), Decimal("0"))
     assert "option_fee_unset" not in _kinds(rows[1])
     assert (rows[1].fee, rows[1].tax) == (Decimal("1.99"), Decimal("0"))
-    assert "stamp_fx_missing" not in _kinds(rows[1])   # no MY stamp on an option
+    assert "stamp_fx_missing" not in _kinds(rows[0])   # no MY stamp on an option
+    assert "stamp_fx_missing" not in _kinds(rows[1])
 
 
 def test_a_put_premium_above_the_strike_is_questioned(conn: sqlite3.Connection) -> None:

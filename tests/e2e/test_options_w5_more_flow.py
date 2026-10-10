@@ -1,5 +1,6 @@
 """E2E options W5 — the remaining option surfaces on a seeded option ledger (spec §4.2, §4.3,
-§6.2, §8): the assignment's two-leg card, the unset-fee refusal's link, the 交易 tab's delete
+§6.2, §8): the assignment's two-leg card, moomoo_us's default option fee (owner ruling
+2026-10-10), the 交易 tab's delete
 warning and the refused-close dialog, the edit dialog in 口數, the 選擇權合約調整 form, the
 fee settings' two option fields, the watchlist toggle and the cash statement's wording.
 
@@ -77,11 +78,12 @@ def test_an_assignment_previews_and_writes_both_legs(
 
 
 @pytest.mark.e2e
-def test_an_unset_option_fee_names_both_repairs(
+def test_a_moomoo_option_trade_carries_the_default_fee(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """moomoo_us has no per-contract rate (OPT-D6): the fee must be supplied — the refusal
-    links to the settings panel where the rate is set."""
+    """Owner ruling 2026-10-10 (OPT-D6): every rule set has a per-contract rate — a moomoo_us
+    option trade with no statement fee is priced at 0.8633 per contract (+ SEC on a sell) and
+    can be written; the old 「未設定」 refusal and its settings link are gone."""
     base = flow_server(seed_option_ledger)
     page = fresh_page
     errors = _errors(page)
@@ -89,9 +91,13 @@ def test_an_unset_option_fee_names_both_repairs(
     page.click("#m-opt-sides button[data-intent='STO']")
     page.fill("#m-contracts", "1")
     page.fill("#m-price", "2.00")
-    page.wait_for_selector("#m-issues .opt-fee-link")
-    assert page.get_attribute("#m-issues .opt-fee-link", "href") == "settings.html#accounts"
-    assert page.is_disabled("#m-confirm")
+    page.wait_for_function(
+        "() => document.querySelector('#m-fee-rule').textContent === '每口 0.8633＋SEC（賣出）'")
+    # 1 × 0.8633 → 0.86; SEC = 0.0000206 × 200 = 0.00412 → the 0.01 minimum
+    page.wait_for_function("() => document.querySelector('#m-fee').value === '0.87'")
+    page.wait_for_function("() => !document.querySelector('#m-confirm').disabled")
+    assert page.locator("#m-issues .opt-fee-link").count() == 0
+    assert "未設定" not in page.inner_text("#m-issues")
     assert not errors, errors
 
 
@@ -206,10 +212,17 @@ def test_the_fee_settings_show_the_two_option_fields(
     field = schwab.locator(".fee-field[data-key='option_per_contract'] input")
     assert field.input_value() == "0.65"
     assert field.get_attribute("max") is None                 # a per-contract fee, not a ratio
+    note = schwab.locator(".fee-field[data-key='option_per_contract'] .fee-opt-note")
+    assert note.inner_text().startswith("留空＝還原系統預設 0.65")
+    # Owner ruling 2026-10-10: moomoo_us has a default rate too — no 「未設定」 anywhere.
     moomoo = page.locator("#fee-rules-wrap details", has_text="moomoo_us").first
     moomoo.locator("summary").click()
-    unset = moomoo.locator(".fee-field[data-key='option_per_contract'] input")
-    assert unset.input_value() == "" and unset.get_attribute("placeholder") == "未設定"
+    rate = moomoo.locator(".fee-field[data-key='option_per_contract'] input")
+    assert rate.input_value() == "0.8633"
+    assert rate.get_attribute("placeholder") == "預設 0.8633"
+    note = moomoo.locator(".fee-field[data-key='option_per_contract'] .fee-opt-note")
+    assert note.inner_text().startswith("留空＝還原系統預設 0.8633")
+    assert "未設定" not in page.inner_text("#fee-rules-wrap")
     assert moomoo.locator(".fee-field[data-key='option_reg_per_contract']").count() == 1
     tw = page.locator("#fee-rules-wrap details", has_text="台灣券商規則").first
     assert tw.locator(".fee-field[data-key='option_per_contract']").count() == 0

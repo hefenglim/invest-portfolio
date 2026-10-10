@@ -60,7 +60,7 @@ roll chains, collateral reservation, quotes / Greeks for open contracts, option-
 | OPT-D3 | Contract adjustment | New corporate-action kind **`OPTION_ADJUST`**, option → option, carrying long AND short lots | `EXCHANGE` refuses a short source (D33); a new kind leaves equities byte-identical (D38) |
 | OPT-D4 | Which figures include an open option | **Point-in-time** figures include it at its last trade price (KPI 總市值 / 總報酬 / XIRR, total return A, the FX pool, 月度成績). **Trend-derived** figures exclude its value (trend chart, B, TWR, benchmark) with one note | XIRR's final value must carry the open liability |
 | OPT-D5 | Where options appear | `holdings` rows, allocation, weights, subtotals: **stock-only**; KPI totals **include** options with a 「其中選擇權」 line; the 已實現損益 section shows a separate option line (not summed) | R4 without dropping option P&L from the totals |
-| OPT-D6 | Fees | Per-**rule-set** `option_per_contract`: `schwab` 0.65, `moomoo_us` unset; + SEC on sells (notional basis) + optional `option_reg_per_contract` (default 0); no MY stamp on an option in v1; a statement-supplied fee wins; an unset rate makes the fee required | The engine must not guess a rate it was never given |
+| OPT-D6 | Fees | Per-**rule-set** `option_per_contract`: `schwab` 0.65, `moomoo_us` **0.8633** (owner ruling 2026-10-10: every rule set has one default value, so an option trade always carries a fee — the Moomoo schedule's fixed per-contract items summed, its per-order minimum / ≤ 0.10-premium free commission / clearing cap / TAF not modelled); + SEC on sells (notional basis) + optional `option_reg_per_contract` (default 0); no MY stamp on an option in v1; a statement-supplied fee wins | One default per rule set (2026-10-10) replaced "an unset rate makes the fee required": the refusal stopped every Moomoo option entry that had no statement at hand |
 | OPT-D7 | Registration | An option instrument is **created from its symbol** at the CSV door and the manual door, with no quote lookup; the underlying need not be registered | A quote gate cannot pass for an option |
 | OPT-D8 | Entry units | CSV `shares` = share-equivalents (multiple of 100); the manual and edit forms send **口數** (`contracts`); the server converts | The raw ledger CSV must round-trip; the multiplier lives only in `shared/options.py` |
 | OPT-D9 | Assignment / exercise rows in the broker converter | **Not mapped blind** — `UnmappedRow` with a reason (§8) | No rule without a real row behind it |
@@ -365,7 +365,11 @@ detector and routes live in `api/` (they read the book).
 - **Corporate-action CSV:** `OPTION_ADJUST` / 「選擇權合約調整」, §4.3. **Opening CSV:** option symbols
   refused. **`unknown_action_kind`** and the CSV hint list the four kinds (from `KIND_ZH`).
 - **Compose endpoint:** `GET /api/input/option-symbol?underlying&expiry&strike&right` → `{symbol,
-  name}` or a zh refusal (digit root, malformed strike, non-US).
+  name}` or a zh refusal (digit root, malformed strike, non-US). Its recognition form `?text=` (owner
+  ruling 2026-10-10) takes an OCC symbol (any case, padded) or a Schwab statement string
+  (`from_broker_option`) → `{symbol, name, underlying, right}`, and anything else → `200 {symbol:
+  null}` — never a 4xx, since the page asks it for unknown stock tickers too; read-only, no
+  registration.
 - **Manual entry:** on a US account the picker footer gains 「＋選擇權合約」 → an inline builder
   標的（US 代號）／到期日／履約價／買權｜賣權 → the compose endpoint. Option mode: 口數 (`step=1`; the server
   returns `share_equivalents` → 「= 200 股當量」), 權利金（每股） (hint 「對帳單 Price 欄；總權利金由伺服器計算」),
@@ -373,13 +377,19 @@ detector and routes live in `api/` (they read the book).
   whole position on a closing side; the preview's large label 「淨收權利金」／「權利金總成本」; 「到期作廢」 and
   「被指派／履約」 (§4.2). After a 買進平倉 commit an inline button 「轉倉：賣出開倉同標的新合約」 reopens the
   builder prefilled (underlying, right, 口數, date), side 賣出開倉, focus on 到期日 — two rows, no chain.
-- **Fees (OPT-D6):** an option trade on a rule set with no `option_per_contract` is refused only when
-  the **fee** is not supplied (tax may be blank — it is 0 for an option), issue kind
-  `option_fee_unset`, 「此帳戶未設定選擇權手續費：請按 ✎ 覆寫填入對帳單手續費，或到 系統設定 → 費率 設定每口費率」 with a
-  link; the preview's fee label for an option reads 「每口 0.65＋SEC（賣出）」 from a separate option label
-  helper (`fee_rules_wire()["label"]` is unchanged). The fee settings panel lists
-  「選擇權每口手續費」／「選擇權每口監管費」 for US rule sets (`option_per_contract` is nullable — unset is not
-  0; `option_reg_per_contract` defaults to 0). The CSV and manual doors never write an instrument on a
+  A contract code typed or pasted into 代號 that the page's own instrument list does not know is
+  recognised by the server (owner ruling 2026-10-10: `?text=`, debounced, asked once per distinct
+  value, no preview sent while it is unanswered) and takes exactly the builder's path — canonical
+  symbol, contract name, option mode; the browser never parses the shape, and an unknown stock
+  ticker keeps the stock form.
+- **Fees (OPT-D6):** every rule set has a default `option_per_contract` (owner ruling 2026-10-10:
+  `schwab` 0.65, `moomoo_us` 0.8633), so an option trade with no statement fee is priced at it — the
+  former `option_fee_unset` refusal is gone — and a supplied fee still wins (tax may be blank — it is
+  0 for an option); the preview's fee label for an option reads the rule set's own value,
+  「每口 0.65＋SEC（賣出）」／「每口 0.8633＋SEC（賣出）」, from a separate option label helper
+  (`fee_rules_wire()["label"]` is unchanged). The fee settings panel lists
+  「選擇權每口手續費」／「選擇權每口監管費」 for US rule sets (both ordinary amounts; a blank field reverts
+  to the rule set's default, 「留空＝還原系統預設 X」; `option_reg_per_contract` defaults to 0). The CSV and manual doors never write an instrument on a
   preview: a parseable OCC symbol resolves without writing (「將建立選擇權合約 …」) and
   `register_option_contract` runs only inside the commit's transaction.
 - **What's new:** 「可以登錄美股選擇權了：賣出 Put、到期、被指派、合約調整都進帳本」, href `trades.html`, target

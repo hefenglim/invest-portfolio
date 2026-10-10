@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 from portfolio_dash.data_ingestion.config_seed import get_fee_rule_set
 from portfolio_dash.data_ingestion.fees import (
     ETF_FLAG_UNKNOWN_MESSAGE,
-    OPTION_FEE_UNSET_MESSAGE,
     FeeComputationError,
     close_row_fees,
     compute_fees,
@@ -316,8 +315,6 @@ def enter_transaction(
         except FeeComputationError as exc:
             issues.append(Issue(kind="fee_overflow", message=str(exc)))
         else:
-            if opt.unset:
-                issues.append(Issue(kind="option_fee_unset", message=OPTION_FEE_UNSET_MESSAGE))
             fee, tax, snapshot = opt.fee, opt.tax, dict(opt.snapshot)
     elif acc is not None and (fee is None or tax is None):
         # Registry-authoritative ETF flag + its third state — ONE definition, shared with

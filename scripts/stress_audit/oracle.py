@@ -129,8 +129,9 @@ FEE_RULES = {
                tax_normal=D("0.003"), tax_etf=D("0.001"), tax_daytrade=D("0.0015"),
                rounding="floor", ccy="TWD"),
     # OPT-D6 (options spec §2): ``option_per_contract`` is per RULE SET — schwab 0.65, moomoo_us
-    # UNSET (None, never 0: an unset rate makes the fee required, the engine must not guess);
-    # ``option_reg_per_contract`` defaults to 0.
+    # 0.8633 (owner ruling 2026-10-10: one default per rule set, transcribed from the ruling —
+    # the Moomoo US options schedule's fixed per-contract items, 0.20 + 0.45 + 0.18 + 0.02 +
+    # 0.013 + 0.0003); ``option_reg_per_contract`` defaults to 0.
     "schwab": dict(sec_rate=D("0.0000206"), sec_min=D("0.01"), taf_per_share=D("0.000195"),
                    taf_min=D("0.01"), taf_cap=D("9.79"), ccy="USD",
                    option_per_contract=D("0.65"), option_reg_per_contract=D("0")),
@@ -140,7 +141,8 @@ FEE_RULES = {
                       sec_rate=D("0.0000206"), sec_min=D("0.01"), taf_per_share=D("0.000195"),
                       taf_min=D("0.01"), taf_cap=D("9.79"), stamp_unit=D("1000"),
                       stamp_per_unit=D("1"), stamp_cap_stock=D("1000"), stamp_cap_etf=D("200"),
-                      ccy="USD", option_per_contract=None, option_reg_per_contract=D("0")),
+                      ccy="USD", option_per_contract=D("0.8633"),
+                      option_reg_per_contract=D("0")),
     "moomoo_my": dict(commission_rate=D("0.0003"), commission_min=D("0.01"),
                       platform=D("3.00"), clearing_rate=D("0.0003"), clearing_cap=D("1000"),
                       sst_rate=D("0.08"), stamp_unit=D("1000"), stamp_per_unit=D("1"),
@@ -289,7 +291,7 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
             is_etf: bool, daytrade: bool = False,
             stamp_fx: Decimal | None = None,
             market: str | None = None, *, is_option: bool = False,
-            close_reason: str | None = None) -> tuple[Decimal | None, Decimal, list[str]]:
+            close_reason: str | None = None) -> tuple[Decimal, Decimal, list[str]]:
     """Return (fee, tax, notes[]) expected from the fee-engine v2 spec (independent derive).
 
     OPTIONS (options spec OPT-D6 / §4.2, transcribed): a ``close_reason`` row (expiry /
@@ -297,9 +299,8 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
     engine. An ordinary option trade is ``option_per_contract × contracts`` (+ the optional
     ``option_reg_per_contract × contracts``) + SEC on a SELL over the premium notional (the
     stock SEC formula), each component cent-quantized; no TAF, no transaction tax, no MY stamp
-    in v1. On a rule set whose per-contract rate is UNSET the engine has no answer: ``fee`` is
-    returned as ``None`` and the caller must supply the statement's fee (the door refuses the
-    row otherwise — ``option_fee_unset``).
+    in v1. Every rule set has a per-contract rate (owner ruling 2026-10-10), so an option trade
+    always has an expected fee; a statement-supplied fee wins at the caller.
 
     ``side`` in {"BUY","SELL"}. Logic is re-derived from the mini-spec + reference doc
     (NOT imported from fees.py); parameters are transcribed above. ``notes`` records the
@@ -324,10 +325,7 @@ def fee_tax(account_id: str, side: str, qty: Decimal, price: Decimal,
     if notional <= ZERO:
         return fee, tax, ["zero/negative notional -> no fee/tax"]
     if is_option:
-        per = r.get("option_per_contract")
-        if per is None:
-            return None, ZERO, [f"{rule_name}: option_per_contract unset -> fee must be "
-                                "supplied (OPT-D6)"]
+        per = r["option_per_contract"]
         contracts = qty / OPTION_MULTIPLIER
         fee = _cent(per * contracts)
         reg = r.get("option_reg_per_contract") or ZERO

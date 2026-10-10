@@ -184,18 +184,42 @@ def test_contracts_on_a_stock_are_refused(api_client: TestClient) -> None:
     assert "選擇權合約" in r.json()["error"]["message"]
 
 
-def test_an_unset_rate_needs_the_fee_override(
+def test_moomoo_us_computes_its_default_option_fee(
     api_client: TestClient, golden_db: sqlite3.Connection,
 ) -> None:
-    r = api_client.post("/api/input/manual/commit",
-                        json=_base(account_id="moomoo_my", contracts="1", option_intent="STO",
-                                   market="US"))
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["message"].startswith("此帳戶未設定選擇權手續費")
-    r = api_client.post("/api/input/manual/commit",
-                        json=_base(account_id="moomoo_my", contracts="1", option_intent="STO",
-                                   market="US", fee_override="1.99"))
+    """Owner ruling 2026-10-10: one default per rule set — a moomoo_us option trade with no
+    statement fee is priced at 0.8633 per contract (+ SEC on a sell), never refused; the
+    preview's option label reads the rule set's own value, and a fee override still wins."""
+    body = _base(account_id="moomoo_my", contracts="1", option_intent="STO", market="US")
+    r = api_client.post("/api/input/manual/preview", json=body)
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert (pv["fee"], pv["tax"]) == ("0.87", "0")     # 0.8633 → 0.86 + SEC min 0.01
+    assert pv["fee_rule_label"] == "每口 0.8633＋SEC（賣出）"
+    assert not [i for i in pv["issues"] if i.get("code") == "option_fee_unset"]
+    r = api_client.post("/api/input/manual/commit", json=body)
     assert r.status_code == 201, r.text
+    (row,) = [t for t in list_transactions(golden_db) if t.symbol == PUT]
+    assert (row.fees, row.tax) == (Decimal("0.87"), Decimal("0"))
+    r = api_client.post("/api/input/manual/commit",
+                        json=_base(account_id="moomoo_my", contracts="1", option_intent="STO",
+                                   market="US", date="2026-06-02", fee_override="1.99"))
+    assert r.status_code == 201, r.text
+    assert sorted(t.fees for t in list_transactions(golden_db) if t.symbol == PUT) == [
+        Decimal("0.87"), Decimal("1.99")]
+
+
+def test_an_option_on_a_tw_account_quotes_no_option_rate(api_client: TestClient) -> None:
+    """The TW / MY rule sets carry the inert ``option_per_contract`` 0 (options are US only —
+    ruling 2026-10-10 left no "unset"). A contract code recognised on a TW account previews as
+    a hard ``market_mismatch``, and the fee line must not quote 「每口 0」 as if it were a
+    rate: the TW rule set has no option rate at all."""
+    r = api_client.post("/api/input/manual/preview", json=_base(
+        account_id="tw_broker", contracts="1", option_intent="STO"))
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert "market_mismatch" in [i["code"] for i in pv["issues"] if i["sev"] == "error"]
+    assert pv["fee_rule_label"] is None
 
 
 # --- close rows -------------------------------------------------------------------------------
