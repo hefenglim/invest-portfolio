@@ -100,8 +100,10 @@ def test_post_all_marks_every_feature_seen(api_client: TestClient) -> None:
 
 def test_post_features_marks_only_those(api_client: TestClient) -> None:
     before = api_client.get("/api/whats-new").json()
-    keys = _all_feature_keys(before)
-    target = keys[0]  # the newest group's first feature
+    # The newest group that HAS siblings: a release may ship a single feature (v0.1.30 did),
+    # and marking a lone feature seen rightly marks its group seen too.
+    group = next(g for g in before["versions"] if len(g["features"]) >= 2)
+    target = group["features"][0]["key"]
     r = api_client.post("/api/whats-new/seen", json={"features": [target]})
     assert r.status_code == 200
     body = r.json()
@@ -112,8 +114,8 @@ def test_post_features_marks_only_those(api_client: TestClient) -> None:
     assert seen_map[target] is True
     assert sum(1 for v in seen_map.values() if v) == 1
     # its group is still unseen (sibling features remain unread).
-    grp0 = body["versions"][0]
-    assert grp0["unseen"] is True
+    grp = next(g for g in body["versions"] if g["version"] == group["version"])
+    assert grp["unseen"] is True
     # persisted across a fresh GET.
     after = api_client.get("/api/whats-new").json()
     after_seen = {f["key"]: f["seen"] for g in after["versions"] for f in g["features"]}

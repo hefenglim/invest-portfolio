@@ -119,6 +119,8 @@
     suppressed_ref_unknown: '被丟棄的群組指向了匯出檔裡找不到的列。這是程式的問題，不是你檔案的問題 — 請回報。',
     rows_lost: '有列在轉換途中消失了。這是程式的問題 — 請回報。',
     over_reinvested: '有一組配息再投入的金額超過它收到的金額。請回報。',
+    reinvest_quantity_mismatch: '有一筆股利再投入印出的股數，和「金額 ÷ 價格」對不起來（或缺了股數、價格）。'
+      + '寫入帳本的是印出的股數，所以這一列必須自己對得上 — 請把報告指出的那一列和訊息回報。',
     withholding_exceeds_gross: '有一筆預扣稅大於股利總額。請回報。',
     /* DEF-029: the statement's broker and the target account's broker disagree. Named
        through pdNames on both sides, so the sentence reads in one language. */

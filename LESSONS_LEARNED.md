@@ -2153,6 +2153,29 @@ tree and ~1 h of gates had to be re-run.
    merge-base) and re-run every count / contract test of the seams after merging parallel work.
 6. **The final review belongs to the round.** Merge → review → fix → THEN the heavy gates once.
 
+## 2026-10-11 — the reinvest count: a per-row fact that fits two readings chose neither
+
+**What happened.** The converter's 2026-08-11 rule derived a reinvested share count from
+`amount / price` because 125 of 227 rows failed `quantity × price == amount` and the printed
+quantity was always `round(amount / price)`. That measurement is true and decides nothing: a
+broker that books the rounded quantity prints exactly the same row. The evidence that decides
+it sits in OTHER rows — a later sale closes the printed sum, and the positions report equals the
+printed sums on 18 of 18 symbols. It surfaced only when the owner's full history was replayed to
+the broker's positions and 17 sales on 7 positions came out as sticky 賣超. The rule's own
+reconciler check had been written against the derived count, so it certified the rule it was
+supposed to test (its docstring said so: "the substitution is the intended behaviour, so it is
+the baseline").
+
+**Rules.**
+1. **A per-row consistency check cannot choose between two models that both produce the row.**
+   Ask which downstream fact differs between them — a later sale, a position report, a balance —
+   and measure that before writing the rule.
+2. **Accept a converter rule only against the broker's own end state** (positions, cash), not
+   against the converter's own reconciler: a gate built on the rule's baseline cannot fail it.
+3. **When a printed figure becomes authoritative, check it against its siblings at its own
+   precision** (`reinvest_quantity_mismatch`): what was harmless as a display value is a
+   share count of record once it is written.
+
 ## 2026-10-10 — v0.1.29 release: what the real data and the rehearsal caught after the gates
 
 **What happened.** (a) The options final review fixed "two underlyings adjusted on one day" by

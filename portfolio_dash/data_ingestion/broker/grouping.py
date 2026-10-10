@@ -1,12 +1,14 @@
 """Fold a ``RawEvent`` stream into domain events. Broker-neutral: written once, for all.
 
-Four transformations live here, and three of them exist because a plausible simpler version
-was measured against a real export and found to destroy data.
+Four transformations live here, and most of them exist because a plausible version was
+measured against a real export and found to destroy data — the reinvest count twice, in
+opposite directions.
 
 1. :func:`suppress` — drop the paired self-cancelling rows. **Classification first,
    arithmetic as a veto**, keyed on ``(date, symbol)`` and never across symbols.
 2. :func:`fold_dividends` — collapse the broker's 3-row DRIP group into one dividend, with
-   the reinvested share count DERIVED from ``amount / price``.
+   the reinvested share count the broker's PRINTED quantity (``amount / price`` until
+   2026-10-11, when the rows after a reinvest showed the printed figure is the one booked).
 3. :func:`derive_ratio` — recover a corporate action's rational ratio from its two legs.
 4. :func:`prehistory_shares` — find the positions that predate the export, by the UNION of
    two detectors that each miss what the other catches.
@@ -76,8 +78,15 @@ class DividendEvent:
     symbol: str
     gross: Decimal
     withholding: Decimal
+    #: The broker's PRINTED quantity, summed over the reinvest legs — never ``amount / price``
+    #: (:func:`fold_dividends`).
     reinvest_shares: Decimal | None
+    #: The first reinvest leg's printed price. Display only: a DRIP's shares enter at $0.
     reinvest_price: Decimal | None
+    #: The cash the reinvestment spent, as printed (positive). The printed quantity times the
+    #: printed price is NOT this figure — each is rounded at its own precision — so every cash
+    #: check reads the amount, never ``shares x price``.
+    reinvest_amount: Decimal | None
     refs: tuple[str, ...]
 
     @property
@@ -265,25 +274,6 @@ def suppress(
     return kept, dropped, vetoed
 
 
-def derive_reinvest_shares(net: Decimal, price: Decimal) -> Decimal | None:
-    """Shares bought by a reinvestment, from ``|net| / price``.
-
-    ⚠ **The printed quantity is NOT the authority.** Measured on a real export: 125 of 227
-    reinvest rows fail ``quantity x price == amount``, and in every case the printed
-    quantity is exactly ``round(|amount| / price)`` at the 3–4 dp the column displays.
-    Amount and price are what the broker actually asserts; the quantity is a rounded view of
-    them. Trusting it drifts the share count away from the statement, in the same direction,
-    for every reinvestment of a multi-year DRIP history.
-
-    Same principle as ``close_raw`` / ``close`` in ``data-and-pricing.md``: store what the
-    source asserts and derive the rest, rather than storing a derived value twice and
-    letting the copies disagree.
-    """
-    if price <= _ZERO:
-        return None
-    return abs(net) / price
-
-
 def fold_dividends(events: list[RawEvent]) -> tuple[list[DividendEvent], list[RawEvent]]:
     """Collapse distribution legs into one event per ``(date, symbol)``.
 
@@ -292,6 +282,25 @@ def fold_dividends(events: list[RawEvent]) -> tuple[list[DividendEvent], list[Ra
     exactly the shape they fold into (``gross`` / ``withholding`` / ``reinvest_shares`` /
     ``reinvest_price``). Returns ``(folded, remaining)``; *remaining* is every event that was
     not part of a distribution, unchanged and in order.
+
+    **The reinvested share count is the broker's PRINTED quantity** (owner ruling B,
+    2026-10-11), summed over the reinvest legs. On every reinvest row of a real 1,593-line
+    history the three printed columns disagree — ``quantity x price != amount`` on 250 of 250
+    — and the quantity is ``round(amount / price)`` at the 3–4 dp it is printed with. One row
+    cannot say which of the two readings the broker BOOKS; the rows after it can, and they all
+    say the printed one:
+
+    * a later sale closes the printed sum exactly (in the shape of: 0.121 + 0.046 reinvested,
+      0.167 sold), where ``amount / price`` holds only 0.16686…, so the replay books the sale
+      as a 賣超 that discards the cost basis for good — 17 sale rows on 7 positions, measured;
+    * the broker's positions report equals the printed sums on 18 of 18 reinvesting symbols,
+      and the ``amount / price`` sums on 0 of 18.
+
+    This reverses the 2026-08-11 rule (spec ``2026-08-11-broker-import-record-model.md`` §2a),
+    which read the per-row disagreement as the quantity being a rounded VIEW and derived the
+    count from ``amount / price``. It was measured on single rows, which fit either reading.
+    The printed quantity is checked against ``amount / price`` at its own printed precision by
+    :func:`reconcile._check_reinvest_rows`, so a mis-read column still stops the import.
     """
     dist_kinds = {
         EventKind.DIVIDEND, EventKind.CAPGAIN_DIST,
@@ -316,19 +325,17 @@ def fold_dividends(events: list[RawEvent]) -> tuple[list[DividendEvent], list[Ra
             (r.amount for r in rows if r.kind is EventKind.WITHHOLDING_TAX), _ZERO
         )
         reinvests = [r for r in rows if r.kind is EventKind.DRIP_BUY]
-        price = reinvests[0].price if reinvests else None
-        shares = (
-            derive_reinvest_shares(
-                sum((r.amount for r in reinvests), _ZERO), price
-            )
-            if reinvests and price is not None
-            else None
-        )
         folded.append(
             DividendEvent(
                 trade_date=day, symbol=symbol,
                 gross=gross, withholding=withholding,
-                reinvest_shares=shares, reinvest_price=price,
+                reinvest_shares=(
+                    sum((_share_delta(r) for r in reinvests), _ZERO) if reinvests else None
+                ),
+                reinvest_price=reinvests[0].price if reinvests else None,
+                reinvest_amount=(
+                    -sum((r.amount for r in reinvests), _ZERO) if reinvests else None
+                ),
                 refs=tuple(r.ref for r in rows),
             )
         )

@@ -71,6 +71,16 @@ known action must fail just as loudly.
 
 ## 2. NORMATIVE — two further observed facts the converter must encode
 
+> **SUPERSEDED 2026-10-11 (owner ruling B).** The reinvested share count is the broker's
+> **printed quantity**; the printed amount is the cash. §2a's per-row measurement stands (every
+> real reinvest row has `quantity × price ≠ amount`, the quantity being `round(amount / price)`
+> at its printed places), but one row fits either reading, and the rows AFTER a reinvestment
+> decide it: on the owner's full 2020–2026 history a later sale closes the printed sum exactly,
+> and the broker's positions report equals the printed sums on 18 of 18 reinvesting symbols and
+> the `amount / price` sums on 0. Deriving made 17 sales on 7 positions replay as sticky 賣超.
+> See `grouping.fold_dividends` and `reconcile._check_reinvest_rows`. The text below is kept as
+> the record of the earlier rule.
+
 **2a. Fractional reinvest quantities are display-rounded; derive shares from `amount / price`.**
 125 of 227 reinvest rows fail `quantity × price == amount`. In **every** case the printed quantity
 is exactly `round(|amount| / price)` at the 3–4 dp the column shows. Amount and price are the

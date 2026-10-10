@@ -308,22 +308,36 @@ def test_a_drip_triple_folds_into_one_dividend() -> None:
     assert folded.withholding == Decimal("30")
     assert folded.net == Decimal("70")
     assert folded.is_drip and folded.reinvest_shares == Decimal("10")
+    assert folded.reinvest_amount == Decimal("70")
     assert len(folded.refs) == 3
 
 
-def test_reinvest_shares_come_from_amount_over_price_not_the_column() -> None:
-    """Measured: 125 of 227 reinvest rows fail ``quantity x price == amount``, and in every
-    case the printed quantity is the rounded view of the other two. Amount and price are
-    what the broker asserts; trusting the display drifts the share count away from the
-    statement in the same direction for a whole DRIP history."""
+def test_reinvest_shares_are_the_printed_quantity_and_the_cash_is_the_amount() -> None:
+    """Owner ruling B (2026-10-11). The printed 3.3333 is ``round(100 / 30)``, and it is the
+    count the broker books: a later sale closes the printed sum and the positions report
+    equals it (18 of 18 reinvesting symbols, measured; ``amount / price`` matched 0). The
+    cash is the printed amount, NOT ``3.3333 x 30`` — the two are rounded separately."""
     events = [
         _ev(EventKind.DIVIDEND, amount="100", line=2),
-        # printed 3.3333 shares, but 100/30 is 3.333... — the row's own quantity is rounded.
         _ev(EventKind.DRIP_BUY, amount="-100", price="30", qty="3.3333", line=3),
     ]
     [folded], _ = grouping.fold_dividends(events)
-    assert folded.reinvest_shares == Decimal("100") / Decimal("30")
-    assert folded.reinvest_shares != Decimal("3.3333")
+    assert folded.reinvest_shares == Decimal("3.3333")
+    assert folded.reinvest_amount == Decimal("100")
+    assert folded.reinvest_price == Decimal("30")
+    assert Decimal("3.3333") * Decimal("30") != folded.reinvest_amount
+
+
+def test_two_reinvest_legs_on_one_day_sum_their_printed_quantities() -> None:
+    events = [
+        _ev(EventKind.DIVIDEND, amount="12.00", line=2),
+        _ev(EventKind.DRIP_BUY, amount="-7.26", price="60.04", qty="0.121", line=3),
+        _ev(EventKind.DRIP_BUY, amount="-4.74", price="60.04", qty="0.079", line=4),
+    ]
+    [folded], _ = grouping.fold_dividends(events)
+    assert folded.reinvest_shares == Decimal("0.200")
+    assert folded.reinvest_amount == Decimal("12.00")
+    assert folded.reinvest_price == Decimal("60.04")
 
 
 def test_a_cash_dividend_folds_without_a_reinvestment() -> None:
@@ -536,14 +550,14 @@ def test_the_corpus_reproduces_the_overlap_between_two_exports() -> None:
     assert first.kind is EventKind.DEPOSIT
 
 
-def test_the_corpus_reinvest_shares_are_derived_not_read() -> None:
-    """The corpus's DRIP triple deliberately prints a rounded quantity that does not satisfy
-    ``quantity x price == amount`` — the shape 125 of 227 real reinvest rows have."""
+def test_the_corpus_reinvest_shares_are_the_printed_quantity() -> None:
+    """The corpus's DRIP triple prints a rounded quantity that does not satisfy
+    ``quantity x price == amount`` — the shape every real reinvest row has — and the count
+    written is the printed one (owner ruling B, 2026-10-11)."""
     events = _corpus("schwab_2024.csv")
     [dividend] = grouping.group_events(events).dividends
-    printed = Decimal("1.8137")
-    assert dividend.reinvest_shares == Decimal("47.50") / Decimal("26.19")
-    assert dividend.reinvest_shares != printed
+    assert dividend.reinvest_shares == Decimal("1.8137")
+    assert dividend.reinvest_amount == Decimal("47.50")
 
 
 def test_the_corpus_dual_date_row_books_on_its_trade_date() -> None:
