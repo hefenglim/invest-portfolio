@@ -247,7 +247,7 @@ def test_a_raw_statement_converts_imports_and_undoes_from_the_page(
     assert held["NEWX"] == Decimal("200")            # OLDX EXCHANGEd 1:1 into NEWX
     assert "OLDX" not in held
     assert held["PARE"] == Decimal("150")
-    assert held["ALFA"] == Decimal("101.81366934")   # incl. the DRIP's fractional reinvest
+    assert held["ALFA"] == Decimal("101.8137")   # incl. the DRIP's printed 1.8137 reinvest
 
     # --- every batch it wrote is listed, with a 復原 beside it ----------------------------
     batches = _get_json(base, "/api/import/batches")["batches"]
@@ -346,7 +346,7 @@ def test_an_unticked_row_is_not_written_and_a_skipped_warning_row_is_not_written
 
     held = _shares(base)
     assert "PREH" not in held, "the skipped 賣超 row must not reach the ledger"
-    assert held["ALFA"] == Decimal("91.81366934")   # 101.81366934 without the unticked buy
+    assert held["ALFA"] == Decimal("91.8137")   # 101.8137 without the unticked buy
     batches = _get_json(base, "/api/import/batches")["batches"]
     assert {b["kind"]: b["row_count"] for b in batches}["transactions"] == 10
 

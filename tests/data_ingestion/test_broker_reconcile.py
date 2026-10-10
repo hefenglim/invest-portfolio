@@ -223,7 +223,8 @@ def test_a_reinvestment_larger_than_its_payout_blocks() -> None:
     div = DividendEvent(
         trade_date=date(2026, 3, 11), symbol="AAA",
         gross=Decimal("10.00"), withholding=Decimal("3.00"),
-        reinvest_shares=Decimal("4"), reinvest_price=Decimal("25.00"),  # $100 from a $7 net
+        reinvest_shares=Decimal("4"), reinvest_price=Decimal("25.00"),
+        reinvest_amount=Decimal("100.00"),  # $100 from a $7 net
         refs=(),
     )
     report = run_reconcile([], GroupedImport(dividends=[div]))
@@ -236,6 +237,7 @@ def test_a_one_cent_overdraw_is_broker_rounding_not_a_defect() -> None:
         trade_date=date(2026, 3, 11), symbol="AAA",
         gross=Decimal("0.70"), withholding=Decimal("0.18"),
         reinvest_shares=Decimal("1"), reinvest_price=Decimal("0.53"),
+        reinvest_amount=Decimal("0.53"),
         refs=(),
     )
     report = run_reconcile([], GroupedImport(dividends=[div]))
@@ -246,7 +248,7 @@ def test_withholding_larger_than_the_gross_blocks() -> None:
     div = DividendEvent(
         trade_date=date(2026, 3, 11), symbol="AAA",
         gross=Decimal("10.00"), withholding=Decimal("30.00"),
-        reinvest_shares=None, reinvest_price=None, refs=(),
+        reinvest_shares=None, reinvest_price=None, reinvest_amount=None, refs=(),
     )
     report = run_reconcile([], GroupedImport(dividends=[div]))
     assert "withholding_exceeds_gross" in _codes(report, "blocking")
@@ -263,7 +265,7 @@ def test_money_invented_by_the_fold_blocks() -> None:
         trade_date=fat.trade_date, symbol=fat.symbol,
         gross=Decimal("1000.00"), withholding=fat.withholding,
         reinvest_shares=fat.reinvest_shares, reinvest_price=fat.reinvest_price,
-        refs=fat.refs,
+        reinvest_amount=fat.reinvest_amount, refs=fat.refs,
     )
     report = run_reconcile(events, grouped)
     assert "cash_not_conserved" in _codes(report, "blocking")
@@ -275,23 +277,94 @@ def test_shares_invented_by_the_fold_block() -> None:
     d = grouped.dividends[0]
     grouped.dividends[0] = DividendEvent(
         trade_date=d.trade_date, symbol=d.symbol, gross=d.gross, withholding=d.withholding,
-        reinvest_shares=Decimal("999"), reinvest_price=d.reinvest_price, refs=d.refs,
+        reinvest_shares=Decimal("999"), reinvest_price=d.reinvest_price,
+        reinvest_amount=d.reinvest_amount, refs=d.refs,
     )
     report = run_reconcile(events, grouped)
     assert "shares_not_conserved" in _codes(report, "blocking")
 
 
-def test_the_derived_share_rule_is_the_baseline_not_the_printed_quantity() -> None:
-    """The printed 0.27 disagrees with 7.00 / 25.00; conservation must accept the DERIVED
-    0.28, or the check would forbid the rule it is supposed to protect."""
+def test_the_printed_quantity_is_the_share_baseline_and_the_amount_the_cash() -> None:
+    """Printed 0.2857 at 24.50 for 7.00: 0.2857 x 24.50 = 6.99965, so the quantity and the
+    amount disagree by rounding — and neither check may multiply one out of the other
+    (owner ruling B, 2026-10-11)."""
+    events = _parse(
+        '03/11/2026,Cash Dividend,AAA,"CASH DIVIDEND",,,,$10.00',
+        '03/11/2026,NRA Tax Adj,AAA,"W-8 WITHHOLDING",,,,-$3.00',
+        '03/11/2026,Reinvest Shares,AAA,"REINVEST",0.2857,$24.50,,-$7.00',
+    )
+    report = run_reconcile(events, group_events(events))
+    assert _codes(report, "blocking") == set()
+    assert report.share_deltas["AAA"] == Decimal("0.2857")
+    assert report.cash_total == Decimal("0.00")
+
+
+@pytest.mark.parametrize(("printed", "price", "spent", "sold", "cash"), [
+    # 3 dp, the older broker: 7.26 / 60.04 = 0.12092 -> 0.121; 2.15 / 46.80 = 0.04594 -> 0.046
+    (("0.121", "0.046"), ("$60.04", "$46.80"), ("7.26", "2.15"), "10.167", "$406.68"),
+    # 4 dp, the current one: 47.50 / 26.19 -> 1.8137; 13.21 / 27.43 -> 0.4816
+    (("1.8137", "0.4816"), ("$26.19", "$27.43"), ("47.50", "13.21"), "12.2953", "$491.81"),
+])
+def test_two_reinvests_then_a_sale_of_the_printed_sum_nets_to_exactly_zero(
+    printed: tuple[str, str], price: tuple[str, str], spent: tuple[str, str],
+    sold: str, cash: str,
+) -> None:
+    """The shape that decided the ruling. ``amount / price`` rounds DOWN from each printed
+    count here, so under it the sale outruns the position by a few hundred-thousandths of a
+    share — a running balance below zero, which the import reports as a pre-history position
+    and the replay books as a sticky 賣超."""
+    events = _parse(
+        f'05/04/2026,Sell,AAA,"SELL",{sold},$40.00,,{cash}',
+        f'04/15/2026,Reinvest Shares,AAA,"REINVEST",{printed[1]},{price[1]},,-${spent[1]}',
+        f'04/15/2026,Cash Dividend,AAA,"CASH DIVIDEND",,,,${spent[1]}',
+        f'03/16/2026,Reinvest Shares,AAA,"REINVEST",{printed[0]},{price[0]},,-${spent[0]}',
+        f'03/16/2026,Cash Dividend,AAA,"CASH DIVIDEND",,,,${spent[0]}',
+        '02/02/2026,Buy,AAA,"BUY",10,$50.00,,-$500.00',
+    )
+    report = run_reconcile(events, group_events(events))
+    assert _codes(report, "blocking") == set()
+    assert report.share_deltas["AAA"] == Decimal(0)
+    assert "prehistory_position" not in _codes(report, "advisory")
+
+
+def test_a_printed_quantity_the_amount_does_not_support_blocks() -> None:
+    """The printed quantity is now the share count written, so a quantity that is not
+    ``amount / price`` at its own printed precision — a mis-read column — must stop the
+    batch: 7.00 / 25.00 = 0.28, and 0.27 is not a rounding of it."""
     events = _parse(
         '03/11/2026,Cash Dividend,AAA,"CASH DIVIDEND",,,,$10.00',
         '03/11/2026,NRA Tax Adj,AAA,"W-8 WITHHOLDING",,,,-$3.00',
         '03/11/2026,Reinvest Shares,AAA,"REINVEST",0.27,$25.00,,-$7.00',
     )
     report = run_reconcile(events, group_events(events))
+    issue = next(i for i in report.blocking if i.code == "reinvest_quantity_mismatch")
+    assert issue.refs == (events[2].ref,)
+    assert "0.27" in issue.detail and "0.28000000" in issue.detail
+
+
+@pytest.mark.parametrize(("qty", "price"), [("", "$25.00"), ("0.28", "")])
+def test_a_reinvest_missing_its_quantity_or_its_price_blocks(qty: str, price: str) -> None:
+    events = _parse(
+        '03/11/2026,Cash Dividend,AAA,"CASH DIVIDEND",,,,$7.00',
+        f'03/11/2026,Reinvest Shares,AAA,"REINVEST",{qty},{price},,-$7.00',
+    )
+    report = run_reconcile(events, group_events(events))
+    assert "reinvest_quantity_mismatch" in _codes(report, "blocking")
+
+
+def test_a_rounded_count_on_a_high_priced_share_is_not_an_overdraw() -> None:
+    """0.0105 x 950.00 = 9.975, 2.5 cents more than the 9.95 net — past the one-cent
+    ``over_reinvested`` tolerance. The reinvestment spent the printed 9.95, so nothing is
+    overdrawn and no cash moved; only a check that priced the reinvestment as shares x price
+    would see one."""
+    events = _parse(
+        '03/11/2026,Cash Dividend,AAA,"CASH DIVIDEND",,,,$14.21',
+        '03/11/2026,NRA Tax Adj,AAA,"W-8 WITHHOLDING",,,,-$4.26',
+        '03/11/2026,Reinvest Shares,AAA,"REINVEST",0.0105,$950.00,,-$9.95',
+    )
+    report = run_reconcile(events, group_events(events))
     assert _codes(report, "blocking") == set()
-    assert report.share_deltas["AAA"] == Decimal("0.28")
+    assert report.cash_total == Decimal("0.00")
 
 
 # ============================================================ CUSIPs

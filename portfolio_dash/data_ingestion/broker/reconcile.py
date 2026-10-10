@@ -33,11 +33,15 @@ re-measures from the ORIGINAL rows:
   real defects — two rows silently dropped off an ``if``/``elif`` chain, and 108 rows
   double-counted because ``line_no`` is not unique across files.
 
-⚠ **Share conservation is asserted under the DERIVED-share rule, not the printed one.** A
-check written against the printed quantity would fail on 125 of 227 real reinvest rows and
-would therefore forbid the very rule (``amount / price``, see
-:func:`grouping.derive_reinvest_shares`) that makes a multi-year DRIP history come out right.
-The substitution is the intended behaviour, so it is the baseline the check measures against.
+⚠ **A reinvestment's shares are its PRINTED quantity and its cash is its PRINTED amount** —
+two different columns, because ``quantity x price != amount`` on every real reinvest row (each
+is rounded at its own precision; :func:`grouping.fold_dividends` has the measurement and the
+owner ruling of 2026-10-11 that made the printed quantity the authority). So share
+conservation counts the printed quantity, every cash check counts the amount, and neither ever
+multiplies one back out of the other. What ties the two columns together is
+:func:`_check_reinvest_rows`: the printed quantity must be ``amount / price`` at its own
+printed precision, or the batch stops — the printed column is now written to the ledger, so a
+mis-read of it is no longer harmless.
 """
 
 from collections import defaultdict
@@ -49,7 +53,6 @@ from portfolio_dash.data_ingestion.broker.grouping import (
     GroupedImport,
     _share_delta,
     account_for,
-    derive_reinvest_shares,
     overlap_duplicates,
     prehistory_shares,
 )
@@ -65,13 +68,13 @@ from portfolio_dash.shared.options import contracts_to_shares
 _ZERO = Decimal(0)
 
 #: Money tolerance. The broker states cents, so anything a correct parse produces lands on a
-#: cent; half a cent is therefore "the same number" and nothing larger is. It also absorbs the
-#: ~1e-27 tail of ``derive_reinvest_shares``'s exact division being multiplied back out.
+#: cent; half a cent is therefore "the same number" and nothing larger is.
 #: A tolerance wide enough to hide a real error is not a tolerance, it is a switched-off check.
 _MONEY_TOL: Final = Decimal("0.005")
 
-#: Share tolerance. Reinvest share counts are fractional to many places by construction
-#: (``amount / price``), so an exact comparison would fail on arithmetic that is right.
+#: Share tolerance. Every share count is now a printed figure (at most 4 dp on a reinvest), so
+#: a correct fold conserves them exactly; the tolerance only keeps the comparison from turning
+#: on a trailing digit no statement prints.
 _SHARE_TOL: Final = Decimal("0.0000001")
 
 #: How far a reinvestment may exceed its own net payout. **Measured, not chosen**: across 225
@@ -111,7 +114,7 @@ class ReconcileReport:
     rows_in: int
     #: Net cash effect of everything that will be written, in the export's currency.
     cash_total: Decimal
-    #: Per-symbol share delta the import will apply, under the derived-share rule.
+    #: Per-symbol share delta the import will apply, reinvests at their printed quantity.
     share_deltas: dict[str, Decimal]
 
     @property
@@ -145,13 +148,6 @@ class ReconcileFailed(Exception):
         super().__init__(
             f"import refused — {len(report.blocking)} blocking issue(s):\n" + "\n".join(lines)
         )
-
-
-def _reinvest_cash(shares: Decimal | None, price: Decimal | None) -> Decimal:
-    """Cash a reinvestment consumed, from the DERIVED share count."""
-    if shares is None or price is None:
-        return _ZERO
-    return shares * price
 
 
 def _check_suppressed(
@@ -275,7 +271,10 @@ def _check_dividends(grouped: GroupedImport, issues: list[ReconcileIssue]) -> No
       subtracted; a sign error on it doubles the payout instead of reducing it.
     """
     for d in grouped.dividends:
-        reinvested = _reinvest_cash(d.reinvest_shares, d.reinvest_price)
+        # The printed amount, never shares x price: the printed quantity is rounded on its own,
+        # so its product overshoots a fully reinvested payout by up to half a unit of its last
+        # place x the price — cents on a high-priced share, past the one-cent tolerance.
+        reinvested = d.reinvest_amount if d.reinvest_amount is not None else _ZERO
         if reinvested > _ZERO and d.gross <= _ZERO:
             # A reinvestment with no payout leg in the file. The innocent cause is common and
             # unavoidable — the payout predates the export window, which is the same thing
@@ -310,17 +309,65 @@ def _check_dividends(grouped: GroupedImport, issues: list[ReconcileIssue]) -> No
             )
 
 
+def _check_reinvest_rows(
+    events: list[RawEvent], grouped: GroupedImport, issues: list[ReconcileIssue]
+) -> None:
+    """Every written reinvest leg's printed quantity must be ``amount / price`` at its own
+    printed precision.
+
+    The printed quantity IS the share count the ledger receives
+    (:func:`grouping.fold_dividends`), so this is the reinvest counterpart of
+    :func:`_check_priced_rows`: it tests the broker's arithmetic and our reading of the
+    columns, and it is what stops a mis-mapped or blank quantity column from writing a
+    plausible wrong share count.
+
+    The bound is the two roundings the statement applies and nothing more: the quantity is
+    rounded to its last printed place (half a unit of it, times the price, in money) and the
+    amount to the cent (:data:`_MONEY_TOL`). Measured on a real 1,593-line history: 250 of 250
+    reinvest rows sit inside it, while none of them satisfies ``quantity x price == amount``.
+    A leg with no quantity or no price cannot be checked, and an unchecked printed figure is
+    exactly what this gate exists to refuse, so it blocks too.
+    """
+    dropped = {r for g in grouped.suppressed for r in g.refs}
+    for e in events:
+        if e.kind is not EventKind.DRIP_BUY or e.ref in dropped:
+            continue
+        quantity, price, amount = abs(e.quantity), e.price, abs(e.amount)
+        if quantity == _ZERO or price <= _ZERO:
+            issues.append(
+                ReconcileIssue(
+                    "reinvest_quantity_mismatch", "blocking", (e.ref,),
+                    f"{e.trade_date} {e.symbol}: the reinvestment of {amount} prints "
+                    f"{e.quantity} shares at {e.price} — a reinvest needs both its printed "
+                    "quantity and its price, because the quantity is the share count written",
+                )
+            )
+            continue
+        exponent = quantity.as_tuple().exponent
+        last_place = Decimal(1).scaleb(exponent if isinstance(exponent, int) else 0)
+        allowed = last_place / 2 * price + _MONEY_TOL
+        if abs(quantity * price - amount) > allowed:
+            issues.append(
+                ReconcileIssue(
+                    "reinvest_quantity_mismatch", "blocking", (e.ref,),
+                    f"{e.trade_date} {e.symbol}: the reinvestment prints {quantity} shares at "
+                    f"{price} for {amount}, but {amount} / {price} = {amount / price:.8f} "
+                    f"does not round to {quantity} — the printed quantity is the share "
+                    "count written, so the row must agree with itself",
+                )
+            )
+
+
 def _cash_effect(grouped: GroupedImport) -> Decimal:
     """Net cash of everything the import will write.
 
-    A folded dividend contributes ``net - reinvested`` with the reinvestment priced from the
-    DERIVED share count, which is exactly where this total can legitimately differ by a
-    fraction of a cent from the sum of the printed rows — and exactly why the caller compares
-    it with a tolerance rather than for equality.
+    A folded dividend contributes ``net - reinvested``, the reinvestment at its PRINTED amount
+    — never its printed quantity times its printed price, which differ by the rounding of the
+    quantity (see the module docstring).
     """
     total = _ZERO
     for d in grouped.dividends:
-        total += d.net - _reinvest_cash(d.reinvest_shares, d.reinvest_price)
+        total += d.net - (d.reinvest_amount if d.reinvest_amount is not None else _ZERO)
     for bucket in (grouped.trades, grouped.cash, grouped.actions):
         for e in bucket:
             total += e.amount
@@ -339,7 +386,7 @@ def _parked(grouped: GroupedImport) -> set[str]:
 
 
 def _share_deltas(grouped: GroupedImport) -> dict[str, Decimal]:
-    """Per-symbol share delta the import will apply, under the derived-share rule."""
+    """Per-symbol share delta the import will apply, reinvests at their printed quantity."""
     out: dict[str, Decimal] = defaultdict(lambda: _ZERO)
     for d in grouped.dividends:
         if d.reinvest_shares is not None:
@@ -382,14 +429,14 @@ def _check_cash_conserved(
 def _check_shares_conserved(
     events: list[RawEvent], grouped: GroupedImport, issues: list[ReconcileIssue]
 ) -> dict[str, Decimal]:
-    """Per-symbol shares in equals shares out, with reinvests measured the derived way.
+    """Per-symbol shares in equals shares out, reinvests at their printed quantity.
 
-    ⚠ The baseline is rebuilt from the RAW rows — a reinvest leg contributes
-    ``derive_reinvest_shares(amount, price)``, computed here, not the count the fold stored.
-    The first version read that count back out of the ``DividendEvent`` and compared it with
-    itself, so it agreed unconditionally: a fold that invented 999 shares passed. A check
-    whose two sides share a source is not a check, and this module's docstring promises the
-    opposite, so the promise is what got fixed.
+    ⚠ The baseline is rebuilt from the RAW rows — a reinvest leg contributes its own printed
+    quantity, read here leg by leg, not the count the fold stored. The first version read that
+    count back out of the ``DividendEvent`` and compared it with itself, so it agreed
+    unconditionally: a fold that invented 999 shares passed. A check whose two sides share a
+    source is not a check, and this module's docstring promises the opposite, so the promise is
+    what got fixed.
     """
     dropped = {r for g in grouped.suppressed for r in g.refs}
     # Option legs carry no ``symbol`` (their contract is ``option_symbol``), so the walk below
@@ -400,11 +447,7 @@ def _check_shares_conserved(
     for e in events:
         if not e.symbol or e.ref in dropped or e.ref in parked:
             continue
-        if e.kind is EventKind.DRIP_BUY:
-            shares = derive_reinvest_shares(e.amount, e.price)
-            expected[e.symbol] += shares if shares is not None else _ZERO
-        else:
-            expected[e.symbol] += _share_delta(e)
+        expected[e.symbol] += _share_delta(e)
 
     actual = _share_deltas(grouped)
     for symbol in sorted(set(expected) | set(actual)):
@@ -552,6 +595,7 @@ def reconcile(events: list[RawEvent], grouped: GroupedImport) -> ReconcileReport
     _check_priced_rows(grouped, issues)
     _check_option_rows(grouped, issues)
     _check_dividends(grouped, issues)
+    _check_reinvest_rows(events, grouped, issues)
     cusips = _check_symbols(grouped, by_ref, issues)
     cash_total = _check_cash_conserved(events, grouped, issues)
     share_deltas = _check_shares_conserved(events, grouped, issues)

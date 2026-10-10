@@ -90,6 +90,7 @@ Blocking issues seen on a real export, and what each means:
 | `cusip_unresolved` | A row identifies a security only by its CUSIP. Imported as-is it becomes a **second instrument**, and any corporate action against it then replays as a no-op — silently, with every screen still looking right. | The message quotes the row's description, which carries the company name. Re-run with `--alias <the CUSIP>=<the ticker>` (repeatable). |
 | `priced_row_no_cash` | A trade with a stated price that moved no money — a **free position**. Observed once: a when-issued ADR re-badged regular-way, whose cancelling row carries no symbol to pair it with. | Look at the two lines the report names and decide. Usually one of them should be deleted from the export. |
 | `priced_row_mismatch` | `quantity × price ± fees` disagrees with the row's own amount. | This is either a broker oddity or a parsing bug — send the report. |
+| `reinvest_quantity_mismatch` | A reinvestment's printed quantity is not `amount ÷ price` rounded to the places it is printed with, or the row has no quantity or no price. The printed quantity is the share count written (owner ruling B, 2026-10-11), so it must agree with its own row. | A mis-read column or a broker oddity — send the report. |
 | `cash_not_conserved` · `shares_not_conserved` · `suppressed_not_zero` · `rows_lost` | The conversion itself lost or invented something. | A defect in this code, not in your file. Send the report. |
 
 **Advisories never block.** Option legs (recognised, not supported — P3), positions older than
@@ -140,6 +141,14 @@ So: paste the summary, not the whole terminal, and not the report.
   wearing a name.
 - **Cash in lieu has no ledger row** and is reported for manual entry — it is neither a trade
   nor a cash movement.
+- **It never re-derives a reinvested share count** (owner ruling B, 2026-10-11). A reinvest row
+  prints a quantity, a price and an amount that never multiply out exactly — each is rounded on
+  its own. The DRIP row takes the **printed quantity** as its shares and the **printed amount**
+  as the cash spent. `amount ÷ price` was the rule until then, and it is wrong in the way that
+  matters: a later sale closes the printed sum, so the derived count is short by a few
+  hundred-thousandths of a share and the sale replays as a sticky 賣超. The printed quantity is
+  still checked against `amount ÷ price` at its own printed precision
+  (`reinvest_quantity_mismatch` above).
 
 ---
 

@@ -65,7 +65,8 @@ FILE_1: list[list[str]] = [
     ["01/08/2024", "Buy", _A, "ALFA CORP", "100", "$25.00", "$0.00", "-$2,500.00"],
     ["02/12/2024", "Buy", _A, "ALFA CORP", "50", "$28.00", "$0.00", "-$1,400.00"],
     # A DRIP triple. 47.5 / 26.19 = 1.813669... and the broker PRINTS 1.8137 — so
-    # quantity x price = 47.500... != 47.50 exactly. Amount and price are the authority.
+    # quantity x price = 47.500... != 47.50 exactly. The printed quantity is the share count
+    # the broker books, the amount the cash (owner ruling B, 2026-10-11).
     ["03/15/2024", "Cash Dividend", _A, "ALFA CORP DIVIDEND", "", "", "", "$67.86"],
     ["03/15/2024", "NRA Tax Adj", _A, "ALFA CORP W-8 WITHHOLDING", "", "", "", "-$20.36"],
     ["03/15/2024", "Reinvest Shares", _A, "ALFA CORP REINVESTMENT",

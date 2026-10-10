@@ -141,7 +141,7 @@ _NOT_A_SETTLEMENT = {
     ("strategy/rebalance.py", "amount"): 1,
     # CHECKS with a tolerance band against a statement's own amount, never booked
     ("data_ingestion/agents.py", "_append_amount_check"): 1,
-    ("data_ingestion/broker/reconcile.py", "_reinvest_cash"): 1,
+    ("data_ingestion/broker/reconcile.py", "_check_reinvest_rows"): 1,
     ("data_ingestion/broker/reconcile.py", "_check_priced_rows"): 1,
     # unreachable fallbacks for a symbol with no registry row (no ledger rows either)
     ("api/routers/symbol.py", "symbol_detail"): 1,

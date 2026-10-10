@@ -59,10 +59,10 @@ from portfolio_dash.shared.options import (
 
 _ZERO = Decimal(0)
 
-#: Share counts are written at 8 dp. A derived reinvest count is an exact quotient carrying
-#: 28 significant digits, which is false precision, not accuracy — the broker states an amount
-#: and a price, and eight places is past any fractional share either can express. The value
-#: still differs from the printed quantity, which is the entire point of deriving it.
+#: Share counts are written at 8 dp, trailing zeros dropped. Every count the converter writes
+#: is built from printed quantities — a reinvest too since 2026-10-11 (``grouping.fold_dividends``),
+#: whose figure has at most 4 dp — so the quantize changes nothing a statement prints; it is a
+#: ceiling on false precision, not a rounding step.
 _SHARE_PLACES = Decimal("0.00000001")
 
 #: Broker event kinds that become a cash movement, and the ledger kind each becomes.

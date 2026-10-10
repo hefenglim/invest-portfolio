@@ -250,9 +250,10 @@ def test_a_converted_schwab_export_imports_through_the_browser(
     assert held["NEWX"] == Decimal("200")            # OLDX 200 EXCHANGEd 1:1 into NEWX
     assert "OLDX" not in held                        # …and the old line is gone
     assert held["PARE"] == Decimal("150")
-    # 100 + 50 − 60 + 10 bought, plus the DRIP's fractional reinvest — the dividend file
-    # reached the same replay as the transaction file.
-    assert held["ALFA"] == Decimal("101.81366934")
+    # 100 + 50 − 60 + 10 bought, plus the DRIP's fractional reinvest at its PRINTED 1.8137
+    # (owner ruling B, 2026-10-11) — the dividend file reached the same replay as the
+    # transaction file.
+    assert held["ALFA"] == Decimal("101.8137")
     # The prehistory sell has no covering position (its 期初庫存 is the unfillable worksheet),
     # so it stands as an oversold line rather than being quietly absorbed.
     assert held["PREH"] == Decimal("-80")
