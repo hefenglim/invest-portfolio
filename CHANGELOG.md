@@ -9,6 +9,18 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.29] - 2026-10-10
+
+First release since v0.1.28. It ships everything recorded below: the Schwab broker-statement
+import, corporate actions (W0–W8), the investment-logic review waves R1–R7, the functional-test
+and pre-merge CR rounds, and US equity options in the ledger (owner instruction 2026-10-10:
+merge into `main`, cut the version, deploy to the demo site and to prod). Gate results and
+the deploy record: **Release record** directly below.
+
+### Release record
+
+- (filled in as the release runs)
+
 ### Added — US equity options in the ledger (P3, approach ④; branch `feat/options-ledger`)
 
 Spec `docs/spec/2026-10-09-options-ledger.md` (APPROVED 2026-10-09), plan

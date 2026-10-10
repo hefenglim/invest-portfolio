@@ -66,10 +66,7 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
-    # --- v0.1.29 (broker import) — NOT YET SHIPPED; hidden until __version__ reaches it ----
-    # ⚠ ``VERSION_DATES["0.1.29"]`` is deliberately NOT set here. The date must be the REAL
-    # delivery date and this has not been delivered; it is set at ship time, in the same edit
-    # as the version bump and the CHANGELOG heading.
+    # --- v0.1.29 (broker import, corporate actions, US equity options) — shipped 2026-10-10 --
     # --- v0.1.29, US equity options in the ledger (options spec §8, 2026-10-09) -----------
     Feature(
         version="0.1.29",
@@ -1980,6 +1977,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.29": "2026-10-10",
     "0.1.28": "2026-08-09",
     "0.1.27": "2026-08-05",
     "0.1.26": "2026-08-03",
