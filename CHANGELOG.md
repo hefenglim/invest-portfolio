@@ -9,6 +9,8 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.31] - 2026-10-14
+
 Prod performance after the owner's real ledger went in (owner report 2026-10-13: 「prod site 為何
 效能變慢，一直轉動loading頁面狀態」; owner chose the fix 「事件日沿用＋共用結果」 the same day).
 
@@ -50,6 +52,21 @@ Prod performance after the owner's real ledger went in (owner report 2026-10-13:
   lands inside a write window, and both fail with the session's window removed).
 - Docs: `.claude/rules/architecture.md` (`shared/flight.py`, the one non-pure shared module, and
   its two write seams); `LESSONS_LEARNED.md`.
+
+### Release record
+
+- **Gates** (dev machine, every one in the foreground — a background run of the contract suite
+  was reaped for low memory first): `ruff check portfolio_dash tests scripts` clean;
+  `mypy --strict` 1,085 files, 0 issues, on a cold cache; pytest non-e2e 7,650 passed /
+  5 skipped / 0 failed; e2e 369 / 369 passed in 34 foreground batches of ≤ 11, on the release
+  tree; stress audit phase 1 `ops=164 pass=19,948 fail=0` (UI read-back included), oracle
+  independence grep empty. The release commit adds only the version, the asset stamps, the
+  what's-new entry and this record; the 381 tests that read them were re-run green on it.
+- **Self-review** found one gap before the gates were re-run on the final tree: the HTTP write
+  window closed before the request's own commit (measured with a probe app), so `session()`
+  now commits inside a window of its own — see the shared-builds entry above.
+- **Deploy**: demo first, then prod, both from the tag; the record is in the VM operation log
+  (git-ignored).
 
 ## [v0.1.30] - 2026-10-11
 

@@ -66,6 +66,19 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.31 (dashboard speed on a long ledger) — shipped 2026-10-14 -------------------
+    Feature(
+        version="0.1.31",
+        id="dashboard-speed-long-ledger",
+        title="帳本歷史很長時，首頁與各頁面不再轉圈很久",
+        desc="資產走勢圖以前每一天都把整本帳從頭重算一次；帳本有好幾年歷史時，首頁要等數十秒，"
+        "連點幾個頁面，重算還會在背景越堆越多，整個網站跟著變慢。現在只在帳上有異動的日子重算，"
+        "其他日子沿用前一天的結果，圖上每個數字都和以前完全相同；幾個頁面同時要同一份資料時也只"
+        "算一次、大家共用。按下儲存後重新整理，拿到的一定是儲存後的數字",
+        href="index.html",
+        area="儀表板 → 資產走勢",
+        target="#trend-chart",
+    ),
     # --- v0.1.30 (broker import: reinvested shares as printed) — shipped 2026-10-11 --------
     Feature(
         version="0.1.30",
@@ -1992,6 +2005,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.31": "2026-10-14",
     "0.1.30": "2026-10-11",
     "0.1.29": "2026-10-10",
     "0.1.28": "2026-08-09",
