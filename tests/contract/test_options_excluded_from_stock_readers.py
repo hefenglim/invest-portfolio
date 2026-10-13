@@ -98,7 +98,7 @@ _ALLOWLIST: dict[str, str] = {
     "export/holdings_report.py::_holdings_table_html": _EXPORT,
     "export/rebalance_report.py::build_rebalance_report_html": _EXPORT,
     # -- the replay and the doors that must see every position, options included ----------
-    "portfolio/dashboard.py::build_dashboard": (
+    "portfolio/dashboard.py::_build_dashboard": (
         "the valuation itself: W2 splits book.holdings into the stock list and the options "
         "block here"),
     "api/routers/input_center.py::_holdings_or_none": (

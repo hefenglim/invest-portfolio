@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from .config import get_settings
+from .flight import begin_write, end_write, note_write
 
 
 def get_connection() -> sqlite3.Connection:
@@ -44,9 +45,25 @@ def session() -> Iterator[sqlite3.Connection]:
     conn = get_connection()
     try:
         yield conn
-        conn.commit()
+        if conn.total_changes:
+            # The commit runs inside a write window (`shared/flight.py`): a request's
+            # `get_conn` commits AFTER `api/app.py`'s window has closed (FastAPI runs a yield
+            # dependency's exit once the response has started), so without this a caller
+            # arriving just after the commit could still join a build started before it.
+            begin_write()
+            try:
+                conn.commit()
+            finally:
+                end_write()
+        else:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
+        # A session that changed a row ends any sharing of a computation started before it
+        # (`shared/flight.py`, 2026-10-13). Counted with or without the commit: a needless
+        # bump only costs one shared build, a missed one could serve a pre-write answer.
+        if conn.total_changes:
+            note_write()
         conn.close()

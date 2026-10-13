@@ -100,6 +100,7 @@ from portfolio_dash.pricing.store import (
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.flight import coalesce, write_generation
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
@@ -657,7 +658,48 @@ def _benchmark_comparison(
 def build_dashboard(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency
 ) -> DashboardData:
-    """Assemble the complete dashboard data model from SQLite (read-only)."""
+    """Assemble the complete dashboard data model from SQLite (read-only).
+
+    Concurrent identical builds are shared (2026-10-13, ``shared/flight.py``): a caller that
+    arrives while the same build is RUNNING — same database file, same day, same reporting
+    currency, no write since it started — waits for it and receives its own deep copy.
+    Nothing is kept once the build returns.
+    """
+    def build() -> DashboardData:
+        return _build_dashboard(conn, now=now, reporting=reporting)
+
+    return coalesce(_flight_key(conn, now, reporting), build, copy=_own_copy)
+
+
+def _own_copy(data: DashboardData) -> DashboardData:
+    return data.model_copy(deep=True)
+
+
+def _flight_key(
+    conn: sqlite3.Connection, now: datetime, reporting: Currency
+) -> tuple[str, str, int, date, Currency] | None:
+    """Which running build this caller may share, or ``None`` to build alone.
+
+    Alone when the caller's connection holds uncommitted changes (its own writes must be in
+    its answer), while a write is in progress (:func:`write_generation` is ``None``), and for
+    a database with no file (an in-memory test database is private to its connection).
+    """
+    if conn.in_transaction:
+        return None
+    generation = write_generation()
+    if generation is None:
+        return None
+    row = conn.execute("PRAGMA database_list").fetchone()
+    path = str(row[2]) if row is not None and row[2] else ""
+    if not path:
+        return None
+    return ("dashboard", path, generation, now.date(), reporting)
+
+
+def _build_dashboard(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+) -> DashboardData:
+    """The build itself — :func:`build_dashboard` decides whether it is shared."""
     as_of = now.date()
 
     # 1. Ledgers and reference data. One bundle, one loader (Stored* -> ledger models).

@@ -155,7 +155,15 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   TITLE names its rule in the rule's own words, DEF-076 2026-09-26: `tests/contract/
   test_def076_alert_titles_use_rule_vocabulary.py` derives the (rule, title) pairs from the
   code, and a different wording must be a reviewed entry with its reason), the LLM client.
-  Pure, importable everywhere.
+  Pure, importable everywhere. **One exception to "pure": `flight.py`** (2026-10-13) — a
+  process-wide registry that lets callers asking for the SAME computation while it RUNS share
+  it (`build_dashboard` is its one user). It is not a cache: nothing is kept once the
+  computation returns, so no clock-dependent figure outlives its request. A write ends sharing
+  through two seams that must stay wired — `api/app.py`'s write window around every
+  non-GET request and `shared/db.session()` committing any session that changed a row inside
+  a window of its own (a request's commit runs after the HTTP window closes) — and a
+  connection holding uncommitted changes always computes alone. Each joiner receives its own
+  deep copy. `tests/shared/test_flight.py` + `tests/portfolio/test_dashboard_shared_build.py`.
 - **data_ingestion/** — manual transaction entry + CSV/broker/AI import, dividends, cash
   movements, corporate actions. Validates and normalizes into the canonical ledger models
   before persisting (`store.py` owns the ledger tables and their DDL). Rejects bad input

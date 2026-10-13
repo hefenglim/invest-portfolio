@@ -38,6 +38,7 @@ from portfolio_dash.portfolio.cost_basis import (
 )
 from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
 from portfolio_dash.portfolio.price_basis import price_in
+from portfolio_dash.portfolio.results import Book
 
 # ONE definition of both, shared with the metric that already takes these kinds: an oracle
 # of B that re-derived either would be free to disagree with XIRR about which flows exist.
@@ -340,13 +341,24 @@ def daily_value_series(
         # last trade, a point-in-time figure), so its value is left OUT of every day — without
         # marking the day incomplete — and the series says so once.
         options_excluded = False
+        # The book changes only on a day some row counts from (2026-10-13). `through(day)` is a
+        # date-PREFIX cut, so between two such days it holds the same rows and `build_book`, a
+        # pure function of the bundle, returns the same book: replay on those days and reuse
+        # the book on the others. Measured on the owner's 6-year ledger: 2,181 replays → 461,
+        # the dashboard 26.1 s → 7.7 s locally, payload byte-identical. Rebuilding every
+        # calendar day was quadratic in the history length — invisible on the demo corpus,
+        # minutes per page on the prod VM. The loop below only READS `book`; anything that
+        # starts mutating it must rebuild every day instead.
+        rebuild_on = bundle.counts_on_dates()
+        book: Book | None = None
         day = start
         while day <= end:
             # allow_oversell (2026-07-02): an acked-oversold ledger must NEVER 500 the
             # dashboard through the trend replay either — mirror the main book's
             # degradation. An oversold (negative-share) day has no honest value, so it
             # marks the point incomplete instead of contributing a fabricated number.
-            book = build_book(bundle.through(day), allow_oversell=True)
+            if book is None or day in rebuild_on:
+                book = build_book(bundle.through(day), allow_oversell=True)
             total = _ZERO
             incomplete = False
             # Read the BOOK, and BEFORE the holdings loop, because that loop structurally

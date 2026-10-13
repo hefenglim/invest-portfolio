@@ -2201,3 +2201,38 @@ head of a command opened a REPL that waited on stdin for 20 minutes, which read 
    when the machine is short of memory and the session is idle.
 4. **When a batch "hangs", look at the process tree before suspecting the test.** A bare
    interpreter waiting on stdin looks exactly like a stuck browser test from the outside.
+
+## 2026-10-13 — prod spun for 20 minutes: a per-day replay measured, then left in place
+
+**What happened.** The day after the owner's 6-year Schwab history went into prod, every page
+spun. `daily_value_series` rebuilt the book from the whole ledger once per CALENDAR day —
+2,181 replays per dashboard for 461 distinct event days, 27 s locally — and at least seven
+pages fetch `/api/dashboard`. Six page loads in two minutes left six identical builds running
+side by side on the 1 GB VM: still computing 20 minutes later, `/api/health` at 7 s on
+loopback because every request queued behind them. A sync route is not cancelled when the
+browser leaves, so each abandoned page kept its build. The cost had been MEASURED before:
+M7-07 (2026-09) found `build_book` called 2,053 times and 87% of `build_dashboard`, and fixed
+it by building lazily in one caller — the loop itself stayed quadratic. The demo's synthetic
+corpus spans weeks, so no gate, no verify run and no demo click-through ever felt it.
+
+**Rules.**
+1. **Judge any per-day loop over the ledger against prod's span, not the demo's.** Cost that
+   grows with days × rows is invisible on a weeks-long fixture and dominant on years of
+   history. Measure on a prod-shaped ledger (the real import set through the real doors plus a
+   real history backfill, in a scratch DB) before calling a dashboard path cheap.
+2. **When a profile names the hot loop, fix the loop, not only the caller that tripped on it.**
+   M7-07's lazy build was right and still left every other caller paying 87%.
+3. **A performance fix to a money figure pins two halves:** the output identical to the slow
+   path (here every trend point, and the 435,867-byte prod-shaped payload) AND the count of
+   the expensive operation (replays == event days). Then mutate the new shortcut (drop one
+   ledger from `counts_on_dates`) and watch the identity test fail.
+4. **Sharing an in-flight computation is only safe with a write signal on every writer.** The
+   HTTP write window alone misses the scheduler; `session()` alone misses the window between
+   a mid-request commit and the session's close. Both seams are wired and tested.
+5. **Measure the ORDER of the seams a guarantee leans on — never assume it.** The middleware
+   comment said the HTTP window covered the request's write. A 10-line probe in self-review
+   showed FastAPI closes the middleware's `call_next` BEFORE a yield dependency's exit, so
+   `get_conn`'s commit ran outside the window; `session()` now commits inside one of its own.
+   The first request-level test written for it went through `PUT /api/ui-prefs`, whose store
+   writer commits inside the route — it passed with the fix removed. Only a route that leaves
+   its write to the dependency, run against the mutation, pinned the real ordering.

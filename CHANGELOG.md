@@ -9,6 +9,65 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.31] - 2026-10-14
+
+Prod performance after the owner's real ledger went in (owner report 2026-10-13: 「prod site 為何
+效能變慢，一直轉動loading頁面狀態」; owner chose the fix 「事件日沿用＋共用結果」 the same day).
+
+### Fixed — the dashboard took tens of seconds, and pages piled up behind each other
+
+- **Diagnosis (prod, read-only).** After the 6-year Schwab history was imported on 2026-10-12, one
+  `/api/dashboard` took 28 s; six page loads in a row left six identical builds running for 20+
+  minutes (a sync route keeps computing after the browser leaves, and at least seven pages
+  fetch the dashboard), `/api/health` answered in 7 s on loopback, the 1 GB host was ~700 MB
+  into swap. Locally, on a prod-shaped ledger (the owner's import set through the real import
+  doors + a real history backfill, scratch DB): `/api/dashboard` 27.5 s, `/api/performance/twr`
+  27.9 s, `/api/alerts` 27.0 s; every other GET under 0.6 s. cProfile: `build_book` was 43 of
+  53 s — `daily_value_series` replayed the whole ledger once per calendar day (2,181 times).
+- **The trend replays only on event days** (`portfolio/timeseries.py`). `LedgerBundle.through`
+  is a date-prefix cut, so between two days a row counts from it holds the same rows and the
+  book is reused. New `LedgerBundle.counts_on_dates()` names those days from the same dates
+  `valued_as_of` filters on. 2,181 replays → 461; the dashboard 26.1 s → 7.7 s locally, the
+  payload byte-identical (435,867 bytes). Every reader of the series gains it (dashboard, TWR,
+  alerts, the drawer, snapshots, exports, insight runs).
+- **Concurrent identical builds run once** (new `shared/flight.py`; `build_dashboard`). A caller
+  that asks for a build while the same one is RUNNING — same database file, day, reporting
+  currency, no write since it started — waits for it and gets its own deep copy (~55 ms).
+  Nothing is kept after the build returns, so no clock-dependent figure goes stale. A write
+  ends sharing: `api/app.py` opens a write window around every non-GET request (no sharing
+  while one runs) and `shared/db.session()` commits any session that changed a row inside a
+  window of its own and notes it on close (the scheduler, background runners). The session's
+  window is not redundant — measured: a request's `get_conn` commits AFTER the HTTP window has
+  closed, because FastAPI exits a yield dependency once the response has started. A
+  connection holding uncommitted changes builds alone.
+- Tests: `tests/shared/test_counts_on_dates.py` (agrees with `through()` day by day for every
+  list field, and fails when a new field has no fixture row), `tests/portfolio/
+  test_trend_rebuilds_only_on_event_days.py` (series identical to rebuilding every day on a
+  ledger with an opening, a 賣超, a split, a 配股 by ex-date, an unreadable action and a future
+  trade; replays == event days; mutating `counts_on_dates` breaks it), `tests/shared/
+  test_flight.py` (sharing, own copies, errors, nothing kept, re-entry, the write window),
+  `tests/portfolio/test_dashboard_shared_build.py` (two connections build once; the key
+  refuses an in-memory DB, an uncommitted change and a write in progress; both write seams;
+  every COMMIT — a bare session's and a real request's own, through the middleware stack —
+  lands inside a write window, and both fail with the session's window removed).
+- Docs: `.claude/rules/architecture.md` (`shared/flight.py`, the one non-pure shared module, and
+  its two write seams); `LESSONS_LEARNED.md`.
+
+### Release record
+
+- **Gates** (dev machine, every one in the foreground — a background run of the contract suite
+  was reaped for low memory first): `ruff check portfolio_dash tests scripts` clean;
+  `mypy --strict` 1,085 files, 0 issues, on a cold cache; pytest non-e2e 7,650 passed /
+  5 skipped / 0 failed; e2e 369 / 369 passed in 34 foreground batches of ≤ 11, on the release
+  tree; stress audit phase 1 `ops=164 pass=19,948 fail=0` (UI read-back included), oracle
+  independence grep empty. The release commit adds only the version, the asset stamps, the
+  what's-new entry and this record; the 381 tests that read them were re-run green on it.
+- **Self-review** found one gap before the gates were re-run on the final tree: the HTTP write
+  window closed before the request's own commit (measured with a probe app), so `session()`
+  now commits inside a window of its own — see the shared-builds entry above.
+- **Deploy**: demo first, then prod, both from the tag; the record is in the VM operation log
+  (git-ignored).
+
 ## [v0.1.30] - 2026-10-11
 
 One change, on the owner's ruling: the Schwab converter writes a reinvested dividend's share

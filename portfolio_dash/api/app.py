@@ -111,6 +111,7 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.db import session
+from portfolio_dash.shared.flight import begin_write, end_write
 from portfolio_dash.shared.llm_fail_log import (
     ensure_table as ensure_llm_fail_log_table,
 )
@@ -303,6 +304,25 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001 — the log is an observer, never a gate
             pass
         return response
+
+    # Shared builds (`shared/flight.py`, 2026-10-13): no request joins a dashboard build
+    # while a mutating request runs, and none joins one that started before it — so a page
+    # reloaded right after 儲存 never receives an answer computed before the save. Every
+    # method but GET / HEAD / OPTIONS counts, read-only POSTs (preview, 試算) included: a
+    # needless window only costs one build that is not shared. This window covers the route
+    # body only — `get_conn`'s commit runs after it closes (a yield dependency exits once the
+    # response has started), so `shared/db.session()` brackets that commit in its own window.
+    @app.middleware("http")
+    async def _write_window_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return await call_next(request)
+        begin_write()
+        try:
+            return await call_next(request)
+        finally:
+            end_write()
 
     app.include_router(auth.router, prefix="/api")
     app.include_router(users.router, prefix="/api")
