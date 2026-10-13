@@ -576,7 +576,7 @@ _PKG = Path(__file__).resolve().parents[2] / "portfolio_dash"
 _POOL_READERS = {
     "cash_balances": {
         "api/routers/cash.py::bind_cash_pool", "api/routers/cash.py::pool_balances",
-        "api/routers/cash.py::probe", "portfolio/dashboard.py::build_dashboard",
+        "api/routers/cash.py::probe", "portfolio/dashboard.py::_build_dashboard",
         "portfolio/networth.py::daily_cash_series",
     },
     "pool_lines": {
@@ -589,8 +589,8 @@ _POOL_READERS = {
         "export/cash_statement.py::build_cash_statement_csv",
         "export/cash_statement.py::build_cash_statement_report_html",
     },
-    "daily_cash_series": {"portfolio/dashboard.py::build_dashboard"},
-    "compute_fx_summary": {"portfolio/dashboard.py::build_dashboard"},
+    "daily_cash_series": {"portfolio/dashboard.py::_build_dashboard"},
+    "compute_fx_summary": {"portfolio/dashboard.py::_build_dashboard"},
     "build_reporting_flows": {
         "portfolio/dashboard.py::_benchmark_comparison",
         "portfolio/timeseries.py::daily_value_series",

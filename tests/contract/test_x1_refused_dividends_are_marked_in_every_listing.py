@@ -251,7 +251,7 @@ _DIVIDEND_READERS = {
     # cash — split into booked / unbooked by DividendRefusals (⑪); the statement lists both
     "api/routers/cash.py::load_cash_ledgers",
     "export/cash_statement.py::_load",
-    "portfolio/dashboard.py::build_dashboard",
+    "portfolio/dashboard.py::_build_dashboard",
     # replay inputs — the rows the refusal is decided FROM
     "api/replay_guard.py::_read_ledgers",
     "data_ingestion/store.py::load_ledger_bundle",

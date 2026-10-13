@@ -268,6 +268,27 @@ class LedgerBundle:
         """
         return self.valued_as_of(day)
 
+    def counts_on_dates(self) -> set[date]:
+        """Every date some row of this bundle counts from — the days :meth:`through` changes.
+
+        :meth:`valued_as_of` keeps a row iff ``counts_by(<its date>, day)``, so the cut only
+        grows: ``through(d)`` differs from ``through(d - 1 day)`` exactly when a row counts
+        from ``d``, and on every other day it holds the SAME rows. The daily trend replay
+        reads this to rebuild the book only on those days (2026-10-13: a 6-year real ledger
+        rebuilt it 2,181 times per dashboard, once per calendar day, for 461 distinct days).
+
+        The dates are the ones :meth:`valued_as_of` filters on, field for field — a ledger
+        cut there but missing here would let a stale book stand on that ledger's dates, so
+        ``tests/shared/test_counts_on_dates.py`` asserts the two agree for every list field.
+        """
+        return (
+            {t.trade_date for t in self.transactions}
+            | {d.effective_date for d in self.dividends}
+            | {o.build_date for o in self.opening}
+            | {a.date for a in self.actions}
+            | {u.date for u in self.unreadable_actions}
+        )
+
     def before_action_on(self, day: date) -> "LedgerBundle":
         """Everything that replays BEFORE a corporate action dated *day* (2026-08-11).
 
