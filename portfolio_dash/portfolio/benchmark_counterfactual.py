@@ -46,8 +46,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.money import from_db, to_db
 
 _ZERO = Decimal("0")
 
@@ -127,16 +129,67 @@ def _close_at_or_before(
     return value if value > _ZERO else None
 
 
-def counterfactual(
+@dataclass(frozen=True)
+class BenchState:
+    """What :func:`counterfactual` accumulates from a flow list (PERF spec §8.4) — everything
+    its answer needs besides each market's LAST close, so a settled state can be finished with
+    today's close without re-spending the flows.
+
+    ``units`` / ``invested`` per placed market in first-placed order, the gross of the
+    uncovered and of all placeable flows, the uncovered markets, and the number of placeable
+    flows (zero means 「no flows」, which a zero ``gross_all`` cannot say: a flow of zero is
+    still a flow). Round-trips losslessly through :meth:`to_json` / :meth:`from_json`.
+    """
+
+    units: dict[Market, Decimal]
+    invested: dict[Market, Decimal]
+    uncovered_gross: Decimal
+    gross_all: Decimal
+    uncovered: frozenset[str]
+    placeable: int
+
+    def to_json(self) -> dict[str, Any]:
+        """The canonical JSON form: every Decimal as ``money.to_db`` TEXT.
+
+        Fixed-point TEXT keeps a Decimal's exponent only when it is not positive. Every
+        accumulator here starts from ``Decimal("0")`` (exponent 0) and a sum takes the
+        smaller exponent, so a positive one needs a value past 28 digits — refused
+        (``ValueError``) rather than stored with a different exponent.
+        """
+        def text(value: Decimal) -> str:
+            exponent = value.as_tuple().exponent
+            if isinstance(exponent, int) and exponent > 0:
+                raise ValueError("BenchState: a positive exponent has no lossless canonical "
+                                 "text")
+            return to_db(value)
+
+        return {
+            "units": {m.value: text(v) for m, v in self.units.items()},
+            "invested": {m.value: text(v) for m, v in self.invested.items()},
+            "uncovered_gross": text(self.uncovered_gross),
+            "gross_all": text(self.gross_all),
+            "uncovered": sorted(self.uncovered),
+            "placeable": self.placeable,
+        }
+
+    @classmethod
+    def from_json(cls, doc: Mapping[str, Any]) -> "BenchState":
+        return cls(
+            units={Market(k): from_db(v) for k, v in doc["units"].items()},
+            invested={Market(k): from_db(v) for k, v in doc["invested"].items()},
+            uncovered_gross=from_db(doc["uncovered_gross"]),
+            gross_all=from_db(doc["gross_all"]),
+            uncovered=frozenset(doc["uncovered"]),
+            placeable=int(doc["placeable"]),
+        )
+
+
+def accumulate(
     flows: Sequence[ReportingFlow],
     closes_by_market: Mapping[Market, Sequence[tuple[date, Decimal]]],
-) -> Counterfactual:
-    """Spend ``flows`` on each market's benchmark instead, and value the result today.
-
-    ``closes_by_market`` holds each market's benchmark closes, ascending, **already in the
-    reporting currency**. A market absent from the mapping has no benchmark and its flows are
-    reported as uncovered rather than dropped.
-    """
+) -> BenchState:
+    """Spend ``flows`` on each market's benchmark — the accumulation half of
+    :func:`counterfactual`, in its order and with its arithmetic."""
     # AI-D49: cash-movement flows (``market is None``) are excluded from BOTH legs and from
     # the coverage ratio. ``uncovered_ratio`` answers 「how much of the money has no index to
     # compare against」 — a market this app cannot cover (MY today). A broker fee is not
@@ -145,11 +198,6 @@ def counterfactual(
     # benchmark coverage.
     placeable = [f for f in flows if f.market is not None]
     gross_all = sum((abs(f.amount) for f in placeable), _ZERO)
-    if not placeable:
-        return Counterfactual(
-            available=False, reason=_NO_FLOWS, terminal_value=None, net_invested=None,
-            benchmark_return=None, uncovered_markets=(), uncovered_ratio=None, by_market=(),
-        )
 
     units: dict[Market, Decimal] = {}
     invested: dict[Market, Decimal] = {}
@@ -168,6 +216,27 @@ def counterfactual(
             continue
         units[flow.market] = units.get(flow.market, _ZERO) + flow.amount / level
         invested[flow.market] = invested.get(flow.market, _ZERO) + flow.amount
+
+    return BenchState(units=units, invested=invested, uncovered_gross=uncovered_gross,
+                      gross_all=gross_all, uncovered=frozenset(uncovered),
+                      placeable=len(placeable))
+
+
+def finish(
+    state: BenchState,
+    closes_by_market: Mapping[Market, Sequence[tuple[date, Decimal]]],
+) -> Counterfactual:
+    """Value an accumulated :class:`BenchState` at each placed market's LAST close — the
+    finishing half of :func:`counterfactual`. *closes_by_market* must hold a non-empty series
+    for every market in ``state.units``; only its last element is read."""
+    if not state.placeable:
+        return Counterfactual(
+            available=False, reason=_NO_FLOWS, terminal_value=None, net_invested=None,
+            benchmark_return=None, uncovered_markets=(), uncovered_ratio=None, by_market=(),
+        )
+    units, invested = state.units, state.invested
+    uncovered_gross, gross_all, uncovered = (state.uncovered_gross, state.gross_all,
+                                             state.uncovered)
 
     ratio = (uncovered_gross / gross_all) if gross_all > _ZERO else _ZERO
 
@@ -200,4 +269,27 @@ def counterfactual(
     )
 
 
-__all__ = ["Counterfactual", "MarketLeg", "ReportingFlow", "counterfactual"]
+def counterfactual(
+    flows: Sequence[ReportingFlow],
+    closes_by_market: Mapping[Market, Sequence[tuple[date, Decimal]]],
+) -> Counterfactual:
+    """Spend ``flows`` on each market's benchmark instead, and value the result today.
+
+    ``closes_by_market`` holds each market's benchmark closes, ascending, **already in the
+    reporting currency**. A market absent from the mapping has no benchmark and its flows are
+    reported as uncovered rather than dropped.
+
+    The composition :func:`finish` ∘ :func:`accumulate` (PERF spec §8.4), unchanged.
+    """
+    return finish(accumulate(flows, closes_by_market), closes_by_market)
+
+
+__all__ = [
+    "BenchState",
+    "Counterfactual",
+    "MarketLeg",
+    "ReportingFlow",
+    "accumulate",
+    "counterfactual",
+    "finish",
+]
