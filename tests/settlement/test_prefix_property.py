@@ -7,11 +7,13 @@ settled through the corpus day, after EACH write: every trend point (``total_val
 recorded is unchanged, and ``dirty_from`` is at or before the earliest point that changed. A
 write that changes nothing may record nothing.
 
-The oracle is the FROZEN v0.1.31 engine and trend (``tests/reference/cost_basis_v0131.py``,
-``trend_v0131.py``) over the inputs ``build_dashboard`` assembles (``dashboard_inputs.py``) —
-never the new engine (package A builds it in parallel; the main session reruns this file on
-A's engine at the wave-1 merge). A write after which either series is unavailable (the
-series-level ``available`` is evaluated live on every build, §4) is counted, not compared.
+The property is checked on TWO engines: the FROZEN v0.1.31 engine and trend
+(``tests/reference/cost_basis_v0131.py``, ``trend_v0131.py``) over the inputs ``build_dashboard``
+assembles (``dashboard_inputs.py``), and — since the wave-1 merge — the SHIPPING engine, the
+trend of an uncached ``dashboard._build_dashboard`` (``iter_books`` + ``value_series``), so the
+property the store relies on is pinned on the code that serves it. A write after which either
+series is unavailable (the series-level ``available`` is evaluated live on every build, §4) is
+counted, not compared.
 
 Every operation kind runs once per corpus, in a seeded order, so every trigger table sees an
 insert, an update and a delete. ``PD_PREFIX_SWEEP=<n>`` adds *n* further seeded random
@@ -30,6 +32,7 @@ from typing import Any
 
 import pytest
 
+from portfolio_dash.portfolio import dashboard
 from portfolio_dash.portfolio import settlement_store as st
 from tests.reference import trend_v0131 as ref
 from tests.reference.canon import canon
@@ -60,6 +63,21 @@ def _points(conn: sqlite3.Connection, db: CorpusDB) -> Points | None:
     series = ref.ref_compose_net_worth(trend, cash)
     return {p.date: canon((p.total_value, p.net_invested, p.incomplete, p.net_worth))
             for p in series.points}
+
+
+def _points_live(conn: sqlite3.Connection, db: CorpusDB) -> Points | None:
+    """The shipping engine's trend + net worth by day (an uncached build), or ``None``."""
+    trend = dashboard._build_dashboard(conn, now=db.now, reporting=db.reporting).trend
+    if not trend.available:
+        return None
+    return {p.date: canon((p.total_value, p.net_invested, p.incomplete, p.net_worth))
+            for p in trend.points}
+
+
+_ENGINES: dict[str, Callable[[sqlite3.Connection, CorpusDB], Points | None]] = {
+    "v0131": _points,
+    "live": _points_live,
+}
 
 
 def _changed(before: Points, after: Points) -> list[date]:
@@ -383,8 +401,12 @@ _OPS: tuple[str, ...] = tuple(sorted(
     and name not in {"day", "one", "x", "held"}))
 
 
+@pytest.mark.parametrize("engine", sorted(_ENGINES))
 @pytest.mark.parametrize("name", ["golden", "demo", "doubled_demo"])
-def test_dirty_from_bounds_every_reference_change(corpus_db: CorpusFactory, name: str) -> None:
+def test_dirty_from_bounds_every_reference_change(
+    corpus_db: CorpusFactory, name: str, engine: str
+) -> None:
+    points = _ENGINES[engine]
     db = corpus_db(name)
     conn = open_db(db.path)
     try:
@@ -401,7 +423,7 @@ def test_dirty_from_bounds_every_reference_change(corpus_db: CorpusFactory, name
         schedule = list(_OPS)
         rng.shuffle(schedule)
         schedule += [rng.choice(_OPS) for _ in range(SWEEP)]
-        before = _points(conn, db)
+        before = points(conn, db)
         assert before is not None, f"{name}: the reference series must start available"
         compared = changed_ops = 0
         for op in schedule:
@@ -410,7 +432,7 @@ def test_dirty_from_bounds_every_reference_change(corpus_db: CorpusFactory, name
             label: str = getattr(ops, op)()
             dirty_text = conn.execute("SELECT dirty_from FROM settle_dirty").fetchone()[0]
             dirty = None if dirty_text is None else date.fromisoformat(dirty_text)
-            after = _points(conn, db)
+            after = points(conn, db)
             if before is not None and after is not None:
                 compared += 1
                 moved = _changed(before, after)

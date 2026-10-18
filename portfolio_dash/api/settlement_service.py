@@ -7,13 +7,17 @@ spawn, and finalises both when the child exits (P7). Wave 0 fixes the boot hook 
 
 import sqlite3
 
+from portfolio_dash.portfolio.settlement_store import TriggerCheck
 
-def on_boot(conn: sqlite3.Connection) -> None:
-    """Called by the lifespan after the settle DDL (and, from wave 1, the trigger check).
+
+def on_boot(conn: sqlite3.Connection, *, trigger_check: TriggerCheck) -> None:
+    """Called by the lifespan after the settle DDL and the trigger check, on the boot session,
+    before ``trigger_schema_version`` is recorded. *trigger_check* says whether the trigger set
+    was recreated (spec §9.1: a recreated trigger starts a full run).
 
     A no-op until wave 2 (package E), which finalises orphan runs and starts the boot run.
     """
-    del conn
+    del conn, trigger_check
 
 
 __all__ = ["on_boot"]

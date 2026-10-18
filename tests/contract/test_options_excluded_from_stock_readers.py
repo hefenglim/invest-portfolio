@@ -101,6 +101,9 @@ _ALLOWLIST: dict[str, str] = {
     "portfolio/dashboard.py::_build_dashboard": (
         "the valuation itself: W2 splits book.holdings into the stock list and the options "
         "block here"),
+    "portfolio/dashboard.py::kpis_as_of": (
+        "the valuation's KPI half, extracted from _build_dashboard (PERF §11.2): it values "
+        "every position and splits the options out itself (opt_syms / split_holdings)"),
     "api/routers/input_center.py::_holdings_or_none": (
         "the manual door's preview book: option mode closes a contract position (W3)"),
     "api/routers/input_center.py::_position_preview": (

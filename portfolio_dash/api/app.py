@@ -94,6 +94,8 @@ from portfolio_dash.news.store import get_news_connection
 from portfolio_dash.ops import digest as digest_ops
 from portfolio_dash.ops import notify as notify_ops
 from portfolio_dash.ops.backup import pre_write_snapshot
+from portfolio_dash.portfolio import settlement_store
+from portfolio_dash.portfolio.settlement_models import ACTOR_BOOT
 from portfolio_dash.portfolio.settlement_store import create_tables as create_settle_tables
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
@@ -115,7 +117,8 @@ from portfolio_dash.scheduler.jobs import (
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared.clock import app_now
-from portfolio_dash.shared.db import session
+from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.db import install_actor, session
 from portfolio_dash.shared.flight import begin_write, end_write
 from portfolio_dash.shared.llm_fail_log import (
     ensure_table as ensure_llm_fail_log_table,
@@ -139,7 +142,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # In lifespan (not create_app) so hermetic TestClient(app) tests — which skip
     # lifespan — never write log files.
     configure_logging()
-    with session() as conn:
+    # Every boot write is stamped `system:boot` in the settlement store's change trail
+    # (spec §7 "Who made the change"): a no-op on a fresh database until the trail exists,
+    # installed again right after the settle DDL below.
+    with session(actor=ACTOR_BOOT) as conn:
         # First-run bootstrap: create EVERY table the running app reads + seed config, so a
         # fresh 0-byte DB is usable out of the box (guarded by tests/contract/
         # test_first_run_bootstrap.py — an empty DB hid the missing `prices` table until the
@@ -196,14 +202,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_option_expiry_tables(conn)  # option_expiry_skips (options spec §7.2)
         ensure_snapshots_table(conn)  # portfolio_snapshots (月度快照)
         action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
-        # The settlement store (PERF spec 2026-10-18 §6), after every table it borrows. Order
-        # matters (plan W0.6): (1) every step above; (2) the settle DDL and the job_runs.results
-        # migration (P3); (3) [wave 1] the trigger set, verified or recreated on a
-        # `system:boot` session; (4) the settlement's boot hook; (5) [wave 1] LAST, record
-        # `trigger_schema_version` — no boot DDL may move `schema_version` after it.
+        # The settlement store (PERF spec 2026-10-18 §6, §7), after every table it borrows.
+        # Order matters (plan W0.6): (1) every step above; (2) the settle DDL and the
+        # job_runs.results migration (P3); (3) the trigger set, verified or recreated, on this
+        # `system:boot` session — after every migration, since the ledgers' columns decide each
+        # trigger's text; (4) the settlement's boot hook; (5) LAST, record
+        # `trigger_schema_version` — no boot DDL may move `schema_version` after it, or every
+        # read would find the store unverified.
         create_settle_tables(conn)
         migrate_job_runs_results(conn)
-        settlement_on_boot(conn)
+        install_actor(conn, ACTOR_BOOT)
+        trigger_check = settlement_store.install_or_verify(
+            conn,
+            calc_version_changed=not settlement_store.store_state(
+                conn, reporting=get_settings().reporting_currency).calc_ok,
+        )
+        settlement_on_boot(conn, trigger_check=trigger_check)
+        settlement_store.record_schema_version(conn)
+    # What the boot's trigger check found (read by tests and diagnostics; never by a route).
+    app.state.settle_trigger_check = trigger_check
     # The news library lives in its own file (news/store.py); its first open creates and
     # migrates it, so open it once here rather than inside the first GET /api/news.
     get_news_connection().close()

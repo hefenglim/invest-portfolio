@@ -3,9 +3,10 @@ tests): after a FRESH boot and after an UPGRADE boot (a database created without
 tables and without ``job_runs.results``), the store is usable and ``trigger_schema_version``
 equals ``PRAGMA schema_version``; a second boot recreates nothing and moves nothing.
 
-``_boot`` is the lifespan as the main session wires it at the wave-1 merge: W0's steps (the
-real ``api/app.py`` lifespan, which creates the tables and migrates ``job_runs``), then — on a
-``system:boot`` session — the trigger set, the boot hook, and ``record_schema_version`` LAST.
+``_boot`` runs the REAL ``api/app.py`` lifespan, which since the wave-1 merge does the whole
+order on its ``system:boot`` session: the tables and the ``job_runs`` migration, the trigger
+set, the boot hook, and ``record_schema_version`` LAST; it returns what the trigger check found
+(``app.state.settle_trigger_check``).
 """
 
 from __future__ import annotations
@@ -21,12 +22,9 @@ from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
 from portfolio_dash.api.app import create_app
-from portfolio_dash.api.settlement_service import on_boot
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.settlement_models import ACTOR_BOOT, PeriodKpi, RunRequest
-from portfolio_dash.scheduler.jobs import migrate_job_runs_results
 from portfolio_dash.shared.config import get_settings
-from portfolio_dash.shared.db import install_actor, session
 from portfolio_dash.shared.enums import Currency
 from tests.conftest import _seed_golden
 
@@ -48,17 +46,10 @@ def boot_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
 
 
 def _boot() -> st.TriggerCheck:
-    with TestClient(create_app()) as client:
+    app = create_app()
+    with TestClient(app) as client:
         assert client.get("/api/health").status_code == 200
-    with session(actor=ACTOR_BOOT) as conn:
-        st.create_tables(conn)          # (2) the settle DDL …
-        migrate_job_runs_results(conn)  # … and the P3 migration (both no-ops here)
-        install_actor(conn, ACTOR_BOOT)  # the table exists now (a no-op if already on)
-        reporting = get_settings().reporting_currency
-        check = st.install_or_verify(
-            conn, calc_version_changed=not st.store_state(conn, reporting=reporting).calc_ok)
-        on_boot(conn)                   # (4) the boot hook
-        st.record_schema_version(conn)  # (5) LAST
+    check: st.TriggerCheck = app.state.settle_trigger_check
     return check
 
 
