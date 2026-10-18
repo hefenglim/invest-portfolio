@@ -26,7 +26,7 @@ defect this one was: fixed once, believed general.
 """
 
 from bisect import bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal, getcontext
 
@@ -53,6 +53,7 @@ from portfolio_dash.shared.cash_kinds import movement_sign
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle, counts_by
 from portfolio_dash.shared.money import settled_notional
@@ -471,6 +472,19 @@ def trend_book_days(bundle: LedgerBundle, *, start: date, end: date) -> list[dat
     return lead[-1:] + [d for d in days if begin < d <= end]
 
 
+def holds_open_option(book: Book, instruments: Mapping[str, Instrument]) -> bool:
+    """Whether *book* holds an open option contract — the per-day test behind
+    ``TrendSeries.options_value_excluded`` (options spec §5 / R3): a non-zero holding of an
+    instrument registered as an option. The settlement stores it per day (``options_open``)."""
+    for h in book.holdings:
+        if h.shares == _ZERO:
+            continue
+        inst = instruments.get(h.symbol)
+        if inst is not None and inst.is_option:
+            return True
+    return False
+
+
 def value_series(
     bundle: LedgerBundle,
     price_history: PriceHistory,
@@ -482,6 +496,7 @@ def value_series(
     cash_movements: Sequence[CashMovementFlow],
     refused_dividends: Iterable[DividendIdentity],
     books: Iterable[tuple[date, Book]],
+    options_open_before: bool,
 ) -> TrendSeries:
     """The trend over ``[start, end]`` from precomputed books (PERF spec §8.2).
 
@@ -492,10 +507,20 @@ def value_series(
     the trend's own first day is never valued, and ``available`` is decided over EVERY flow,
     whatever *start* is. Arithmetic, order and refusals are :func:`daily_value_series`'s —
     this is its precomputed-books form.
+
+    *options_open_before* — REQUIRED, no default: whether any day from the trend's first day
+    up to the day before the first valued day held an open option contract
+    (:func:`holds_open_option` on that day's book; the store keeps it per day as
+    ``options_open``). ``TrendSeries.options_value_excluded`` is defined over EVERY day of the
+    trend (spec §4) while this function sees only the valued ones, so the caller states the
+    rest and the flag is their OR — the series a later start returns carries the same flag as
+    the full one. With *start* on or before the trend's first day there is no such day: pass
+    ``False`` (``True`` is refused).
     """
     return daily_value_series(bundle, price_history, fx_history, reporting, end=end,
                               cash_movements=cash_movements, start=start, books=books,
-                              refused_dividends=refused_dividends)
+                              refused_dividends=refused_dividends,
+                              options_open_before=options_open_before)
 
 
 def daily_value_series(
@@ -509,6 +534,7 @@ def daily_value_series(
     start: date | None = None,
     books: Iterable[tuple[date, Book]] | None = None,
     refused_dividends: Iterable[DividendIdentity] | None = None,
+    options_open_before: bool | None = None,
 ) -> TrendSeries:
     """Replay the ledgers day by day from the first event to ``end``.
 
@@ -518,12 +544,14 @@ def daily_value_series(
     Raises :class:`~portfolio_dash.portfolio.cost_basis.UnbookableLedgerError` (never a raw
     ``ArithmeticError``) when a day cannot be valued at all — see :func:`build_reporting_flows`.
 
-    The three optional arguments are :func:`value_series`' (PERF spec §8.2). Left out, this is
+    The optional arguments are :func:`value_series`' (PERF spec §8.2). Left out, this is
     v0.1.31's function: the book rebuilt from ``bundle.through(day)`` on every day a row counts
     from, the refusals from one whole-bundle replay, every day from the first:
 
     * *start* — value only the days from ``max(start, trend_start(bundle))``; a point's values
-      do not depend on it;
+      do not depend on it. A start after the trend's first day REQUIRES
+      *options_open_before* (``TypeError`` without it — see :func:`value_series`), so the
+      series flag stays the OR over every day;
     * *books* — ``(day, book)`` ascending, read instead of the per-day rebuild: a valued day
       reads the latest book on or before it, and a book missing for a day some row counts
       from is refused (``ValueError``) rather than reused stale;
@@ -546,6 +574,12 @@ def daily_value_series(
         if first_day is None:
             return TrendSeries(points=[], reporting_currency=reporting, available=False)
         begin = first_day if start is None else max(start, first_day)
+        if begin > first_day and options_open_before is None:
+            raise TypeError("a trend starting after its first day needs options_open_before: "
+                            "whether a day before the start held an open option contract")
+        if begin == first_day and options_open_before:
+            raise ValueError("options_open_before=True, but no day precedes the trend's "
+                             "first day")
 
         # ONE ActionIndex for the whole replay (trap #21) — never one per day and never one per
         # lookup. Built from the FULL action list rather than per-day: `split_factor`'s window
@@ -573,7 +607,8 @@ def daily_value_series(
         # Options spec §5 / R3: an open contract has no daily price series (R2 values it at its
         # last trade, a point-in-time figure), so its value is left OUT of every day — without
         # marking the day incomplete — and the series says so once.
-        options_excluded = False
+        # The days before the first valued one are the caller's to state (`value_series`).
+        options_excluded = bool(options_open_before)
         # The book changes only on a day some row counts from (2026-10-13). `through(day)` is a
         # date-PREFIX cut, so between two such days it holds the same rows and `build_book`, a
         # pure function of the bundle, returns the same book: replay on those days and reuse

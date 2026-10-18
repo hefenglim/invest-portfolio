@@ -654,6 +654,26 @@ def fx_complete_return(
     return FxCompleteOutcome(last.total_value - last.net_invested, None)
 
 
+_BENCH_EPOCH = date(1990, 1, 1)  # benchmark closes may predate the first ledger event
+
+
+def bounded_closes(
+    conn: sqlite3.Connection, symbol: str, boundary: date, end: date, *, floor: date,
+) -> list[tuple[date, Decimal]]:
+    """The closes a carry-forward reader of ``[boundary, end]`` needs, never one before *floor*.
+
+    v0.1.31 read every close ``BETWEEN floor AND end`` (the trend and the performance route
+    from 1900, the benchmark from 1990). The light read (PERF spec §8.5) starts at the last
+    close on or before ``max(boundary, floor)`` instead — so a first day on a weekend, a
+    holiday or in a suspension keeps its carried-forward value — and drops whatever predates
+    *floor*. Every lookup on a day from *boundary* on therefore finds exactly the close the
+    full v0.1.31 read gave it, including "none" for a day before the first close on or after
+    *floor* (a 1988 flow is uncovered by a benchmark history stored from 1987, as before).
+    """
+    return [row for row in get_close_series(conn, symbol, max(boundary, floor), end)
+            if row[0] >= floor]
+
+
 def _benchmark_comparison(
     conn: sqlite3.Connection,
     bundle: LedgerBundle,
@@ -697,8 +717,9 @@ def _benchmark_comparison(
     # benchmark series to load. `counterfactual` excludes it from both legs; this loop must
     # not ask for 「the index of None」.
     # PERF spec §8.5: each market's closes are read from the last close on or before that
-    # market's FIRST flow — the earliest day `counterfactual` looks a level up for — instead
-    # of from 1990; its terminal value is the last close, which the bounded read keeps too.
+    # market's FIRST flow — the earliest day `counterfactual` looks a level up for — and
+    # never from before 1990 (v0.1.31's floor, `bounded_closes`); its terminal value is the
+    # last close, which the bounded read keeps too.
     first_flow: dict[Market, date] = {}
     for f in flows:
         if f.market is not None and (f.market not in first_flow or f.on < first_flow[f.market]):
@@ -711,7 +732,8 @@ def _benchmark_comparison(
             continue
         raw = closes_in(
             actions, bench.storage_key,
-            get_close_series(conn, bench.storage_key, first_flow[market], as_of),
+            bounded_closes(conn, bench.storage_key, first_flow[market], as_of,
+                           floor=_BENCH_EPOCH),
             valued_on=as_of,
         )
         converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
@@ -764,7 +786,8 @@ def closes_in(
 class KpiBlock:
     """What :func:`kpis_as_of` answers (PERF spec §11.2) — its return set is fixed.
 
-    * the KPI fields: ``total_market_value`` (stocks + options, all-or-nothing on FX),
+    * the KPI fields: KPI 總市值 through :meth:`market_value_with` (the stock grand subtotal
+      ``stock_market_value`` plus the options block's own market value, all-or-nothing on FX),
       ``total_return`` (A) and its rate, the realized / unrealized split, ``xirr`` with its
       window and reason, ``by_currency_value``;
     * the rates used and the missing / stale facts: ``price_reads`` (each held stock's price
@@ -772,13 +795,15 @@ class KpiBlock:
       for, ``None`` = missing, with its date and ``stale``) — a snapshot taken when the KPIs
       were done, so the pairs a later step reads are not in it;
     * the intermediates ``_build_dashboard`` goes on with: the valued bundle, the book, the
-      valuation, the returns, the currency view, the resolver (whose ``reads`` keep growing),
-      the option value and the cut cash movements.
+      valuation, the returns, the currency view, the resolver (whose ``reads`` keep growing)
+      and the cut cash movements.
+
+    The 選擇權 block is assembled by :func:`options_block_of` from these intermediates — once —
+    and KPI 總市值 is read from it, exactly as v0.1.31 read it.
     """
 
     as_of: date
     reporting: Currency
-    total_market_value: Decimal | None
     total_return: Decimal | None
     total_return_rate: Decimal | None
     realized_total: Decimal | None
@@ -801,9 +826,28 @@ class KpiBlock:
     returns: ReturnSummary | None
     view: CombinedView | None
     stock_market_value: Decimal | None
-    option_market_value: Decimal | None
     resolver: RateResolver
     cash_movements: list[CashMovementFlow]
+
+    def market_value_with(self, options: OptionsBlock | None) -> Decimal | None:
+        """KPI 總市值 (OPT-D5): the stock grand subtotal plus *options*' own reporting market
+        value — the block :func:`options_block_of` assembled, never a second computation. The
+        addition is SKIPPED (not ``+ 0``) on a ledger without an option, and the figure
+        degrades to ``None`` when either half cannot be formed (the all-or-nothing FX rule).
+
+        Refuses the wrong block shape loudly: an options ledger without its block (the
+        figure would silently drop every contract) or a block on a stock ledger.
+        """
+        if not self.has_options:
+            if options is not None:
+                raise ValueError("an options block for a ledger without an option")
+            return self.stock_market_value
+        if options is None:
+            raise ValueError("KPI 總市值 of an options ledger needs its options block")
+        option_mv = options.market_value.reporting
+        if self.stock_market_value is None or option_mv is None:
+            return None
+        return self.stock_market_value + option_mv
 
     @property
     def held_symbols(self) -> list[str]:
@@ -1062,24 +1106,12 @@ def kpis_as_of(
         unrealized_total = unrealized_rep
         if gross_rep != _ZERO:
             total_return_rate = total_return_blended / gross_rep
-    # KPI 總市值 (OPT-D5): the stock grand subtotal plus the options' reporting value — the
-    # addition is SKIPPED (not `+ 0`) on a ledger without an option, and degrades to None when
-    # either half cannot be formed (the all-or-nothing FX rule). The options' value is the
-    # 選擇權 block's own figure (`option_summary`'s market value), so the two never differ.
+    # KPI 總市值's stock half; the options' half is the 選擇權 block's own market value
+    # (`KpiBlock.market_value_with`).
     total_value = view.reporting_total_value if view is not None else None
-    kpi_market_value = total_value
-    option_mv: Decimal | None = None
-    if has_options:
-        option_mv = option_summary(
-            book=book, valued=valued, bundle=bundle, last_trades=last_trades,
-            underlying_prices={}, fx_rate=resolver.rate, reporting=reporting, as_of=as_of,
-            trend_excludes_value=False).market_value.reporting
-        kpi_market_value = (None if total_value is None or option_mv is None
-                            else total_value + option_mv)
 
     return KpiBlock(
-        as_of=as_of, reporting=reporting,
-        total_market_value=kpi_market_value, total_return=total_return_blended,
+        as_of=as_of, reporting=reporting, total_return=total_return_blended,
         total_return_rate=total_return_rate, realized_total=realized_total,
         unrealized_total=unrealized_total, xirr=xirr_value,
         xirr_window_days=xirr_window_days, xirr_reason=xirr_reason,
@@ -1088,9 +1120,28 @@ def kpis_as_of(
         bundle=bundle, has_options=has_options, option_symbols=opt_syms, book=book,
         actions=actions, price_map=price_map, last_trades=last_trades, valued=valued,
         valued_stocks=valued_stocks, returns=returns, view=view,
-        stock_market_value=total_value, option_market_value=option_mv, resolver=resolver,
+        stock_market_value=total_value, resolver=resolver,
         cash_movements=list(cash_movements),
     )
+
+
+def options_block_of(
+    kpi: KpiBlock, prices: PriceSource, *, trend_excludes_value: bool,
+) -> OptionsBlock | None:
+    """The 選擇權 block (options spec §7.1) from *kpi*'s ONE replay and ONE valuation, or
+    ``None`` on a ledger without an option. The underlyings' prices come from *prices* — the
+    same source the valuation read (:class:`LatestStored` live, :class:`OnOrBefore` for a
+    period close); *trend_excludes_value* is the trend's own flag. KPI 總市值 reads this
+    block's market value (:meth:`KpiBlock.market_value_with`)."""
+    if not kpi.has_options:
+        return None
+    return option_summary(
+        book=kpi.book, valued=kpi.valued, bundle=kpi.bundle, last_trades=kpi.last_trades,
+        underlying_prices=_underlying_prices(prices, kpi.book, kpi.option_symbols,
+                                             kpi.bundle.instruments, kpi.actions,
+                                             as_of=kpi.as_of),
+        fx_rate=kpi.resolver.rate, reporting=kpi.reporting, as_of=kpi.as_of,
+        trend_excludes_value=trend_excludes_value)
 
 
 def build_dashboard(
@@ -1199,7 +1250,6 @@ def _build_dashboard(
     held_symbols = kpi.held_symbols
     price_reads = kpi.price_reads
     actions = kpi.actions
-    last_trades = kpi.last_trades
     valued = kpi.valued
     valued_stocks = kpi.valued_stocks
     resolver = kpi.resolver
@@ -1406,9 +1456,11 @@ def _build_dashboard(
         # before` lookup — with `valued_on=day`, which is exactly the factor a precomputed
         # re-expression could not know. Correcting it twice would divide by the ratio twice.
         # PERF spec §8.5: read from the last close on or before the trend's FIRST day — the
-        # earliest day it looks a price up for — not from 1900 (the light read).
+        # earliest day it looks a price up for — and never from before 1900, v0.1.31's floor
+        # (`bounded_closes`; the light read).
         price_history: PriceHistory = {
-            sym: get_close_series(conn, sym, first_day, as_of) for sym in ledger_symbols
+            sym: bounded_closes(conn, sym, first_day, as_of, floor=_EPOCH)
+            for sym in ledger_symbols
         }
         # (``trend_fx_history`` is declared before this branch so step 10's benchmark
         # counterfactual can read it on an EMPTY ledger too — where it is simply empty and
@@ -1423,12 +1475,14 @@ def _build_dashboard(
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
         # ONE replay feeds every day (PERF spec §8.1): `iter_books` yields the book of each
         # day a row counts from, and the payouts the flows leave out are this request's
-        # book's refusals — the same rows a second whole-bundle replay would refuse.
+        # book's refusals — the same rows a second whole-bundle replay would refuse. The
+        # series starts on its first day, so no day precedes it (`options_open_before`).
         book_days = trend_book_days(bundle, start=first_day, end=as_of)
         trend = value_series(
             bundle, price_history, fx_history, reporting, start=first_day, end=as_of,
             cash_movements=cash_movements, refused_dividends=book.refused_dividends,
-            books=zip(book_days, iter_books(bundle, book_days), strict=True))
+            books=zip(book_days, iter_books(bundle, book_days), strict=True),
+            options_open_before=False)
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
@@ -1491,14 +1545,8 @@ def _build_dashboard(
         else fx_complete - total_return_blended - trading_cost
     )
     # Options spec §7.1: the block, from this request's ONE replay and ONE valuation.
-    options_block: OptionsBlock | None = None
-    if has_options:
-        options_block = option_summary(
-            book=book, valued=valued, bundle=bundle, last_trades=last_trades,
-            underlying_prices=_underlying_prices(conn, book, opt_syms, instruments, actions,
-                                                 now=now, as_of=as_of),
-            fx_rate=resolver.rate, reporting=reporting, as_of=as_of,
-            trend_excludes_value=trend.options_value_excluded)
+    options_block = options_block_of(kpi, source,
+                                     trend_excludes_value=trend.options_value_excluded)
     # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
     benchmark = _benchmark_comparison(
         conn, bundle, trend_fx_history, reporting,
@@ -1511,7 +1559,8 @@ def _build_dashboard(
     )
     kpis = KpiSummary(
         reporting_currency=reporting,
-        total_market_value=kpi.total_market_value,
+        # KPI 總市值 (OPT-D5): the stock grand subtotal plus the block's own market value.
+        total_market_value=kpi.market_value_with(options_block),
         total_return=total_return_blended,
         total_return_fx_complete=fx_complete,
         principal_fx_effect=principal_fx,
@@ -1611,13 +1660,14 @@ def _build_dashboard(
 
 
 def _underlying_prices(
-    conn: sqlite3.Connection, book: Book, opt_syms: frozenset[str],
-    instruments: dict[str, Instrument], actions: ActionIndex, *, now: datetime, as_of: date,
+    prices: PriceSource, book: Book, opt_syms: frozenset[str],
+    instruments: dict[str, Instrument], actions: ActionIndex, *, as_of: date,
 ) -> dict[str, tuple[Decimal, date]]:
     """OPT-D17: the latest stored price of every REGISTERED underlying of an open contract —
-    ONE read per distinct underlying, re-expressed across splits like every held price
-    (``price_in``), and never added to ``price_reads`` (so never in freshness). An unregistered
-    or unpriced underlying is simply absent (the block omits the two keys)."""
+    ONE read per distinct underlying (through *prices*, the valuation's own source),
+    re-expressed across splits like every held price (``price_in``), and never added to
+    ``price_reads`` (so never in freshness). An unregistered or unpriced underlying is simply
+    absent (the block omits the two keys)."""
     out: dict[str, tuple[Decimal, date]] = {}
     seen: set[str] = set()
     for h in book.holdings:
@@ -1630,7 +1680,7 @@ def _underlying_prices(
         und = instruments.get(terms.underlying)
         if und is None or und.is_option:
             continue
-        pr = get_latest_price(conn, terms.underlying, now=now)
+        pr = prices.price(terms.underlying)
         if pr is not None:
             out[terms.underlying] = (
                 price_in(actions, terms.underlying, pr.value, priced_on=pr.as_of,

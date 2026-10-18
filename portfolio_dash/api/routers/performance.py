@@ -23,16 +23,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.data_ingestion.holdings import load_action_index
-from portfolio_dash.portfolio.dashboard import build_dashboard, closes_in
+from portfolio_dash.portfolio.dashboard import bounded_closes, build_dashboard, closes_in
 from portfolio_dash.portfolio.timeseries import FxHistory
 from portfolio_dash.portfolio.twr import build_overlay, convert_closes, twr_index
 from portfolio_dash.pricing.benchmarks import get_benchmark
-from portfolio_dash.pricing.store import get_close_series, get_fx_series
+from portfolio_dash.pricing.store import get_fx_series
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
 
 router = APIRouter()
 
+# History reads start here (stored benchmark closes may predate the first ledger event).
+_EPOCH = date(1900, 1, 1)
 _WINDOW_DAYS = {"1y": 365, "3y": 1095}
 _WINDOWS = {"1y", "3y", "all"}
 _WIRE_DP = Decimal("0.0001")  # 4 dp at the wire (index values are analysis, not money)
@@ -52,12 +54,14 @@ def _load_fx_history(
     conn: sqlite3.Connection, quote: Currency, reporting: Currency, start: date, as_of: date
 ) -> FxHistory:
     """Both directions of the ``quote``/``reporting`` pair for carry-forward conversion of
-    closes dated from *start* — each read from its last rate on or before *start*."""
+    closes dated from *start* — each read from its last rate on or before *start*, and never
+    from before 1900 (v0.1.31 read ``BETWEEN _EPOCH AND as_of``)."""
     history: FxHistory = {}
     if quote == reporting:
         return history
     for base, other in ((quote, reporting), (reporting, quote)):
-        rows = get_fx_series(conn, base, other, start, as_of)
+        rows = [r for r in get_fx_series(conn, base, other, max(start, _EPOCH), as_of)
+                if r[0] >= _EPOCH]
         if rows:
             history[(base, other)] = rows
     return history
@@ -124,13 +128,13 @@ def performance_twr(
     #
     # PERF spec §8.5 — a BOUNDED load. Every point the overlay reads is a carry-forward
     # lookup on a day in ``[window_start, as_of]``, so the closes are read from the last close
-    # on or before ``window_start`` (``get_close_series``), and the FX from the last rate on
-    # or before that first close — never from 1900. A first day on a weekend, a holiday or a
-    # suspension keeps the value it carries forward.
+    # on or before ``window_start`` (``bounded_closes``), and the FX from the last rate on
+    # or before that first close, both never from before v0.1.31's 1900 floor (``_EPOCH``).
+    # A first day on a weekend, a holiday or a suspension keeps the value it carries forward.
     actions = load_action_index(conn)
     closes = closes_in(
         actions, bench.storage_key,
-        get_close_series(conn, bench.storage_key, window_start, as_of),
+        bounded_closes(conn, bench.storage_key, window_start, as_of, floor=_EPOCH),
         valued_on=as_of,
     )
     fx_history = _load_fx_history(conn, bench.quote_ccy, reporting,

@@ -235,3 +235,88 @@ def test_the_performance_route_on_the_crafted_boundaries(
                               reporting=TWD)
         assert got["available"], (shape, window, got["reason"])
         assert got == _v0131_overlay(conn, _NOW, TWD, "0050", window), (shape, window)
+
+
+# --- v0.1.31's floors: nothing before 1900 (trend, performance) or 1990 (benchmark) -----------
+
+
+def _fresh(tmp_path: Any) -> sqlite3.Connection:
+    from portfolio_dash.data_ingestion.config_seed import seed_accounts
+    from tests.conftest import init_golden_base
+
+    conn = open_db(tmp_path / "floor.db")
+    init_golden_base(conn)
+    seed_accounts(conn)
+    return conn
+
+
+def test_a_benchmark_history_before_1990_is_not_read(tmp_path: Any) -> None:
+    """v0.1.31 read benchmark closes from 1990-01-01. An opening built in 1988, under an index
+    history stored from 1987, therefore stays UNCOVERED — the bounded read must not place it
+    on a 1988 close (the review's reproduction: `uncovered_markets` ["US"] → [])."""
+    from portfolio_dash.data_ingestion.store import upsert_opening
+    from portfolio_dash.pricing.results import FxRow
+    from portfolio_dash.pricing.store import upsert_fx
+
+    conn = _fresh(tmp_path)
+    try:
+        upsert_instrument(conn, Instrument(symbol="AAPL", market=Market.US,
+                                           quote_ccy=Currency.USD, sector="Tech", name="Apple"))
+        upsert_opening(conn, account_id="schwab", symbol="AAPL", shares=Decimal("40"),
+                       original_cost_total=Decimal("1400"), build_date=date(1988, 3, 1))
+        insert_transaction(conn, account_id="schwab", symbol="AAPL", side=Side.BUY,
+                           quantity=Decimal("5"), price=Decimal("40"), fees=Decimal("0"),
+                           tax=Decimal("0"), trade_date=date(1990, 2, 5))
+        days = _weekdays(date(1987, 1, 2), date(1990, 3, 14))
+        upsert_prices(conn, [PriceRow(instrument=sym, market=Market.US, as_of=d,
+                                      close=base + Decimal(n % 13), source="test")
+                             for n, d in enumerate(days)
+                             for sym, base in (("AAPL", Decimal(35)), ("^GSPC", Decimal(250)))],
+                      fetched_at=datetime(1990, 3, 14, 12, 0))
+        upsert_fx(conn, [FxRow(base=Currency.USD, quote=TWD, as_of=date(1987, 12, 31),
+                               rate=Decimal("28.5"), source="test")],
+                  fetched_at=datetime(1990, 3, 14, 12, 0))
+        conn.commit()
+        now = datetime(1990, 3, 15, 14, 30, tzinfo=TAIPEI)
+        data = _build_dashboard(conn, now=now, reporting=TWD)
+        i = load_inputs(conn, now, TWD)
+        expected = _frozen_benchmark(conn, i)
+        assert expected is not None and expected["uncovered_markets"] == ["US"]
+        assert data.benchmark is not None
+        got = to_wire(data.benchmark.model_dump())
+        assert {k: got[k] for k in expected} == expected
+        a, b = canon(_frozen_trend(i)), canon(data.trend)
+        assert a == b, first_difference(a, b)
+    finally:
+        conn.close()
+
+
+def test_a_price_before_1900_is_not_read(tmp_path: Any) -> None:
+    """v0.1.31 read the trend's closes and the performance route's closes and FX from
+    1900-01-01: a close stored for 1899 is not carried into the first day of 1900."""
+    conn = _fresh(tmp_path)
+    try:
+        upsert_instrument(conn, Instrument(symbol="OLD", market=Market.TW, quote_ccy=TWD,
+                                           sector="Utilities", name="Old Co", board="TWSE"))
+        insert_transaction(conn, account_id="tw_broker", symbol="OLD", side=Side.BUY,
+                           quantity=Decimal("1000"), price=Decimal("10"), fees=Decimal("20"),
+                           tax=Decimal("0"), trade_date=date(1900, 1, 2))
+        rows = [(date(1899, 12, 29), Decimal("9.5")), (date(1900, 1, 15), Decimal("10.5")),
+                (date(1900, 1, 29), Decimal("11"))]
+        upsert_prices(conn, [PriceRow(instrument=sym, market=Market.TW, as_of=d, close=c,
+                                      source="test")
+                             for d, c in rows for sym in ("OLD", "0050")],
+                      fetched_at=datetime(1900, 1, 30, 12, 0))
+        conn.commit()
+        now = datetime(1900, 2, 1, 14, 30, tzinfo=TAIPEI)
+        data = _build_dashboard(conn, now=now, reporting=TWD)
+        frozen = _frozen_trend(load_inputs(conn, now, TWD))
+        assert frozen.points[0].incomplete, "v0.1.31 had no close for the first day"
+        a, b = canon(frozen), canon(data.trend)
+        assert a == b, first_difference(a, b)
+        for window in ("1y", "all"):
+            got = performance_twr(benchmark="0050", window=window, conn=conn, now=now,
+                                  reporting=TWD)
+            assert got == _v0131_overlay(conn, now, TWD, "0050", window), window
+    finally:
+        conn.close()

@@ -10,7 +10,9 @@ claim that "as at D" on the full database is that world.
 
 Compared: the KPI fields (``total_market_value``, ``total_return``, ``total_return_rate``, the
 realized / unrealized split, ``xirr`` and its window and reason), ``by_currency_value``, and
-the missing / stale facts — every held price read, and every FX pair the KPIs read. The
+the missing / stale facts — every held price read, and every FX pair the KPIs read. KPI 總市值
+is read the way the dashboard reads it: the stock subtotal plus the 選擇權 block's own market
+value (``options_block_of``), and that block's market value is compared with the reference's. The
 reference's ``freshness.fx`` also lists the pairs only the 換匯損益 summary reads (step 5,
 which a period close leaves out — spec §11.2 "FX P&L at D"); those are named, not compared.
 """
@@ -32,7 +34,9 @@ from portfolio_dash.portfolio.dashboard import (
     KpiBlock,
     LatestStored,
     OnOrBefore,
+    PriceSource,
     kpis_as_of,
+    options_block_of,
 )
 from portfolio_dash.pricing.store import FxSeriesCache
 from portfolio_dash.shared.enums import Currency
@@ -47,8 +51,8 @@ from tests.reference.corpora import (
 )
 
 _PAYLOADS = Path(__file__).resolve().parents[1] / "reference" / "payloads"
-_KPI_FIELDS = ("total_market_value", "total_return", "total_return_rate", "realized_total",
-               "unrealized_total", "xirr", "xirr_window_days")
+_KPI_FIELDS = ("total_return", "total_return_rate", "realized_total", "unrealized_total",
+               "xirr", "xirr_window_days")
 
 
 def _manifest() -> dict[str, Any]:
@@ -78,6 +82,14 @@ def _kpi_wire(k: KpiBlock) -> dict[str, Any]:
     return {f: to_wire(getattr(k, f)) for f in _KPI_FIELDS}
 
 
+def _market_value(label: str, k: KpiBlock, prices: PriceSource, ref: dict[str, Any]) -> Any:
+    """KPI 總市值 as the dashboard reads it, the options block's market value checked too."""
+    block = options_block_of(k, prices, trend_excludes_value=False)
+    if block is not None:
+        assert to_wire(block.market_value.model_dump()) == ref["options"]["market_value"], label
+    return to_wire(k.market_value_with(block))
+
+
 def _price_facts(k: KpiBlock) -> list[dict[str, Any]]:
     return [{"symbol": s, "as_of": None if pr is None else pr.as_of.isoformat(),
              "stale": True if pr is None else pr.stale} for s, pr in k.price_reads.items()]
@@ -90,8 +102,10 @@ def _fx_facts(k: KpiBlock) -> dict[str, dict[str, Any]]:
             for (b, q), r in k.fx_reads.items()}
 
 
-def _assert_matches(label: str, k: KpiBlock, ref: dict[str, Any]) -> None:
+def _assert_matches(label: str, k: KpiBlock, prices: PriceSource, ref: dict[str, Any]
+                    ) -> None:
     assert _kpi_wire(k) == {f: ref["kpis"][f] for f in _KPI_FIELDS}, label
+    assert _market_value(label, k, prices, ref) == ref["kpis"]["total_market_value"], label
     assert k.xirr_reason == ref["freshness"]["xirr_unavailable_reason"], label
     view = ref["currency_view"]
     assert to_wire(k.by_currency_value) == (None if view is None
@@ -126,7 +140,7 @@ def test_every_month_end_close_is_the_truncated_world(corpus: tuple[str, sqlite3
                        cash_movements=valued_rows_as_of(movements, d),
                        prices=source, fx=source, as_of=d, reporting=reporting)
         ref = json.loads((_PAYLOADS / name / "month_end" / f"{d:%Y-%m}.json").read_bytes())
-        _assert_matches(f"{name} {d}", k, ref)
+        _assert_matches(f"{name} {d}", k, source, ref)
 
 
 def test_the_pairs_only_the_fx_summary_reads_are_named(corpus: tuple[str, sqlite3.Connection]
@@ -166,7 +180,7 @@ def test_the_live_sources_give_the_dashboards_kpis(corpus: tuple[str, sqlite3.Co
                    cash_movements=valued_rows_as_of(list_cash_movements(conn), now.date()),
                    prices=source, fx=source, as_of=now.date(), reporting=corpus_def.reporting)
     ref = json.loads((_PAYLOADS / name / "dashboard.json").read_bytes())
-    _assert_matches(name, k, ref)
+    _assert_matches(name, k, source, ref)
 
 
 def test_a_precomputed_book_is_used_not_rebuilt(corpus: tuple[str, sqlite3.Connection],

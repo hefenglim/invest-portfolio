@@ -6,7 +6,14 @@ The one-pass trend: the per-day valuation loop of ``daily_value_series``, fed by
 FROZEN v0.1.31 ``daily_value_series`` (``tests/reference/trend_v0131.py``) point for point,
 compared by :func:`tests.reference.canon.canon` — exponents and the ``exclude=True`` flag
 included. The guard's fallback (the reference per-day sum) is forced on every corpus and must
-be equal too; ``usd_reporting`` takes it without being forced.
+be equal too, and a crafted USD ledger takes it without being forced.
+
+A series starting after its first day carries the flag of the WHOLE trend
+(``options_value_excluded`` is the OR over every day, spec §4): the caller states whether a day
+before the start held an open option (``options_open_before``), and a ledger that closed its
+option before the start shows the argument matters. The book's refusals are an input that
+matters too: ``refused_dividends=[]`` (the reviewer's surviving mutant) gives another series on
+a ledger with refused cash dividends.
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ from portfolio_dash.portfolio.dashboard_models import TrendSeries
 from portfolio_dash.portfolio.networth import daily_cash_series
 from portfolio_dash.portfolio.timeseries import (
     _NetInvested,
+    daily_value_series,
+    holds_open_option,
     trend_book_days,
     trend_start,
     value_series,
@@ -35,6 +44,7 @@ from portfolio_dash.shared.models.ledger import LedgerBundle, Transaction
 from tests.reference import trend_v0131 as ref
 from tests.reference.canon import canon, first_difference
 from tests.reference.corpora import CORPUS_NAMES, TEMPLATE_DIR_NAME, copy_corpus, open_db
+from tests.reference.cost_basis_v0131 import ref_books
 from tests.reference.dashboard_inputs import DashboardInputs, load_inputs
 
 
@@ -57,14 +67,24 @@ def _reference(i: DashboardInputs) -> TrendSeries:
                                       cash_movements=i.cash_movements)
 
 
-def _one_pass(i: DashboardInputs, start: date) -> TrendSeries:
+def _open_before(bundle: LedgerBundle, start: date) -> bool:
+    """Whether a day from the trend's first day to the day before *start* held an open option
+    — what the store read path states from its stored days, here from the FROZEN books."""
+    first = trend_start(bundle)
+    assert first is not None
+    days = sorted(d for d in bundle.counts_on_dates() if first <= d < start)
+    return any(holds_open_option(b, bundle.instruments) for b in ref_books(bundle, days))
+
+
+def _one_pass(i: DashboardInputs, start: date, *, refused: Any = None) -> TrendSeries:
     """The trend as the dashboard builds it: one ``iter_books`` pass, the book's refusals."""
     days = trend_book_days(i.bundle, start=start, end=i.as_of)
     return value_series(i.bundle, i.price_history, i.trend_fx_history, i.reporting,
                         start=start, end=i.as_of, cash_movements=i.cash_movements,
-                        refused_dividends=build_book(i.bundle, allow_oversell=True)
-                        .refused_dividends,
-                        books=zip(days, iter_books(i.bundle, days), strict=True))
+                        refused_dividends=(build_book(i.bundle, allow_oversell=True)
+                                           .refused_dividends if refused is None else refused),
+                        books=zip(days, iter_books(i.bundle, days), strict=True),
+                        options_open_before=_open_before(i.bundle, start))
 
 
 def _assert_same(label: str, expected: Any, got: Any) -> None:
@@ -73,8 +93,8 @@ def _assert_same(label: str, expected: Any, got: Any) -> None:
 
 
 def _from(series: TrendSeries, start: date) -> TrendSeries:
-    """The reference series with the days before *start* removed (the flag recomputed over
-    the days kept would be the same here: no corpus holds an option)."""
+    """The reference series with the days before *start* removed — its flag kept: a later
+    start carries the whole trend's ``options_value_excluded``."""
     return series.model_copy(update={"points": [p for p in series.points if p.date >= start]})
 
 
@@ -183,7 +203,8 @@ def test_a_usd_ledger_whose_sum_needs_more_digits_takes_the_fallback(
     days = trend_book_days(bundle, start=date(2026, 3, 2), end=end)
     got = value_series(bundle, prices, fx, usd, start=date(2026, 3, 2), end=end,
                        cash_movements=[], refused_dividends=[],
-                       books=zip(days, iter_books(bundle, days), strict=True))
+                       books=zip(days, iter_books(bundle, days), strict=True),
+                       options_open_before=False)
     _assert_same("crafted usd", expected, got)
     assert calls[0] == 2  # the first day, and the second buy's day
 
@@ -212,7 +233,8 @@ def test_a_book_missing_for_an_event_day_is_refused(corpus: tuple[str, Dashboard
         value_series(i.bundle, i.price_history, i.trend_fx_history, i.reporting,
                      start=first, end=i.as_of, cash_movements=i.cash_movements,
                      refused_dividends=[],
-                     books=zip(kept, iter_books(i.bundle, kept), strict=True))
+                     books=zip(kept, iter_books(i.bundle, kept), strict=True),
+                     options_open_before=False)
 
 
 def test_trend_book_days() -> None:
@@ -237,3 +259,95 @@ def test_the_cash_series_from_a_start_day_is_the_full_one_cut(
         cut = {d: v for d, v in full.items() if d >= start}
         _assert_same(f"{name} cash from {start}", cut,
                      daily_cash_series(*args, end=i.as_of, start=start))
+
+
+# --- the series flag over every day, and the refusals as an input ---------------------------
+
+
+def test_holds_open_option_is_the_series_flag(corpus: tuple[str, DashboardInputs]) -> None:
+    """The per-day test the store keeps, OR-ed over every event day's book, is the frozen
+    series' ``options_value_excluded``."""
+    name, i = corpus
+    expected = _reference(i)
+    if not expected.available:
+        pytest.skip(f"{name}: no trend")
+    assert _open_before(i.bundle, i.as_of + timedelta(days=1)) == (
+        expected.options_value_excluded), name
+
+
+_PUT = "XYZ261218P00050000"
+
+
+def _closed_option_ledger() -> tuple[LedgerBundle, dict[str, list[tuple[date, Decimal]]]]:
+    """A put bought and sold within January, a stock held throughout — the option is open on
+    days BEFORE a February start and on none after it."""
+    from portfolio_dash.data_ingestion.register import option_contract_draft
+    from portfolio_dash.shared.options import parse_option_symbol
+
+    terms = parse_option_symbol(_PUT)
+    assert terms is not None
+    stock = Instrument(symbol="XYZ", market=Market.US, quote_ccy=Currency.USD, sector="Tech",
+                       name="XYZ Corp")
+    put = option_contract_draft(terms)
+
+    def tx(symbol: str, side: Side, qty: str, price: str, day: date) -> Transaction:
+        return Transaction(account_id="schwab", symbol=symbol, side=side,
+                           quantity=Decimal(qty), price=Decimal(price), fees=Decimal("0"),
+                           tax=Decimal("0"), trade_date=day)
+
+    bundle = LedgerBundle(
+        transactions=[tx("XYZ", Side.BUY, "10", "50", date(2026, 1, 5)),
+                      tx(_PUT, Side.BUY, "100", "1.20", date(2026, 1, 12)),
+                      tx(_PUT, Side.SELL, "100", "1.50", date(2026, 1, 26))],
+        instruments={"XYZ": stock, _PUT: put})
+    prices = {"XYZ": [(date(2026, 1, 5), Decimal("50")), (date(2026, 2, 2), Decimal("52"))]}
+    return bundle, prices
+
+
+def test_a_later_start_carries_the_whole_trends_option_flag() -> None:
+    bundle, prices = _closed_option_ledger()
+    end, start = date(2026, 2, 20), date(2026, 2, 3)
+    expected = ref.ref_daily_value_series(bundle, prices, {}, Currency.USD, end=end,
+                                          cash_movements=[])
+    assert expected.options_value_excluded is True
+    days = trend_book_days(bundle, start=start, end=end)
+
+    def tail(open_before: bool) -> TrendSeries:
+        return value_series(bundle, prices, {}, Currency.USD, start=start, end=end,
+                            cash_movements=[], refused_dividends=[],
+                            books=zip(days, iter_books(bundle, days), strict=True),
+                            options_open_before=open_before)
+
+    assert _open_before(bundle, start) is True
+    _assert_same("closed option", _from(expected, start), tail(True))
+    assert tail(False).options_value_excluded is False  # the argument is what carries it
+
+
+def test_the_option_flag_argument_cannot_be_left_out_or_contradicted() -> None:
+    bundle, prices = _closed_option_ledger()
+    first = trend_start(bundle)
+    assert first is not None
+    with pytest.raises(TypeError, match="options_open_before"):
+        daily_value_series(bundle, prices, {}, Currency.USD, end=date(2026, 2, 20),
+                           cash_movements=[], start=date(2026, 2, 3))
+    days = trend_book_days(bundle, start=first, end=date(2026, 2, 20))
+    with pytest.raises(ValueError, match="no day precedes"):
+        value_series(bundle, prices, {}, Currency.USD, start=first, end=date(2026, 2, 20),
+                     cash_movements=[], refused_dividends=[],
+                     books=zip(days, iter_books(bundle, days), strict=True),
+                     options_open_before=True)
+
+
+def test_the_books_refusals_are_an_input_that_matters(corpus: tuple[str, DashboardInputs]
+                                                      ) -> None:
+    """The reviewer's surviving mutant — ``refused_dividends=[]`` handed to the trend — gives
+    another series on every corpus whose replay refuses a CASH-type payout."""
+    name, i = corpus
+    book = build_book(i.bundle, allow_oversell=True)
+    cash_refused = [d for d in book.refused_dividends if d.type.value in ("CASH", "NET")]
+    first = trend_start(i.bundle)
+    if not cash_refused or first is None or not _reference(i).available:
+        pytest.skip(f"{name}: no refused cash payout")
+    expected = canon(_reference(i))
+    assert canon(_one_pass(i, first)) == expected
+    assert canon(_one_pass(i, first, refused=[])) != expected, name
