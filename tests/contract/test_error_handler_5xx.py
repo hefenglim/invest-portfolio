@@ -27,7 +27,7 @@ def test_unhandled_exception_returns_internal_error_envelope_and_logs_traceback(
     def _boom(*_a: object, **_k: object) -> object:
         raise RuntimeError("synthetic dashboard failure")
 
-    monkeypatch.setattr(dashboard_router, "build_dashboard", _boom)
+    monkeypatch.setattr(dashboard_router, "build_dashboard_keyed", _boom)
 
     from pytest_socket import disable_socket, enable_socket
 

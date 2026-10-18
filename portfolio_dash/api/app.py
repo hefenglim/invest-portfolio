@@ -116,6 +116,7 @@ from portfolio_dash.scheduler.jobs import (
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
+from portfolio_dash.shared import flags
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import install_actor, session
@@ -142,6 +143,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # In lifespan (not create_app) so hermetic TestClient(app) tests — which skip
     # lifespan — never write log files.
     configure_logging()
+    # The PD_* flags (shared/flags.py) are read per call; read them all once here so a bad
+    # value stops the boot with its own message instead of answering 500 on each request.
+    flags.current()
     # Every boot write is stamped `system:boot` in the settlement store's change trail
     # (spec §7 "Who made the change"): a no-op on a fresh database until the trail exists,
     # installed again right after the settle DDL below.

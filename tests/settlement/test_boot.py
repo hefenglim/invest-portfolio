@@ -62,3 +62,11 @@ def test_boot_creates_the_store_and_a_second_boot_changes_nothing(boot_db: Path)
         conn.close()
     _boot()
     assert _state(boot_db) == first
+
+
+def test_a_bad_flag_stops_the_boot(boot_db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every PD_* flag is validated once at boot (shared/flags.py reads them per call): a typo
+    fails the start with the variable's name, never as a 500 on each request later."""
+    monkeypatch.setenv("PD_STATIC_IMMUTABLE", "yes")
+    with pytest.raises(ValueError, match="PD_STATIC_IMMUTABLE"), TestClient(create_app()):
+        pass
