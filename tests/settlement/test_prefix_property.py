@@ -91,8 +91,38 @@ class _Ops:
     def __init__(self, conn: sqlite3.Connection, rng: random.Random, first: date,
                  today: date) -> None:
         self.conn, self.rng, self.first, self.today = conn, rng, first, today
+        self.prepared: dict[str, str] = {}
+        self.serial = 0
+
+    def fresh(self, prefix: str) -> str:
+        self.serial += 1
+        return f"{prefix}{self.serial}"
 
     # --- helpers ---
+    def registered_with_a_buy(self, prefix: str) -> str:
+        """A fresh registered stock with one buy and one price (a ``prep_*`` step: it moves
+        the series, so the loop re-baselines after it)."""
+        symbol = self.fresh(prefix)
+        d = max(self.day(), self.first + timedelta(days=10))
+        self.x("INSERT INTO instruments (symbol, market, quote_ccy, sector, name) "
+               "VALUES (?, 'TW', 'TWD', 'Energy', 'prefix')", (symbol,))
+        self.x("INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+               "trade_date) VALUES ('tw_broker', ?, 'BUY', '10', '20', '0', '0', ?)",
+               (symbol, d.isoformat()))
+        self.x("INSERT INTO prices (instrument, market, as_of_date, close, source, fetched_at) "
+               "VALUES (?, 'TW', ?, '25', 'test', '2026-01-01T00:00:00')",
+               (symbol, d.isoformat()))
+        return symbol
+
+    def registered_target(self, prefix: str) -> str:
+        """A registered stock with a price on every day and no ledger row (an action target)."""
+        symbol = self.fresh(prefix)
+        self.x("INSERT INTO instruments (symbol, market, quote_ccy, sector, name) "
+               "VALUES (?, 'TW', 'TWD', 'Energy', 'prefix')", (symbol,))
+        self.x("INSERT INTO prices (instrument, market, as_of_date, close, source, fetched_at) "
+               "VALUES (?, 'TW', ?, '7', 'test', '2026-01-01T00:00:00')",
+               (symbol, self.first.isoformat()))
+        return symbol
     def day(self) -> date:
         return self.first + timedelta(days=self.rng.randrange((self.today - self.first).days))
 
@@ -189,6 +219,14 @@ class _Ops:
         self.x("DELETE FROM dividends WHERE id = ?", (row["id"],))
         return f"dividend {row['id']} deleted"
 
+    def div_move_date(self) -> str:
+        row = self.one("SELECT id FROM dividends WHERE type <> 'STOCK'")
+        if row is None:
+            return self.div_insert()
+        d = self.day()
+        self.x("UPDATE dividends SET date = ? WHERE id = ?", (d.isoformat(), row["id"]))
+        return f"dividend {row['id']} -> {d}"
+
     # --- openings ---
     def open_upsert(self) -> str:
         sym = self.one("SELECT symbol FROM instruments WHERE asset_type = 'stock' "
@@ -240,6 +278,14 @@ class _Ops:
         self.x("DELETE FROM cash_movements WHERE id = ?", (row["id"],))
         return f"cash {row['id']} deleted"
 
+    def cash_move_date(self) -> str:
+        row = self.one("SELECT id FROM cash_movements")
+        if row is None:
+            return self.cash_insert()
+        d = self.day()
+        self.x("UPDATE cash_movements SET date = ? WHERE id = ?", (d.isoformat(), row["id"]))
+        return f"cash {row['id']} -> {d}"
+
     # --- FX conversions ---
     def fxc_insert(self) -> str:
         d = self.day()
@@ -261,6 +307,14 @@ class _Ops:
             return self.fxc_insert()
         self.x("DELETE FROM fx_conversions WHERE id = ?", (row["id"],))
         return f"fx conversion {row['id']} deleted"
+
+    def fxc_move_date(self) -> str:
+        row = self.one("SELECT id FROM fx_conversions")
+        if row is None:
+            return self.fxc_insert()
+        d = self.day()
+        self.x("UPDATE fx_conversions SET date = ? WHERE id = ?", (d.isoformat(), row["id"]))
+        return f"fx conversion {row['id']} -> {d}"
 
     # --- corporate actions ---
     def ca_split(self) -> str:
@@ -284,6 +338,38 @@ class _Ops:
             return self.ca_split()
         self.x("DELETE FROM corporate_actions WHERE id = ?", (row["id"],))
         return f"action {row['id']} deleted"
+
+    def ca_move_date(self) -> str:
+        row = self.one("SELECT id FROM corporate_actions")
+        if row is None:
+            return self.ca_split()
+        d = self.day()
+        self.x("UPDATE corporate_actions SET date = ? WHERE id = ?", (d.isoformat(), row["id"]))
+        return f"action {row['id']} -> {d}"
+
+    def prep_ca_exchange(self) -> None:
+        self.prepared["ca_exchange"] = self.registered_target("XCH")
+
+    def ca_exchange(self) -> str:
+        h = self.held()
+        to = self.prepared.pop("ca_exchange", None) or self.registered_target("XCH")
+        d = max(self.day(), date.fromisoformat(h["d"]) + timedelta(days=1))
+        self.x("INSERT INTO corporate_actions (account_id, date, kind, from_symbol, to_symbol, "
+               "ratio_to, ratio_from) VALUES (?, ?, 'EXCHANGE', ?, ?, '1', '1')",
+               (h["account_id"], d.isoformat(), h["symbol"], to))
+        return f"exchange {h['symbol']} -> {to} {d}"
+
+    def prep_ca_spinoff(self) -> None:
+        self.prepared["ca_spinoff"] = self.registered_target("SPN")
+
+    def ca_spinoff(self) -> str:
+        h = self.held()
+        child = self.prepared.pop("ca_spinoff", None) or self.registered_target("SPN")
+        d = max(self.day(), date.fromisoformat(h["d"]) + timedelta(days=1))
+        self.x("INSERT INTO corporate_actions (account_id, date, kind, from_symbol, to_symbol, "
+               "ratio_to, ratio_from, cost_carry) VALUES (?, ?, 'SPINOFF', ?, ?, '1', '10', "
+               "'0.1')", (h["account_id"], d.isoformat(), h["symbol"], child))
+        return f"spinoff {h['symbol']} -> {child} {d}"
 
     # --- prices ---
     def _ledger_price(self, *, keep_first: bool = False) -> sqlite3.Row | None:
@@ -377,28 +463,83 @@ class _Ops:
                    (self.first.isoformat(),))
         return f"unregistered buy {d}"
 
+    def prep_inst_register(self) -> None:
+        """A fresh unregistered symbol with a trade and a price (excluded from the replay
+        until it is registered)."""
+        symbol = self.fresh("ZZR")
+        self.x("INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+               "trade_date) VALUES ('tw_broker', ?, 'BUY', '10', '20', '0', '0', ?)",
+               (symbol, self.day().isoformat()))
+        self.x("INSERT INTO prices (instrument, market, as_of_date, close, source, fetched_at) "
+               "VALUES (?, 'TW', ?, '25', 'test', '2026-01-01T00:00:00')",
+               (symbol, self.first.isoformat()))
+        self.prepared["inst_register"] = symbol
+
     def inst_register(self) -> str:
-        if not self.conn.execute("SELECT 1 FROM transactions WHERE symbol = 'ZZPF'").fetchone():
-            self.inst_unregistered_trade()
-            self.conn.execute("UPDATE settle_dirty SET dirty_from = NULL")
-            self.conn.commit()
-        self.x("INSERT OR IGNORE INTO instruments (symbol, market, quote_ccy, sector, name) "
-               "VALUES ('ZZPF', 'TW', 'TWD', 'Energy', 'prefix')")
-        return "register ZZPF"
+        symbol = self.prepared.pop("inst_register")
+        self.x("INSERT INTO instruments (symbol, market, quote_ccy, sector, name) "
+               "VALUES (?, 'TW', 'TWD', 'Energy', 'prefix')", (symbol,))
+        return f"register {symbol}"
 
     def inst_display(self) -> str:
         self.x("UPDATE instruments SET name = name || '*', sector = 'Energy', archived = 1")
         return "instrument display fields"
 
-    def acct_rules(self) -> str:
+    def prep_inst_delete(self) -> None:
+        self.prepared["inst_delete"] = self.registered_with_a_buy("ZZD")
+
+    def inst_delete(self) -> str:
+        symbol = self.prepared.pop("inst_delete")
+        self.x("DELETE FROM instruments WHERE symbol = ?", (symbol,))
+        return f"instrument {symbol} deleted"
+
+    def prep_inst_quote_ccy(self) -> None:
+        self.prepared["inst_quote_ccy"] = self.registered_with_a_buy("ZZC")
+
+    def inst_quote_ccy(self) -> str:
+        symbol = self.prepared.pop("inst_quote_ccy")
+        self.x("UPDATE instruments SET quote_ccy = 'USD', market = 'US' WHERE symbol = ?",
+               (symbol,))
+        return f"instrument {symbol} quote currency"
+
+    # --- accounts and their market rules: the trend reads neither (only the FX pool and the
+    # dividend projection do), so these move no point — they pin that the triggers record them
+    def acct_currency(self) -> str:
+        self.x("UPDATE accounts SET funding_ccy = CASE funding_ccy WHEN 'TWD' THEN 'USD' "
+               "ELSE 'TWD' END WHERE account_id = 'schwab'")
+        return "account funding currency"
+
+    def amr_dividend_model(self) -> str:
+        self.x("UPDATE account_market_rules SET dividend_model = CASE dividend_model "
+               "WHEN 'cash' THEN 'drip_us' ELSE 'cash' END WHERE account_id = 'schwab'")
+        return "account market rule dividend model"
+
+    def amr_fee_rule(self) -> str:
         self.x("UPDATE account_market_rules SET fee_rule_set = fee_rule_set || 'x' "
                "WHERE account_id = 'tw_broker'")
-        return "account market rule"
+        return "account market rule fee set"
 
 
+_HELPERS = frozenset({"day", "one", "x", "held", "fresh", "registered_with_a_buy",
+                      "registered_target"})
 _OPS: tuple[str, ...] = tuple(sorted(
     name for name, fn in vars(_Ops).items() if callable(fn) and not name.startswith("_")
-    and name not in {"day", "one", "x", "held"}))
+    and not name.startswith("prep_") and name not in _HELPERS))
+
+#: An operation's table, by its name's first word.
+_TABLE_OF: dict[str, str] = {
+    "tx": "transactions", "div": "dividends", "open": "opening_inventory",
+    "cash": "cash_movements", "fxc": "fx_conversions", "ca": "corporate_actions",
+    "px": "prices", "fx": "fx_rates", "inst": "instruments", "acct": "accounts",
+    "amr": "account_market_rules",
+}
+#: The tables whose writes move trend points (the trend reads neither accounts nor their
+#: market rules).
+_POINT_TABLES = frozenset(_TABLE_OF.values()) - {"accounts", "account_market_rules"}
+
+
+def _table(op: str) -> str:
+    return _TABLE_OF[op.split("_", 1)[0]]
 
 
 @pytest.mark.parametrize("engine", sorted(_ENGINES))
@@ -426,18 +567,27 @@ def test_dirty_from_bounds_every_reference_change(
         before = points(conn, db)
         assert before is not None, f"{name}: the reference series must start available"
         compared = changed_ops = 0
+        fired: set[str] = set()
+        moved_tables: set[str] = set()
         for op in schedule:
+            prep: Callable[[], None] | None = getattr(ops, f"prep_{op}", None)
+            if prep is not None:  # a setup that moves the series: re-baseline after it
+                prep()
+                before = points(conn, db)
             conn.execute("UPDATE settle_dirty SET dirty_from = NULL WHERE id = 1")
             conn.commit()
             label: str = getattr(ops, op)()
             dirty_text = conn.execute("SELECT dirty_from FROM settle_dirty").fetchone()[0]
             dirty = None if dirty_text is None else date.fromisoformat(dirty_text)
+            if dirty is not None:
+                fired.add(_table(op))
             after = points(conn, db)
             if before is not None and after is not None:
                 compared += 1
                 moved = _changed(before, after)
                 if moved:
                     changed_ops += 1
+                    moved_tables.add(_table(op))
                     assert dirty is not None, f"{name} {op} ({label}): {moved[0]} changed, " \
                                               "nothing recorded"
                     assert dirty <= moved[0], (
@@ -445,23 +595,29 @@ def test_dirty_from_bounds_every_reference_change(
             before = after  # an unavailable series re-baselines: never compare across it
         assert compared >= len(schedule) // 2, f"{name}: only {compared} writes were comparable"
         assert changed_ops >= len(schedule) // 3, f"{name}: the writes changed too little"
+        assert fired == set(st.TRIGGER_TABLES), (
+            f"{name}: no write recorded a change on {sorted(set(st.TRIGGER_TABLES) - fired)}")
+        assert _POINT_TABLES <= moved_tables, (
+            f"{name}: no write moved a point through {sorted(_POINT_TABLES - moved_tables)}")
     finally:
         conn.close()
 
 
 def test_the_catalogue_covers_every_trigger_table() -> None:
-    prefixes: dict[str, Callable[[str], bool]] = {
-        "transactions": lambda o: o.startswith("tx_"),
-        "dividends": lambda o: o.startswith("div_"),
-        "opening_inventory": lambda o: o.startswith("open_"),
-        "cash_movements": lambda o: o.startswith("cash_"),
-        "fx_conversions": lambda o: o.startswith("fxc_"),
-        "corporate_actions": lambda o: o.startswith("ca_"),
-        "prices": lambda o: o.startswith("px_"),
-        "fx_rates": lambda o: o.startswith("fx_"),
-        "instruments": lambda o: o.startswith("inst_"),
-        "accounts": lambda o: o.startswith("acct_"),
+    assert set(_TABLE_OF.values()) == set(st.TRIGGER_TABLES)
+    for table in st.TRIGGER_TABLES:
+        assert any(_table(o) == table for o in _OPS), table
+    kinds = {
+        "transactions": ("insert", "update", "move_date", "delete"),
+        "dividends": ("insert", "update", "move_date", "delete"),
+        "cash_movements": ("insert", "update", "move_date", "delete"),
+        "fx_conversions": ("insert", "update", "move_date", "delete"),
+        "corporate_actions": ("split", "exchange", "spinoff", "update", "move_date", "delete"),
+        "instruments": ("register", "quote_ccy", "delete"),
     }
-    assert set(st.TRIGGER_TABLES) - {"account_market_rules"} == set(prefixes)
-    for table, match in prefixes.items():
-        assert any(match(o) for o in _OPS), table
+    for table, wanted in kinds.items():
+        names = [o for o in _OPS if _table(o) == table]
+        for kind in wanted:
+            assert any(kind in o for o in names), f"{table}: no {kind} operation"
+    for op in _OPS:
+        _table(op)  # every operation names its table

@@ -261,7 +261,79 @@ def test_a_publish_that_extends_new_days_keeps_them_after_a_partial(
     assert max(_values(conn, 2)) == n - ONE
 
 
+# --- the claimed range is never short of the held days (wave-1 review B #1) ----------------------
+
+
+def test_a_chained_run_asked_to_stop_inside_the_held_days_publishes_them_all(
+        conn: sqlite3.Connection) -> None:
+    _first_generation(conn)
+    _buy(conn, date(2026, 6, 2))
+    c2 = _start(conn, 2)
+    _compute(conn, c2, "200")
+    _buy(conn, date(2026, 6, 5))  # during run 2
+    assert _publish(conn, 2).status == "partial"
+    state = st.store_state(conn, reporting=TWD)
+    assert (state.settled_through, state.held_through) == (date(2026, 6, 4), THROUGH)
+    c3 = _start(conn, 3, through=date(2026, 6, 7))  # S <= through < H
+    assert (c3.requested_through, c3.run_through, c3.through_clamped) == (
+        date(2026, 6, 7), THROUGH, True)
+    assert c3.run_from == date(2026, 6, 5)
+    with pytest.raises(st.SwapRefused) as refused:
+        _publish(conn, 3, through=date(2026, 6, 7))
+    assert refused.value.reason == "through_mismatch"
+    _compute(conn, c3, "300", through=c3.run_through)
+    assert _publish(conn, 3, through=c3.run_through).status == "published"
+    state = st.store_state(conn, reporting=TWD)
+    assert (state.settled_through, state.held_through, state.dirty_from) == (
+        THROUGH, THROUGH, None)
+    assert st.stale_range(state, date(2026, 6, 11)) is None
+    assert _values(conn, state.generation)[date(2026, 6, 8)] == "300"
+    assert st.pending_changes(conn).total_count == 0
+
+
+def test_a_dirty_run_asked_to_stop_before_the_settled_day_settles_through_it(
+        conn: sqlite3.Connection) -> None:
+    _first_generation(conn)
+    _buy(conn, date(2026, 6, 8))  # a correction inside the settled range
+    c = _start(conn, 2, through=date(2026, 6, 5))  # e.g. final_through moved back
+    assert (c.run_from, c.run_through, c.through_clamped, c.days) == (
+        date(2026, 6, 8), THROUGH, True, 3)
+    _compute(conn, c, "200", through=c.run_through)
+    result = _publish(conn, 2, through=c.run_through)
+    assert (result.status, result.settled_through, result.settled_records) == (
+        "published", THROUGH, 1)
+    assert _values(conn, 2)[date(2026, 6, 8)] == "200"
+
+
+def test_a_claim_that_needs_no_clamp_says_so(conn: sqlite3.Connection) -> None:
+    _first_generation(conn)
+    later = THROUGH + timedelta(days=2)
+    c = _start(conn, 2, through=later)
+    assert (c.requested_through, c.run_through, c.through_clamped) == (later, later, False)
+
+
 # --- the other outcomes ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("arrival", "status"), [
+    (date(2026, 3, 3), "superseded"),  # N == range_from: nothing of the range is publishable
+    (date(2026, 3, 4), "partial"),     # one day later: range_from alone is published
+])
+def test_the_range_start_boundary(conn: sqlite3.Connection, arrival: date, status: str) -> None:
+    _first_generation(conn)
+    _buy(conn, date(2026, 3, 3))
+    c = _start(conn, 2)
+    assert c.run_from == date(2026, 3, 3)
+    _compute(conn, c, "200")
+    _buy(conn, arrival)
+    result = _publish(conn, 2)
+    assert result.status == status
+    if status == "partial":
+        assert result.settled_through == date(2026, 3, 3)
+        assert _values(conn, 2)[date(2026, 3, 3)] == "200"
+    else:
+        assert result.generation == 1 and st.store_state(conn, reporting=TWD).dirty_from == (
+            date(2026, 3, 3))
 
 
 def test_a_superseded_run_moves_nothing(conn: sqlite3.Connection) -> None:

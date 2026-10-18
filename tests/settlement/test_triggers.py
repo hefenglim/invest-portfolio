@@ -204,7 +204,8 @@ def test_a_new_ledger_column_changes_the_text_and_is_an_input_by_default(
     store.execute("ALTER TABLE transactions ADD COLUMN venue TEXT")
     assert not st.verify_triggers(store)
     check = st.install_or_verify(store, calc_version_changed=False)
-    assert check.replaced == (f"{st.TRIGGER_PREFIX}transactions_upd",)
+    assert check.replaced == (f"{st.TRIGGER_PREFIX}transactions_rep",
+                              f"{st.TRIGGER_PREFIX}transactions_upd")
     _clean(store)
     store.execute("UPDATE transactions SET venue = 'X' WHERE symbol = '2330'")
     store.commit()

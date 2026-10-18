@@ -355,7 +355,9 @@ def _iso(value: date | None) -> str | None:
 
 
 def _day(value: object) -> date | None:
-    return None if value is None else date.fromisoformat(str(value))
+    """A stored ISO day, or ``None`` for NULL and for an empty string (an external writer's
+    ``''`` reads as "no date", as ``data_ingestion/store.py`` reads ``ex_date``)."""
+    return None if value is None or value == "" else date.fromisoformat(str(value))
 
 
 def _dec(value: object) -> Decimal | None:
@@ -410,13 +412,15 @@ def _attempts_text(ids: Iterable[int]) -> str:
 #: The SQL twin of :attr:`shared.models.ledger.Dividend.effective_date` over the ``dividends``
 #: columns of the row in scope (``tests/settlement/test_triggers.py`` asserts they agree for
 #: every type): a 配股 with a known ex-date counts from it, everything else from the payment date.
+#: An empty ``ex_date`` (an external writer's ``''``) is no ex-date, exactly as the Python reader
+#: (``data_ingestion/store.py::_div_row``) treats it.
 DIVIDEND_EFFECTIVE_DAY_SQL = (
-    "CASE WHEN type = 'STOCK' AND ex_date IS NOT NULL THEN ex_date ELSE date END"
+    "CASE WHEN type = 'STOCK' AND NULLIF(ex_date, '') IS NOT NULL THEN ex_date ELSE date END"
 )
 
 
 def _dividend_day(row: str) -> str:
-    return (f"CASE WHEN {row}.type = 'STOCK' AND {row}.ex_date IS NOT NULL "
+    return (f"CASE WHEN {row}.type = 'STOCK' AND NULLIF({row}.ex_date, '') IS NOT NULL "
             f"THEN {row}.ex_date ELSE {row}.date END")
 
 
@@ -516,6 +520,9 @@ class _Spec:
     agg_key: str | None = None
     key_columns: tuple[str, ...] = ()
     price_gate: bool = False
+    #: The key a ``REPLACE`` conflicts on, when the removed row's affected day can differ from
+    #: the new row's (a date column outside the key): the BEFORE INSERT trigger marks it.
+    replace_key: tuple[str, ...] = ()
 
 
 _PROVENANCE = frozenset({"import_batch_id", "source_row_hash"})
@@ -523,19 +530,19 @@ _PROVENANCE = frozenset({"import_batch_id", "source_row_hash"})
 _SPECS: tuple[_Spec, ...] = (
     _Spec("transactions", "{r}.trade_date",
           exempt=frozenset({"fee_rule_snapshot", "note"}) | _PROVENANCE,
-          detail=(("side", "side"),)),
+          detail=(("side", "side"),), replace_key=("id",)),
     _Spec("dividends", _dividend_day("{r}"), exempt=_PROVENANCE,
-          detail=(("type", "type"),)),
+          detail=(("type", "type"),), replace_key=("id",)),
     _Spec("opening_inventory", "{r}.build_date",
-          row_key="{r}.account_id || '|' || {r}.symbol"),
+          row_key="{r}.account_id || '|' || {r}.symbol", replace_key=("account_id", "symbol")),
     _Spec("cash_movements", "{r}.date", exempt=frozenset({"note"}) | _PROVENANCE,
-          symbol=None, detail=(("kind", "kind"), ("ccy", "ccy"))),
+          symbol=None, detail=(("kind", "kind"), ("ccy", "ccy")), replace_key=("id",)),
     _Spec("fx_conversions", "{r}.date", exempt=_PROVENANCE, symbol=None,
-          detail=(("from_ccy", "from_ccy"), ("to_ccy", "to_ccy"))),
+          detail=(("from_ccy", "from_ccy"), ("to_ccy", "to_ccy")), replace_key=("id",)),
     _Spec("corporate_actions", "{r}.date",
           exempt=frozenset({"child_seed_json", "note"}) | _PROVENANCE,
           symbol="{r}.from_symbol",
-          detail=(("kind", "kind"), ("to_symbol", "to_symbol"))),
+          detail=(("kind", "kind"), ("to_symbol", "to_symbol")), replace_key=("id",)),
     _Spec("prices", "{r}.as_of_date", inputs=("as_of_date", "close", "instrument"),
           agg_key="{r}.instrument", key_columns=("instrument",), price_gate=True),
     _Spec("fx_rates", "{r}.as_of_date", inputs=("as_of_date", "base", "quote", "rate"),
@@ -559,6 +566,28 @@ _SPECS: tuple[_Spec, ...] = (
 
 #: The trigger tables, in the order the trail lists them.
 TRIGGER_TABLES: tuple[str, ...] = tuple(spec.table for spec in _SPECS)
+
+#: §7's exclusion lists: an UPDATE of any OTHER column of these tables is an input.
+EXEMPT_COLUMNS: dict[str, frozenset[str]] = {
+    spec.table: spec.exempt for spec in _SPECS if spec.inputs is None}
+#: ``prices`` / ``fx_rates``: the only columns whose change is an input (§7).
+INPUT_COLUMNS: dict[str, tuple[str, ...]] = {
+    spec.table: spec.inputs for spec in _SPECS if spec.inputs is not None}
+
+#: Why ``instruments``, ``accounts`` and ``account_market_rules`` carry no REPLACE trigger: a
+#: REPLACE conflicts on their key alone, and their affected day depends on the key alone (the
+#: symbol's first ledger day; the ledger's first day), so the AFTER INSERT of the new row
+#: already marks the removed row's day. A BEFORE INSERT there would also misfire on
+#: ``upsert_instrument``: an option contract's upsert proposes the model default
+#: ``asset_type = 'stock'``, which its ``DO UPDATE`` deliberately does not write.
+REPLACE_TABLES: tuple[str, ...] = tuple(spec.table for spec in _SPECS if spec.replace_key)
+
+
+def watched_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """The columns whose change an UPDATE (or a REPLACE) of *table* records, sorted: the
+    table's ``PRAGMA table_info`` minus its exclusion list, or its input list."""
+    spec = next(s for s in _SPECS if s.table == table)
+    return _watched(spec, _columns(conn, table))
 
 #: The trail line a recreated trigger writes (§7, §9.1 boot row): the table's zh label.
 TRIGGER_REBUILT_KIND = "trigger_rebuilt"
@@ -701,6 +730,24 @@ def _spec_triggers(spec: _Spec, columns: Sequence[str],
     out[f"{base}_upd"] = _trigger_sql(
         f"{base}_upd", f"AFTER UPDATE ON {spec.table}", when, body)
 
+    # --- REPLACE: a conflicting row a REPLACE removes fires no DELETE trigger
+    # (``recursive_triggers`` is off), so the removed row's day is marked BEFORE the insert —
+    # only when a row with the key exists and a watched column differs. An upsert that takes
+    # ``DO UPDATE`` fires BEFORE INSERT too: an unchanged one (``upsert_opening`` with the
+    # stored values) stays silent; a changed one marks a day its AFTER UPDATE marks anyway.
+    # No trail row and no ``seq``: the AFTER INSERT (or AFTER UPDATE) records the change.
+    if spec.replace_key and all(c in columns for c in spec.replace_key):
+        key = " AND ".join(f"o.{c} = NEW.{c}" for c in spec.replace_key)
+        differs = " OR ".join(f"o.{c} IS NOT NEW.{c}" for c in _watched(spec, columns))
+        removed = f"(SELECT {_r(spec.day, 'o')} FROM {spec.table} AS o WHERE {key})"
+        out[f"{base}_rep"] = _trigger_sql(
+            f"{base}_rep", f"BEFORE INSERT ON {spec.table}",
+            f"EXISTS (SELECT 1 FROM {spec.table} AS o WHERE {key} AND ({differs}) "
+            f"AND {_r(spec.day, 'o')} <= {_BOUND})",
+            [f"UPDATE settle_dirty SET dirty_from = CASE WHEN dirty_from IS NULL OR "
+             f"{removed} < dirty_from THEN {removed} ELSE dirty_from END WHERE id = 1"],
+        )
+
     # --- the import-batch annotation: an import stamps its batch AFTER the insert
     # (``provenance.stamp_row``), so the insert's trail row learns it here. It records no
     # change (the stamp's columns are exempt) and touches no dirt.
@@ -822,7 +869,9 @@ def install_or_verify(conn: sqlite3.Connection, *, calc_version_changed: bool,
         if not calc_version_changed:
             meta = _meta_row(conn)
             if meta is not None and int(meta["generation"]) > 0:
-                first = _day(meta["first_day"]) or first_ledger_day(conn)
+                # the earlier of the generation's start and the ledger's: an edit made while
+                # the trigger was missing may lie before either
+                first = _nmin(_day(meta["first_day"]), first_ledger_day(conn))
                 if first is not None:
                     for table in tables:
                         _write_rebuilt_line(conn, table, first)
@@ -1039,6 +1088,11 @@ class Claim:
     records: int
     counters: int
     triggers_verified: bool
+    #: The ``run_through`` the caller asked for.
+    requested_through: date | None = None
+    #: The claim raised ``run_through`` to ``max(settled_through, held_through)``: a claiming
+    #: run never publishes short of a day the store already holds (wave-1 review B #1).
+    through_clamped: bool = False
 
 
 def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
@@ -1050,6 +1104,9 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
       ``min(dirty_from, settled_through + 1)``; ``full`` → :func:`first_ledger_day`;
       ``selfcheck`` → the first ledger day through ``min(run_through, settled_through,
       Dd − 1)``; on generation 0 every scope is ``full``;
+    - for every CLAIMING scope (``dirty``, ``full``, ``nightly``) raises ``run_through`` to
+      ``max(run_through, settled_through, held_through)`` — nothing moves back and no held day
+      is left behind; :attr:`Claim.through_clamped` says so;
     - records ``run_id`` / ``run_through`` and sets ``dirty_from = NULL``;
     - tags every PENDING trail row and counter with ``claimed_run_id`` (rows are tagged, never
       moved);
@@ -1081,6 +1138,15 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
         settled = _day(meta["settled_through"])
         effective: RunScope = "full" if generation == 0 or settled is None else scope
         through = run_through
+        clamped = False
+        if effective != "selfcheck":
+            # A claiming run publishes through at least every day the store holds: a publish
+            # short of them would leave the held days (through, H] served as settled while
+            # the changes claimed for them are marked settled (wave-1 review B #1).
+            held = _day(meta["held_through"])
+            floor = max((d for d in (settled, held) if d is not None), default=None)
+            if floor is not None and floor > through:
+                through, clamped = floor, True
         start: date | None
         if effective in ("dirty", "nightly"):
             assert settled is not None
@@ -1145,7 +1211,7 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
         generation=generation, settled_through=settled,
         held_through=_day(meta["held_through"]), first_day=_day(meta["first_day"]),
         dirty_from=dirty_from, seq=seq, records=records, counters=counters,
-        triggers_verified=verified,
+        triggers_verified=verified, requested_through=run_through, through_clamped=clamped,
     )
 
 
@@ -2087,8 +2153,9 @@ class SwapRefused(RuntimeError):
     """:func:`swap` refused to publish; nothing changed.
 
     ``reason``: ``not_current_run`` (an orphan: boot cleaned up or another run owns the store),
-    ``not_running`` (the report is not ``running``), ``incomplete`` (the completeness
-    assertion failed — the run must end as failed)."""
+    ``not_running`` (the report is not ``running``), ``through_mismatch`` (*through* is not
+    the ``run_through`` the claim recorded, :attr:`Claim.run_through`), ``incomplete`` (the
+    completeness assertion failed — the run must end as failed)."""
 
     def __init__(self, reason: str, detail: str = "") -> None:
         super().__init__(f"{reason}: {detail}" if detail else reason)
@@ -2192,6 +2259,12 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
         run = _run_row(conn, run_id)
         if run is None or run["status"] != "running":
             raise SwapRefused("not_running", f"run {run_id} is not running")
+        claimed_through = _day(meta["run_through"])
+        if claimed_through != through:
+            # publish exactly the claimed range: short of it leaves held days behind, past it
+            # publishes days whose changes the triggers never recorded (the bound)
+            raise SwapRefused("through_mismatch",
+                              f"run {run_id} claimed through {claimed_through}, not {through}")
         n_row = conn.execute("SELECT dirty_from FROM settle_dirty WHERE id = 1").fetchone()
         arrived = _day(n_row[0])
         range_from = _day(run["range_from"])
@@ -2373,6 +2446,9 @@ __all__ = [
     "CODE_DIGEST",
     "DIVIDEND_EFFECTIVE_DAY_SQL",
     "END_STATUSES",
+    "EXEMPT_COLUMNS",
+    "INPUT_COLUMNS",
+    "REPLACE_TABLES",
     "KEEP_RUNS",
     "SETTLE_TABLES",
     "STORE_SCHEMA_VERSION",
@@ -2435,6 +2511,7 @@ __all__ = [
     "triggers_verified",
     "update_run",
     "verify_triggers",
+    "watched_columns",
     "window_start",
     "write_days",
     "write_diff",
