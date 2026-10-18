@@ -55,12 +55,12 @@ def _rules_wire(rules: Any) -> list[dict[str, Any]]:
 
 
 @router.get("/alert-rules")
-def get_rules(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_rules(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     return {"rules": _rules_wire(get_alert_rules(conn))}
 
 
 @router.get("/alerts")
-def get_alerts(conn: sqlite3.Connection = Depends(get_conn),
+def get_alerts(conn: sqlite3.Connection = Depends(get_conn, scope="function"),
                now: datetime = Depends(get_now),
                reporting: Currency = Depends(get_reporting)) -> dict[str, Any]:
     # calib_gap fed from the single-source helper so this matches the dashboard embed.
@@ -83,7 +83,7 @@ class AlertRulesBody(BaseModel):
 
 @router.put("/alert-rules")
 def put_rules(body: AlertRulesBody,
-              conn: sqlite3.Connection = Depends(get_conn),
+              conn: sqlite3.Connection = Depends(get_conn, scope="function"),
               now: datetime = Depends(get_now),
               reporting: Currency = Depends(get_reporting)) -> Any:
     current = get_alert_rules(conn)
@@ -133,7 +133,7 @@ class WhatIfBody(BaseModel):
 
 @router.post("/whatif")
 def post_whatif(body: WhatIfBody,
-                conn: sqlite3.Connection = Depends(get_conn),
+                conn: sqlite3.Connection = Depends(get_conn, scope="function"),
                 now: datetime = Depends(get_now),
                 reporting: Currency = Depends(get_reporting)) -> Any:
     try:
@@ -160,7 +160,7 @@ class RebalanceBody(BaseModel):
 
 @router.post("/rebalance/preview")
 def post_rebalance(body: RebalanceBody,
-                   conn: sqlite3.Connection = Depends(get_conn),
+                   conn: sqlite3.Connection = Depends(get_conn, scope="function"),
                    now: datetime = Depends(get_now),
                    reporting: Currency = Depends(get_reporting)) -> Any:
     for symbol, ratio in body.targets.items():
@@ -208,7 +208,7 @@ def _target_weights_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str
 
 
 @router.get("/target-weights")
-def get_target_weights(conn: sqlite3.Connection = Depends(get_conn),
+def get_target_weights(conn: sqlite3.Connection = Depends(get_conn, scope="function"),
                        now: datetime = Depends(get_now)) -> dict[str, Any]:
     return _target_weights_view(conn, now=now)
 
@@ -219,7 +219,7 @@ class TargetWeightsBody(BaseModel):
 
 @router.put("/target-weights")
 def put_target_weights(body: TargetWeightsBody,
-                       conn: sqlite3.Connection = Depends(get_conn),
+                       conn: sqlite3.Connection = Depends(get_conn, scope="function"),
                        now: datetime = Depends(get_now)) -> Any:
     """Validate + persist the target weights (ratios). 400 on unknown symbol / bad value /
     each ∉ (0,1] / Σ > 1 — a zh message. An empty map clears all targets (valid)."""

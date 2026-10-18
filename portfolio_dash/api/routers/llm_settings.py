@@ -136,7 +136,7 @@ def _usage_wire(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 @router.get("/llm/config")
-def get_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_config(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     health = model_health(conn)
     return {
         "models": [_model_wire(m, health) for m in list_models(conn)],
@@ -188,7 +188,7 @@ def list_llm_requests(
     until: str | None = None,
     limit: int = Query(50, ge=1, le=_REQ_MAX_LIMIT),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Per-request LiteLLM ledger, newest first: date/time, model, agent, in/out/cache
     tokens, cost. ``totals`` covers the WHOLE filtered set (count + Decimal-string cost)
@@ -293,7 +293,10 @@ def _single_model_response(
 
 
 @router.post("/llm/models")
-def create_model(body: ModelBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def create_model(
+    body: ModelBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> Any:
     if not body.alias:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "請輸入模型代號（alias）", field="alias"))
@@ -323,7 +326,7 @@ def create_model(body: ModelBody, conn: sqlite3.Connection = Depends(get_conn)) 
 
 @router.put("/llm/models/{alias}")
 def update_model(
-    alias: str, body: ModelBody, conn: sqlite3.Connection = Depends(get_conn)
+    alias: str, body: ModelBody, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     existing = get_model(conn, alias)
     if existing is None:
@@ -356,7 +359,7 @@ def update_model(
 
 
 @router.delete("/llm/models/{alias}")
-def remove_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def remove_model(alias: str, conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> Any:
     if get_model(conn, alias) is None:
         return JSONResponse(status_code=404, content=error_body(
             "not_found", f"模型 {alias} 不存在", field="alias"))
@@ -381,7 +384,10 @@ class RolesBody(BaseModel):
 
 
 @router.put("/llm/roles")
-def put_roles(body: RolesBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def put_roles(
+    body: RolesBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> Any:
     fields = body.model_dump()
     # Validate every referenced alias exists and is enabled before writing anything.
     for field, role in _ROLE_FIELDS.items():
@@ -432,7 +438,7 @@ def _ping_failure(exc: Exception) -> str:
 
 
 @router.post("/llm/models/{alias}/test")
-def test_model(alias: str, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def test_model(alias: str, conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> Any:
     model = get_model(conn, alias)
     if model is None:
         return JSONResponse(status_code=404, content=error_body(
@@ -483,7 +489,10 @@ class TopupBody(BaseModel):
 
 
 @router.post("/llm/quota/topup")
-def topup_quota(body: TopupBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def topup_quota(
+    body: TopupBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> Any:
     if body.amount_usd <= 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "加值金額需大於 0", field="amount_usd"))
@@ -496,7 +505,10 @@ class QuotaBody(BaseModel):
 
 
 @router.put("/llm/quota")
-def put_quota(body: QuotaBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def put_quota(
+    body: QuotaBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> Any:
     if body.alert_threshold_usd < 0:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", "警示閾值不可為負", field="alert_threshold_usd"))

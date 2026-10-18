@@ -144,7 +144,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument,
 @router.get("/instruments")
 def list_all(
     include_options: bool = Query(False),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """The watchlist / registry list. Option contracts are hidden unless ``include_options=1``
@@ -179,7 +179,7 @@ def probe(body: ProbeBody) -> dict[str, Any]:
 def lookup(
     symbol: str = Query(...),
     market: Market = Query(...),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """FU-D23 fast identification for the quick-add dialog — name + suggested sector +
@@ -326,7 +326,7 @@ class AiInstrumentResolveReply(BaseModel):
 @router.post("/instruments/ai-resolve")
 def ai_resolve(
     body: AiResolveBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Unified AI instrument-resolve (R6-B, 2026-07-19): ONE LLM call → local exchange code +
@@ -564,7 +564,7 @@ def _apply_extras(
 def register(
     body: RegisterBody,
     background_tasks: BackgroundTasks,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Classic (detail-form) registration: registers even when no quote is found.
@@ -656,7 +656,7 @@ _QUICK_BOARD_LABEL = {"TWSE": "TWSE 上市", "TPEx": "TPEx 上櫃", ".KL": "馬�
 @router.post("/instruments/quick", status_code=201)
 def quick(
     body: QuickBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """One-step add (2026-07-02): symbol -> probe + real quote + name + history.
@@ -690,7 +690,7 @@ def quick(
 def update(
     symbol: str,
     body: UpdateBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     existing = get_instrument(conn, symbol)
@@ -758,7 +758,7 @@ def archive(
     symbol: str,
     body: ArchiveBody,
     background_tasks: BackgroundTasks,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Set / clear a symbol's 封存 (stop-tracking) flag (FU-D13; restore backfill FU-D18).
@@ -787,7 +787,7 @@ def archive(
 @router.delete("/instruments/{symbol}")
 def remove(
     symbol: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """SOFT-delete (archive) any non-held symbol — accumulative watchlist (FU-D18).
@@ -827,7 +827,7 @@ _HAS_HISTORY_MSG = (
 @router.post("/instruments/{symbol}/purge")
 def purge(
     symbol: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """HARD-delete (永久移除) a never-traded watch symbol + all its personal artifacts (FU-D32).

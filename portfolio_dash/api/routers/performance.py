@@ -69,7 +69,7 @@ def _load_fx_history(
 def performance_twr(
     benchmark: str = Query("0050"),
     window: str = Query("1y"),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> dict[str, Any]:

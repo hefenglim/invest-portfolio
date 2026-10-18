@@ -68,7 +68,7 @@ class RefreshBody(BaseModel):
 @router.post("/actions/refresh-quotes", status_code=200)
 def refresh_quotes_action(
     body: RefreshBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Run the per-market quote jobs synchronously; answer ``{run_ids, jobs, results, summary}``.
@@ -110,7 +110,7 @@ class BackfillBody(BaseModel):
 @router.post("/actions/backfill-history", status_code=200)
 def backfill_history(
     body: BackfillBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Backfill price + FX history for ALL instruments (manual, idempotent).
@@ -127,7 +127,7 @@ def backfill_history(
 
 @router.post("/actions/recompute", status_code=200)
 def recompute(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Re-validate the ledgers by replaying them (read-only; append-only honored)."""

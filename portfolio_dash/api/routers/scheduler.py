@@ -207,7 +207,7 @@ def _job_element(
 @router.get("/scheduler/jobs")
 def list_jobs(
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     """§15.1 — schedule config + latest run + next fire for every scheduled job.
 
@@ -238,7 +238,7 @@ def update_job(
     job_id: str,
     body: _PutBody,
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """§15.2 — edit cron/tz/enabled (subset merge), validate, persist + live reschedule."""
     ensure_job_rows(conn)
@@ -323,7 +323,7 @@ def insight_task_run_refusal(
 @router.post("/scheduler/jobs/{job_id}/run")
 def run_job_now(
     job_id: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """§15.3 — fire a job once now (async 202; background thread opens its own session).
@@ -422,7 +422,7 @@ def _status_last_run(row: Any) -> dict[str, Any]:
 
 
 @router.get("/scheduler/status")
-def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def job_status(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     """FU-D36/D46 — per-job live run status for the 排程中心 poll (needs 七).
 
     For every scheduled job → ``{running, queued, progress, last_run}``. ``running`` = the
@@ -519,7 +519,7 @@ def _run_row(
 
 @router.get("/scheduler/runs")
 def list_runs(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     job_id: str | None = None,
     limit: int = 50,
     offset: int = 0,

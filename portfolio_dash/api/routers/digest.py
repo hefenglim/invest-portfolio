@@ -55,7 +55,7 @@ def _guest_forbidden() -> JSONResponse:
 
 @router.get("/digest/latest")
 def get_latest(
-    kind: str = "daily", conn: sqlite3.Connection = Depends(get_conn)
+    kind: str = "daily", conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     """Latest stored digest of *kind* (or ``null`` when none exists)."""
     if kind not in digest_store.VALID_KINDS:
@@ -68,7 +68,7 @@ def get_history(
     kind: str = "daily",
     offset: int = 0,
     limit: int = 5,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Page stored digests (newest first). ``offset >= 0`` and ``1 <= limit <= 20``."""
     if kind not in digest_store.VALID_KINDS:
@@ -94,7 +94,7 @@ class _RunBody(BaseModel):
 @router.post("/digest/run")
 def run_now(
     body: _RunBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Manually regenerate a digest (async 202); already-running → 409.
@@ -123,7 +123,7 @@ class _ConfigBody(BaseModel):
 
 
 @router.get("/digest/config")
-def get_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_config(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     """The digest config: ``{llm_summary_enabled}`` (the optional AI one-liner switch)."""
     cfg = digest_store.load_config(conn)
     return {"llm_summary_enabled": cfg.llm_summary_enabled}
@@ -132,7 +132,7 @@ def get_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
 @router.put("/digest/config")
 def put_config(
     body: _ConfigBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Set the AI one-liner switch (default off). Guest → 403."""

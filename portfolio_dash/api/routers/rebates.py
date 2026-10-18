@@ -35,7 +35,7 @@ _ZERO = Decimal("0")
 @router.get("/rebates")
 def list_rebates(
     older: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Pending + accruing + skipped rebate months.
@@ -61,7 +61,7 @@ def list_rebates(
 
 @router.get("/rebates/count")
 def rebates_count(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, int]:
     """Pending-rebate count for the sidebar badge (summed with the dividend inbox)."""
@@ -83,7 +83,7 @@ class ConfirmBody(BaseModel):
 @router.post("/rebates/confirm")
 def confirm(
     body: ConfirmBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Book a confirmed rebate as a cash-pool credit; recompute/validate server-side.
@@ -153,7 +153,7 @@ class MonthBody(BaseModel):
 @router.post("/rebates/skip")
 def skip(
     body: MonthBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, int]:
     svc.mark_skipped(conn, body.account_id, body.month, now=now)
@@ -163,7 +163,7 @@ def skip(
 @router.post("/rebates/unskip")
 def unskip(
     body: MonthBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, int]:
     """Un-skip a month so it re-surfaces (mirrors the dividend-inbox unskip — guest-open)."""
     removed = svc.unskip(conn, [(body.account_id, body.month)])

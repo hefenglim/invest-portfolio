@@ -142,7 +142,9 @@ class PromptBody(BaseModel):
 
 
 @router.get("/prompt-vars")
-def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+def prompt_vars(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> list[dict[str, Any]]:
     """The 34-variable registry (vars.js mirror + backend signal/news vars). ``available``
     drives the UI's
     "需後端新增" markers; chips/sentiment went live (spec 20.2), ai stays False (spec 04).
@@ -176,14 +178,16 @@ def prompt_vars(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, 
 
 
 @router.get("/system-prompt")
-def read_system_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def read_system_prompt(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     return get_system_prompt(conn)
 
 
 @router.put("/system-prompt")
 def write_system_prompt(
     payload: SystemPromptIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if not payload.body.strip():
@@ -206,7 +210,7 @@ def read_prompt_templates() -> dict[str, Any]:
 
 @router.post("/system-prompt/reset")
 def reset_system_prompt(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Restore the global system prompt to the official library version.
@@ -220,7 +224,9 @@ def reset_system_prompt(
 
 
 @router.get("/news-prompt")
-def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def read_news_prompt(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     """The editable news-organizer system prompt (default-seeded from the official library),
     with ``official_version`` + ``is_official`` for the settings page's badge (D1(a))."""
     return dict(news_organizer_prompt.get_news_prompt(conn))
@@ -229,7 +235,7 @@ def read_news_prompt(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, 
 @router.put("/news-prompt")
 def write_news_prompt(
     payload: SystemPromptIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Overwrite the news-organizer prompt (applies to the next nightly news run).
@@ -245,7 +251,7 @@ def write_news_prompt(
 
 @router.post("/news-prompt/reset")
 def reset_news_prompt(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Restore the news-organizer prompt to the official library version (a version too)."""
@@ -297,7 +303,9 @@ def _version_routes(kind: pv.Kind, base: str, read: _ReadFn, restore: _RestoreFn
         v = pv.get_version(conn, version_id)
         return v if v is not None and v.kind == kind else None
 
-    def list_versions(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    def list_versions(
+        conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    ) -> dict[str, Any]:
         """The prompt's whole version history, newest first (DEF-057)."""
         read(conn)
         current = pv.current_version_no(conn, kind)
@@ -308,7 +316,10 @@ def _version_routes(kind: pv.Kind, base: str, read: _ReadFn, restore: _RestoreFn
             "versions": [_pv_meta(v, current) for v in pv.list_versions(conn, kind)],
         }
 
-    def get_version(version_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+    def get_version(
+        version_id: int,
+        conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    ) -> Any:
         """One version, with its full body (DEF-057)."""
         v = _own(conn, version_id)
         if v is None:
@@ -318,7 +329,7 @@ def _version_routes(kind: pv.Kind, base: str, read: _ReadFn, restore: _RestoreFn
     def diff_version(
         version_id: int,
         against: str = "current",
-        conn: sqlite3.Connection = Depends(get_conn),
+        conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     ) -> Any:
         """Line diff between this version and another of the SAME prompt (DEF-057).
 
@@ -364,7 +375,7 @@ def _version_routes(kind: pv.Kind, base: str, read: _ReadFn, restore: _RestoreFn
 
     def restore_version(
         version_id: int,
-        conn: sqlite3.Connection = Depends(get_conn),
+        conn: sqlite3.Connection = Depends(get_conn, scope="function"),
         now: datetime = Depends(get_now),
     ) -> Any:
         """Make an old version's body current again — as a NEW version (DEF-057).
@@ -1047,7 +1058,7 @@ def _option_target_refused(payload: PromptBody) -> JSONResponse | None:
 @router.post("/prompts/preview")
 def preview(
     payload: PromptBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Any:
@@ -1074,7 +1085,7 @@ def preview(
 @router.post("/prompts/test")
 def test_prompt(
     payload: PromptBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Any:

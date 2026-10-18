@@ -104,7 +104,7 @@ def _bad_range(body: RangeBody) -> JSONResponse | None:
 @router.post("/export/holdings")
 def export_holdings(
     body: HoldingsFilterBody | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
@@ -118,7 +118,7 @@ def export_holdings(
 @router.post("/export/options")
 def export_options(
     body: HoldingsFilterBody | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
@@ -156,7 +156,7 @@ def list_export_ledgers() -> Any:
 
 @router.post("/export/ledgers")
 def export_ledgers(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     return _respond(build_ledgers_zip(conn, now=now))
@@ -165,7 +165,7 @@ def export_ledgers(
 @router.post("/export/ledger")
 def export_ledger(
     body: LedgerBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     # Single reconciliation-grade CSV for the 交易帳本 page's ACTIVE tab, range-filtered.
@@ -184,7 +184,7 @@ def export_ledger(
 
 @router.post("/export/realized")
 def export_realized(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
@@ -194,7 +194,7 @@ def export_realized(
 
 @router.post("/export/ai-predictions")
 def export_ai_predictions(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     # AI 洞察 預測明細 battle record from the evaluations store. Empty JSON body {}.
@@ -204,7 +204,7 @@ def export_ai_predictions(
 @router.post("/export/symbol-detail")
 def export_symbol_detail(
     body: SymbolBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     # Symbol drawer 配息史 from the dividend ledger. Unknown symbol -> 400.
@@ -220,7 +220,7 @@ def export_symbol_detail(
 @router.post("/export/holdings-report")
 def export_holdings_report(
     body: HoldingsFilterBody | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
@@ -235,7 +235,7 @@ def export_holdings_report(
 @router.post("/export/ledgers-report")
 def export_ledgers_report(
     body: RangeBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     # Print-optimized 帳本報告 over [from, to]. SAME RangeBody + 400 validation as the other
@@ -249,7 +249,7 @@ def export_ledgers_report(
 @router.post("/export/llm-usage")
 def export_llm_usage(
     body: RangeBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     bad = _bad_range(body)
@@ -261,7 +261,7 @@ def export_llm_usage(
 @router.post("/export/job-runs")
 def export_job_runs(
     body: RangeBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     bad = _bad_range(body)
@@ -273,7 +273,7 @@ def export_job_runs(
 @router.post("/export/ledger-audit")
 def export_ledger_audit(
     body: RangeBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Response:
     """The ledger audit trail (post-closure item 10, owner 2026-09-30) — the 資料中心 list's
     CSV, built by the same presenter so the two cannot label a column differently."""
@@ -286,7 +286,7 @@ def export_ledger_audit(
 @router.post("/export/tax-package")
 def export_tax_package(
     body: TaxPackageBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:
@@ -323,7 +323,7 @@ class CashStatementBody(BaseModel):
 @router.post("/export/cash-statement")
 def export_cash_statement(
     body: CashStatementBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     # 現金收支明細 CSV for one account (all pools when ccy is null), from the SAME
@@ -341,7 +341,7 @@ def export_cash_statement(
 @router.post("/export/cash-statement-report")
 def export_cash_statement_report(
     body: CashStatementBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Response:
     # Print-optimized 現金收支明細 report (one section per pool). Unknown account -> 400.
@@ -362,7 +362,7 @@ class RebalanceReportBody(BaseModel):
 @router.post("/export/rebalance-report")
 def export_rebalance_report(
     body: RebalanceReportBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Response:

@@ -32,7 +32,7 @@ _PREVIEW = 20
 @router.get("/llm-fail-log")
 def summary(
     limit: int = Query(_PREVIEW, ge=1, le=200),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, object]:
     """Per-agent counts, the ring's capacity, and a preview of the newest rows.
 
@@ -56,7 +56,7 @@ def summary(
 @router.post("/llm-fail-log/export")
 def export_jsonl(
     agent: str | None = Query(None),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Response:
     """The whole log as JSON Lines — one complete record per line, nothing truncated.
 
@@ -77,7 +77,7 @@ def export_jsonl(
 @router.delete("/llm-fail-log")
 def clear(
     agent: str | None = Query(None),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, object]:
     """Empty the log (or one agent's rows). Never touches ``llm_usage`` — see module doc."""
     return {"ok": True, "deleted": fail_log.delete_all(conn, agent=agent)}

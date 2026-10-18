@@ -154,7 +154,7 @@ def _news_run_worker(
 @router.post("/news/run")
 def run_news(
     body: _RunBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Manually fetch + AI-organize news (async 202). Already-running → 409.

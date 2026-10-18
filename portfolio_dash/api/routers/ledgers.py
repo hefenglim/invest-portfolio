@@ -259,7 +259,7 @@ def transactions(
     account_id: str | None = None, symbol: str | None = None,
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
@@ -342,7 +342,7 @@ def dividends(
     account_id: str | None = None, symbol: str | None = None,
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
@@ -392,7 +392,7 @@ def fx(
     account_id: str | None = None,
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
@@ -429,7 +429,7 @@ def cash_movements(
     account_id: str | None = None,
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """The 6th ledger's page view (2026-08-16).
@@ -475,7 +475,7 @@ def cash_movements(
 def openings(
     account_id: str | None = None, symbol: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     today = now.date()
@@ -734,7 +734,7 @@ def _recompute_edit_fees(
 def edit_transaction(
     txn_id: int,
     body: TxEditBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Correct one transaction row — through the SAME ``validate_transaction`` a new entry
@@ -836,7 +836,7 @@ def edit_transaction(
 def remove_transaction(
     txn_id: int,
     ack_oversell: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     if get_transaction(conn, txn_id) is None:
         return JSONResponse(status_code=404,
@@ -893,7 +893,7 @@ def _dividend_input(body: "DivEditBody | DivPreviewBody",
 
 @router.post("/ledgers/dividends/preview")
 def preview_dividend_edit(
-    body: DivPreviewBody, conn: sqlite3.Connection = Depends(get_conn)
+    body: DivPreviewBody, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     """What saving this dividend correction WOULD report — the same ``validate_dividend``
     (with ``replacing=``) the PUT runs, computed and never written (DEF-061). The edit dialog
@@ -934,7 +934,7 @@ class DivEditBody(BaseModel):
 def edit_dividend(
     div_id: int,
     body: DivEditBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Correct one dividend row — through the SAME ``validate_dividend`` every entry door
     runs (DEF-061, owner ruling 2026-09-24; the dividend twin of DEF-042).
@@ -1002,7 +1002,7 @@ def edit_dividend(
 def remove_dividend(
     div_id: int,
     ack_oversell: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     if get_dividend(conn, div_id) is None:
         return JSONResponse(status_code=404,
@@ -1032,7 +1032,7 @@ class FxEditBody(BaseModel):
 def edit_fx(
     fx_id: int,
     body: FxEditBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Correct one fx_conversions row — through the SAME guard ``POST /api/cash/fx`` runs.
 
@@ -1088,7 +1088,7 @@ def edit_fx(
 def remove_fx(
     fx_id: int,
     ack_negative: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Delete one fx_conversions row, with the ack-able ``negative_cash`` guard (QA-10).
 
@@ -1143,7 +1143,7 @@ def edit_opening(
     account_id: str,
     symbol: str,
     body: OpeningEditBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     existing = get_opening(conn, account_id, symbol)
     if existing is None:
@@ -1193,7 +1193,7 @@ def remove_opening(
     account_id: str,
     symbol: str,
     ack_oversell: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     if get_opening(conn, account_id, symbol) is None:
         return JSONResponse(status_code=404, content=error_body(
@@ -2085,7 +2085,7 @@ def corporate_actions(
     account_id: str | None = None, symbol: str | None = None,
     frm: str | None = Query(None, alias="from"), to: str | None = None,
     limit: int = Query(200, ge=1, le=500), offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     bad = _check_dates(frm, to)
@@ -2161,7 +2161,7 @@ def corporate_actions(
 @router.post("/ledgers/corporate-actions/preview")
 def preview_corporate_action(
     body: ActionBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     return _preview_payload(conn, body, now.date())
@@ -2170,7 +2170,7 @@ def preview_corporate_action(
 @router.post("/ledgers/corporate-actions", status_code=201)
 def add_corporate_action(
     body: ActionBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Write the COMPLETE E13 batch for one submitted action, then reconcile prices.
@@ -2490,7 +2490,9 @@ def _change_block(issues: list[Issue]) -> JSONResponse | None:
 
 @router.put("/ledgers/corporate-actions/{action_id}")
 def edit_corporate_action(
-    action_id: int, body: ActionBody, conn: sqlite3.Connection = Depends(get_conn),
+    action_id: int,
+    body: ActionBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Edit one row — re-validated on the way OUT (F-32) and IN, then both ends reconciled.
@@ -2751,7 +2753,7 @@ def remove_corporate_action_set(
     kind: str = Query(...),
     ack_oversell: bool = False,
     ack_negative: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Delete a whole ``(from_symbol, date, kind)`` set — the ONLY way to leave one.
@@ -2949,7 +2951,7 @@ def _weight_restore_wire(verdict: WeightRestoreVerdict | None) -> dict[str, Any]
 @router.delete("/ledgers/corporate-actions/{action_id}")
 def remove_corporate_action(
     action_id: int, ack_oversell: bool = False, ack_negative: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Delete one row — refused when it belongs to a multi-account set (F-32), and replayed

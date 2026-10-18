@@ -126,7 +126,9 @@ def _rule_set_wire(conn: sqlite3.Connection, name: str) -> dict[str, Any]:
 
 
 @router.get("/fee-rules")
-def list_fee_rules(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def list_fee_rules(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     """Every rule set: per-field default + effective + overridden flag (Decimal strings)."""
     return {"rule_sets": [_rule_set_wire(conn, name) for name in FEE_RULES]}
 
@@ -141,7 +143,7 @@ class FeeRulePutBody(BaseModel):
 def update_fee_rule(
     name: str,
     body: FeeRulePutBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if name not in FEE_RULES:
@@ -156,7 +158,9 @@ def update_fee_rule(
 
 
 @router.post("/fee-rules/reset-all")
-def reset_all_fee_rules(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def reset_all_fee_rules(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     """Delete every overlay row — revert all rule sets to fee-engine v2 defaults."""
     fee_overrides.reset_all(conn)
     return {"rule_sets": [_rule_set_wire(conn, name) for name in FEE_RULES]}
@@ -164,7 +168,7 @@ def reset_all_fee_rules(conn: sqlite3.Connection = Depends(get_conn)) -> dict[st
 
 @router.post("/fee-rules/{name}/reset")
 def reset_fee_rule(
-    name: str, conn: sqlite3.Connection = Depends(get_conn)
+    name: str, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     """Delete one rule set's overlay — revert every field to its fee-engine v2 default."""
     if name not in FEE_RULES:

@@ -88,7 +88,7 @@ def _source_wire(
 
 @router.get("/datasources")
 def list_datasources(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     store.ensure_seeded(conn)
     states = store.list_states(conn)
@@ -118,7 +118,7 @@ class KeyBody(BaseModel):
 def set_key(
     source_id: str,
     body: KeyBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     store.ensure_seeded(conn)
     info = store.SOURCE_INFO_BY_ID.get(source_id)
@@ -153,7 +153,7 @@ class TierBody(BaseModel):
 def set_tier(
     source_id: str,
     body: TierBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Mark a source's token tier (spec 20.15.3). 404 unknown id; 400 if the source has
     no selectable tiers (auth:"none") or the value is not one of its options."""
@@ -280,7 +280,7 @@ def _run_probe(source_id: str, api_key: str | None) -> tuple[str, int | None, st
 @router.post("/datasources/{source_id}/test")
 async def test_source(
     source_id: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     store.ensure_seeded(conn)
@@ -323,7 +323,7 @@ class MarketOrderBody(BaseModel):
 @router.put("/datasources/market-order")
 def set_market_order(
     body: MarketOrderBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     store.ensure_seeded(conn)
     if not body.order:

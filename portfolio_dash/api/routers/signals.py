@@ -22,7 +22,7 @@ router = APIRouter()
 
 @router.get("/signals")
 def signals(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Rule-engine signals for every registered symbol (held + watchlist; honest nulls
@@ -44,7 +44,7 @@ def signals(
 @router.get("/signals/{symbol}")
 def signal(
     symbol: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """One symbol's rule-engine signals — the drawer path (no holdings enumeration). Any

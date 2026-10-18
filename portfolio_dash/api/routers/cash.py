@@ -507,7 +507,7 @@ def fx_edit_negative_guard(
 def cash_overview(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> dict[str, Any]:
@@ -667,7 +667,7 @@ def cash_statement(
     ccy: Currency | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Merged, date-ordered flow timeline with a server-computed running balance (audit C5).
@@ -837,7 +837,7 @@ def _resolved_acq(accounts: dict[str, Account], inp: CashMovementInput) -> Decim
 @router.post("/cash/movements", status_code=201)
 def add_movement(
     body: MovementBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     # ONE guard, shared with the CSV door: structural checks, the acquisition-cost rules,
     # and FU-D43a's HARD withdraw block (``ack_negative`` does NOT bypass it; deposit /
@@ -890,7 +890,7 @@ def _linked_rebate_move_refusal(
 def edit_movement(
     move_id: int,
     body: MovementBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     existing = get_cash_movement(conn, move_id)
     if existing is None:
@@ -946,7 +946,7 @@ def edit_movement(
 def remove_movement(
     move_id: int,
     ack_negative: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     existing = get_cash_movement(conn, move_id)
     if existing is None:
@@ -974,7 +974,7 @@ class CashFxBody(BaseModel):
 @router.post("/cash/fx", status_code=201)
 def add_fx(
     body: CashFxBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """FX conversion entry with a HARD balance guard (FU-D34, 需求五) and currency↔account
     coherence (audit C2).
@@ -1026,7 +1026,7 @@ def cash_acq_rate(
     account_id: str = Query(...),
     ccy: Currency = Query(...),
     on: date = Query(...),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Point-in-time foreign->home rate to PRE-FILL the 取得成本 field (spec 2026-07-30).
 
@@ -1064,7 +1064,7 @@ def cash_fx_estimate(
     from_ccy: Currency = Query(...),
     to_ccy: Currency = Query(...),
     amount: Decimal = Query(...),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """FU-D43c: SERVER-computed buy-amount what-if for the 換匯中心 form.

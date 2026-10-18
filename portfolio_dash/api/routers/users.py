@@ -37,7 +37,7 @@ def _current_username(conn: sqlite3.Connection, token: str | None) -> str | None
 
 @router.get("/users")
 def list_all(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
 ) -> list[dict[str, Any]]:
     current = _current_username(conn, pd_session)
@@ -55,7 +55,7 @@ def list_all(
 @router.post("/users")
 def create(
     body: NewUser,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if not body.username.strip():
@@ -91,7 +91,7 @@ def create(
 def delete(
     username: str,
     response: Response,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
 ) -> Response:
     is_self = _current_username(conn, pd_session) == username

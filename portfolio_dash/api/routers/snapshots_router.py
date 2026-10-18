@@ -14,7 +14,7 @@ router = APIRouter()
 @router.get("/snapshots")
 def snapshots(
     limit: int = Query(24, ge=1, le=120),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     rows = list_snapshots(conn, limit=limit)
     return {"rows": rows, "total_count": len(rows)}

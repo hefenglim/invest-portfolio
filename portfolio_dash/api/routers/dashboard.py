@@ -38,7 +38,7 @@ _INSIGHT_N = 3
 @router.get("/dashboard")
 def dashboard(
     trend_days: int = Query(90, ge=1, le=3650),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
     scheduler_running: bool | None = Depends(scheduler_running_dep),

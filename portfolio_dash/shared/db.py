@@ -46,10 +46,10 @@ def session() -> Iterator[sqlite3.Connection]:
     try:
         yield conn
         if conn.total_changes:
-            # The commit runs inside a write window (`shared/flight.py`): a request's
-            # `get_conn` commits AFTER `api/app.py`'s window has closed (FastAPI runs a yield
-            # dependency's exit once the response has started), so without this a caller
-            # arriving just after the commit could still join a build started before it.
+            # The commit runs inside a write window (`shared/flight.py`), so a caller arriving
+            # just after the commit cannot join a build started before it. A request's
+            # `get_conn` commits inside `api/app.py`'s window since PERF-S10 (function scope);
+            # this window covers every session opened outside a request (threads, jobs).
             begin_write()
             try:
                 conn.commit()

@@ -18,6 +18,6 @@ router = APIRouter()
 def system_log(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, object]:
     return list_actions(conn, limit=limit, offset=offset)

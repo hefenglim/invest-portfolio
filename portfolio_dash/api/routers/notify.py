@@ -105,7 +105,9 @@ def _masked_wire(cfg: notify.NotifyConfig, *, guest: bool = False) -> dict[str, 
 
 
 @router.get("/notify/config")
-def get_notify_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_notify_config(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     return _masked_wire(
         notify.load_config(conn), guest=not auth_store.is_protected(conn)
     )
@@ -195,7 +197,7 @@ def _valid_hm(value: str) -> bool:
 @router.put("/notify/config")
 def put_notify_config(
     body: NotifyConfigIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Merge a partial update into the saved config (validate shapes; 400 on junk).
@@ -299,7 +301,7 @@ class TestIn(BaseModel):
 @router.post("/notify/test")
 async def test_notify(
     body: TestIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Send a test message via ONE channel using the saved config; report its outcome.
 

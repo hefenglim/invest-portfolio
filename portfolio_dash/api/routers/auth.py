@@ -32,7 +32,7 @@ class LoginBody(BaseModel):
 def login(
     body: LoginBody,
     response: Response,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if not A.authenticate(conn, body.username, body.password):
@@ -51,7 +51,7 @@ def login(
 
 @router.get("/auth/session")
 def session(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     # Case 1: guest mode (no users) -> everything open.
@@ -77,7 +77,7 @@ def session(
 @router.post("/auth/logout", status_code=204)
 def logout(
     response: Response,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
 ) -> Response:
     if pd_session is not None:
@@ -89,7 +89,7 @@ def logout(
 
 @router.post("/auth/lock")
 def lock(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
 ) -> Response:
     # Require a valid (unlocked, known) session before locking.

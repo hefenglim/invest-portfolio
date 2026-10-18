@@ -215,13 +215,14 @@ def lock_session(conn: sqlite3.Connection, token: str) -> bool:
 
 
 def require_session(
-    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    request: Request, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> None:
     """Global gate (wired in create_app): protect ``/api/*`` in protected mode.
 
     Allows: non-``/api/`` paths (static files), the open paths (login/session), and
     everything in guest mode. Otherwise requires a valid, unlocked ``pd_session``
-    cookie -> 401. Shares ``Depends(get_conn)`` so tests' DB override applies.
+    cookie -> 401. Shares ``Depends(get_conn)`` — with the routes' ``scope="function"``, so
+    the request has one connection — and tests' DB override applies.
     """
     path = request.url.path
     if not path.startswith("/api/") or path in _OPEN_PATHS:

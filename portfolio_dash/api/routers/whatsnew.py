@@ -85,14 +85,16 @@ def _payload(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 @router.get("/whats-new")
-def read_whats_new(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def read_whats_new(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     return _payload(conn)
 
 
 @router.post("/whats-new/seen")
 def write_seen(
     body: SeenBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Mark features seen. Body: ``{"features": ["<version>:<id>", ...]}`` OR ``{"all": true}``.
@@ -119,7 +121,7 @@ def write_seen(
 def read_history(
     offset: int = 0,
     limit: int = 5,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Page the FULL release history (version <= current, newest first).
 

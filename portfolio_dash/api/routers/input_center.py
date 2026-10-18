@@ -162,7 +162,7 @@ _BOM = "\ufeff"
 
 
 @router.get("/input/context")
-def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def context(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     rows = conn.execute(
         "SELECT account_id, fee_rule_set, dividend_model FROM accounts ORDER BY account_id"
     ).fetchall()
@@ -258,7 +258,7 @@ def _recognise_contract(conn: sqlite3.Connection, text: str) -> dict[str, Any]:
 def compose_option_symbol(
     underlying: str = "", expiry: str = "", strike: str = "", right: str = "",
     text: str | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """The compose endpoint (options spec §8): 標的／到期日／履約價／買權｜賣權 → the OCC
     symbol and its display name, through ``shared.options.option_symbol`` — the ONLY composer
@@ -429,7 +429,7 @@ def _adjusted_avg_by_position(
 
 @router.get("/input/holdings")
 def input_holdings(
-    account: str, conn: sqlite3.Connection = Depends(get_conn),
+    account: str, conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Per-account held / closed symbols: 股利 picker (FU-D35) + sell-entry hints (FU-D44).
@@ -1266,7 +1266,7 @@ def _charged_discount(
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     replacing: StoredTransaction | None = None
@@ -1459,7 +1459,7 @@ def _pair_preview(conn: sqlite3.Connection, body: ManualBody, *, now: datetime) 
 @router.post("/input/manual/commit", status_code=201)
 def manual_commit(
     body: ManualBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     today = now.date()
@@ -1889,7 +1889,10 @@ class ImportPreviewBody(BaseModel):
 
 
 @router.post("/import/preview")
-def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def import_preview(
+    body: ImportPreviewBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> Any:
     if body.kind not in _BUILDERS:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
@@ -1983,7 +1986,7 @@ def _oversell_rows_response(rows: list[PreviewRow]) -> JSONResponse:
 @router.post("/import/commit")
 def import_commit(
     body: ImportCommitBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     bind_writer = _WRITERS.get(body.kind)
@@ -2194,7 +2197,7 @@ def import_commit(
 
 @router.get("/import/batches")
 def import_batches(
-    limit: int = 50, conn: sqlite3.Connection = Depends(get_conn)
+    limit: int = 50, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> dict[str, Any]:
     """The import history, newest first — what came in, from which file, and how much of it.
 
@@ -2222,7 +2225,7 @@ _UNDO_REFUSED_ZH = {
 def import_batch_delete(
     batch_id: int, request: Request,
     ack_oversell: bool = False, ack_negative: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Undo one import: delete exactly the ledger rows that batch wrote, and the batch.
@@ -2401,7 +2404,7 @@ class AiBody(BaseModel):
 @router.post("/input/ai/preview")
 def ai_preview(
     body: AiBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if body.drafts is not None:

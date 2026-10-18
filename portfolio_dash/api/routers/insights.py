@@ -242,7 +242,9 @@ def _strategy_scope(body: str) -> str:
 
 
 @router.get("/strategy-prompts")
-def list_strategy_prompts(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+def list_strategy_prompts(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> list[dict[str, Any]]:
     """List the (non-archived) strategies, each stamped with the scope its body REQUIRES.
 
     ``scope`` is ADDITIVE (M7-04) — every existing field keeps its name and type.
@@ -257,7 +259,7 @@ def list_strategy_prompts(conn: sqlite3.Connection = Depends(get_conn)) -> list[
 @router.post("/strategy-prompts")
 def create_strategy_prompt(
     payload: StrategyIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     cs.ensure_seeded(conn)
@@ -279,7 +281,7 @@ class FromTemplateIn(BaseModel):
 @router.post("/strategy-prompts/from-template")
 def create_strategy_from_template(
     payload: FromTemplateIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Copy an official library strategy into the user's editable set (2026-07-05 program).
@@ -349,7 +351,7 @@ def create_strategy_from_template(
 def update_strategy_prompt(
     strategy_id: int,
     payload: StrategyIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     cs.ensure_seeded(conn)
@@ -368,7 +370,7 @@ def update_strategy_prompt(
 @router.delete("/strategy-prompts/{strategy_id}")
 def delete_strategy_prompt(
     strategy_id: int,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Spec-4.1 strategy delete: 409 with the referencing list while in use, else
@@ -423,7 +425,7 @@ def _unknown_version(version_id: int) -> JSONResponse:
 
 @router.get("/strategy-prompt-versions")
 def list_strategy_prompt_versions(
-    strategy_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    strategy_id: int, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     """A strategy's whole version history, newest first (DEF-033)."""
     cs.ensure_seeded(conn)
@@ -446,7 +448,7 @@ def list_strategy_prompt_versions(
 
 @router.get("/strategy-prompt-versions/{version_id}")
 def get_strategy_prompt_version(
-    version_id: int, conn: sqlite3.Connection = Depends(get_conn)
+    version_id: int, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     """One version, with its full body (DEF-033)."""
     cs.ensure_seeded(conn)
@@ -462,7 +464,7 @@ def get_strategy_prompt_version(
 def diff_strategy_prompt_version(
     version_id: int,
     against: str = "current",
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Line diff between this version and another of the SAME strategy (DEF-033).
 
@@ -515,7 +517,7 @@ def diff_strategy_prompt_version(
 @router.post("/strategy-prompt-versions/{version_id}/restore")
 def restore_strategy_prompt_version(
     version_id: int,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Make an old version's body current again — as a NEW version (DEF-033).
@@ -545,7 +547,9 @@ def restore_strategy_prompt_version(
 
 
 @_dual("GET", "")
-def list_insight_types(conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+def list_insight_types(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> list[dict[str, Any]]:
     cs.ensure_seeded(conn)
     return [_insight_type_wire(conn, it) for it in cs.list_insight_types(conn)]
 
@@ -553,7 +557,7 @@ def list_insight_types(conn: sqlite3.Connection = Depends(get_conn)) -> list[dic
 @_dual("POST", "")
 def create_insight_type(
     payload: InsightTypeIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     cs.ensure_seeded(conn)
@@ -582,7 +586,7 @@ def create_insight_type(
 def update_insight_type(
     insight_type_id: int,
     payload: InsightTypeIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     cs.ensure_seeded(conn)
@@ -616,7 +620,7 @@ def update_insight_type(
 def delete_insight_type(
     insight_type_id: int,
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Spec-4.1 insight_type delete: archive + clear schedule binding + archive calib chain."""
@@ -640,7 +644,7 @@ def delete_insight_type(
 @_dual("POST", "/official-pack")
 def enable_official_pack(
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Create every official task preset in one click (strategy + knobs + schedule).
@@ -716,7 +720,7 @@ def mount_schedule(
     insight_type_id: int,
     payload: ScheduleIn,
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Bind/update the insight_type's schedule (kind=insight). on_alert combos reject (400).
 
@@ -760,7 +764,7 @@ def mount_schedule(
 def unmount_schedule(
     insight_type_id: int,
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     cs.ensure_seeded(conn)
     if cs.get_insight_type(conn, insight_type_id) is None:
@@ -782,7 +786,7 @@ def unmount_schedule(
 def set_active_calibration(
     insight_type_id: int,
     payload: ActiveCalibrationIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Manually select (or clear with null) the active calibration version.
 
@@ -825,7 +829,7 @@ def set_active_calibration(
 def list_calibrations(
     insight_type: int,
     include_archived: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> list[dict[str, Any]]:
     """The task's calibration chain, oldest first (spec 4.7), for the drawer's ④.
 
@@ -853,7 +857,7 @@ def list_calibrations(
 @router.post("/calibrations/{calibration_id}/archive")
 def archive_calibration(
     calibration_id: int,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Soft-delete a calibration version; clears the active selection if it was active."""
     cs.ensure_seeded(conn)
@@ -869,7 +873,7 @@ def archive_calibration(
 @router.get("/calibrations/{calibration_id}/samples")
 def calibration_samples(
     calibration_id: int,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> list[dict[str, Any]]:
     """The miss-evaluation samples that drove a calibration version (spec 4.7).
 
@@ -894,7 +898,7 @@ def calibration_samples(
 def get_ai_score(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     """The AI battle-record table: ``{totals, by_combo[], calibration_bins[], rows[]}``.
 
@@ -968,7 +972,9 @@ def _task_label(task_id: int, tasks: dict[int, cs.InsightType]) -> str:
 
 
 @router.get("/evolution-config")
-def get_evolution_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def get_evolution_config(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     cs.ensure_seeded(conn)
     return cs.get_evolution_config(conn)
 
@@ -976,7 +982,7 @@ def get_evolution_config(conn: sqlite3.Connection = Depends(get_conn)) -> dict[s
 @router.put("/evolution-config")
 def put_evolution_config(
     payload: EvolutionConfigIn,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Upsert the evolution knobs.
 
@@ -1022,7 +1028,7 @@ def put_evolution_config(
 @_dual("POST", "/{insight_type_id}/run")
 def run_insight_now(
     insight_type_id: int,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Fire one insight generation now (async 202; the bg thread opens its own session).
@@ -1066,7 +1072,7 @@ def _insight_run_row(row: sqlite3.Row) -> dict[str, Any]:
 def list_insight_runs(
     insight_type_id: int,
     limit: int = 50,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """Run history for one insight_type (job_runs filtered by its kind=insight job_id).
 
@@ -1094,7 +1100,7 @@ def list_insight_runs(
 
 @router.get("/insight-tasks/status")
 def insight_tasks_status(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> dict[str, Any]:
@@ -1115,7 +1121,7 @@ def insight_tasks_status(
 def insight_task_preflight(
     insight_type_id: int,
     draft: insight_service.PreflightDraft | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Any:
@@ -1155,7 +1161,7 @@ def insight_task_preflight(
 @router.get("/insight-tasks/{insight_type_id}/diagnose")
 def insight_task_diagnose(
     insight_type_id: int,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> Any:
@@ -1332,7 +1338,7 @@ def list_insights(
     history_limit: int = Query(5, ge=1, le=20),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """List stored insight cards (newest first) — paginated (WPE, 2026-07-07).
 

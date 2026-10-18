@@ -738,7 +738,7 @@ def _option_realized_wire(r: OptionRealizedRow) -> dict[str, Any]:
 def symbol_detail(
     symbol: str,
     days: int = Query(180, ge=1, le=3650),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> dict[str, Any]:

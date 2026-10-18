@@ -309,9 +309,10 @@ def create_app() -> FastAPI:
     # while a mutating request runs, and none joins one that started before it — so a page
     # reloaded right after 儲存 never receives an answer computed before the save. Every
     # method but GET / HEAD / OPTIONS counts, read-only POSTs (preview, 試算) included: a
-    # needless window only costs one build that is not shared. This window covers the route
-    # body only — `get_conn`'s commit runs after it closes (a yield dependency exits once the
-    # response has started), so `shared/db.session()` brackets that commit in its own window.
+    # needless window only costs one build that is not shared. Since PERF-S10 (2026-10-18)
+    # `get_conn` is function-scoped, so the request's commit runs before the response starts,
+    # inside this window; `shared/db.session()` still brackets its own commit in a window,
+    # which covers the sessions opened outside a request (threads, jobs).
     @app.middleware("http")
     async def _write_window_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]

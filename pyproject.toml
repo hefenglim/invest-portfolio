@@ -12,7 +12,7 @@ dependencies = [
     "requests>=2.31",
     "litellm>=1.40",
     "APScheduler>=3.10,<4",
-    "fastapi>=0.111",
+    "fastapi>=0.121.1",  # Depends(scope="function") — PERF-S10
     "uvicorn[standard]>=0.30",
     # Runtime provider (TW quote-chain fallback + TW name lookup). Was mis-grouped
     # under the [probe] extra, which silently disabled BOTH on deployed instances

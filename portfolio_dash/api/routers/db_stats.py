@@ -180,7 +180,7 @@ def _size_bytes(path: Path) -> int | None:
 
 
 @router.get("/db-stats")
-def db_stats(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def db_stats(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     """Read-only statistics of ALL data categories across BOTH SQLite files.
 
     ``portfolio`` reads the request connection; ``news`` opens the separate news DB
