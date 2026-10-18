@@ -865,6 +865,25 @@ class KpiBlock:
                 if read is None]
 
 
+def options_block_of(
+    kpi: KpiBlock, prices: PriceSource, *, trend_excludes_value: bool,
+) -> OptionsBlock | None:
+    """The 選擇權 block (options spec §7.1) from *kpi*'s ONE replay and ONE valuation, or
+    ``None`` on a ledger without an option. The underlyings' prices come from *prices* — the
+    same source the valuation read (:class:`LatestStored` live, :class:`OnOrBefore` for a
+    period close); *trend_excludes_value* is the trend's own flag. KPI 總市值 reads this
+    block's market value (:meth:`KpiBlock.market_value_with`)."""
+    if not kpi.has_options:
+        return None
+    return option_summary(
+        book=kpi.book, valued=kpi.valued, bundle=kpi.bundle, last_trades=kpi.last_trades,
+        underlying_prices=_underlying_prices(prices, kpi.book, kpi.option_symbols,
+                                             kpi.bundle.instruments, kpi.actions,
+                                             as_of=kpi.as_of),
+        fx_rate=kpi.resolver.rate, reporting=kpi.reporting, as_of=kpi.as_of,
+        trend_excludes_value=trend_excludes_value)
+
+
 def kpis_as_of(
     bundle: LedgerBundle,
     *,
@@ -1123,25 +1142,6 @@ def kpis_as_of(
         stock_market_value=total_value, resolver=resolver,
         cash_movements=list(cash_movements),
     )
-
-
-def options_block_of(
-    kpi: KpiBlock, prices: PriceSource, *, trend_excludes_value: bool,
-) -> OptionsBlock | None:
-    """The 選擇權 block (options spec §7.1) from *kpi*'s ONE replay and ONE valuation, or
-    ``None`` on a ledger without an option. The underlyings' prices come from *prices* — the
-    same source the valuation read (:class:`LatestStored` live, :class:`OnOrBefore` for a
-    period close); *trend_excludes_value* is the trend's own flag. KPI 總市值 reads this
-    block's market value (:meth:`KpiBlock.market_value_with`)."""
-    if not kpi.has_options:
-        return None
-    return option_summary(
-        book=kpi.book, valued=kpi.valued, bundle=kpi.bundle, last_trades=kpi.last_trades,
-        underlying_prices=_underlying_prices(prices, kpi.book, kpi.option_symbols,
-                                             kpi.bundle.instruments, kpi.actions,
-                                             as_of=kpi.as_of),
-        fx_rate=kpi.resolver.rate, reporting=kpi.reporting, as_of=kpi.as_of,
-        trend_excludes_value=trend_excludes_value)
 
 
 def build_dashboard(
