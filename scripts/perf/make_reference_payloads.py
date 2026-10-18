@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT,
                         help="the payload directory (default tests/reference/payloads)")
     parser.add_argument("--corpus", action="append", default=[],
-                        help="generate only this corpus (repeatable; default: all five)")
+                        help="generate only this corpus (repeatable; default: all of CORPUS_NAMES)")
     parser.add_argument("--here", action="store_true",
                         help="generate with THIS checkout's code instead of a worktree")
     parser.add_argument("--check", action="store_true",
