@@ -276,6 +276,21 @@ def create_tables(conn: sqlite3.Connection) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_{_ledger}_batch "
             f"ON {_ledger}(import_batch_id)"
         )
+    # Symbol lookups (PERF, spec 2026-10-18 §6). The settlement store's `prices` trigger asks
+    # "does this symbol appear in a ledger?" on every price write (a 5-year backfill fires it
+    # ~100,000 times), and the per-symbol reads of the instrument / input pages ask the same
+    # by account (performance audit 2026-10-16, P6). Indexes only: no row and no query result
+    # changes.
+    for _name, _table, _cols in (
+        ("idx_transactions_symbol", "transactions", "symbol"),
+        ("idx_dividends_symbol", "dividends", "symbol"),
+        ("idx_opening_inventory_symbol", "opening_inventory", "symbol"),
+        ("idx_corporate_actions_from_symbol", "corporate_actions", "from_symbol"),
+        ("idx_corporate_actions_to_symbol", "corporate_actions", "to_symbol"),
+        ("idx_transactions_account_symbol", "transactions", "account_id, symbol"),
+        ("idx_dividends_account_symbol", "dividends", "account_id, symbol"),
+    ):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {_name} ON {_table}({_cols})")
     # child_seed_json (DEF-040 R4, 2026-09-25): what a SPINOFF's save wrote into `prices` for
     # its child — the slot and the typed close, or "nothing" — so the delete takes back
     # exactly that and never a row that was there before the save (a provider's quote, or an

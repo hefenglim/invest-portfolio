@@ -62,6 +62,7 @@ from portfolio_dash.api.routers import (
     prompts,
     rebates,
     scheduler,
+    settlement,
     signals,
     snapshots_router,
     strategy,
@@ -71,6 +72,7 @@ from portfolio_dash.api.routers import (
     users,
     whatsnew,
 )
+from portfolio_dash.api.settlement_service import on_boot as settlement_on_boot
 from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
 from portfolio_dash.api.snapshots import ensure_table as ensure_snapshots_table
 from portfolio_dash.api.snapshots import snapshot_job
@@ -91,10 +93,12 @@ from portfolio_dash.news.store import get_news_connection
 from portfolio_dash.ops import digest as digest_ops
 from portfolio_dash.ops import notify as notify_ops
 from portfolio_dash.ops.backup import pre_write_snapshot
+from portfolio_dash.portfolio.settlement_store import create_tables as create_settle_tables
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
+    migrate_job_runs_results,
     register_alert_compute_runner,
     register_alert_held_fn,
     register_calibration_runner,
@@ -216,6 +220,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_option_expiry_tables(conn)  # option_expiry_skips (options spec §7.2)
         ensure_snapshots_table(conn)  # portfolio_snapshots (月度快照)
         action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
+        # The settlement store (PERF spec 2026-10-18 §6), after every table it borrows. Order
+        # matters (plan W0.6): (1) every step above; (2) the settle DDL and the job_runs.results
+        # migration (P3); (3) [wave 1] the trigger set, verified or recreated on a
+        # `system:boot` session; (4) the settlement's boot hook; (5) [wave 1] LAST, record
+        # `trigger_schema_version` — no boot DDL may move `schema_version` after it.
+        create_settle_tables(conn)
+        migrate_job_runs_results(conn)
+        settlement_on_boot(conn)
     # The news library lives in its own file (news/store.py); its first open creates and
     # migrates it, so open it once here rather than inside the first GET /api/news.
     get_news_connection().close()
@@ -346,6 +358,7 @@ def create_app() -> FastAPI:
     app.include_router(symbol.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
+    app.include_router(settlement.router, prefix="/api")
     app.include_router(signals.router, prefix="/api")
     app.include_router(llm_fail_log.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")

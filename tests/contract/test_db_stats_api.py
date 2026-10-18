@@ -124,6 +124,7 @@ def _build_full_portfolio_schema(conn: sqlite3.Connection) -> None:
     from portfolio_dash.news.organizer_prompt import ensure_news_prompt_seeded
     from portfolio_dash.ops import digest as digest_ops
     from portfolio_dash.ops import notify as notify_ops
+    from portfolio_dash.portfolio.settlement_store import create_tables as create_settle_tables
     from portfolio_dash.pricing import datasources_store, snapshots_store
     from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
     from portfolio_dash.scheduler.jobs import create_scheduler_tables
@@ -163,6 +164,7 @@ def _build_full_portfolio_schema(conn: sqlite3.Connection) -> None:
     ensure_fee_tables(conn)  # fee_rule_overrides
     ensure_snapshots_table(conn)  # portfolio_snapshots
     ensure_llm_fail_log_table(conn)  # llm_fail_log (AI-D64)
+    create_settle_tables(conn)  # the settlement store (PERF 2026-10-18)
 
 
 def test_every_portfolio_table_is_registered() -> None:

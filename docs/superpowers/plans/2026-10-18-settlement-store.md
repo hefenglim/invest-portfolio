@@ -1314,8 +1314,24 @@ builds (§6.2).
 - Ops: `run_phase1.py:15` `run_scenario`.
 - Direct writes: `common.py:364-407`.
 
-**Environment** (W0.1 completes it):
-- dev `.venv`: SQLite 3.49.1, FastAPI 0.136.3, Starlette 1.3.1, `Depends(scope=)` present; every B
-  construct verified;
-- VM demo: …;
-- VM prod: ….
+**Environment** (W0.1, measured 2026-10-18; the VM through `scripts/vm_exec.py`, read-only, on a
+scratch DB in `/tmp`):
+- dev `.venv`: Python 3.12.10, SQLite 3.49.1, FastAPI 0.136.3, Starlette 1.3.1; every B construct OK;
+- VM demo venv: Python 3.12.13, SQLite 3.53.1, FastAPI 0.139.0, Starlette 1.3.1; every B construct OK;
+- VM prod venv: Python 3.12.13, SQLite 3.53.1, FastAPI 0.138.2, Starlette 1.3.1 (the same SQLite
+  library as demo);
+- the one difference: a `main.`-qualified table name in a TEMP trigger's body is accepted by 3.53.1
+  and refused by 3.49.1 ("qualified table names are not allowed"). B writes the unqualified name,
+  valid on both;
+- on both: the trigger-body upsert needs the partial index's `WHERE` repeated in `ON CONFLICT`; `WHEN
+  OLD.x IS NOT NEW.x` keeps a note-only update silent and fires on a change to NULL; creating a TEMP
+  trigger leaves main `schema_version` unchanged (9 → 9) and fails with "no such table" when the main
+  table is missing; a TEMP trigger whose function is not registered makes the WRITE fail ("no such
+  function"), so the actor installs both or neither; `sqlite_master.sql` drops `IF NOT EXISTS`,
+  leading whitespace, the `main.` qualifier and a trailing `;`, keeps inner spacing and newlines;
+  an identical DROP + CREATE moves `schema_version` by 2; `PRAGMA data_version` moves on another
+  connection's or process's commit and on a TRUNCATE checkpoint, never on a rollback or on the
+  connection's own commit, and freezes inside the reader's own transaction; `total_changes` counts
+  the rows a trigger writes;
+- FastAPI floor `>=0.121.1`: `Depends(scope=)` arrived in 0.121.0, and 0.121.1 fixed it for
+  parameterless top-level dependencies (release notes). Both VM venvs are above it.

@@ -50,6 +50,19 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("dividend_events", "股利事件偵測", "市場資料", "ex_date"),
     _TableSpec("external_snapshots", "外部數據快照", "市場資料", "fetched_at"),
     _TableSpec("portfolio_snapshots", "月度 KPI 快照", "市場資料", "month"),
+    # 結算資料 — the settlement store (PERF 2026-10-18): derived from the ledgers, rebuilt by a
+    # run, so its size is a cache's, not a record's.
+    _TableSpec("settled_day", "已結算日值", "結算資料", "day"),
+    _TableSpec("settled_period", "月結與年結", "結算資料", "end_day"),
+    _TableSpec("settled_period_holding", "月結持倉", "結算資料", None),
+    _TableSpec("settled_period_cash", "月結現金", "結算資料", None),
+    _TableSpec("settle_restatement", "月結重述紀錄", "結算資料", "at"),
+    _TableSpec("settle_run", "重新結算報告", "結算資料", "started_at"),
+    _TableSpec("settle_run_diff", "重新結算逐日差異", "結算資料", "day"),
+    _TableSpec("settle_change_log", "結算變更紀錄", "結算資料", "written_at"),
+    _TableSpec("settle_change_agg", "價格與匯率變更計數", "結算資料", "earliest"),
+    _TableSpec("settle_meta", "結算版本狀態", "結算資料", None),
+    _TableSpec("settle_dirty", "待結算標記", "結算資料", None),
     # AI 記錄 — per-call / per-card AI history
     _TableSpec("llm_usage", "AI 請求明細", "AI 記錄", "ts"),
     _TableSpec("llm_fail_log", "AI 抽取失敗記錄", "AI 記錄", "created_at"),
@@ -102,7 +115,7 @@ _PORTFOLIO_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("account_market_rules", "帳戶市場規則", "設定", None),
     _TableSpec("settings_meta", "設定種子記錄", "設定", None),
 )
-_PORTFOLIO_CATEGORIES = ("帳本", "市場資料", "AI 記錄", "系統記錄", "設定")
+_PORTFOLIO_CATEGORIES = ("帳本", "市場資料", "結算資料", "AI 記錄", "系統記錄", "設定")
 
 _NEWS_REGISTRY: tuple[_TableSpec, ...] = (
     _TableSpec("organized_news", "整理後新聞", "新聞庫", "news_date"),

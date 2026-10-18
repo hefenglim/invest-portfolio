@@ -52,6 +52,8 @@ _OPENER_ATTRS: frozenset[str] = frozenset({"connect", "Connection"})
 ALLOWLIST: dict[str, int] = {
     # THE canonical choke-point: get_connection()/session() open the per-request personal
     # ledger connection. All personal DB access must route through here (Phase 0 invariant).
+    # The one open is ``connect_path`` (PERF 2026-10-18): get_connection, the result cache's
+    # dedicated connection and the settlement worker all open the file through it.
     "portfolio_dash/shared/db.py": 1,
     # The separate-DB precedent: news.db beside the ledger, opened lazily on demand. This is
     # the template the deferred market.db split (Phase 1) will mirror — its own opener by design.

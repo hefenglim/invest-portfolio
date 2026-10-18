@@ -3,6 +3,7 @@
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 from .config import get_settings
 from .flight import begin_write, end_write, note_write
@@ -16,13 +17,25 @@ def get_connection() -> sqlite3.Connection:
     """
     settings = get_settings()
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    return connect_path(settings.db_path)
+
+
+def connect_path(path: Path) -> sqlite3.Connection:
+    """THE one raw open of the personal database file (``tests/architecture/
+    test_db_open_surface.py`` pins it): ``Row`` rows, foreign keys, WAL.
+
+    :func:`get_connection` opens the configured file through it; the result cache's dedicated
+    connection and the settlement worker (which receives the path, not the settings) open
+    theirs through it too (PERF, 2026-10-18), so every connection to the file is configured
+    alike.
+    """
     # check_same_thread=False: FastAPI runs the sync `get_conn` dependency in an anyio
     # threadpool, so a connection may be created on one worker thread and closed on
     # another (session() ENTER vs. finally: close() can straddle threads). Each request
     # gets its OWN connection — never shared or used concurrently across threads — so
     # only the create-vs-close thread can differ, with no concurrent access. Disabling
     # the same-thread guard is therefore safe and necessary here.
-    conn = sqlite3.connect(settings.db_path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")  # must be set per connection
     # WAL persists per database file; re-setting it per connection is harmless. It

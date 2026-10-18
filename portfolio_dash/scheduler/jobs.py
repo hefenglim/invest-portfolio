@@ -320,6 +320,20 @@ def create_scheduler_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_job_runs_results(conn: sqlite3.Connection) -> None:
+    """Boot migration (PERF plan P3, 2026-10-18): ``job_runs.results``, a quote job's results
+    JSON (its ``held_failed`` list), which the settlement's ``final_through`` reads to name the
+    unconfirmed closes of a day settled by the 4-day rule. NULL on every other row.
+
+    Called from the lifespan only — never from :func:`create_scheduler_tables`, whose callers
+    include the 排程 GETs (``ensure_scheduler_seeded``), so the ALTER can never run on a read
+    path (DEF-065). ``job_runs.payload`` already means the insight task id, hence a column of
+    its own.
+    """
+    _add_column_if_missing(conn, "job_runs", "results", "TEXT")
+    conn.commit()
+
+
 def ensure_job_rows(conn: sqlite3.Connection) -> None:
     """Insert a default ``schedule_config`` row for any registered job that lacks one.
 
