@@ -1,6 +1,7 @@
 """LiteLLM client: budget gate, role-based selection with fallback, vision, usage log."""
 
 import base64
+import importlib
 import json
 import logging
 import sqlite3
@@ -10,10 +11,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, NamedTuple
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-import litellm as litellm  # re-exported so tests can monkeypatch llm_mod.litellm
-from litellm import exceptions as litellm_errors
 from pydantic import BaseModel, ValidationError
 
 from portfolio_dash.shared import llm_fail_log as fail_log
@@ -36,6 +36,52 @@ from portfolio_dash.shared.llm_schema import portable_schema
 from portfolio_dash.shared.money import to_db
 
 logger = logging.getLogger(__name__)
+
+# --- LiteLLM, imported on first use (PERF spec 2026-10-18 §16) -----------------------------
+#
+# Importing LiteLLM costs ~15 s and most of the app's 252 MB import (measured: the app imports
+# in 58 MB / 7.6 s without it and yfinance), and every process that never calls a model paid
+# it at boot. So this module binds NO module-level ``litellm``: the first access to
+# ``llm.litellm`` / ``llm.litellm_errors`` — a test's ``monkeypatch.setattr(llm.litellm, …)``
+# or an internal call through :func:`_litellm` / :func:`_litellm_errors` — imports it and
+# caches it into this module's globals, so later reads are plain attribute reads and a
+# monkeypatch of the module object sticks. A bare ``litellm`` name inside a function here would
+# be a ``NameError`` until something else imported it first; the two declarations below give
+# the type checker the attributes WITHOUT binding them (an annotation alone binds nothing), and
+# ``tests/shared/test_lazy_imports.py`` rejects any bare use.
+litellm: ModuleType
+litellm_errors: ModuleType
+
+_LAZY_MODULES = {"litellm": "litellm", "litellm_errors": "litellm.exceptions"}
+
+
+def _lazy(name: str) -> ModuleType:
+    found = globals().get(name)
+    if found is not None:
+        return cast(ModuleType, found)
+    module = importlib.import_module(_LAZY_MODULES[name])
+    globals()[name] = module
+    return module
+
+
+def _litellm() -> Any:
+    """The LiteLLM module (imported on first use) — every internal call goes through here."""
+    return _lazy("litellm")
+
+
+def _litellm_errors() -> Any:
+    """``litellm.exceptions`` (imported on first use)."""
+    return _lazy("litellm_errors")
+
+
+if not TYPE_CHECKING:  # the type checker reads the two declarations above instead
+
+    def __getattr__(name: str) -> ModuleType:
+        """PEP 562: ``llm.litellm`` / ``llm.litellm_errors`` import LiteLLM on first access."""
+        if name in _LAZY_MODULES:
+            return _lazy(name)
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # A role's fallback companion (spec 04.3): role selection tries the primary then this.
 _ROLE_FALLBACK: dict[LLMRole, LLMRole] = {
@@ -169,7 +215,7 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     try:
-        return int(litellm.token_counter(text=text))
+        return int(_litellm().token_counter(text=text))
     except Exception:  # noqa: BLE001 — see the docstring
         return len(text)
 
@@ -316,7 +362,7 @@ def _supports_response_format(model: ModelConfig) -> bool:
     rather than crash (graceful, spec 04.10).
     """
     try:
-        return bool(litellm.supports_response_schema(model=litellm_model_string(model)))
+        return bool(_litellm().supports_response_schema(model=litellm_model_string(model)))
     except Exception:  # noqa: BLE001 — an unclassifiable model degrades to no rf
         return False
 
@@ -418,7 +464,8 @@ def _status_of(exc: BaseException) -> int | None:
 
 def is_transient(exc: BaseException) -> bool:
     """True for a failure a retry can fix: timeout, connection error, 408/425/429, 5xx."""
-    if isinstance(exc, litellm_errors.Timeout | litellm_errors.APIConnectionError):
+    errors = _litellm_errors()
+    if isinstance(exc, errors.Timeout | errors.APIConnectionError):
         return True
     status = _status_of(exc)
     return status is not None and (status in _TRANSIENT_STATUS or 500 <= status <= 599)
@@ -429,11 +476,12 @@ def provider_failure_zh(exc: BaseException) -> tuple[str, str | None]:
 
     Never the provider's own text: it is English, and an auth error is free to echo the key
     it was sent. That text goes to the redacting fail log (:mod:`shared.llm_fail_log`)."""
-    if isinstance(exc, litellm_errors.Timeout):
+    errors = _litellm_errors()
+    if isinstance(exc, errors.Timeout):
         return "回應逾時", None
-    if isinstance(exc, litellm_errors.APIConnectionError):
+    if isinstance(exc, errors.APIConnectionError):
         return "無法連線到供應商", None
-    if isinstance(exc, litellm_errors.ContextWindowExceededError):
+    if isinstance(exc, errors.ContextWindowExceededError):
         return "輸入超過模型可處理的長度", "HTTP 400"
     status = _status_of(exc)
     if status is None:
@@ -483,7 +531,7 @@ def _call_provider(
     errors: list[Exception] = []
     for n in range(retries + 1):
         try:
-            return litellm.completion(
+            return _litellm().completion(
                 model=litellm_model_string(model),
                 api_base=model.api_base or None,
                 api_key=model.api_key or None,

@@ -10,8 +10,6 @@ tests).
 
 from decimal import Decimal, InvalidOperation
 
-import yfinance as yf
-
 INDEX_SYMBOLS: tuple[str, ...] = ("^TWII", "^GSPC", "^KLSE")
 
 
@@ -27,6 +25,7 @@ def _to_decimal(value: object) -> Decimal | None:
 
 def _index_last_close(symbol: str) -> float | None:
     """The last available close for one index symbol from yfinance (None when empty)."""
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     df = yf.Ticker(symbol).history(period="5d", auto_adjust=False)
     if df is None or df.empty:
         return None

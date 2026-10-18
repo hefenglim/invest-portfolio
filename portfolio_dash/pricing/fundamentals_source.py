@@ -41,7 +41,6 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 import requests
-import yfinance as yf
 
 from portfolio_dash.pricing.providers.yfinance_provider import yf_symbol
 from portfolio_dash.pricing.refs import InstrumentRef
@@ -153,6 +152,7 @@ def _rows_newest_first(df: Any) -> dict[str, list[Decimal | None]]:
 
 
 def _fetch_yf_fast_info(symbol: str) -> dict[str, Any] | None:
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     info = yf.Ticker(symbol).fast_info
     if info is None:
         return None
@@ -163,14 +163,17 @@ def _fetch_yf_fast_info(symbol: str) -> dict[str, Any] | None:
 
 
 def _fetch_yf_quarterly_income(symbol: str) -> dict[str, list[Decimal | None]]:
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     return _rows_newest_first(yf.Ticker(symbol).quarterly_income_stmt)
 
 
 def _fetch_yf_balance_sheet(symbol: str) -> dict[str, list[Decimal | None]]:
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     return _rows_newest_first(yf.Ticker(symbol).balance_sheet)
 
 
 def _fetch_yf_dividends(symbol: str) -> list[tuple[date, Decimal]]:
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     series = yf.Ticker(symbol).dividends
     if series is None or getattr(series, "empty", True):
         return []
