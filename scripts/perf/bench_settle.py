@@ -48,7 +48,7 @@ PROFILE_FUNCTIONS = (
     "get_fx_history", "load_ledger_bundle", "xirr_reporting", "build_reporting_flows",
     "replay_dividend_refusals", "value_holdings", "dividend_summary", "_holdings_subtotals",
     "trading_financing_cost", "price_in", "_entry_at_or_before", "counts_by", "valued_as_of",
-    "iter_books", "value_series", "kpis_as_of",
+    "iter_books", "value_series", "kpis_as_of", "get_close_series", "get_fx_series",
 )
 
 

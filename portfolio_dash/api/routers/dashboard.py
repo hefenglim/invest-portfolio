@@ -24,10 +24,8 @@ from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.corporate_actions import kind_label
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
+from portfolio_dash.shared.llm_config import ai_active, budget_remaining
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy.alerts import compute_alerts_from
-from portfolio_dash.strategy.rules_config import get_alert_rules
 
 router = APIRouter()
 
@@ -106,19 +104,12 @@ def dashboard(
     # calib_gap is fed in from the single-source helper (None below the min_samples gate); the
     # P3 market-risk metrics (drawdown / vol / drift / consensus) are assembled from the SAME
     # `data` + stored prices/consensus/target-weights via the shared alert_inputs seam, so the
-    # embed and GET /api/alerts feed byte-identical inputs.
+    # embed and GET /api/alerts feed byte-identical inputs. Since PERF (2026-10-18) both go
+    # through ONE function and its cached result (`alert_inputs.compute_alerts_full`, entry
+    # "alerts"): this request's `data` feeds a miss, so there is still no second build.
     calib = insight_service.calibration_gap(conn)
-    fed = alert_inputs.assemble(conn, data, now=now)
-    alerts = compute_alerts_from(
-        data, get_alert_rules(conn),
-        quota_remaining=budget_remaining(conn),
-        quota_threshold=get_alert_threshold(conn),
-        ai_active=ai_on,
-        calib_gap=calib,
-        symbol_metrics=fed.symbol_metrics,
-        target_weights=fed.target_weights,
-        consensus_deltas=fed.consensus_deltas,
-        target_levels=fed.target_levels,  # FU-D28: keep the embed identical to GET /api/alerts
+    alerts = alert_inputs.compute_alerts_full(
+        conn, now=now, reporting=reporting, calib_gap=calib, data=data
     )
     payload["alerts"] = alerts_wire(alerts)   # I-16: + scope / subject
 

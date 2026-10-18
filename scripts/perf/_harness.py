@@ -66,6 +66,10 @@ DEFAULT_COUNT_TARGETS: dict[str, str] = {
     "daily_cash_series": "portfolio_dash.portfolio.networth:daily_cash_series",
     "get_price_history": "portfolio_dash.pricing.store:get_price_history",
     "get_fx_history": "portfolio_dash.pricing.store:get_fx_history",
+    "iter_books": "portfolio_dash.portfolio.cost_basis:iter_books",
+    "value_series": "portfolio_dash.portfolio.timeseries:value_series",
+    "get_close_series": "portfolio_dash.pricing.store:get_close_series",
+    "kpis_as_of": "portfolio_dash.portfolio.dashboard:kpis_as_of",
     "load_ledger_bundle": "portfolio_dash.data_ingestion.store:load_ledger_bundle",
     "xirr_reporting": "portfolio_dash.portfolio.returns:xirr_reporting",
     "load_cash_ledgers": "portfolio_dash.api.routers.cash:load_cash_ledgers",
@@ -501,14 +505,15 @@ class SettledSimulation:
     """Serve a dashboard build's history-dependent pieces from memory, as a settled store
     would, and leave everything else live (the 2026-10-18 feasibility measurement).
 
-    Patched on ``portfolio_dash.portfolio.dashboard``: the daily value series, the daily
-    cash series and the benchmark comparison are memoised on the first (priming) build, and
-    the trend's full-history price loads (``start == _EPOCH``) are then skipped. Names a later
-    wave renames are reported by :attr:`missing`, and the simulation is then unavailable.
+    Patched on ``portfolio_dash.portfolio.dashboard`` (names as of the wave-1 engine): the
+    trend (``value_series`` — the ``iter_books`` pass runs inside it, lazily), the daily cash
+    series and the benchmark comparison are memoised on the first (priming) build, and every
+    close-series read is then answered from memory. Names a later wave renames are reported
+    by :attr:`missing`, and the simulation is then unavailable.
     """
 
-    MEMOISED = ("daily_value_series", "daily_cash_series", "_benchmark_comparison")
-    NEEDED = (*MEMOISED, "get_price_history", "_EPOCH")
+    MEMOISED = ("value_series", "daily_cash_series", "_benchmark_comparison")
+    NEEDED = (*MEMOISED, "get_close_series")
 
     def __init__(self, dashboard: ModuleType) -> None:
         self._mod = dashboard
@@ -523,7 +528,7 @@ class SettledSimulation:
     def __enter__(self) -> SettledSimulation:
         if not self.available:
             raise RuntimeError(f"settled simulation unavailable: missing {self.missing}")
-        self._real = {n: getattr(self._mod, n) for n in (*self.MEMOISED, "get_price_history")}
+        self._real = {n: getattr(self._mod, n) for n in self.NEEDED}
         self._memo.clear()
         for name in self.MEMOISED:
             setattr(self._mod, name, self._memoised(name))
@@ -538,15 +543,18 @@ class SettledSimulation:
 
     def prime(self, build: Callable[[], Any]) -> None:
         """Run one build to fill the memo (the settlement's one-time cost; not timed), then
-        skip the trend's full-history price loads from here on."""
+        answer the close-series reads from memory from here on."""
         build()
-        epoch = self._mod._EPOCH
-        real_history = self._real["get_price_history"]
+        real_series = self._real["get_close_series"]
+        seen: dict[tuple[Any, Any, Any], Any] = {}
 
-        def history(conn: Any, symbol: Any, start: Any, end: Any) -> Any:
-            return [] if start == epoch else real_history(conn, symbol, start, end)
+        def series(conn: Any, symbol: Any, start: Any, end: Any) -> Any:
+            key = (symbol, start, end)
+            if key not in seen:
+                seen[key] = real_series(conn, symbol, start, end)
+            return list(seen[key])
 
-        setattr(self._mod, "get_price_history", history)  # noqa: B010 - a module attribute
+        setattr(self._mod, "get_close_series", series)  # noqa: B010 - a module attribute
 
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
                  tb: TracebackType | None) -> None:

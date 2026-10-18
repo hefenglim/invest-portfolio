@@ -86,12 +86,13 @@ def test_static_mount_sends_cache_control_no_cache() -> None:
 
 # --- PERF §13: versioned assets are immutable (api/static_cache.py) -------------------------
 #
-# Added by the main session when it mounts StaticCacheFiles in create_app (wave-1 merge):
-#
-#     def test_the_app_mounts_the_versioned_cache_policy() -> None:
-#         client = TestClient(create_app())
-#         r = client.get(f"/format.js?v={__version__}")
-#         assert r.headers.get("cache-control") == IMMUTABLE
+def test_the_app_mounts_the_versioned_cache_policy() -> None:
+    """``create_app`` mounts :class:`StaticCacheFiles` (wave-1 merge): a stamped asset is
+    immutable, the same asset unstamped and every page still revalidate."""
+    client = TestClient(create_app())
+    assert client.get(f"/format.js?v={__version__}").headers.get("cache-control") == IMMUTABLE
+    assert client.get("/format.js").headers.get("cache-control") == NO_CACHE
+    assert client.get("/index.html").headers.get("cache-control") == NO_CACHE
 
 
 def _static_client() -> TestClient:

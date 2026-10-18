@@ -40,6 +40,7 @@ from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
 from portfolio_dash.scheduler.jobs import create_scheduler_tables, migrate_job_runs_results
+from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -66,9 +67,22 @@ def _safe_db(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     os.environ["PD_SETTLE_MODE"] = "inline"
     os.environ["PD_JOB_MODE"] = "inline"
     os.environ["PD_PREWARM"] = "0"
+    # LiteLLM is imported on first use (PERF, spec §16), now inside a test with sockets banned
+    # instead of at collection: read its bundled model-cost map, never the remote one.
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_result_cache() -> Iterator[None]:
+    """Every test starts and ends with an empty result cache (``shared/result_cache.py``):
+    an entry must never leak into the next test, and the cache's version connections must
+    not keep a test's temporary database (and its ``-wal``) open on Windows."""
+    result_cache.reset()
+    yield
+    result_cache.reset()
 
 
 def _seed_golden(conn: sqlite3.Connection) -> None:

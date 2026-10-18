@@ -24,10 +24,10 @@ from portfolio_dash.portfolio.dashboard import (
 from portfolio_dash.portfolio.results import UnappliedAction
 from portfolio_dash.portfolio.returns import xirr_reporting
 from portfolio_dash.pricing.benchmarks import BENCHMARKS
-from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRead, PriceRow
+from portfolio_dash.pricing.results import DividendEvent, FxRow, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import (
-    get_price_history,
+    get_close_series,
     upsert_dividend_events,
     upsert_fx,
     upsert_prices,
@@ -575,7 +575,7 @@ def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches
       on ``index.splits_on(symbol)`` being empty, so with no action in the ledger the
       arithmetic never runs and ``price_map`` is byte-for-byte the pre-change dict.
 
-    ``ledger_symbols`` is observed through the symbols ``get_price_history`` is actually
+    ``ledger_symbols`` is observed through the symbols ``get_close_series`` is actually
     asked for: with no actions the two added set comprehensions are empty, so the requested
     set must be exactly the transaction / dividend / opening symbols.
     """
@@ -585,14 +585,14 @@ def test_a_ledger_with_no_corporate_action_takes_exactly_the_pre_change_branches
     requested: list[str] = []
 
     def _spy(conn_: sqlite3.Connection, instrument: str, start: date,
-             end: date) -> list[PriceRead]:
+             end: date) -> list[tuple[date, Decimal]]:
         requested.append(instrument)
-        return get_price_history(conn_, instrument, start, end)
+        return get_close_series(conn_, instrument, start, end)
 
     monkeypatch.setattr(cost_basis, "_reject", _boom)
     monkeypatch.setattr(dashboard, "_unapplied_action_reason", _boom)
     monkeypatch.setattr(price_basis, "split_factor", _boom)
-    monkeypatch.setattr(dashboard, "get_price_history", _spy)
+    monkeypatch.setattr(dashboard, "get_close_series", _spy)
 
     _seed_full(conn)            # the rich fixture: two markets, a dividend, an FX conversion
     # A registered instrument that appears in NO ledger. Without it the ledger_symbols

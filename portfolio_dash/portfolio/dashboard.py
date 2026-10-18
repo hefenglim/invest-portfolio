@@ -101,10 +101,10 @@ from portfolio_dash.pricing.store import (
     get_latest_price,
     get_price_on_or_before,
 )
+from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.flight import coalesce, write_generation
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
@@ -1098,40 +1098,37 @@ def build_dashboard(
 ) -> DashboardData:
     """Assemble the complete dashboard data model from SQLite (read-only).
 
-    Concurrent identical builds are shared (2026-10-13, ``shared/flight.py``): a caller that
-    arrives while the same build is RUNNING — same database file, same day, same reporting
-    currency, no write since it started — waits for it and receives its own deep copy.
-    Nothing is kept once the build returns.
+    Served through the result cache (PERF spec 2026-10-18 §12.1, ``shared/result_cache.py``,
+    which replaced the in-flight-only sharing of 2026-10-13): one entry per database file,
+    ``data_version``, write generation, DAY and reporting currency, so any commit — this
+    process, another one, the settlement child — makes the next read build afresh, and
+    identical builds that run at the same time still run once. Nothing is cached while a
+    write is in progress, inside a transaction, or for a database with no file. Every reader
+    receives its own deep copy with the fields that depend on *now* beyond its date
+    (:data:`SUB_DAY_FIELDS`) set to its own clock.
     """
     def build() -> DashboardData:
         return _build_dashboard(conn, now=now, reporting=reporting)
 
-    return coalesce(_flight_key(conn, now, reporting), build, copy=_own_copy)
+    def stamp(data: DashboardData) -> DashboardData:
+        for name in SUB_DAY_FIELDS:
+            setattr(data, name, now)
+        return data
+
+    return result_cache.cached(
+        conn, name="dashboard", now=now, reporting=reporting, compute=build,
+        copy=_own_copy, restamp=stamp,
+    )
+
+
+#: Every ``DashboardData`` field that depends on ``now`` beyond its date — re-stamped on each
+#: reader's copy of a cached build. ``tests/shared/test_result_cache_dashboard.py`` proves the
+#: list complete (two clocks on one day, every corpus).
+SUB_DAY_FIELDS: tuple[str, ...] = ("as_of",)
 
 
 def _own_copy(data: DashboardData) -> DashboardData:
     return data.model_copy(deep=True)
-
-
-def _flight_key(
-    conn: sqlite3.Connection, now: datetime, reporting: Currency
-) -> tuple[str, str, int, date, Currency] | None:
-    """Which running build this caller may share, or ``None`` to build alone.
-
-    Alone when the caller's connection holds uncommitted changes (its own writes must be in
-    its answer), while a write is in progress (:func:`write_generation` is ``None``), and for
-    a database with no file (an in-memory test database is private to its connection).
-    """
-    if conn.in_transaction:
-        return None
-    generation = write_generation()
-    if generation is None:
-        return None
-    row = conn.execute("PRAGMA database_list").fetchone()
-    path = str(row[2]) if row is not None and row[2] else ""
-    if not path:
-        return None
-    return ("dashboard", path, generation, now.date(), reporting)
 
 
 def _build_dashboard(

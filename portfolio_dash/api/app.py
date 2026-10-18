@@ -9,8 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.staticfiles import StaticFiles
-from starlette.types import Scope
 
 from portfolio_dash.api import action_log
 from portfolio_dash.api.alert_inputs import scan_alert_compute
@@ -21,6 +19,7 @@ from portfolio_dash.api.dividend_inbox import ensure_tables as ensure_dividend_i
 from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
 from portfolio_dash.api.fundamentals_service import run_fundamentals_av
+from portfolio_dash.api.gzip import GZipMiddleware
 from portfolio_dash.api.insight_service import (
     evaluate_due as insight_evaluate_due,
 )
@@ -33,6 +32,7 @@ from portfolio_dash.api.insight_service import (
 from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
 from portfolio_dash.api.news_service import run_news_daily
 from portfolio_dash.api.option_expiry import ensure_tables as ensure_option_expiry_tables
+from portfolio_dash.api.read_only import is_read_only
 from portfolio_dash.api.rebates import ensure_tables as ensure_rebate_tables
 from portfolio_dash.api.routers import (
     accounts,
@@ -76,6 +76,7 @@ from portfolio_dash.api.settlement_service import on_boot as settlement_on_boot
 from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
 from portfolio_dash.api.snapshots import ensure_table as ensure_snapshots_table
 from portfolio_dash.api.snapshots import snapshot_job
+from portfolio_dash.api.static_cache import StaticCacheFiles
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
 from portfolio_dash.data_ingestion.moomoo_merge import (
@@ -130,31 +131,6 @@ from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_
 from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
-
-
-class _NoCacheStaticFiles(StaticFiles):
-    """StaticFiles that adds ``Cache-Control: no-cache`` to every response (2026-07-07).
-
-    Bare StaticFiles sends only ETag/Last-Modified — NO Cache-Control — so browsers fall
-    back to HEURISTIC freshness (~10% of the asset's age since Last-Modified) and can keep
-    serving a cached ``web/*.js`` for days without ever revalidating. After a deploy that
-    ships an HTML page together with a new helper it calls (e.g. insights.html →
-    ``fmt.aiAttrib``), a returning browser then mixes the fresh HTML with a STALE cached
-    script and the page dies client-side (live incident 2026-07-07: insights/news/index
-    lost every AI card to a swallowed ``f.aiAttrib is not a function``).
-
-    ``no-cache`` keeps caching but forces conditional revalidation on every use: an ETag
-    304 while unchanged, the new body immediately after every future deploy. This is the
-    class fix that fits the no-build-step rule (there is no bundler to fingerprint
-    filenames); the ``?v=<version>`` query on the HTML tags (see web/*.html + the
-    ``test_static_cache_discipline`` contract tests) additionally flushes clients that
-    cached assets BEFORE this header existed.
-    """
-
-    async def get_response(self, path: str, scope: Scope) -> Response:
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
 
 
 @asynccontextmanager
@@ -317,19 +293,21 @@ def create_app() -> FastAPI:
             pass
         return response
 
-    # Shared builds (`shared/flight.py`, 2026-10-13): no request joins a dashboard build
-    # while a mutating request runs, and none joins one that started before it — so a page
-    # reloaded right after 儲存 never receives an answer computed before the save. Every
-    # method but GET / HEAD / OPTIONS counts, read-only POSTs (preview, 試算) included: a
-    # needless window only costs one build that is not shared. Since PERF-S10 (2026-10-18)
-    # `get_conn` is function-scoped, so the request's commit runs before the response starts,
-    # inside this window; `shared/db.session()` still brackets its own commit in a window,
-    # which covers the sessions opened outside a request (threads, jobs).
+    # Shared builds and the result cache (`shared/flight.py` 2026-10-13, `shared/
+    # result_cache.py` PERF 2026-10-18): no request joins or caches a dashboard build while a
+    # mutating request runs, and none joins one that started before it — so a page reloaded
+    # right after 儲存 never receives an answer computed before the save. Every method but
+    # GET / HEAD / OPTIONS counts, except the declared read-only POSTs (`api/read_only.py`:
+    # 試算, rebalance preview, prompt preview), which write nothing and so share like a GET.
+    # Since PERF-S10 (2026-10-18) `get_conn` is function-scoped, so the request's commit runs
+    # before the response starts, inside this window; `shared/db.session()` still brackets its
+    # own commit in a window, which covers the sessions opened outside a request (threads,
+    # jobs).
     @app.middleware("http")
     async def _write_window_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.method in ("GET", "HEAD", "OPTIONS"):
+        if is_read_only(request.method, request.url.path):
             return await call_next(request)
         begin_write()
         try:
@@ -374,5 +352,10 @@ def create_app() -> FastAPI:
     app.include_router(digest.router, prefix="/api")
     app.include_router(whatsnew.router, prefix="/api")
     if _WEB_DIR.is_dir():
-        app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")
+        # `no-cache` for pages and unversioned files, `immutable` for an asset requested with
+        # the current `?v=` stamp (`api/static_cache.py`, PERF spec §13).
+        app.mount("/", StaticCacheFiles(directory=_WEB_DIR, html=True), name="web")
+    # Outermost layer: compresses every JSON / text response >= 1 KiB, never a ZIP
+    # (`api/gzip.py`, PERF spec §13).
+    app.add_middleware(GZipMiddleware)
     return app
