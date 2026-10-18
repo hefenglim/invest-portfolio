@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Protocol
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
@@ -29,7 +30,7 @@ from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
 from portfolio_dash.portfolio.benchmark_counterfactual import counterfactual
 from portfolio_dash.portfolio.cash import cash_balances
-from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
+from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book, iter_books
 from portfolio_dash.portfolio.dashboard_models import (
     BenchmarkComparison,
     BenchmarkMarketLeg,
@@ -51,6 +52,7 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.options import (
+    LastTrade,
     has_open_option,
     last_trade_prices,
     ledger_has_options,
@@ -60,10 +62,11 @@ from portfolio_dash.portfolio.options import (
     stock_realized,
 )
 from portfolio_dash.portfolio.pnl import value_holdings
-from portfolio_dash.portfolio.price_basis import price_in, series_in
+from portfolio_dash.portfolio.price_basis import price_in
 from portfolio_dash.portfolio.results import (
     Book,
     CombinedView,
+    Holding,
     OversoldPosition,
     RefusedClose,
     ReturnSummary,
@@ -83,19 +86,20 @@ from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
     build_reporting_flows,
-    daily_value_series,
     trading_financing_cost,
+    trend_book_days,
+    trend_start,
+    value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes
 from portfolio_dash.pricing.benchmarks import benchmark_for_market
 from portfolio_dash.pricing.results import FxRead, PriceRead
 from portfolio_dash.pricing.store import (
+    FxSeriesCache,
+    get_close_series,
     get_dividend_events,
-    get_fx,
-    get_fx_history,
-    get_fx_on,
     get_latest_price,
-    get_price_history,
+    get_price_on_or_before,
 )
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
@@ -130,25 +134,108 @@ _EPOCH = date(1900, 1, 1)
 _XIRR_MIN_WINDOW_DAYS = 30
 
 
+class PriceSource(Protocol):
+    """Where a valuation reads a held stock's price (PERF spec §11.2)."""
+
+    def price(self, symbol: str) -> PriceRead | None:
+        """The price a holding is valued at, ``stale`` against the valuation clock."""
+        ...
+
+
+class FxSource(Protocol):
+    """Where a valuation reads FX (PERF spec §11.2): the "current" rate, the rate on or
+    before a flow's day (XIRR), and a pair's stored rows (the triangulation)."""
+
+    def latest(self, base: Currency, quote: Currency) -> FxRead | None:
+        """The current rate of *base*/*quote* as stored — direct pair only, no inversion."""
+        ...
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        """The stored rate dated on or before *on* (``get_fx_on``)."""
+        ...
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        """The stored rates dated in ``[start, end]`` (``get_fx_history``)."""
+        ...
+
+
+class LatestStored:
+    """Today's sources: :func:`get_latest_price` and :func:`get_fx` — the most recent stored
+    row, whatever its date, ``stale`` against *now* — and FX through one
+    :class:`~portfolio_dash.pricing.store.FxSeriesCache` (one query per directed pair)."""
+
+    def __init__(self, conn: sqlite3.Connection, *, now: datetime,
+                 fx_cache: FxSeriesCache | None = None) -> None:
+        self._conn = conn
+        self._now = now
+        self.fx_cache = fx_cache if fx_cache is not None else FxSeriesCache(conn)
+
+    def price(self, symbol: str) -> PriceRead | None:
+        return get_latest_price(self._conn, symbol, now=self._now)
+
+    def latest(self, base: Currency, quote: Currency) -> FxRead | None:
+        return self.fx_cache.latest(base, quote, now=self._now)
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        return self.fx_cache.on_or_before(base, quote, on)
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        return self.fx_cache.history(base, quote, start, end)
+
+
+class OnOrBefore:
+    """The sources of a valuation AS AT day D (PERF spec §11.2, PERF-S7): the latest stored
+    row dated on or before D, ``stale`` against D — what :class:`LatestStored` answers on a
+    database holding no price or FX row after D, at a clock on D. A rate read for a later day
+    is the rate at D (nothing after D exists in this world)."""
+
+    def __init__(self, conn: sqlite3.Connection, day: date, *,
+                 fx_cache: FxSeriesCache | None = None) -> None:
+        self._conn = conn
+        self.day = day
+        self.fx_cache = fx_cache if fx_cache is not None else FxSeriesCache(conn)
+
+    def price(self, symbol: str) -> PriceRead | None:
+        return get_price_on_or_before(self._conn, symbol, on=self.day)
+
+    def latest(self, base: Currency, quote: Currency) -> FxRead | None:
+        return self.fx_cache.latest_as_of(base, quote, self.day)
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        return self.fx_cache.on_or_before(base, quote, min(on, self.day))
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        return self.fx_cache.history(base, quote, start, min(end, self.day))
+
+
 class RateResolver:
     """Current-FX lookup: identity -> direct pair -> inverted pair -> KeyError.
 
-    Records every requested pair (found or not) for the freshness report.
+    Records every requested pair (found or not) for the freshness report. Reads its rates
+    from *fx* — :class:`LatestStored` over *conn* unless another source is given (a period
+    close passes :class:`OnOrBefore`).
     """
 
-    def __init__(self, conn: sqlite3.Connection, *, now: datetime) -> None:
-        self._conn = conn
-        self._now = now
+    def __init__(self, conn: sqlite3.Connection | None = None, *, now: datetime | None = None,
+                 fx: FxSource | None = None) -> None:
+        if fx is None:
+            if conn is None or now is None:
+                raise TypeError("RateResolver needs a connection and a clock, or a source")
+            fx = LatestStored(conn, now=now)
+        self._fx: FxSource = fx
         self.reads: dict[tuple[Currency, Currency], FxRead | None] = {}
         # Pairs `_read` answered from the INVERSE stored pair — so `history` reads the series
         # in the same direction the rate was resolved (one owner of the direction rule).
         self._inverted: set[tuple[Currency, Currency]] = set()
 
     def _read(self, base: Currency, quote: Currency) -> FxRead | None:
-        direct = get_fx(self._conn, base, quote, now=self._now)
+        direct = self._fx.latest(base, quote)
         if direct is not None:
             return direct
-        inverse = get_fx(self._conn, quote, base, now=self._now)
+        inverse = self._fx.latest(quote, base)
         if inverse is not None:
             self._inverted.add((base, quote))
             return FxRead(rate=_ONE / inverse.rate, as_of=inverse.as_of,
@@ -166,10 +253,10 @@ class RateResolver:
         zero stored rate is skipped (a rate of 0 is not a rate).
         """
         if (base, quote) not in self._inverted:
-            return get_fx_history(self._conn, base, quote, start, end)
+            return self._fx.history(base, quote, start, end)
         return [
             FxRead(rate=_ONE / r.rate, as_of=r.as_of, source=r.source, stale=False)
-            for r in get_fx_history(self._conn, quote, base, start, end)
+            for r in self._fx.history(quote, base, start, end)
             if r.rate != _ZERO
         ]
 
@@ -567,9 +654,6 @@ def fx_complete_return(
     return FxCompleteOutcome(last.total_value - last.net_invested, None)
 
 
-_BENCH_EPOCH = date(1990, 1, 1)  # benchmark closes may predate the first ledger event
-
-
 def _benchmark_comparison(
     conn: sqlite3.Connection,
     bundle: LedgerBundle,
@@ -612,20 +696,24 @@ def _benchmark_comparison(
     # AI-D49: a cash-movement flow has no market and buys no index, so it contributes no
     # benchmark series to load. `counterfactual` excludes it from both legs; this loop must
     # not ask for 「the index of None」.
+    # PERF spec §8.5: each market's closes are read from the last close on or before that
+    # market's FIRST flow — the earliest day `counterfactual` looks a level up for — instead
+    # of from 1990; its terminal value is the last close, which the bounded read keeps too.
+    first_flow: dict[Market, date] = {}
+    for f in flows:
+        if f.market is not None and (f.market not in first_flow or f.on < first_flow[f.market]):
+            first_flow[f.market] = f.on
     for market in {f.market for f in flows if f.market is not None}:
         bench = benchmark_for_market(market)
         if bench is None:
             # No market is unmapped today (MY gained KLCI 2026-08-27), but a market
             # added later would land here — uncovered and NAMED, never dropped.
             continue
-        raw = [
-            (p.as_of, p.value)
-            for p in series_in(
-                actions, bench.storage_key,
-                get_price_history(conn, bench.storage_key, _BENCH_EPOCH, as_of),
-                valued_on=as_of,
-            )
-        ]
+        raw = closes_in(
+            actions, bench.storage_key,
+            get_close_series(conn, bench.storage_key, first_flow[market], as_of),
+            valued_on=as_of,
+        )
         converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
         if converted:
             closes_by_market[market] = converted
@@ -652,6 +740,356 @@ def _benchmark_comparison(
             )
             for leg in result.by_market
         ],
+    )
+
+
+def closes_in(
+    index: ActionIndex,
+    symbol: str,
+    closes: list[tuple[date, Decimal]],
+    *,
+    valued_on: date,
+) -> list[tuple[date, Decimal]]:
+    """:func:`~portfolio_dash.portfolio.price_basis.series_in` for ``(date, close)`` pairs
+    (``pricing.store.get_close_series``): every close in *valued_on*'s share terms through
+    :func:`price_in`, and — the same structural short-circuit — the pairs untouched when no
+    SPLIT is recorded on *symbol*."""
+    if not index.splits_on(symbol):
+        return closes
+    return [(d, price_in(index, symbol, v, priced_on=d, valued_on=valued_on))
+            for d, v in closes]
+
+
+@dataclass(frozen=True)
+class KpiBlock:
+    """What :func:`kpis_as_of` answers (PERF spec §11.2) — its return set is fixed.
+
+    * the KPI fields: ``total_market_value`` (stocks + options, all-or-nothing on FX),
+      ``total_return`` (A) and its rate, the realized / unrealized split, ``xirr`` with its
+      window and reason, ``by_currency_value``;
+    * the rates used and the missing / stale facts: ``price_reads`` (each held stock's price
+      read, ``None`` = missing; ``stale`` per row) and ``fx_reads`` (each pair the KPIs asked
+      for, ``None`` = missing, with its date and ``stale``) — a snapshot taken when the KPIs
+      were done, so the pairs a later step reads are not in it;
+    * the intermediates ``_build_dashboard`` goes on with: the valued bundle, the book, the
+      valuation, the returns, the currency view, the resolver (whose ``reads`` keep growing),
+      the option value and the cut cash movements.
+    """
+
+    as_of: date
+    reporting: Currency
+    total_market_value: Decimal | None
+    total_return: Decimal | None
+    total_return_rate: Decimal | None
+    realized_total: Decimal | None
+    unrealized_total: Decimal | None
+    xirr: Decimal | None
+    xirr_window_days: int | None
+    xirr_reason: str | None
+    by_currency_value: dict[Currency, Decimal] | None
+    price_reads: dict[str, PriceRead | None]
+    fx_reads: dict[tuple[Currency, Currency], FxRead | None]
+    bundle: LedgerBundle
+    has_options: bool
+    option_symbols: frozenset[str]
+    book: Book
+    actions: ActionIndex
+    price_map: dict[str, Decimal]
+    last_trades: dict[str, LastTrade]
+    valued: list[Holding]
+    valued_stocks: list[Holding]
+    returns: ReturnSummary | None
+    view: CombinedView | None
+    stock_market_value: Decimal | None
+    option_market_value: Decimal | None
+    resolver: RateResolver
+    cash_movements: list[CashMovementFlow]
+
+    @property
+    def held_symbols(self) -> list[str]:
+        """The held stock symbols, sorted — the keys of ``price_reads``."""
+        return list(self.price_reads)
+
+    @property
+    def missing_prices(self) -> list[str]:
+        return [sym for sym, pr in self.price_reads.items() if pr is None]
+
+    @property
+    def missing_fx(self) -> list[str]:
+        return [f"{b.value}/{q.value}" for (b, q), read in
+                sorted(self.fx_reads.items(), key=lambda kv: (kv[0][0].value, kv[0][1].value))
+                if read is None]
+
+
+def kpis_as_of(
+    bundle: LedgerBundle,
+    *,
+    book: Book | None,
+    cash_movements: Sequence[CashMovementFlow],
+    prices: PriceSource,
+    fx: FxSource,
+    as_of: date,
+    reporting: Currency,
+) -> KpiBlock:
+    """The KPI computation of the dashboard as at *as_of* (PERF spec §11.2): book, prices,
+    valuation, returns, XIRR, the KPI blend and the currency view.
+
+    The live dashboard calls it with :class:`LatestStored` (its payload is unchanged); a
+    period close calls it with :class:`OnOrBefore` and a book its one replay already holds,
+    so no replay runs per period end.
+
+    * *bundle* — the ledger with every unregistered row dropped, NOT cut: whether the 選擇權
+      block exists is decided on the whole ledger (options spec §7.1); the valuation cut
+      ``bundle.valued_as_of(as_of)`` is taken here;
+    * *book* — the dashboard-path replay of that cut (``iter_books`` yields it), or ``None``
+      to replay here;
+    * *cash_movements* — already cut at *as_of* (``valued_rows_as_of``, step 1);
+    * *prices* / *fx* — where the held prices, the current rates and XIRR's per-flow rates
+      come from.
+    """
+    # Options spec §7.1: the 選擇權 block exists iff the UNCUT ledger carries a trade or an
+    # action on an option contract — decided BEFORE the valuation cut below, so a contract
+    # traded after the valuation day still shows its (empty) section. On every other ledger
+    # `has_options` is False and every option branch below is skipped outright (invariant 1:
+    # no `+ Decimal(0)`, the stock path runs untouched).
+    has_options = ledger_has_options(bundle)
+    instruments = bundle.instruments
+    # 1c. Every row counts from its OWN date (DEF-016 for dividends, widened to trades,
+    # openings, FX conversions and corporate actions by DEF-056 — owner rulings 2026-09-24).
+    # A confirmed payout is stored on its payment date and a trade may be entered ahead of
+    # its date; replaying either now moved the holdings, 總報酬 and the adjusted cost, and
+    # handed XIRR a flow dated after its own terminal value, while the cash pool and the
+    # trend already ignored it. ONE cut, here, so the book, XIRR, the received-dividend
+    # summary, the FX pool and the trend all read the same ledger — and every surface built
+    # on this function (drawer, exports, alerts, insights, snapshots, rebalance) inherits it.
+    bundle = bundle.valued_as_of(as_of)
+    # Read-only local views of the (now filtered) bundle, for the steps below.
+    txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
+
+    # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
+    # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
+    if book is None:
+        try:
+            book = build_book(bundle, allow_oversell=True)
+        except ArithmeticError as exc:
+            # ⚠ NOT THE OWNER any more (2026-08-29). ``cost_basis.build_book`` re-types every
+            # ``ArithmeticError`` out of the replay into an ``UnbookableLedgerError`` naming
+            # the offending row, so this arm no longer fires for a ledger fault — go THERE to
+            # change the behaviour or the wording. The re-typing moved because this was the
+            # ONLY call site that had it: the same row that degraded here answered 500 on 重算,
+            # the tax package and 試算, and fixing it at four sites is four chances to miss one.
+            #
+            # Kept, deliberately, as a floor rather than deleted: the guarantee this file owes
+            # its caller is "``build_dashboard`` does not raise a raw decimal fault", and that
+            # must hold even if the replay is swapped, patched or extended. It is pinned as a
+            # CHANNEL by ``tests/portfolio/test_r8_decimal_fault_degrades.py``, which injects
+            # the fault rather than provoking it, precisely so the guarantee survives its
+            # current cause.
+            #
+            # The arm catches the CLASS, not one cause: ``decimal.DivisionByZero`` and
+            # ``decimal.Overflow`` are SIBLINGS of ``InvalidOperation``, not subclasses (this
+            # arm said ``InvalidOperation`` until wave 3 and both walked straight past it), and
+            # ``ZeroDivisionError`` is in the class too.
+            raise UnbookableLedgerError(
+                "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
+                "請於交易帳本修正該列後重試"
+            ) from exc
+    # Read off the BOOK, not off the holdings (CR-01 / CR-11, 2026-10-04): a 賣超 that a later
+    # buy of the same size netted back to exactly zero shares has no holding to inspect —
+    # `any(h.oversold ...)` was False there, and XIRR came out as a confident −67.8% over a
+    # discarded basis (measured on the review's probe). `Book.oversold_positions` lists every
+    # 賣超 position, so this is a strict superset of the old test.
+    oversold_positions = book.oversold_positions
+    # CR-02: dividends the replay refused because the account never held the symbol by their
+    # date. No position carries a flag for them, so the book's list is the only record.
+    orphan_dividends = book.orphan_dividends
+    # Read off the BOOK, not off the holdings: two of the three ways an action goes
+    # unapplied leave no holding to inspect — an EXCHANGE that already emptied the source
+    # (the flag is dropped with its zero-share carrier), and a source that never existed
+    # (nothing is flagged at all). `any(h.unbookable_action ...)` is False in both, and the
+    # XIRR terminal value is wrong in all three. See Book.unapplied_actions (audit F-47/F-49).
+    unapplied_actions = book.unapplied_actions
+    # Options spec §5: a contract is never quoted, so it never enters `price_reads` — nor,
+    # therefore, `freshness.prices`, `missing_prices` or `any_stale` — nor the ex-dividend
+    # calendar below (OPT-D10). Empty without an option, so `held_symbols` is unchanged.
+    opt_syms = option_symbols(instruments) if has_options else frozenset()
+    held_symbols = sorted({h.symbol for h in book.holdings if h.symbol not in opt_syms})
+    price_reads: dict[str, PriceRead | None] = {sym: prices.price(sym) for sym in held_symbols}
+    # §5.1(d), applied HERE and not inside `value_holdings` (trap #3). A stored close is
+    # as traded on its own date, but the book's share count is already in today's terms, so
+    # a price carried forward across a split must be re-expressed — divided by the splits
+    # in `(pr.as_of, as_of]` — before it meets those shares. `price_map` is the ONE dict fed
+    # to BOTH `value_holdings` (below) and `xirr_reporting` (step 4), which multiplies
+    # `price × h.shares` itself rather than reading `market_value`: correcting it inside
+    # `value_holdings` would leave the XIRR terminal value on the raw price and make market
+    # value and XIRR disagree by the whole ratio — two numbers on one screen, the worst
+    # kind of discrepancy. One seam here gives valuation, XIRR, weights, KPIs and net worth
+    # the same corrected price.
+    #
+    # ONE index for the request (trap #21). `price_in` short-circuits structurally on "no
+    # SPLIT for this symbol", so an action-free ledger takes the untouched pre-existing
+    # expression and this dict is byte-for-byte the old one (D38 invariant 1).
+    actions = ActionIndex.build(bundle.actions)
+    price_map = {
+        sym: price_in(actions, sym, pr.value, priced_on=pr.as_of, valued_on=as_of)
+        for sym, pr in price_reads.items() if pr is not None
+    }
+    # R2 (options spec §5): an open contract is valued at its last ordinary trade. It joins
+    # `price_map` — the ONE dict both `value_holdings` and XIRR's terminal value read, so the
+    # open liability is in both — and never `price_reads` (no freshness) nor `prices`.
+    last_trades = (last_trade_prices(bundle, as_of, unapplied=book.unapplied_actions)
+                   if has_options else {})
+    for h in book.holdings:
+        if h.symbol in opt_syms and h.symbol in last_trades:
+            price_map[h.symbol] = last_trades[h.symbol].price
+    valued = value_holdings(book.holdings, price_map)
+    # OPT-D5: holdings, weights, allocation, subtotals, the ex-dividend projection and the
+    # `realized` section are STOCK-ONLY, fed to the SAME functions as before; the KPI totals,
+    # total return A, XIRR and the FX pool's exposure read every position. Without an option
+    # the stock list IS `valued` — the same object, not an equal copy.
+    valued_stocks = split_holdings(valued, opt_syms)[0] if has_options else valued
+
+    resolver = RateResolver(fx=fx)
+
+    # 3. Core summaries — each degrades to None on a missing current rate.
+    returns: ReturnSummary | None
+    try:
+        returns = total_return(book, valued, resolver.rate, reporting)
+    except KeyError:
+        returns = None
+    view: CombinedView | None
+    try:
+        view = combined_view(valued_stocks, resolver.rate, reporting)
+    except KeyError:
+        view = None
+
+    # 4. XIRR — on-or-before trade-date FX; degrades to None with a reason.
+    def fx_at(d: date, base: Currency, quote: Currency) -> Decimal:
+        if base == quote:
+            return _ONE
+        direct = fx.on_or_before(base, quote, d)
+        if direct is not None:
+            return direct.rate
+        inverse = fx.on_or_before(quote, base, d)
+        if inverse is not None:
+            return _ONE / inverse.rate
+        # Same: rendered in the XIRR badge. Keeps the pair + the date, because those two
+        # facts are what tell the owner which rate to backfill.
+        raise KeyError(
+            f"查無 {d.isoformat()}（含）之前的 {base.value}/{quote.value} 匯率"
+        )
+
+    xirr_value: Decimal | None = None
+    xirr_window_days: int | None = None
+    xirr_reason: str | None = None
+    if oversold_positions:
+        # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
+        # Named per position since CR-01 (2026-10-04): a 賣超 netted back to zero shares has no
+        # holdings row to find, so the reason is the one place that says which row broke.
+        xirr_reason = _oversold_reason(oversold_positions)
+    elif unapplied_actions:
+        # A skipped corporate action is a DIFFERENT problem from 賣超 and says so: the shares
+        # are positive and look ordinary, but they are in PRE-action terms while every price
+        # is post-action, so `xirr_reporting` — which multiplies `price × h.shares` itself
+        # rather than reading `market_value` — would build its terminal value out of the
+        # wrong quantity and return a confident number (measured before this gate: 0.5301
+        # with no reason given, off a terminal value 94% composed of one such row).
+        #
+        # BLAST RADIUS — deliberate, and the ONE place in this change that is not contained
+        # to the affected symbol (owner requirement 2026-08-10). Everywhere else, one
+        # unapplied action damages exactly one stock: `pnl.py` nulls that position's
+        # market_value and every aggregate simply excludes it while still computing for the
+        # rest. XIRR cannot work that way. It is a SINGLE number over a terminal value that
+        # sums every holding, so one wrong share count makes the sum wrong — and dropping
+        # the position instead would silently report the XIRR of a DIFFERENT portfolio,
+        # which is the same wrong-number-that-looks-right failure by another route. Blanking
+        # the whole figure is therefore correct (and matches the `has_oversold` precedent
+        # directly above), but it is an accepted portfolio-wide cost, not a free one. The
+        # reason string below carries the account, symbol and date precisely so the owner
+        # can go straight to the one row that blanked it.
+        xirr_reason = _unapplied_action_reason(unapplied_actions)
+    elif orphan_dividends:
+        # CR-02 (2026-10-04). A dividend with no position means the ledger is missing the buy
+        # or opening that earned it. XIRR without both is the return of a DIFFERENT ledger — the
+        # unapplied-action reasoning directly above — so the figure is withheld and the rows
+        # are named, rather than computed with the payout silently left out.
+        xirr_reason = _orphan_dividend_reason(orphan_dividends)
+    elif book.refused_closes:
+        # Options spec §4.4: a close row the replay refused — the record, like the orphan
+        # dividends above (it may have no position to flag). Named per row.
+        xirr_reason = _refused_close_reason(book.refused_closes)
+    else:
+        try:
+            outcome = xirr_reporting(
+                txs, divs, opening, valued, instruments, fx_at,
+                price_map, resolver.rate, as_of, reporting,
+                # The replay REFUSED these (a dividend on an open short); counting them
+                # here is what gave one payment three answers on three screens.
+                refused_dividends=book.refused_dividends,
+                # AI-D42: the three trading/financing costs. `cash_movements` is already
+                # loaded above for the pool/FX work — no extra read.
+                cash_movements=cash_movements)
+            xirr_value = outcome.rate
+            xirr_window_days = outcome.window_days
+            if (xirr_value is not None and xirr_window_days is not None
+                    and xirr_window_days < _XIRR_MIN_WINDOW_DAYS):
+                # Withhold the annualization, not the return: `total_return_rate` is
+                # unaffected and still on the wire. `window_days` is reported either way.
+                xirr_value = None
+                xirr_reason = (f"觀察期 {xirr_window_days} 天・不足以年化"
+                               f"（需 ≥{_XIRR_MIN_WINDOW_DAYS} 天）")
+        except KeyError as exc:
+            xirr_reason = str(exc).strip("'\"")
+    if xirr_value is None and xirr_reason is None:
+        xirr_reason = "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）"
+
+    # 10. KPIs — blended; None whenever the blend cannot be formed honestly.
+    total_return_blended: Decimal | None = None
+    total_return_rate: Decimal | None = None
+    realized_total: Decimal | None = None
+    unrealized_total: Decimal | None = None
+    if returns is not None:
+        total_return_blended = returns.reporting_total_return
+        gross_rep = _ZERO
+        realized_rep = _ZERO
+        unrealized_rep = _ZERO
+        for ccy, cr in returns.by_currency.items():
+            rate = resolver.rate(ccy, reporting)  # cached: already resolved above
+            gross_rep += convert(cr.gross_invested, rate)
+            realized_rep += convert(cr.realized, rate)
+            unrealized_rep += convert(cr.unrealized, rate)
+        realized_total = realized_rep
+        unrealized_total = unrealized_rep
+        if gross_rep != _ZERO:
+            total_return_rate = total_return_blended / gross_rep
+    # KPI 總市值 (OPT-D5): the stock grand subtotal plus the options' reporting value — the
+    # addition is SKIPPED (not `+ 0`) on a ledger without an option, and degrades to None when
+    # either half cannot be formed (the all-or-nothing FX rule). The options' value is the
+    # 選擇權 block's own figure (`option_summary`'s market value), so the two never differ.
+    total_value = view.reporting_total_value if view is not None else None
+    kpi_market_value = total_value
+    option_mv: Decimal | None = None
+    if has_options:
+        option_mv = option_summary(
+            book=book, valued=valued, bundle=bundle, last_trades=last_trades,
+            underlying_prices={}, fx_rate=resolver.rate, reporting=reporting, as_of=as_of,
+            trend_excludes_value=False).market_value.reporting
+        kpi_market_value = (None if total_value is None or option_mv is None
+                            else total_value + option_mv)
+
+    return KpiBlock(
+        as_of=as_of, reporting=reporting,
+        total_market_value=kpi_market_value, total_return=total_return_blended,
+        total_return_rate=total_return_rate, realized_total=realized_total,
+        unrealized_total=unrealized_total, xirr=xirr_value,
+        xirr_window_days=xirr_window_days, xirr_reason=xirr_reason,
+        by_currency_value=view.by_currency_value if view is not None else None,
+        price_reads=price_reads, fx_reads=dict(resolver.reads),
+        bundle=bundle, has_options=has_options, option_symbols=opt_syms, book=book,
+        actions=actions, price_map=price_map, last_trades=last_trades, valued=valued,
+        valued_stocks=valued_stocks, returns=returns, view=view,
+        stock_market_value=total_value, option_market_value=option_mv, resolver=resolver,
+        cash_movements=list(cash_movements),
     )
 
 
@@ -731,116 +1169,35 @@ def _build_dashboard(
     unregistered = bundle.unregistered_symbols
     if unregistered:
         bundle = bundle.without_unregistered()
-    # Options spec §7.1: the 選擇權 block exists iff the UNCUT ledger carries a trade or an
-    # action on an option contract — decided BEFORE the valuation cut below, so a contract
-    # traded after the valuation day still shows its (empty) section. On every other ledger
-    # `has_options` is False and every option branch below is skipped outright (invariant 1:
-    # no `+ Decimal(0)`, the stock path runs untouched).
-    has_options = ledger_has_options(bundle)
-    # 1c. Every row counts from its OWN date (DEF-016 for dividends, widened to trades,
-    # openings, FX conversions and corporate actions by DEF-056 — owner rulings 2026-09-24).
-    # A confirmed payout is stored on its payment date and a trade may be entered ahead of
-    # its date; replaying either now moved the holdings, 總報酬 and the adjusted cost, and
-    # handed XIRR a flow dated after its own terminal value, while the cash pool and the
-    # trend already ignored it. ONE cut, here, so the book, XIRR, the received-dividend
-    # summary, the FX pool and the trend all read the same ledger — and every surface built
-    # on this function (drawer, exports, alerts, insights, snapshots, rebalance) inherits it.
-    bundle = bundle.valued_as_of(as_of)
+
+    # PERF spec §8.5: every FX read of this build — the current rates, XIRR's rate per flow,
+    # the trend's, the cash series' and the triangulation's histories — goes through ONE cache
+    # (one query per directed pair; measured before: 1,059 `fx_rates` queries per build).
+    source = LatestStored(conn, now=now, fx_cache=FxSeriesCache(conn))
+
+    # 1c, 2, 3 and 4: the valuation cut, the book, the valuation, the returns, XIRR and the
+    # KPI blend — the ONE computation a period close repeats as at its own day (§11.2).
+    kpi = kpis_as_of(bundle, book=None, cash_movements=cash_movements, prices=source,
+                     fx=source, as_of=as_of, reporting=reporting)
+    has_options = kpi.has_options
+    bundle = kpi.bundle
     # Read-only local views of the (now filtered) bundle, for the steps below.
     txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
-
-    # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
-    # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
-    try:
-        book = build_book(bundle, allow_oversell=True)
-    except ArithmeticError as exc:
-        # ⚠ NOT THE OWNER any more (2026-08-29). ``cost_basis.build_book`` re-types every
-        # ``ArithmeticError`` out of the replay into an ``UnbookableLedgerError`` naming the
-        # offending row, so this arm no longer fires for a ledger fault — go THERE to change
-        # the behaviour or the wording. The re-typing moved because this was the ONLY call
-        # site that had it: the same row that degraded here answered 500 on 重算, the tax
-        # package and 試算, and fixing it at four sites is four chances to miss one.
-        #
-        # Kept, deliberately, as a floor rather than deleted: the guarantee this file owes its
-        # caller is "``build_dashboard`` does not raise a raw decimal fault", and that must
-        # hold even if the replay is swapped, patched or extended. It is pinned as a CHANNEL
-        # by ``tests/portfolio/test_r8_decimal_fault_degrades.py``, which injects the fault
-        # rather than provoking it, precisely so the guarantee survives its current cause.
-        #
-        # The arm catches the CLASS, not one cause: ``decimal.DivisionByZero`` and
-        # ``decimal.Overflow`` are SIBLINGS of ``InvalidOperation``, not subclasses (this arm
-        # said ``InvalidOperation`` until wave 3 and both walked straight past it), and
-        # ``ZeroDivisionError`` is in the class too.
-        raise UnbookableLedgerError(
-            "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
-            "請於交易帳本修正該列後重試"
-        ) from exc
-    # Read off the BOOK, not off the holdings (CR-01 / CR-11, 2026-10-04): a 賣超 that a later
-    # buy of the same size netted back to exactly zero shares has no holding to inspect —
-    # `any(h.oversold ...)` was False there, and XIRR came out as a confident −67.8% over a
-    # discarded basis (measured on the review's probe). `Book.oversold_positions` lists every
-    # 賣超 position, so this is a strict superset of the old test.
+    book = kpi.book
     oversold_positions = book.oversold_positions
     has_oversold = bool(oversold_positions)
-    # CR-02: dividends the replay refused because the account never held the symbol by their
-    # date. No position carries a flag for them, so the book's list is the only record.
     orphan_dividends = book.orphan_dividends
-    # Read off the BOOK, not off the holdings: two of the three ways an action goes
-    # unapplied leave no holding to inspect — an EXCHANGE that already emptied the source
-    # (the flag is dropped with its zero-share carrier), and a source that never existed
-    # (nothing is flagged at all). `any(h.unbookable_action ...)` is False in both, and the
-    # XIRR terminal value is wrong in all three. See Book.unapplied_actions (audit F-47/F-49).
     unapplied_actions = book.unapplied_actions
-    # Options spec §5: a contract is never quoted, so it never enters `price_reads` — nor,
-    # therefore, `freshness.prices`, `missing_prices` or `any_stale` — nor the ex-dividend
-    # calendar below (OPT-D10). Empty without an option, so `held_symbols` is unchanged.
-    opt_syms = option_symbols(instruments) if has_options else frozenset()
-    held_symbols = sorted({h.symbol for h in book.holdings if h.symbol not in opt_syms})
-    price_reads: dict[str, PriceRead | None] = {
-        sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
-    }
-    # §5.1(d), applied HERE and not inside `value_holdings` (trap #3). A stored close is
-    # as traded on its own date, but the book's share count is already in today's terms, so
-    # a price carried forward across a split must be re-expressed — divided by the splits
-    # in `(pr.as_of, as_of]` — before it meets those shares. `price_map` is the ONE dict fed
-    # to BOTH `value_holdings` (below) and `xirr_reporting` (step 4), which multiplies
-    # `price × h.shares` itself rather than reading `market_value`: correcting it inside
-    # `value_holdings` would leave the XIRR terminal value on the raw price and make market
-    # value and XIRR disagree by the whole ratio — two numbers on one screen, the worst
-    # kind of discrepancy. One seam here gives valuation, XIRR, weights, KPIs and net worth
-    # the same corrected price.
-    #
-    # ONE index for the request (trap #21). `price_in` short-circuits structurally on "no
-    # SPLIT for this symbol", so an action-free ledger takes the untouched pre-existing
-    # expression and this dict is byte-for-byte the old one (D38 invariant 1).
-    actions = ActionIndex.build(bundle.actions)
-    price_map = {
-        sym: price_in(actions, sym, pr.value, priced_on=pr.as_of, valued_on=as_of)
-        for sym, pr in price_reads.items() if pr is not None
-    }
-    # R2 (options spec §5): an open contract is valued at its last ordinary trade. It joins
-    # `price_map` — the ONE dict both `value_holdings` and XIRR's terminal value read, so the
-    # open liability is in both — and never `price_reads` (no freshness) nor `prices`.
-    last_trades = (last_trade_prices(bundle, as_of, unapplied=book.unapplied_actions)
-                   if has_options else {})
-    for h in book.holdings:
-        if h.symbol in opt_syms and h.symbol in last_trades:
-            price_map[h.symbol] = last_trades[h.symbol].price
-    valued = value_holdings(book.holdings, price_map)
-    # OPT-D5: holdings, weights, allocation, subtotals, the ex-dividend projection and the
-    # `realized` section are STOCK-ONLY, fed to the SAME functions as before; the KPI totals,
-    # total return A, XIRR and the FX pool's exposure read every position. Without an option
-    # the stock list IS `valued` — the same object, not an equal copy.
-    valued_stocks = split_holdings(valued, opt_syms)[0] if has_options else valued
-
-    resolver = RateResolver(conn, now=now)
-
-    # 3. Core summaries — each degrades to None on a missing current rate.
-    returns: ReturnSummary | None
-    try:
-        returns = total_return(book, valued, resolver.rate, reporting)
-    except KeyError:
-        returns = None
+    opt_syms = kpi.option_symbols
+    held_symbols = kpi.held_symbols
+    price_reads = kpi.price_reads
+    actions = kpi.actions
+    last_trades = kpi.last_trades
+    valued = kpi.valued
+    valued_stocks = kpi.valued_stocks
+    resolver = kpi.resolver
+    returns = kpi.returns
+    view = kpi.view
     allocation: SectorAllocation | None
     # FU-D31 (P1①) / R6 (2026-07-19): canonicalize sectors at the donut GROUPING seam. Stored
     # instrument rows ARE now migrated once at the schema/boot seam (R6,
@@ -861,91 +1218,9 @@ def _build_dashboard(
                                        reporting)
     except KeyError:
         allocation = None
-    view: CombinedView | None
-    try:
-        view = combined_view(valued_stocks, resolver.rate, reporting)
-    except KeyError:
-        view = None
-
-    # 4. XIRR — on-or-before trade-date FX; degrades to None with a reason.
-    def fx_at(d: date, base: Currency, quote: Currency) -> Decimal:
-        if base == quote:
-            return _ONE
-        direct = get_fx_on(conn, base, quote, on=d)
-        if direct is not None:
-            return direct.rate
-        inverse = get_fx_on(conn, quote, base, on=d)
-        if inverse is not None:
-            return _ONE / inverse.rate
-        # Same: rendered in the XIRR badge. Keeps the pair + the date, because those two
-        # facts are what tell the owner which rate to backfill.
-        raise KeyError(
-            f"查無 {d.isoformat()}（含）之前的 {base.value}/{quote.value} 匯率"
-        )
-
-    xirr_value: Decimal | None = None
-    xirr_window_days: int | None = None
-    xirr_reason: str | None = None
-    if has_oversold:
-        # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
-        # Named per position since CR-01 (2026-10-04): a 賣超 netted back to zero shares has no
-        # holdings row to find, so the reason is the one place that says which row broke.
-        xirr_reason = _oversold_reason(oversold_positions)
-    elif unapplied_actions:
-        # A skipped corporate action is a DIFFERENT problem from 賣超 and says so: the shares
-        # are positive and look ordinary, but they are in PRE-action terms while every price
-        # is post-action, so `xirr_reporting` — which multiplies `price × h.shares` itself
-        # rather than reading `market_value` — would build its terminal value out of the
-        # wrong quantity and return a confident number (measured before this gate: 0.5301
-        # with no reason given, off a terminal value 94% composed of one such row).
-        #
-        # BLAST RADIUS — deliberate, and the ONE place in this change that is not contained
-        # to the affected symbol (owner requirement 2026-08-10). Everywhere else, one
-        # unapplied action damages exactly one stock: `pnl.py` nulls that position's
-        # market_value and every aggregate simply excludes it while still computing for the
-        # rest. XIRR cannot work that way. It is a SINGLE number over a terminal value that
-        # sums every holding, so one wrong share count makes the sum wrong — and dropping
-        # the position instead would silently report the XIRR of a DIFFERENT portfolio,
-        # which is the same wrong-number-that-looks-right failure by another route. Blanking
-        # the whole figure is therefore correct (and matches the `has_oversold` precedent
-        # directly above), but it is an accepted portfolio-wide cost, not a free one. The
-        # reason string below carries the account, symbol and date precisely so the owner
-        # can go straight to the one row that blanked it.
-        xirr_reason = _unapplied_action_reason(unapplied_actions)
-    elif orphan_dividends:
-        # CR-02 (2026-10-04). A dividend with no position means the ledger is missing the buy
-        # or opening that earned it. XIRR without both is the return of a DIFFERENT ledger — the
-        # unapplied-action reasoning directly above — so the figure is withheld and the rows
-        # are named, rather than computed with the payout silently left out.
-        xirr_reason = _orphan_dividend_reason(orphan_dividends)
-    elif book.refused_closes:
-        # Options spec §4.4: a close row the replay refused — the record, like the orphan
-        # dividends above (it may have no position to flag). Named per row.
-        xirr_reason = _refused_close_reason(book.refused_closes)
-    else:
-        try:
-            outcome = xirr_reporting(
-                txs, divs, opening, valued, instruments, fx_at,
-                price_map, resolver.rate, as_of, reporting,
-                # The replay REFUSED these (a dividend on an open short); counting them
-                # here is what gave one payment three answers on three screens.
-                refused_dividends=book.refused_dividends,
-                # AI-D42: the three trading/financing costs. `cash_movements` is already
-                # loaded above for the pool/FX work — no extra read.
-                cash_movements=cash_movements)
-            xirr_value = outcome.rate
-            xirr_window_days = outcome.window_days
-            if (xirr_value is not None and xirr_window_days is not None
-                    and xirr_window_days < _XIRR_MIN_WINDOW_DAYS):
-                # Withhold the annualization, not the return: `total_return_rate` is
-                # unaffected and still on the wire. `window_days` is reported either way.
-                xirr_value = None
-                xirr_reason = (f"觀察期 {xirr_window_days} 天・不足以年化"
-                               f"（需 ≥{_XIRR_MIN_WINDOW_DAYS} 天）")
-        except KeyError as exc:
-            xirr_reason = str(exc).strip("'\"")
-    if xirr_value is None and xirr_reason is None:
-        xirr_reason = "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）"
+    xirr_value = kpi.xirr
+    xirr_window_days = kpi.xirr_window_days
+    xirr_reason = kpi.xirr_reason
 
     # 5. FX P&L — settlement != funding accounts; cold-start KeyError -> None.
     # The exposure figure is the market value of equity holdings quoted in the account's
@@ -1099,7 +1374,7 @@ def _build_dashboard(
         )
         holding_rows.append(HoldingRow(**data))
 
-    # 9. Trend — bulk-load histories, then the pure daily replay.
+    # 9. Trend — bulk-load histories, then the ONE-pass daily replay (PERF spec §8).
     trend_reason: str | None = None
     # Declared OUT here (empty by default) because step 10's benchmark counterfactual reads
     # it as well, and on a ledger with no events the trend branch below never runs. Empty is
@@ -1116,14 +1391,17 @@ def _build_dashboard(
                                 | {o.symbol for o in opening}
                                 | {a.from_symbol for a in bundle.actions}
                                 | {a.to_symbol for a in bundle.actions})
+        first_day = trend_start(bundle)
+        assert first_day is not None  # the ledger has a trade, a dividend or an opening
         # RAW on purpose (W6c): this is the ONE series read that must NOT be re-expressed
         # here. Its consumer is `daily_value_series`, which values a DIFFERENT day on every
         # iteration and therefore applies §5.1(d) itself, per point, at its `_entry_at_or_
         # before` lookup — with `valued_on=day`, which is exactly the factor a precomputed
         # re-expression could not know. Correcting it twice would divide by the ratio twice.
+        # PERF spec §8.5: read from the last close on or before the trend's FIRST day — the
+        # earliest day it looks a price up for — not from 1900 (the light read).
         price_history: PriceHistory = {
-            sym: [(p.as_of, p.value) for p in get_price_history(conn, sym, _EPOCH, as_of)]
-            for sym in ledger_symbols
+            sym: get_close_series(conn, sym, first_day, as_of) for sym in ledger_symbols
         }
         # (``trend_fx_history`` is declared before this branch so step 10's benchmark
         # counterfactual can read it on an EMPTY ledger too — where it is simply empty and
@@ -1133,11 +1411,17 @@ def _build_dashboard(
             if ccy == reporting:
                 continue
             for base, quote in ((ccy, reporting), (reporting, ccy)):
-                rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
+                rows = source.fx_cache.history(base, quote, _EPOCH, as_of)
                 if rows:
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
-        trend = daily_value_series(bundle, price_history, fx_history, reporting,
-                                   end=as_of, cash_movements=cash_movements)
+        # ONE replay feeds every day (PERF spec §8.1): `iter_books` yields the book of each
+        # day a row counts from, and the payouts the flows leave out are this request's
+        # book's refusals — the same rows a second whole-bundle replay would refuse.
+        book_days = trend_book_days(bundle, start=first_day, end=as_of)
+        trend = value_series(
+            bundle, price_history, fx_history, reporting, start=first_day, end=as_of,
+            cash_movements=cash_movements, refused_dividends=book.refused_dividends,
+            books=zip(book_days, iter_books(bundle, book_days), strict=True))
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
@@ -1162,7 +1446,7 @@ def _build_dashboard(
                 if ccy == reporting:
                     continue
                 for base, quote in ((ccy, reporting), (reporting, ccy)):
-                    rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
+                    rows = source.fx_cache.history(base, quote, _EPOCH, as_of)
                     if rows:
                         cash_fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
             cash_by_date = daily_cash_series(
@@ -1173,25 +1457,9 @@ def _build_dashboard(
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
         trend_reason = "尚無任何帳本紀錄"
 
-    # 10. KPIs — blended; None whenever the blend cannot be formed honestly.
-    total_return_blended: Decimal | None = None
-    total_return_rate: Decimal | None = None
-    realized_total: Decimal | None = None
-    unrealized_total: Decimal | None = None
-    if returns is not None:
-        total_return_blended = returns.reporting_total_return
-        gross_rep = _ZERO
-        realized_rep = _ZERO
-        unrealized_rep = _ZERO
-        for ccy, cr in returns.by_currency.items():
-            rate = resolver.rate(ccy, reporting)  # cached: already resolved above
-            gross_rep += convert(cr.gross_invested, rate)
-            realized_rep += convert(cr.realized, rate)
-            unrealized_rep += convert(cr.unrealized, rate)
-        realized_total = realized_rep
-        unrealized_total = unrealized_rep
-        if gross_rep != _ZERO:
-            total_return_rate = total_return_blended / gross_rep
+    # 10. KPIs — blended by kpis_as_of (None whenever the blend cannot be formed honestly);
+    # what depends on the trend or the connection is assembled here.
+    total_return_blended = kpi.total_return
     # AI-D41: B and B − A ride beside A. Computed HERE because this is the only layer
     # holding both the ReturnSummary and the TrendSeries; neither module can see the
     # other's figure, which is precisely why the discrepancy went unnoticed.
@@ -1224,14 +1492,6 @@ def _build_dashboard(
                                                  now=now, as_of=as_of),
             fx_rate=resolver.rate, reporting=reporting, as_of=as_of,
             trend_excludes_value=trend.options_value_excluded)
-    # KPI 總市值 (OPT-D5): the stock grand subtotal plus the options' reporting value — the
-    # addition is SKIPPED (not `+ 0`) on a ledger without an option, and degrades to None when
-    # either half cannot be formed (the all-or-nothing FX rule).
-    kpi_market_value = total_value
-    if options_block is not None:
-        option_mv = options_block.market_value.reporting
-        kpi_market_value = (None if total_value is None or option_mv is None
-                            else total_value + option_mv)
     # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
     benchmark = _benchmark_comparison(
         conn, bundle, trend_fx_history, reporting,
@@ -1244,15 +1504,15 @@ def _build_dashboard(
     )
     kpis = KpiSummary(
         reporting_currency=reporting,
-        total_market_value=kpi_market_value,
+        total_market_value=kpi.total_market_value,
         total_return=total_return_blended,
         total_return_fx_complete=fx_complete,
         principal_fx_effect=principal_fx,
         trading_financing_cost=None if fx_complete is None else trading_cost,
         fx_complete_reason=fx_outcome.reason,
-        total_return_rate=total_return_rate,
-        realized_total=realized_total,
-        unrealized_total=unrealized_total,
+        total_return_rate=kpi.total_return_rate,
+        realized_total=kpi.realized_total,
+        unrealized_total=kpi.unrealized_total,
         xirr=xirr_value,
         xirr_window_days=xirr_window_days,
         fx_realized=fx_summary.reporting_realized_fx if fx_summary is not None else None,
