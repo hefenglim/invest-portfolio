@@ -10,17 +10,16 @@ real computations:
 * **Cached** (a file-backed corpus): the SECOND identical request builds nothing, replays
   nothing and assembles no alert inputs — the answer comes from ``shared/result_cache.py``.
 
-The cached layer applies the two wirings the main session makes at the wave-1 merge: the
-dashboard build reads the cache (``test_result_cache_dashboard.cached_build``), and a
-read-only POST opens no write window (``api/read_only.py`` in ``_write_window_middleware``;
-emulated here by a write window that never opens — only read-only requests are sent).
+The cached layer runs the production wiring: ``build_dashboard`` reads the cache, and a
+read-only POST opens no write window (``api/read_only.py`` in ``api/app.py``'s
+``_write_window_middleware``). The counting stub sits under the cache, on
+``dashboard._build_dashboard``.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Iterator
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,23 +27,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from portfolio_dash.api import alert_inputs, deps
-from portfolio_dash.api import app as app_module
 from portfolio_dash.api.app import create_app
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.api.routers import symbol
 from portfolio_dash.llm_insight import composer_store
 from portfolio_dash.portfolio import dashboard
 from portfolio_dash.portfolio.dashboard import RateResolver
-from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.returns import replay_dividend_refusals
 from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import connect_path
-from portfolio_dash.shared.enums import Currency
 from portfolio_dash.strategy import whatif
 from tests.conftest import GOLDEN_NOW
 from tests.reference.corpora import TEMPLATE_DIR_NAME, CorpusDB, copy_corpus
-from tests.shared.test_result_cache_dashboard import cached_build
 
 pytestmark = pytest.mark.enable_socket
 
@@ -145,16 +140,6 @@ def cached_client(
     # The cache serves only the application's database: make the copy that database.
     monkeypatch.setenv("DB_PATH", str(db.path))
     get_settings.cache_clear()
-    counted_build = dashboard._build_dashboard          # the counting stub over the real build
-
-    def wired(conn: sqlite3.Connection, *, now: datetime, reporting: Currency
-              ) -> DashboardData:
-        return cached_build(conn, now=now, reporting=reporting, real=counted_build)
-
-    monkeypatch.setattr(dashboard, "_build_dashboard", wired)
-    # Read-only requests only: the wired predicate opens no write window for them.
-    monkeypatch.setattr(app_module, "begin_write", lambda: None)
-    monkeypatch.setattr(app_module, "end_write", lambda: None)
     app = create_app()
 
     def conn_per_request() -> Iterator[sqlite3.Connection]:

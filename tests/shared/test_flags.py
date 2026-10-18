@@ -9,24 +9,32 @@ import pytest
 
 from portfolio_dash.shared import flags
 
-_NAMES = ("PD_SETTLE", "PD_SETTLE_MODE", "PD_JOB_MODE", "PD_PREWARM")
+_NAMES = ("PD_SETTLE", "PD_SETTLE_MODE", "PD_JOB_MODE", "PD_PREWARM", "PD_STATIC_IMMUTABLE")
 
 
 @pytest.fixture(autouse=True)
 def _unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with the four flags unset, whatever the suite's conftest sets."""
+    """Every test starts with the five flags unset, whatever the suite's conftest sets."""
     for name in _NAMES:
         monkeypatch.delenv(name, raising=False)
 
 
 def test_unset_reads_the_prod_defaults() -> None:
     assert flags.current() == flags.Flags(
-        settle_enabled=True, settle_mode="child", job_mode="child", prewarm_enabled=True)
+        settle_enabled=True, settle_mode="child", job_mode="child", prewarm_enabled=True,
+        static_immutable=False)
     assert {name: flags.raw(name) for name in _NAMES} == {
-        "PD_SETTLE": "on", "PD_SETTLE_MODE": "child", "PD_JOB_MODE": "child", "PD_PREWARM": "1"}
+        "PD_SETTLE": "on", "PD_SETTLE_MODE": "child", "PD_JOB_MODE": "child", "PD_PREWARM": "1",
+        "PD_STATIC_IMMUTABLE": "0"}
 
 
-def test_the_vocabulary_covers_exactly_the_four_flags() -> None:
+def test_static_immutable_is_opt_in() -> None:
+    """Unset is ``0`` everywhere: only an instance running released tags opts in (the demo
+    runs work-in-progress under an unchanged ``__version__``)."""
+    assert flags.static_immutable() is False
+
+
+def test_the_vocabulary_covers_exactly_the_five_flags() -> None:
     assert set(flags.ALLOWED) == set(_NAMES) == set(flags.PROD_DEFAULTS)
     for name, default in flags.PROD_DEFAULTS.items():
         assert default in flags.ALLOWED[name]
@@ -54,13 +62,19 @@ def test_every_value_is_read_on_every_call(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("PD_PREWARM", "1")
     assert flags.prewarm_enabled() is True
 
+    monkeypatch.setenv("PD_STATIC_IMMUTABLE", "1")
+    assert flags.static_immutable() is True
+    monkeypatch.setenv("PD_STATIC_IMMUTABLE", "0")
+    assert flags.static_immutable() is False
+
 
 def test_the_unit_test_combination_reads_back(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in (("PD_SETTLE", "on"), ("PD_SETTLE_MODE", "inline"),
                         ("PD_JOB_MODE", "inline"), ("PD_PREWARM", "0")):
         monkeypatch.setenv(name, value)
     assert flags.current() == flags.Flags(
-        settle_enabled=True, settle_mode="inline", job_mode="inline", prewarm_enabled=False)
+        settle_enabled=True, settle_mode="inline", job_mode="inline", prewarm_enabled=False,
+        static_immutable=False)
 
 
 @pytest.mark.parametrize(("name", "value"), [
@@ -72,6 +86,8 @@ def test_the_unit_test_combination_reads_back(monkeypatch: pytest.MonkeyPatch) -
     ("PD_JOB_MODE", "Child"),
     ("PD_PREWARM", "true"),
     ("PD_PREWARM", "yes"),
+    ("PD_STATIC_IMMUTABLE", "true"),
+    ("PD_STATIC_IMMUTABLE", "on"),
 ])
 def test_an_invalid_value_raises_naming_the_variable_and_its_values(
         monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
@@ -89,6 +105,7 @@ def test_an_invalid_value_raises_naming_the_variable_and_its_values(
 @pytest.mark.parametrize(("accessor", "name"), [
     (flags.settle_enabled, "PD_SETTLE"), (flags.settle_mode, "PD_SETTLE_MODE"),
     (flags.job_mode, "PD_JOB_MODE"), (flags.prewarm_enabled, "PD_PREWARM"),
+    (flags.static_immutable, "PD_STATIC_IMMUTABLE"),
 ])
 def test_each_typed_accessor_validates(monkeypatch: pytest.MonkeyPatch,
                                        accessor: object, name: str) -> None:

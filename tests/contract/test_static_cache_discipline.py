@@ -10,13 +10,12 @@ function`` class — insights/news/index lost every AI card while the API kept w
    ``?v=<portfolio_dash.__version__>`` (scripts/stamp_asset_version.py, rerun on version
    bump), which flushes clients that cached assets before the header existed.
 
-PERF spec 2026-10-18 §13 adds the second policy (``api/static_cache.py``): a request whose
-``?v=`` IS the running version names one build of that file, so it is answered
-``immutable``; HTML, unversioned and other-version requests keep ``no-cache``. Its tests run
-on a minimal app mounting ``StaticCacheFiles`` until the main session mounts it in
-``create_app`` (wave-1 merge) — then ``test_static_mount_sends_cache_control_no_cache``
-below becomes the HTML / unversioned half of the same mount, and
-``test_the_app_mounts_the_versioned_cache_policy`` is added (the snippet is in its place).
+PERF spec 2026-10-18 §13 adds the second policy (``api/static_cache.py``), OPT-IN per instance
+(``PD_STATIC_IMMUTABLE=1``, wave-1 review 2026-10-19): a request whose ``?v=`` IS the running
+version names one build of that file, so it is answered ``immutable``; HTML, unversioned and
+other-version requests keep ``no-cache``. With the flag unset or ``0`` — the demo site, which
+runs work-in-progress under an unchanged ``__version__`` — every answer keeps ``no-cache``.
+Both states are pinned below, on ``create_app``'s own mount and on a minimal app.
 
 These are deterministic source/route scans: no golden DB, no lifespan, no network.
 """
@@ -84,11 +83,57 @@ def test_static_mount_sends_cache_control_no_cache() -> None:
     assert page.headers.get("cache-control") == "no-cache"
 
 
-# --- PERF §13: versioned assets are immutable (api/static_cache.py) -------------------------
-#
-def test_the_app_mounts_the_versioned_cache_policy() -> None:
-    """``create_app`` mounts :class:`StaticCacheFiles` (wave-1 merge): a stamped asset is
-    immutable, the same asset unstamped and every page still revalidate."""
+# --- PERF §13: versioned assets are immutable, opt-in (api/static_cache.py) ----------------
+
+
+@pytest.fixture
+def immutable_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This instance runs released tags: ``PD_STATIC_IMMUTABLE=1``."""
+    monkeypatch.setenv("PD_STATIC_IMMUTABLE", "1")
+
+
+def _stamped_urls() -> list[str]:
+    urls = sorted({f"/{m.group('name')}?v={m.group('ver')}"
+                   for html in _WEB_DIR.glob("*.html")
+                   for m in _ASSET_REF.finditer(html.read_text(encoding="utf-8"))})
+    assert urls, "expected local asset references to scan (web/*.html)"
+    return urls
+
+
+@pytest.mark.parametrize("value", [None, "0"])
+def test_without_the_opt_in_every_static_answer_keeps_no_cache(
+    value: str | None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The demo site's state (unset, or ``0``): a stamped asset revalidates like everything
+    else, so a work-in-progress deploy under the same ``__version__`` is picked up at once."""
+    if value is None:
+        monkeypatch.delenv("PD_STATIC_IMMUTABLE", raising=False)
+    else:
+        monkeypatch.setenv("PD_STATIC_IMMUTABLE", value)
+    urls = _stamped_urls()
+    for client in (TestClient(create_app()), _static_client()):
+        for url in urls:
+            r = client.get(url)
+            assert r.status_code == 200, url
+            assert r.headers.get("cache-control") == NO_CACHE, url
+        etag = client.get(urls[0]).headers["etag"]
+        again = client.get(urls[0], headers={"If-None-Match": etag})
+        assert again.status_code == 304
+        assert again.headers.get("cache-control") == NO_CACHE
+
+
+def test_the_flag_is_read_on_every_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _static_client()
+    url = f"/format.js?v={__version__}"
+    monkeypatch.setenv("PD_STATIC_IMMUTABLE", "1")
+    assert client.get(url).headers.get("cache-control") == IMMUTABLE
+    monkeypatch.setenv("PD_STATIC_IMMUTABLE", "0")
+    assert client.get(url).headers.get("cache-control") == NO_CACHE
+
+
+def test_the_app_mounts_the_versioned_cache_policy(immutable_on: None) -> None:
+    """``create_app`` mounts :class:`StaticCacheFiles` (wave-1 merge): with the opt-in a
+    stamped asset is immutable, the same asset unstamped and every page still revalidate."""
     client = TestClient(create_app())
     assert client.get(f"/format.js?v={__version__}").headers.get("cache-control") == IMMUTABLE
     assert client.get("/format.js").headers.get("cache-control") == NO_CACHE
@@ -101,14 +146,12 @@ def _static_client() -> TestClient:
     return TestClient(app)
 
 
-def test_every_stamped_reference_is_served_immutable() -> None:
-    """Every local asset URL exactly as a page writes it gets the year-long immutable policy
-    — fresh and on a 304 revalidation (a browser that cached it under the old policy)."""
+def test_every_stamped_reference_is_served_immutable(immutable_on: None) -> None:
+    """With the opt-in, every local asset URL exactly as a page writes it gets the year-long
+    immutable policy — fresh and on a 304 revalidation (a browser that cached it under the old
+    policy)."""
     client = _static_client()
-    urls = sorted({f"/{m.group('name')}?v={m.group('ver')}"
-                   for html in _WEB_DIR.glob("*.html")
-                   for m in _ASSET_REF.finditer(html.read_text(encoding="utf-8"))})
-    assert urls, "expected local asset references to scan (web/*.html)"
+    urls = _stamped_urls()
     for url in urls:
         r = client.get(url)
         assert r.status_code == 200, url
@@ -127,7 +170,9 @@ def test_every_stamped_reference_is_served_immutable() -> None:
     "/insights.html",
     "/",                                 # the directory index (index.html)
 ])
-def test_html_unversioned_and_other_version_requests_keep_no_cache(url: str) -> None:
+def test_html_unversioned_and_other_version_requests_keep_no_cache(
+    url: str, immutable_on: None,
+) -> None:
     r = _static_client().get(url)
     assert r.status_code == 200, url
     assert r.headers.get("cache-control") == NO_CACHE, url
@@ -138,7 +183,7 @@ def test_html_unversioned_and_other_version_requests_keep_no_cache(url: str) -> 
     assert again.headers.get("cache-control") == NO_CACHE, url
 
 
-def test_a_missing_versioned_asset_is_never_cached_immutable() -> None:
+def test_a_missing_versioned_asset_is_never_cached_immutable(immutable_on: None) -> None:
     r = _static_client().get(f"/no-such-file.js?v={__version__}")
     assert r.status_code == 404
     assert r.headers.get("cache-control") != IMMUTABLE

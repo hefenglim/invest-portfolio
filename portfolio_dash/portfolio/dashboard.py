@@ -1107,6 +1107,16 @@ def build_dashboard(
     receives its own deep copy with the fields that depend on *now* beyond its date
     (:data:`SUB_DAY_FIELDS`) set to its own clock.
     """
+    return build_dashboard_keyed(conn, now=now, reporting=reporting)[0]
+
+
+def build_dashboard_keyed(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+) -> tuple[DashboardData, result_cache.CacheKey | None]:
+    """:func:`build_dashboard` plus the cache key it was served under (``None`` when built
+    uncached) — for a caller that derives a second cached result from this build, which may
+    be filed under its own key only when both describe the same state
+    (``result_cache.same_state``; ``api/alert_inputs.compute_alerts_full``'s ``data_key``)."""
     def build() -> DashboardData:
         return _build_dashboard(conn, now=now, reporting=reporting)
 
@@ -1115,7 +1125,7 @@ def build_dashboard(
             setattr(data, name, now)
         return data
 
-    return result_cache.cached(
+    return result_cache.cached_keyed(
         conn, name="dashboard", now=now, reporting=reporting, compute=build,
         copy=_own_copy, restamp=stamp,
     )

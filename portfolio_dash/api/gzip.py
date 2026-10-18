@@ -9,7 +9,10 @@ measured on the installed Starlette 1.3.1:
 
 So :class:`ZipAwareGZipResponder` marks a response whose content type starts with one of
 :data:`EXCLUDED_CONTENT_TYPES` as excluded — the flag Starlette's own responder already honours
-for ``text/event-stream`` — and :class:`GZipMiddleware` uses that responder.
+for ``text/event-stream`` — and :class:`GZipMiddleware` uses that responder. A range answer
+(status 206, or any ``Content-Range`` header) passes through the same way: its
+``Content-Range`` describes the uncompressed bytes (wave-1 review, 2026-10-19: Starlette
+gzipped a ``Range: bytes=0-4095`` slice of a static file).
 
 **Wiring** (main session, ``api/app.py::create_app``)::
 
@@ -44,8 +47,11 @@ class ZipAwareGZipResponder(GZipResponder):
     async def send_with_compression(self, message: Message) -> None:
         if message["type"] == "http.response.start":
             await super().send_with_compression(message)
-            content_type = Headers(raw=message["headers"]).get("content-type", "")
-            if content_type.startswith(EXCLUDED_CONTENT_TYPES):
+            headers = Headers(raw=message["headers"])
+            if (headers.get("content-type", "").startswith(EXCLUDED_CONTENT_TYPES)
+                    or message.get("status") == 206 or "content-range" in headers):
+                # A range answer's Content-Range counts UNCOMPRESSED bytes: gzipping the
+                # slice would hand the client a body that range does not describe.
                 self.content_type_is_excluded = True
             return
         await super().send_with_compression(message)

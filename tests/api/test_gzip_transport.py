@@ -68,6 +68,12 @@ def _app() -> FastAPI:
     def events() -> StreamingResponse:
         return StreamingResponse(iter([b"data: x\n\n" * 200]), media_type="text/event-stream")
 
+    @app.get("/ranged")
+    def ranged() -> Response:
+        # a 200 that still names a range (e.g. a proxy's): the header alone passes it through
+        return Response(content=b"x" * 4096, media_type="application/octet-stream",
+                        headers={"Content-Range": "bytes 0-4095/8192"})
+
     app.mount("/", StaticFiles(directory=_WEB, html=True), name="web")
     app.add_middleware(GZipMiddleware)
     return app
@@ -131,3 +137,22 @@ def test_text_downloads_and_static_assets_are_compressed(client: TestClient) -> 
 def test_an_event_stream_keeps_starlettes_exclusion(client: TestClient) -> None:
     headers, _ = _raw(client, "/events")
     assert "content-encoding" not in headers
+
+
+def test_a_range_answer_is_never_compressed(client: TestClient) -> None:
+    """A 206 slice of a static file: its Content-Range counts uncompressed bytes, so the
+    body must be exactly those bytes (Starlette alone gzipped it)."""
+    full = (_WEB / "echarts.min.js").read_bytes()
+    with client.stream("GET", "/echarts.min.js",
+                       headers={"Range": "bytes=0-4095", "Accept-Encoding": "gzip"}) as r:
+        assert r.status_code == 206
+        body = b"".join(r.iter_raw())
+        assert "content-encoding" not in r.headers
+        assert r.headers["content-range"].startswith("bytes 0-4095/")
+    assert body == full[:4096]
+
+
+def test_any_content_range_header_passes_through(client: TestClient) -> None:
+    headers, body = _raw(client, "/ranged")
+    assert "content-encoding" not in headers
+    assert body == b"x" * 4096

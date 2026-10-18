@@ -24,9 +24,13 @@ and a request whose ``?v=`` is NOT the running version (an old page still open, 
 page that reached an old process mid-deploy — caching that pairing for a year would pin it).
 Only a successful answer (200 / 304) is ever marked immutable; a 404 never is.
 
-**Wiring** (main session, ``api/app.py::create_app``): mount
-``StaticCacheFiles(directory=_WEB_DIR, html=True)`` at ``"/"`` in place of
-``_NoCacheStaticFiles``, and delete that class and its now-unused imports from ``app.py``.
+**Opt-in per instance: ``PD_STATIC_IMMUTABLE=1``** (``shared/flags.py``, read on every
+request; unset means ``0``). With ``0`` EVERY static answer keeps ``no-cache``, as before this
+module. ``?v=`` is ``__version__``, which only a release moves, while the demo site runs
+work-in-progress commits between releases under the same version: an immutable copy there
+would pin a browser to old JS for a year — and an instance that once served a tag's assets
+immutable would keep serving those copies to the browser after it moved on to WIP. Only an
+instance that runs released tags (prod) turns it on (wave-1 review, 2026-10-19).
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 import portfolio_dash
+from portfolio_dash.shared import flags
 
 NO_CACHE = "no-cache"
 IMMUTABLE = "public, max-age=31536000, immutable"
@@ -51,6 +56,8 @@ def _version_of(scope: Scope) -> str | None:
 
 def cache_control(path: str, scope: Scope, response: Response) -> str:
     """The ``Cache-Control`` value for this static answer (see the module docstring)."""
+    if not flags.static_immutable():
+        return NO_CACHE
     if response.status_code not in (200, 304):
         return NO_CACHE
     if path.endswith((".html", ".htm")) or path in ("", ".") or path.endswith("/"):

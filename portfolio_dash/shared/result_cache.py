@@ -299,9 +299,55 @@ def cached[T](
       to pass ``False``).
 
     An uncacheable request (:func:`key_for` is ``None``) runs ``compute()`` directly, as the
-    code did before the cache — no snapshot, no sharing.
+    code did before the cache — no snapshot, no sharing. :func:`cached_keyed` also returns
+    the key the answer was served under.
+    """
+    value, _key = cached_keyed(
+        conn, name=name, now=now, compute=compute, copy=copy, reporting=reporting,
+        extra=extra, restamp=restamp, snapshot=snapshot)
+    return value
+
+
+def cached_keyed[T](
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    now: datetime,
+    compute: Callable[[], T],
+    copy: Callable[[T], T],
+    reporting: Hashable = None,
+    extra: Hashable = (),
+    restamp: Callable[[T], T] | None = None,
+    snapshot: bool = True,
+) -> tuple[T, CacheKey | None]:
+    """:func:`cached`, plus the :class:`CacheKey` the answer was served under (``None`` when
+    it was computed uncached).
+
+    The key tells a caller WHICH state the answer belongs to: the value was computed from a
+    snapshot taken after that key's version was read, so it is never older than the key. A
+    second cached result derived from this one may be filed under its own key only when the
+    two keys agree on the state (:func:`same_state`) — otherwise it would sit under a
+    version newer than the data it was computed from.
     """
     key = key_for(conn, name=name, now=now, reporting=reporting, extra=extra)
+    return serve(conn, key, name=name, compute=compute, copy=copy, restamp=restamp,
+                 snapshot=snapshot), key
+
+
+def serve[T](
+    conn: sqlite3.Connection,
+    key: CacheKey | None,
+    *,
+    name: str,
+    compute: Callable[[], T],
+    copy: Callable[[T], T],
+    restamp: Callable[[T], T] | None = None,
+    snapshot: bool = True,
+) -> T:
+    """Serve *compute*'s result under a key the caller already took (:func:`key_for`) —
+    for a caller that must inspect the key BEFORE deciding what to compute. A key taken
+    earlier is the conservative choice: a commit since then only makes the entry
+    unreachable. ``None`` computes directly, uncached."""
     if key is None:
         with _lock:
             _count(name, "uncached")
@@ -329,6 +375,16 @@ def cached[T](
         return value
 
     return _finish(flight.coalesce(key, lead, copy=copy), restamp)
+
+
+def same_state(a: CacheKey | None, b: CacheKey | None) -> bool:
+    """``True`` when two keys describe the same database state: the same file, write
+    generation, ``data_version``, day and reporting currency (their names and extras may
+    differ). ``None`` — an uncached answer — matches nothing."""
+    if a is None or b is None:
+        return False
+    return (a.db_path, a.write_generation, a.data_version, a.day, a.reporting) == (
+        b.db_path, b.write_generation, b.data_version, b.day, b.reporting)
 
 
 def _finish[T](value: T, restamp: Callable[[T], T] | None) -> T:
@@ -412,6 +468,7 @@ __all__ = [
     "CacheKey",
     "Stats",
     "cached",
+    "cached_keyed",
     "data_version",
     "db_file",
     "invalidate",
@@ -419,6 +476,8 @@ __all__ = [
     "key_for",
     "read_snapshot",
     "reset",
+    "same_state",
     "schedule_prewarm",
+    "serve",
     "stats",
 ]
