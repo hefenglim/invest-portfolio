@@ -60,6 +60,7 @@ New in options W5 (spec §6.2 Drawer, 2026-10-09) — ONLY on a ledger that carr
 a non-held / watchlist symbol.
 """
 
+import copy
 import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -107,8 +108,9 @@ from portfolio_dash.portfolio.dashboard_models import (
 from portfolio_dash.portfolio.position_aggregate import aggregate_position
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.results import RealizedRow, RefusedClose, UnappliedAction
-from portfolio_dash.portfolio.returns import replay_dividend_refusals
+from portfolio_dash.portfolio.returns import DividendRefusals, replay_dividend_refusals
 from portfolio_dash.pricing.store import get_price_history
+from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.corporate_actions import ActionIndex, kind_label
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.ledger_events import EventPriority
@@ -734,6 +736,22 @@ def _option_realized_wire(r: OptionRealizedRow) -> dict[str, Any]:
     }
 
 
+def whole_ledger_refusals(conn: sqlite3.Connection, *, now: datetime) -> DividendRefusals:
+    """The whole ledger's dividend refusals (⑪ / X1), as the ledger tab reads them — cached.
+
+    ``replay_dividend_refusals`` replays EVERY row (no valuation-day cut), so it is a full
+    replay on top of the dashboard build the drawer already reads; it is kept as the latest
+    ``"dividend_refusals"`` entry of ``shared/result_cache.py`` until the database changes
+    (PERF spec §12.1). The answer does not depend on *now* (the key carries its date anyway).
+    Every caller receives its own deep copy.
+    """
+    return result_cache.cached(
+        conn, name="dividend_refusals", now=now,
+        compute=lambda: replay_dividend_refusals(load_ledger_bundle(conn)),
+        copy=copy.deepcopy,
+    )
+
+
 @router.get("/symbol/{symbol}/detail")
 def symbol_detail(
     symbol: str,
@@ -876,7 +894,7 @@ def symbol_detail(
     # refused is listed 「未入帳（待釐清）」 with the replay's reason. The whole ledger's replay,
     # as the ledger tab reads it (a future row is marked by the same answer it will get), once
     # per request; the 待釐清 lines under the table (``ledger_issues``) stay as they are.
-    refusals = replay_dividend_refusals(load_ledger_bundle(conn))
+    refusals = whole_ledger_refusals(conn, now=now)
     dividend_events = [
         {
             "date": d.date.isoformat(),

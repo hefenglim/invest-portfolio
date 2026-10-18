@@ -34,6 +34,12 @@ What a caller can rely on:
   directly instead of waiting on itself.
 
 The key decides what "identical" means; ``None`` means "do not share" and simply computes.
+
+**The result cache sits on top** (PERF 2026-10-18, ``shared/result_cache.py``): it KEEPS
+the latest result per name until the database changes, and delegates its in-flight sharing
+to :func:`coalesce` with its own key — which adds the database's ``PRAGMA data_version`` to
+:func:`write_generation`. The write windows here stay the cache's process-local signal.
+"Nothing is kept" remains true of this module.
 """
 
 from __future__ import annotations
