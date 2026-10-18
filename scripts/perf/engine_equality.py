@@ -16,8 +16,9 @@ written to ``<out>/engine_equality.json``; nothing in it is an amount — only d
 timings and the PATH of the first difference (``--show-values`` adds the two values).
 Exit status 0 = every engine equal, 1 = a difference, 2 = usage error.
 
-Engines are a registry (:data:`ENGINES`): ``live`` is today's ``build_book`` per day. The
-next wave adds its one-pass engine (``cost_basis.iter_books``) as another entry.
+Engines are a registry (:data:`ENGINES`): ``live`` is today's ``build_book`` per day, and
+``iter_books`` is the one-pass engine (``cost_basis.iter_books``, PERF spec §8.1) — one replay
+of the ledger yielding every day's book.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ if sys.path[:1] != [_ROOT]:
     sys.path.insert(0, _ROOT)
 
 from portfolio_dash.data_ingestion.store import load_ledger_bundle  # noqa: E402
-from portfolio_dash.portfolio.cost_basis import build_book  # noqa: E402
+from portfolio_dash.portfolio.cost_basis import build_book, iter_books  # noqa: E402
 from portfolio_dash.portfolio.results import Book  # noqa: E402
 from portfolio_dash.shared.models.ledger import LedgerBundle  # noqa: E402
 from scripts.perf._refcommon import copy_db_to_temp, refuse_inside_repo  # noqa: E402
@@ -58,8 +59,13 @@ def _live_per_day(bundle: LedgerBundle, days: list[date]) -> Iterator[tuple[date
         yield d, build_book(bundle.through(d), allow_oversell=True)
 
 
+def _one_pass(bundle: LedgerBundle, days: list[date]) -> Iterator[tuple[date, Book]]:
+    yield from zip(days, iter_books(bundle, days), strict=True)
+
+
 ENGINES: dict[str, Engine] = {
     "live": _live_per_day,
+    "iter_books": _one_pass,
 }
 
 

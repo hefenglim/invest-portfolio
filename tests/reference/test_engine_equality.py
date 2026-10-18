@@ -88,6 +88,17 @@ def test_books_equal_on_every_event_day(corpus: Corpus) -> None:
         _assert_same(f"{name} {d}", canon(ref_book), canon(live_book))
 
 
+def test_one_pass_books_equal_on_every_event_day(corpus: Corpus) -> None:
+    """The one-pass engine (``cost_basis.iter_books``, spec §8.1): ONE replay, and each
+    yielded book equals the frozen prefix replay of its day."""
+    name, _conn, inputs = corpus
+    days = _event_days(inputs.bundle)
+    refs = ref_books(inputs.bundle, days)
+    for d, ref_book, live_book in zip(days, refs, live_cb.iter_books(inputs.bundle, days),
+                                      strict=True):
+        _assert_same(f"{name} iter_books {d}", canon(ref_book), canon(live_book))
+
+
 def test_strict_and_uncut_books_equal(corpus: Corpus) -> None:
     name, conn, inputs = corpus
     uncut = load_ledger_bundle(conn).without_unregistered()

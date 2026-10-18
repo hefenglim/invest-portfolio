@@ -1,8 +1,8 @@
 """Chronological ledger replay → open holdings (cost basis) + realized P&L."""
 
 from collections import defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 
@@ -21,6 +21,7 @@ from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import (
     CorporateAction,
     CorporateActionKind,
+    UnreadableAction,
     apply_ratio,
 )
 from portfolio_dash.shared.enums import Currency
@@ -31,6 +32,7 @@ from portfolio_dash.shared.models.ledger import (
     LedgerBundle,
     OpeningInventory,
     Transaction,
+    counts_by,
 )
 from portfolio_dash.shared.money import settled_notional
 from portfolio_dash.shared.options import (
@@ -1248,3 +1250,433 @@ def build_book(bundle: LedgerBundle, *, allow_oversell: bool = False) -> Book:
         # divide is covered by the same arm. ``from exc`` keeps the failing operation in the
         # traceback: only the sentence the owner reads is replaced, never the diagnosis.
         raise UnbookableLedgerError(_uncomputable_message(booking)) from exc
+
+
+def iter_books(bundle: LedgerBundle, days: Iterable[date]) -> Iterator[Book]:
+    """ONE replay of *bundle*, yielding the book at the end of each requested day (PERF §8.1).
+
+    For every day ``d`` of *days* (non-decreasing) the yielded book equals
+    ``build_book(bundle.through(d), allow_oversell=True)`` — field for field, Decimal exponent
+    for Decimal exponent — while the ledger is replayed once instead of once per day. It is the
+    dashboard path only (``allow_oversell=True``): a refusal is recorded on the book, never
+    raised, exactly as the trend has always replayed.
+
+    How the per-day book stays identical to the prefix replay:
+
+    * the events are sorted exactly as :func:`build_book` sorts them, and a day applies every
+      event that :func:`~portfolio_dash.shared.models.ledger.counts_by` that day — the same
+      predicate :meth:`LedgerBundle.through` cuts by, so no event can land a day early or late;
+    * the prologue's unreadable action rows enter each book at their OWN dates, in list order,
+      ahead of the event-loop refusals — as the prefix bundle (whose ``unreadable_actions`` are
+      cut by the same predicate) records them;
+    * the finalisation never mutates the replay state: the epilogue's ``unbookable_action``
+      flag is set on a COPY of each position an unreadable row names. It is not moved into the
+      event loop, because the epilogue also flags a position opened AFTER the unreadable row's
+      date, which a flag set on that date would miss;
+    * every list and dict in a yielded book is a copy (its elements — rows, refusals — are
+      shared between books and must not be mutated).
+
+    The event handling is :func:`build_book`'s own code, statement for statement (its
+    comments explain every branch and are not repeated here);
+    ``tests/portfolio/test_engine_iter_books.py`` compares the two function bodies by AST, so
+    an edit to one without the other fails. An ``ArithmeticError`` is re-typed into
+    :class:`UnbookableLedgerError` exactly as there, naming the row being booked (or no row,
+    when the fault is in a day's holdings assembly), and it ends the iteration on the first
+    day whose prefix replay would raise.
+    """
+    allow_oversell = True
+
+    def quote_ccy(symbol: str) -> Currency:
+        inst = bundle.instruments.get(symbol)
+        if inst is None:
+            raise KeyError(f"unknown instrument: {symbol}")
+        return inst.quote_ccy
+
+    positions: dict[tuple[str, str], _Position] = {}
+    realized_rows: list[RealizedRow] = []
+    gross: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
+    # The EVENT-LOOP refusals only; a day's book puts the prologue's records ahead of them.
+    unapplied: list[UnappliedAction] = []
+    refused_dividends: list[Dividend] = []
+    orphan_dividends: list[Dividend] = []
+    unbookable_dividends: list[UnbookableDividend] = []
+    refused_closes: list[RefusedClose] = []
+    realized_close_reasons: dict[int, str] = {}
+
+    # build_book's prologue, recorded once with each row's own date (see the docstring).
+    prologue = [
+        (bad.date, UnappliedAction(account_id=bad.account_id, date=bad.date,
+                                   kind=bad.kind, from_symbol=bad.from_symbol,
+                                   to_symbol=bad.to_symbol, reason=bad.reason,
+                                   action_id=bad.id))
+        for bad in bundle.unreadable_actions
+    ]
+
+    events: list[tuple[date, int, int, str, object]] = []
+    for seq, oi in enumerate(bundle.opening):
+        events.append((oi.build_date, EventPriority.OPENING, seq, "open", oi))
+    for seq, tx in enumerate(bundle.transactions):
+        events.append((tx.trade_date, EventPriority.TRADE, seq, "tx", tx))
+    for seq, dv in enumerate(bundle.dividends):
+        events.append((dv.effective_date, EventPriority.DIVIDEND, seq, "div", dv))
+    for seq, ca in enumerate(bundle.actions):
+        events.append((ca.date, EventPriority.CORPORATE_ACTION, seq, "action", ca))
+    events.sort(key=lambda e: (e[0], e[1], e[2]))
+
+    booking: object | None = None
+    position = 0
+    previous: date | None = None
+    try:
+        for day in days:
+            if previous is not None and day < previous:
+                raise ValueError(f"iter_books: days must not decrease ({day} after {previous})")
+            previous = day
+            while position < len(events) and counts_by(events[position][0], day):
+                _d, _p, _seq, kind, ev = events[position]
+                position += 1
+                booking = ev
+                if kind == "action":
+                    assert isinstance(ev, CorporateAction)
+                    _apply_action(positions, ev, quote_ccy, unapplied,
+                                  allow_oversell=allow_oversell)
+                elif kind == "open":
+                    assert isinstance(ev, OpeningInventory)
+                    key = (ev.account_id, ev.symbol)
+                    pos = positions.setdefault(key, _Position(quote_ccy(ev.symbol)))
+                    _reopen(pos)                                  # CR-06
+                    pos.shares += ev.shares
+                    pos.original_total += ev.original_cost_total
+                    pos.adjusted_total += ev.original_cost_total
+                    gross[pos.quote_ccy] += ev.original_cost_total
+                elif kind == "tx":
+                    assert isinstance(ev, Transaction)
+                    ccy = quote_ccy(ev.symbol)
+                    if ev.quantity < _ZERO:
+                        raise UnbookableLedgerError(
+                            f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+                            f"{ev.trade_date.isoformat()} 的交易"
+                            f"股數為負（{ev.quantity}）— 負股數在買進與賣出兩側都沒有定義，"
+                            "請於交易帳本修正該列"
+                        )
+                    if ev.quantity == _ZERO:
+                        continue
+                    key = (ev.account_id, ev.symbol)
+                    if ev.close_reason is not None:
+                        existing = positions.get(key)
+                        room = (_ZERO if existing is None
+                                else existing.short_shares if ev.side is Side.BUY
+                                else max(existing.shares, _ZERO))
+                        if ev.quantity > room:
+                            message = _refused_close_message(ev, existing)
+                            if not allow_oversell:
+                                raise UnbookableLedgerError(message)
+                            refused_closes.append(RefusedClose(
+                                txn_id=ev.id, account_id=ev.account_id, symbol=ev.symbol,
+                                date=ev.trade_date, side=ev.side, quantity=ev.quantity,
+                                close_reason=ev.close_reason, reason=message,
+                                remedy=REFUSED_CLOSE_REMEDY))
+                            if existing is not None:
+                                existing.unbookable_close = True
+                            continue
+                        realized_close_reasons[len(realized_rows)] = ev.close_reason
+                    pos = positions.setdefault(key, _Position(ccy))
+                    _reopen(pos)                                  # CR-06
+                    if ev.side is Side.BUY:
+                        settled = settled_notional(ev.quantity, ev.price, ccy)
+                        cover = min(ev.quantity, pos.short_shares)
+                        if cover > _ZERO:
+                            per_share = (settled + ev.fees + ev.tax) / ev.quantity
+                            short_avg = pos.short_proceeds / pos.short_shares
+                            realized_rows.append(
+                                RealizedRow(
+                                    account_id=ev.account_id,
+                                    symbol=ev.symbol,
+                                    quote_ccy=ccy,
+                                    sell_date=ev.trade_date,   # realizes on the COVER date
+                                    shares_sold=cover,
+                                    proceeds_net=short_avg * cover,
+                                    original_cost_removed=per_share * cover,
+                                    adjusted_cost_removed=per_share * cover,
+                                    realized=(short_avg - per_share) * cover,
+                                    kind="short_cover",
+                                )
+                            )
+                            pos.short_proceeds -= short_avg * cover
+                            pos.short_shares -= cover
+                        to_long = ev.quantity - cover
+                        if to_long > _ZERO:
+                            cost = (settled + ev.fees + ev.tax if cover == _ZERO
+                                    else per_share * to_long)
+                            pos.shares += to_long
+                            pos.original_total += cost
+                            pos.adjusted_total += cost
+                            gross[ccy] += cost      # covering a short is not new investment
+                    elif getattr(ev, "short_sale", False):
+                        from_long = pos.shares if pos.shares > _ZERO else _ZERO
+                        from_long = min(ev.quantity, from_long)
+                        per_share_net = (settled_notional(ev.quantity, ev.price, ccy)
+                                         - ev.fees - ev.tax) / ev.quantity
+                        if from_long > _ZERO:
+                            frac = from_long / pos.shares
+                            original_removed = pos.original_total * frac
+                            adjusted_removed = pos.adjusted_total * frac
+                            realized_rows.append(
+                                RealizedRow(
+                                    account_id=ev.account_id,
+                                    symbol=ev.symbol,
+                                    quote_ccy=ccy,
+                                    sell_date=ev.trade_date,
+                                    shares_sold=from_long,
+                                    proceeds_net=per_share_net * from_long,
+                                    original_cost_removed=original_removed,
+                                    adjusted_cost_removed=adjusted_removed,
+                                    realized=per_share_net * from_long - adjusted_removed,
+                                )
+                            )
+                            pos.shares -= from_long
+                            pos.original_total -= original_removed
+                            pos.adjusted_total -= adjusted_removed
+                            if pos.shares == _ZERO:
+                                _clear_payback_provenance(pos)   # M1-03: the long lot is gone
+                        to_short = ev.quantity - from_long
+                        if to_short > _ZERO:
+                            pos.short_shares += to_short
+                            pos.short_proceeds += per_share_net * to_short
+                    else:
+                        if ev.quantity > pos.shares:
+                            if not allow_oversell:
+                                raise OversellError(
+                                    f"sell {ev.quantity} > held {pos.shares} for {ev.symbol}",
+                                    account_id=ev.account_id, symbol=ev.symbol,
+                                    trade_date=ev.trade_date,
+                                )
+                            if pos.oversold_on is None:
+                                pos.oversold_on = ev.trade_date
+                                pos.oversold_sold = ev.quantity
+                                pos.oversold_held = pos.shares
+                            pos.ever_oversold = True
+                            pos.shares -= ev.quantity
+                            pos.original_total = _ZERO
+                            pos.adjusted_total = _ZERO
+                            _clear_payback_provenance(pos)       # M1-03: basis discarded
+                            continue
+                        frac = ev.quantity / pos.shares
+                        original_removed = pos.original_total * frac
+                        adjusted_removed = pos.adjusted_total * frac
+                        proceeds_net = (settled_notional(ev.quantity, ev.price, ccy)
+                                        - ev.fees - ev.tax)
+                        realized_rows.append(
+                            RealizedRow(
+                                account_id=ev.account_id,
+                                symbol=ev.symbol,
+                                quote_ccy=ccy,
+                                sell_date=ev.trade_date,
+                                shares_sold=ev.quantity,
+                                proceeds_net=proceeds_net,
+                                original_cost_removed=original_removed,
+                                adjusted_cost_removed=adjusted_removed,
+                                realized=proceeds_net - adjusted_removed,
+                            )
+                        )
+                        pos.shares -= ev.quantity
+                        pos.original_total -= original_removed
+                        pos.adjusted_total -= adjusted_removed
+                        if pos.shares == _ZERO:
+                            _clear_payback_provenance(pos)       # M1-03: full exit
+                else:  # dividend
+                    assert isinstance(ev, Dividend)
+                    key = (ev.account_id, ev.symbol)
+                    existing = positions.get(key)
+                    if existing is None:
+                        if not allow_oversell:
+                            raise UnbookableLedgerError(orphan_dividend_message(ev))
+                        orphan_dividends.append(ev)
+                        refused_dividends.append(ev)
+                        continue
+                    if existing.short_shares > _ZERO:
+                        if not allow_oversell:
+                            raise UnbookableLedgerError(_short_dividend_message(ev))
+                        existing.unbookable_dividend = True
+                        unbookable_dividends.append(UnbookableDividend(
+                            dividend=ev, cause="short", carrier_symbol=ev.symbol,
+                            reason=_short_dividend_message(ev)))
+                        refused_dividends.append(ev)
+                        continue
+                    if existing.vacated_to is not None:
+                        message = _vacated_dividend_message(ev, existing.vacated_to)
+                        if not allow_oversell:
+                            raise UnbookableLedgerError(message)
+                        carrier, successor = _follow_exchange_chain(
+                            positions, ev.account_id, ev.symbol, existing)
+                        successor.unbookable_dividend = True
+                        unbookable_dividends.append(UnbookableDividend(
+                            dividend=ev, cause="vacated", carrier_symbol=carrier,
+                            vacated_to=existing.vacated_to, reason=message))
+                        refused_dividends.append(ev)
+                        continue
+                    if ev.type in CASH_DIVIDEND_TYPES:  # CASH (TW) + NET (MY 單層淨額)
+                        if existing.shares == _ZERO:
+                            realized_rows.append(
+                                RealizedRow(
+                                    account_id=ev.account_id,
+                                    symbol=ev.symbol,
+                                    quote_ccy=existing.quote_ccy,
+                                    sell_date=ev.date,
+                                    shares_sold=_ZERO,
+                                    proceeds_net=ev.net,
+                                    original_cost_removed=_ZERO,
+                                    adjusted_cost_removed=_ZERO,
+                                    realized=ev.net,
+                                    kind="dividend",
+                                )
+                            )
+                        else:
+                            existing.adjusted_total -= ev.net
+                            existing.payback_own += ev.net      # M1-03: 自身配息, see _Position
+                    else:  # DRIP / STOCK add shares at zero cost
+                        if ev.reinvest_shares is None:
+                            raise UnbookableLedgerError(
+                                f"{ev.symbol}（{account_ref(ev.account_id)}）於 "
+                                f"{ev.date.isoformat()} 的 {ev.type.value} 股利沒有股數"
+                                "（reinvest_shares）— 配股／再投資以股數入帳，缺這個欄位無法重算。"
+                                "請於股利帳本補上股數"
+                            )
+                        if existing.shares == _ZERO:
+                            existing.revived_by_dividend = True
+                        existing.shares += ev.reinvest_shares
+            booking = None
+            yield _book_at(
+                day, positions, bundle.unreadable_actions,
+                realized_rows=list(realized_rows), gross=gross,
+                unapplied=[ua for on, ua in prologue if counts_by(on, day)] + unapplied,
+                refused_dividends=list(refused_dividends),
+                orphan_dividends=list(orphan_dividends),
+                unbookable_dividends=list(unbookable_dividends),
+                refused_closes=list(refused_closes),
+                realized_close_reasons=dict(realized_close_reasons))
+    except ArithmeticError as exc:
+        raise UnbookableLedgerError(_uncomputable_message(booking)) from exc
+
+
+def _book_at(
+    day: date,
+    positions: dict[tuple[str, str], _Position],
+    unreadable: list[UnreadableAction],
+    *,
+    realized_rows: list[RealizedRow],
+    gross: dict[Currency, Decimal],
+    unapplied: list[UnappliedAction],
+    refused_dividends: list[Dividend],
+    orphan_dividends: list[Dividend],
+    unbookable_dividends: list[UnbookableDividend],
+    refused_closes: list[RefusedClose],
+    realized_close_reasons: dict[int, str],
+) -> Book:
+    """:func:`iter_books`' book for *day*: build_book's epilogue on COPIES, then its assembly.
+
+    The epilogue flags every position an unreadable action row dated by *day* names — the
+    rows the prefix bundle ``through(day)`` carries — on a copy, so the live replay state
+    (which later events keep updating) never sees the flag. The prologue's records are
+    already at the head of *unapplied*.
+    """
+    view = dict(positions)
+    for bad in unreadable:
+        if not counts_by(bad.date, day):
+            continue
+        for sym in (bad.from_symbol, bad.to_symbol):
+            key = (bad.account_id, sym)
+            touched = view.get(key)
+            if touched is None:
+                continue
+            if touched is positions[key]:
+                touched = view[key] = replace(touched)
+            touched.unbookable_action = True
+    return _assemble_book(view, realized_rows, gross, unapplied, refused_dividends,
+                          orphan_dividends, unbookable_dividends, refused_closes,
+                          realized_close_reasons)
+
+
+def _assemble_book(
+    positions: dict[tuple[str, str], _Position],
+    realized_rows: list[RealizedRow],
+    gross: dict[Currency, Decimal],
+    unapplied: list[UnappliedAction],
+    refused_dividends: list[Dividend],
+    orphan_dividends: list[Dividend],
+    unbookable_dividends: list[UnbookableDividend],
+    refused_closes: list[RefusedClose],
+    realized_close_reasons: dict[int, str],
+) -> Book:
+    """build_book's holdings assembly and ``Book`` construction, statement for statement
+    (AST-compared with it by ``tests/portfolio/test_engine_iter_books.py``). Reads the
+    positions; never mutates them."""
+    holdings: list[Holding] = []
+    oversold: list[OversoldPosition] = []
+    opened: list[OpenedPosition] = []
+    for (account_id, symbol), pos in positions.items():
+        shares = pos.shares - pos.short_shares
+        original_total = pos.original_total - pos.short_proceeds
+        adjusted_total = pos.adjusted_total - pos.short_proceeds
+        is_oversold = pos.ever_oversold or pos.shares < _ZERO
+        opened.append(OpenedPosition(
+            account_id=account_id, symbol=symbol, shares=shares,
+            oversold=is_oversold, unbookable_action=pos.unbookable_action,
+            unbookable_close=pos.unbookable_close))
+        if is_oversold:
+            oversold.append(OversoldPosition(
+                account_id=account_id, symbol=symbol, quote_ccy=pos.quote_ccy,
+                shares=shares, oversold_on=pos.oversold_on,
+                oversold_sold=pos.oversold_sold, oversold_held=pos.oversold_held,
+            ))
+        if shares == _ZERO:
+            continue
+        original_avg = original_total / shares
+        adjusted_avg = adjusted_total / shares
+        dividend_portion = original_total - adjusted_total
+        payback = dividend_portion / abs(original_total) if original_total != _ZERO else _ZERO
+        holdings.append(
+            Holding(
+                account_id=account_id,
+                symbol=symbol,
+                quote_ccy=pos.quote_ccy,
+                shares=shares,
+                original_avg=original_avg,
+                adjusted_avg=adjusted_avg,
+                original_cost_total=original_total,
+                adjusted_cost_total=adjusted_total,
+                dividend_portion=dividend_portion,
+                payback_ratio=payback,
+                oversold=is_oversold,
+                oversold_on=pos.oversold_on,
+                oversold_sold=pos.oversold_sold,
+                oversold_held=pos.oversold_held,
+                short_open=pos.short_shares > _ZERO,
+                unbookable_dividend=pos.unbookable_dividend,
+                unbookable_action=pos.unbookable_action,
+                unbookable_close=pos.unbookable_close,
+                revived_by_dividend=pos.revived_by_dividend,
+                payback_from_symbol=pos.payback_from,
+                payback_carried_dividends=(pos.payback_carried
+                                           if pos.payback_from is not None else None),
+                payback_own_dividends=(pos.payback_own
+                                       if pos.payback_from is not None else None),
+            )
+        )
+
+    realized_by_ccy: dict[Currency, Decimal] = defaultdict(lambda: Decimal("0"))
+    for r in realized_rows:
+        realized_by_ccy[r.quote_ccy] += r.realized
+
+    return Book(
+        holdings=holdings,
+        realized=RealizedPnL(rows=realized_rows, by_currency=dict(realized_by_ccy)),
+        gross_invested=dict(gross),
+        unapplied_actions=unapplied,
+        refused_dividends=refused_dividends,
+        oversold_positions=oversold,
+        orphan_dividends=orphan_dividends,
+        opened_positions=opened,
+        unbookable_dividends=unbookable_dividends,
+        refused_closes=refused_closes,
+        realized_close_reasons=realized_close_reasons,
+    )
