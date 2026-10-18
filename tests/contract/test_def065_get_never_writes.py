@@ -46,7 +46,9 @@ from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
 from portfolio_dash.api.app import create_app
+from portfolio_dash.api.read_only import READ_ONLY_POSTS
 from portfolio_dash.bootstrap import bootstrap_db
+from portfolio_dash.portfolio.settlement_store import install_or_verify
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.ui_prefs import set_ui_prefs
@@ -266,3 +268,66 @@ def test_no_get_route_writes_or_creates_after_boot_and_all_answer_under_a_write_
     assert after == before, f"GET routes changed the schema: {sorted(after ^ before)[:8]}"
     assert not failing, "GET routes that fail while another connection writes:\n" + "\n".join(
         failing)
+
+
+# --- 4. the settlement store's change actor (spec 2026-10-18 §7, plan W1-B) ----------------
+
+_TEMP_TRIGGERS = "SELECT COUNT(*) FROM temp.sqlite_master WHERE type = 'trigger'"
+_READ_ONLY_BODIES: dict[str, dict[str, Any]] = {
+    "/api/whatif": {"symbol": "2330", "side": "buy", "shares": "100", "price": "600",
+                    "account_id": "tw_broker"},
+    "/api/rebalance/preview": {"targets": {"2330": "0.30", "AAPL": "0.70"}},
+    "/api/prompts/preview": {"body": "{{dividends_json}}", "scope": "portfolio",
+                             "symbol": None},
+}
+
+
+def test_no_get_or_read_only_post_connection_carries_the_actor_trigger(
+    db_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The change actor's TEMP trigger exists only on a MUTATING request's connection: every
+    connection a GET route or a declared read-only POST opens closes with an empty
+    ``sqlite_temp_master``. A mutating request is the positive control (the probe sees it)."""
+    seen: dict[str, list[int]] = defaultdict(list)
+    current = ["boot"]
+    real = sqlite3.connect
+
+    class _Probe(sqlite3.Connection):
+        def close(self) -> None:
+            try:
+                seen[current[0]].append(int(self.execute(_TEMP_TRIGGERS).fetchone()[0]))
+            except sqlite3.Error:
+                pass
+            super().close()
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _Probe)
+        conn: sqlite3.Connection = real(*args, **kwargs)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    app = create_app()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        seed = real(str(db_file))
+        seed.row_factory = sqlite3.Row
+        _seed_golden(seed)
+        install_or_verify(seed, calc_version_changed=False)  # the trail and its triggers live
+        seed.commit()
+        seed.close()
+        assert set(_READ_ONLY_BODIES) == {path for _m, path in READ_ONLY_POSTS}
+        for template, path in _get_routes(app):
+            current[0] = template
+            client.get(path, params=_QUERY.get(template, {}))
+        for method, path in sorted(READ_ONLY_POSTS):
+            current[0] = f"{method} {path}"
+            assert client.post(path, json=_READ_ONLY_BODIES[path]).status_code < 500
+        current[0] = "control"
+        r = client.post("/api/cash/movements", json={
+            "account_id": "tw_broker", "date": "2026-02-02", "kind": "deposit", "ccy": "TWD",
+            "amount": "1000"})
+        assert r.status_code == 201, r.text
+    carriers = sorted(k for k, counts in seen.items()
+                      if k not in ("boot", "control") and any(counts))
+    assert not carriers, f"read connections carrying the actor trigger: {carriers}"
+    assert len(seen) > 60, "the probe saw too few requests"
+    assert any(seen["control"]), "the probe must see the trigger on a mutating request"

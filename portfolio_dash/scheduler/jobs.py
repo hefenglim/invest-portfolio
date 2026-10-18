@@ -43,7 +43,7 @@ from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.corporate_actions import ActionIndex, split_factor
-from portfolio_dash.shared.db import session
+from portfolio_dash.shared.db import install_actor, job_actor, session
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.instrument_scope import is_option_symbol, tracked_instruments
 from portfolio_dash.shared.llm import UsageTally, usage_tally
@@ -2058,6 +2058,8 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
     """
     try:
         with session() as conn:
+            # The job's writes reach the settlement store's trail as ``job:<id>`` (spec §7).
+            install_actor(conn, job_actor(job_id))
             rid = conn.execute(
                 "SELECT id FROM job_runs WHERE job_id=? AND finished_at IS NULL "
                 "ORDER BY id DESC LIMIT 1",
@@ -2127,6 +2129,7 @@ def run_insight_func(insight_type_id: int, *, now: datetime, run_id: int) -> Non
     """
     try:
         with session() as conn:
+            install_actor(conn, job_actor(insight_job_id(insight_type_id)))
             _execute_insight(
                 conn, insight_job_id(insight_type_id), insight_type_id, now=now,
                 run_id=run_id, trigger=InsightTrigger(source="manual"),
@@ -2311,4 +2314,5 @@ def trigger_job(job_id: str) -> None:
     must produce the same day-anchored cache fingerprint.
     """
     with session() as conn:
+        install_actor(conn, job_actor(job_id))
         dispatch_job(conn, job_id, now=app_now())

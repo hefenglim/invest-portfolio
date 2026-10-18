@@ -44,9 +44,57 @@ def connect_path(path: Path) -> sqlite3.Connection:
     return conn
 
 
+#: The settlement store's change trail (``portfolio/settlement_store.py`` owns the table; this
+#: module may not import it, so the name is spelled here once).
+_TRAIL_TABLE = "settle_change_log"
+_ACTOR_FUNCTION = "pd_actor"
+#: The TEMP trigger that stamps a trail row with the connection's actor (spec 2026-10-18 §7).
+#: The table name in the body is UNQUALIFIED: SQLite 3.49 refuses a ``main.``-qualified name
+#: inside a trigger body (3.53 accepts it); unqualified works on both (measured, plan W0.1).
+_ACTOR_TRIGGER = (
+    f"CREATE TEMP TRIGGER IF NOT EXISTS settle_actor AFTER INSERT ON {_TRAIL_TABLE}\n"
+    "WHEN NEW.actor IS NULL\n"
+    "BEGIN\n"
+    f"    UPDATE {_TRAIL_TABLE} SET actor = {_ACTOR_FUNCTION}() WHERE id = NEW.id;\n"
+    "END"
+)
+
+
+def job_actor(job_id: str) -> str:
+    """The change actor of a scheduled or manually run job: ``job:<id>`` (plan P14; the
+    vocabulary and its zh rendering are ``portfolio/settlement_models.py``'s ``ACTOR_*``)."""
+    return f"job:{job_id}"
+
+
+def install_actor(conn: sqlite3.Connection, actor: str) -> bool:
+    """Stamp every trail row this connection writes with *actor* (spec §7 "Who made the
+    change"): a connection-local application function plus a TEMP trigger that fills a
+    NULL ``actor`` on insert. Returns ``False`` (a no-op) when the trail table does not exist
+    yet — ``CREATE TEMP TRIGGER`` on a missing table raises, and a job would then swallow the
+    error and leave its run ``running``.
+
+    The function is registered BEFORE the trigger, every time, on the same connection: a TEMP
+    trigger whose function is missing makes the WRITE fail ("no such function"). Installing
+    again replaces the actor. Creating a TEMP trigger moves no main ``schema_version`` and
+    counts no change. Never on a GET or read-only connection (DEF-065, ``api/deps.py``); a
+    writer the application did not open keeps ``actor = NULL`` (外部程式／腳本).
+    """
+    present = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?", (_TRAIL_TABLE,)
+    ).fetchone()
+    if present is None:
+        return False
+    conn.create_function(_ACTOR_FUNCTION, 0, lambda: actor)
+    conn.execute(_ACTOR_TRIGGER)
+    return True
+
+
 @contextmanager
-def session() -> Iterator[sqlite3.Connection]:
+def session(actor: str | None = None) -> Iterator[sqlite3.Connection]:
     """Yield a connection that commits on success, rolls back on error, always closes.
+
+    *actor* (``job:<id>``, ``system:boot``, ``user:<login>``) is installed on the connection
+    (:func:`install_actor`), so the settlement store's trail names who wrote each change.
 
     Note: Python's sqlite3 legacy transaction model (``isolation_level=""``) runs
     standalone DDL (CREATE/DROP TABLE, etc.) outside any transaction, so a
@@ -57,6 +105,8 @@ def session() -> Iterator[sqlite3.Connection]:
     """
     conn = get_connection()
     try:
+        if actor is not None:
+            install_actor(conn, actor)
         yield conn
         if conn.total_changes:
             # The commit runs inside a write window (`shared/flight.py`), so a caller arriving
