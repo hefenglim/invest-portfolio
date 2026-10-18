@@ -1,0 +1,202 @@
+{
+ "as_of": "1989-12-31T23:59:00+08:00",
+ "reporting_currency": "TWD",
+ "kpis": {
+  "reporting_currency": "TWD",
+  "total_market_value": "39900.0",
+  "total_return": "0.0",
+  "total_return_rate": "0",
+  "realized_total": "0.0",
+  "unrealized_total": "0.0",
+  "total_return_fx_complete": "0.0",
+  "principal_fx_effect": "0.0",
+  "trading_financing_cost": "0",
+  "fx_complete_reason": null,
+  "xirr": "0.0",
+  "xirr_window_days": 670,
+  "fx_realized": null,
+  "fx_unrealized": null
+ },
+ "holdings": [
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "AAPL",
+   "name": "AAPL Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "40",
+   "original_avg": "35",
+   "adjusted_avg": "35",
+   "original_cost_total": "1400",
+   "adjusted_cost_total": "1400",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": "35",
+   "market_value": "1400",
+   "unrealized_pnl": "0",
+   "capital_gain": "0",
+   "price_stale": false,
+   "price_as_of": "1989-12-29",
+   "weight": "1",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "0"
+  }
+ ],
+ "holdings_subtotals": [
+  {
+   "account_id": null,
+   "market": null,
+   "total_market_value": "39900.0",
+   "unrealized_total": "0.0"
+  },
+  {
+   "account_id": "schwab",
+   "market": null,
+   "total_market_value": "39900.0",
+   "unrealized_total": "0.0"
+  },
+  {
+   "account_id": null,
+   "market": "US",
+   "total_market_value": "39900.0",
+   "unrealized_total": "0.0"
+  },
+  {
+   "account_id": "schwab",
+   "market": "US",
+   "total_market_value": "39900.0",
+   "unrealized_total": "0.0"
+  }
+ ],
+ "realized": {
+  "rows": [],
+  "by_currency": {}
+ },
+ "returns": {
+  "by_currency": {
+   "USD": {
+    "realized": "0",
+    "unrealized": "0",
+    "total_return": "0",
+    "gross_invested": "1400",
+    "rate": "0"
+   }
+  },
+  "reporting_currency": "TWD",
+  "reporting_total_return": "0.0",
+  "xirr": null
+ },
+ "allocation": {
+  "by_sector": {
+   "Information Technology": "39900.0"
+  },
+  "weights": {
+   "Information Technology": "1"
+  },
+  "reporting_currency": "TWD"
+ },
+ "currency_view": {
+  "by_currency_value": {
+   "USD": "1400"
+  },
+  "by_currency_reporting": {
+   "USD": "39900.0"
+  },
+  "reporting_total_value": "39900.0",
+  "reporting_currency": "TWD"
+ },
+ "fx": null,
+ "dividends": {
+  "by_year": [],
+  "total_by_currency": {},
+  "ttm_net": {}
+ },
+ "ex_dividend_calendar": [],
+ "trend": {
+  "points": [
+   {
+    "date": "1989-12-31",
+    "total_value": "39900.0",
+    "net_invested": "39900.0",
+    "incomplete": false,
+    "net_worth": "39900.0"
+   }
+  ],
+  "reporting_currency": "TWD",
+  "available": true
+ },
+ "benchmark": {
+  "available": false,
+  "reason": "所有投入流量都落在基準指數的歷史之外或缺少基準，無法計算基準對照",
+  "terminal_value": null,
+  "net_invested": null,
+  "benchmark_return": null,
+  "excess": null,
+  "uncovered_markets": [
+   "US"
+  ],
+  "uncovered_ratio": "1",
+  "by_market": []
+ },
+ "freshness": {
+  "prices": [
+   {
+    "symbol": "AAPL",
+    "as_of": "1989-12-29",
+    "stale": false
+   }
+  ],
+  "fx": [
+   {
+    "base": "MYR",
+    "quote": "TWD",
+    "as_of": null,
+    "stale": true,
+    "source": null
+   },
+   {
+    "base": "USD",
+    "quote": "MYR",
+    "as_of": null,
+    "stale": true,
+    "source": null
+   },
+   {
+    "base": "USD",
+    "quote": "TWD",
+    "as_of": "1987-12-31",
+    "stale": true,
+    "source": "test"
+   }
+  ],
+  "any_stale": true,
+  "missing_prices": [],
+  "missing_fx": [
+   "MYR/TWD",
+   "USD/MYR"
+  ],
+  "xirr_unavailable_reason": null,
+  "trend_unavailable_reason": null,
+  "fx_unavailable_reason": "尚無換匯或外幣入金的取得成本，無匯兌損益可計算",
+  "unregistered_symbols": [],
+  "last_backup_at": null,
+  "fx_triangulation": [],
+  "scheduler_running": false
+ },
+ "dividend_projection": {
+  "year": 1989,
+  "by_currency": {},
+  "basis": "declared_only"
+ },
+ "unapplied_actions": []
+}

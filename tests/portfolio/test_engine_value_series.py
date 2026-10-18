@@ -6,7 +6,7 @@ The one-pass trend: the per-day valuation loop of ``daily_value_series``, fed by
 FROZEN v0.1.31 ``daily_value_series`` (``tests/reference/trend_v0131.py``) point for point,
 compared by :func:`tests.reference.canon.canon` — exponents and the ``exclude=True`` flag
 included. The guard's fallback (the reference per-day sum) is forced on every corpus and must
-be equal too, and a crafted USD ledger takes it without being forced.
+be equal too; ``rich_refusals`` and a crafted USD ledger take it without being forced.
 
 A series starting after its first day carries the flag of the WHOLE trend
 (``options_value_excluded`` is the OR over every day, spec §4): the caller states whether a day
@@ -157,15 +157,19 @@ def _flows(i: DashboardInputs) -> list[tuple[date, Decimal]]:
     return [(f.on, f.amount) for f in flows]
 
 
-def test_every_corpus_passes_the_exactness_bound(corpus: tuple[str, DashboardInputs]) -> None:
-    """Measured, not assumed: all five corpora take the running sum — ``usd_reporting``
-    included. Its one 28-digit amount (1 / 31.9 does not terminate) sits beside two short
-    ones, and their sum still fits 28 digits at the smallest exponent. The natural fallback is
-    therefore pinned on a crafted USD ledger below, and forced on every corpus above."""
+#: Which corpora take the reference per-day sum by themselves — measured, not assumed.
+#: ``usd_reporting``'s one 28-digit amount (1 / 31.9 does not terminate) sits beside two short
+#: ones and their sum still fits 28 digits; ``rich_refusals`` (reporting USD over many TWD and
+#: MYR flows through 28-digit inverse rates) does not fit, so its trend takes the fallback.
+_TAKES_THE_FALLBACK = {"rich_refusals"}
+
+
+def test_which_corpora_take_the_fallback_by_themselves(corpus: tuple[str, DashboardInputs]
+                                                       ) -> None:
     name, i = corpus
     if not _reference(i).available:
         pytest.skip(f"{name}: no flows to sum (the trend is unavailable)")
-    assert _NetInvested(_flows(i)).exact, name
+    assert _NetInvested(_flows(i)).exact is (name not in _TAKES_THE_FALLBACK), name
 
 
 def test_a_usd_ledger_whose_sum_needs_more_digits_takes_the_fallback(

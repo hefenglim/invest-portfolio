@@ -543,7 +543,8 @@ def _table(op: str) -> str:
 
 
 @pytest.mark.parametrize("engine", sorted(_ENGINES))
-@pytest.mark.parametrize("name", ["golden", "demo", "doubled_demo"])
+@pytest.mark.parametrize("name", ["golden", "demo", "doubled_demo", "rich", "rich_refusals",
+                                  "epoch1990"])
 def test_dirty_from_bounds_every_reference_change(
     corpus_db: CorpusFactory, name: str, engine: str
 ) -> None:

@@ -1,0 +1,5 @@
+﻿sell_date,account_id,symbol,quote_ccy,shares_sold,proceeds_net,original_cost_removed,adjusted_cost_removed,realized_original,realized_adjusted,rate_used,reporting_realized_original,asset_type,contract
+2026-01-16,schwab,XYZ260116P00045000,USD,100,0,106.00,106.00,-106.00,-106.00,31.9,-3381.400,option,XYZ 2026-01-16 45 Put
+2026-02-10,tw_broker,2330,TWD,300,167761,140571.9,139221.9,27189.1,28539.1,1,27189.1,stock,
+2026-03-20,schwab,XYZ,USD,20,1039.00,1021.00,1021.00,18.00,18.00,31.98,575.6400,stock,
+2026-05-11,schwab,XYZ261218P00025000,USD,100,99.67500,40.6500,40.6500,59.02500,59.02500,31.9,1882.897500,option,XYZ 2026-12-18 25 Put

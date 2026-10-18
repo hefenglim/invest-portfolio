@@ -50,6 +50,9 @@ columns) do not move it.
 | `doubled_demo` | 2026-08-11 14:30 | TWD | `demo` + a +1-day copy of every transaction and dividend dated before `now` |
 | `usd_reporting` | 2026-06-11 14:30 | USD | `golden` + ONE USD/TWD rate: 31.9 on 2026-01-02 |
 | `unquoted_ccy_cash` | 2026-06-11 14:30 | TWD | `golden` + MYR/TWD 7.05 on 2026-03-02 + a 50 MYR `REBATE` on `moomoo_my`, 2026-03-16 |
+| `rich` | 2026-06-10 14:30 (`RICH_NOW`) | TWD | `seed_rich`: every risky shape WITHOUT a refusal (below) |
+| `rich_refusals` | 2026-06-10 14:30 | USD | `seed_rich_refusals`: `rich` + every refusal the replay records |
+| `epoch1990` | 1990-03-15 14:30 (`EPOCH_NOW`) | TWD | `seed_epoch1990`: an opening built 1988, index closes from 1987 |
 
 - **`DEMO_NOW`**: `seed_demo`'s price paths are lists aligned to the first of each month from
   January 2026 plus "today" (nine points for ORBT and KEMB = January..August + today; three for
@@ -79,6 +82,29 @@ columns) do not move it.
   `fx_complete_reason` 「尚無趨勢資料，無法計算含匯兌損益」, and the benchmark unavailable
   (「部分投入流量缺少當日匯率，無法換算成報告幣，基準對照暫不可用」). The January and February month ends,
   before the rebate, still have a trend. Recorded, not fixed.
+- **The rich corpora** (added after the wave-1 review of package A: the five above never held the
+  shapes the new engine is most likely to get wrong). Three, not one, because one ledger cannot
+  hold them all honestly:
+  - **`rich`** — a declared short opened and covered; options: a bought put that EXPIRES (a
+    price-0 close row), a sold put (sell-to-open) ADJUSTED 1 → 2 contracts and partly BOUGHT
+    BACK (one contract open at the clock, valued at its last trade); a DRIP and a 配股 counted
+    from its ex-date; SPLIT + EXCHANGE + SPINOFF; two same-day buys; a buy and a dividend
+    dated after the clock; an FX gap (2026-02-02..02-20 on every pair, MYR/TWD derived); a
+    stale held price (1155 stops 2026-06-01); a foreign deposit with its cost, two conversions
+    and the three XIRR cash kinds. No refusal, so XIRR, B, B − A and the benchmark are all
+    computed over these shapes;
+  - **`rich_refusals`** — `rich`, reporting USD, plus a 賣超, a dividend with no position, a
+    dividend paid on the open declared short, a close row with nothing to close, a readable
+    action the replay refuses (a SPLIT on a symbol never held) and an UNREADABLE stored action
+    (ratio 0), and a holding never priced. These withhold XIRR and B ledger-wide — which is
+    why they are not in `rich`. Its tax package is REFUSED (the strict replay meets the
+    unreadable row), so both years are `response.json` (422). Its 28-digit inverse rates make
+    the trend's `net_invested` take the exactness guard's fallback by itself;
+  - **`epoch1990`** — an AAPL opening built 1988-03-01, `^GSPC` closes from 1987-01-02 and ONE
+    USD/TWD rate (1987-12-31), and a buy on 1990-02-05. v0.1.31 reads benchmark closes from
+    1990-01-01 only, so the 1988 flow is uncovered and the 1990 buy is placed
+    (`uncovered_markets ["US"]`). Its own corpus because its clock is in 1990: under a 2026
+    clock the trend would run 38 years and the month-end sweep ~460 builds.
 
 ## The files of each corpus
 
@@ -89,8 +115,9 @@ columns) do not move it.
   `realized_gains_<year>.csv`, `dividends_<year>.csv`, `fx_realized_<year>.csv` (BOM + CRLF, as
   `export/artifact.py::csv_blob` writes them) and `summary.md`. The zip itself is not stored: its
   member timestamps are the wall clock. A refusal would be stored as `response.json` (status +
-  body); none of the five corpora is refused. Years: every calendar year from the first ledger
-  date's to `now`'s (all five corpora: 2026 only).
+  body); only `rich_refusals` is refused. Years: every calendar year from the first ledger
+  date's to `now`'s (the first five corpora: 2026 only; `rich*`: 2025 and 2026; `epoch1990`:
+  1988 to 1990).
 - **`month_end/<YYYY-MM>.json`** — the "truncated world" at every month end D with
   `first ledger date <= D < now.date()` (the first ledger date is the earliest date on any
   transaction, dividend or ex-date, opening, cash movement, FX conversion or corporate action):
@@ -132,7 +159,8 @@ backup, `null`); `freshness.scheduler_running` reads the process (no lifespan: `
 
 ## Size and time
 
-581 KB in all (golden 58 KB, demo 153 KB, doubled_demo 154 KB, usd_reporting 64 KB,
-unquoted_ccy_cash 41 KB). The full month-end sweep runs by default — rendering all five corpora
-takes about 10 s on the dev machine, so there is no sampling switch; add one (and say so here) if
-a corpus grows enough to need it.
+1,065 KB in all (golden 58 KB, demo 153 KB, doubled_demo 154 KB, usd_reporting 64 KB,
+unquoted_ccy_cash 41 KB, rich 173 KB, rich_refusals 201 KB, epoch1990 194 KB). The full
+month-end sweep runs by default — `test_reference_payloads.py` renders all eight corpora in
+about 15 s on the dev machine (the three rich ones about 8 s of it), so there is no sampling
+switch; add one (and say so here) if a corpus grows enough to need it.

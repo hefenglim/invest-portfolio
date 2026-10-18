@@ -1,0 +1,4 @@
+﻿date,account_id,symbol,type,gross,withholding,net,ccy
+2026-01-15,tw_broker,2330,cash,13500,0,13500,TWD
+2026-03-09,moomoo_my,1155,net,45,0,45,MYR
+2026-05-15,schwab,AAPL,drip,6.50,1.95,4.55,USD

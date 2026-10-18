@@ -1,4 +1,4 @@
-"""The five corpora are what they claim to be (PERF plan W0.3).
+"""The corpora are what they claim to be (PERF plan W0.3).
 
 Plus two RECORDS read from the committed v0.1.31 payloads (never from the live code, so they
 stay true after a fix): what ``unquoted_ccy_cash`` shows of suspected defect PERF-F2, and that
@@ -8,7 +8,7 @@ stay true after a fix): what ``unquoted_ccy_cash`` shows of suspected defect PER
 import json
 import sqlite3
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -144,3 +144,71 @@ def test_usd_reporting_carries_28_digit_amounts_into_the_trend() -> None:
     assert trend["available"] is True
     digits = max(len(Decimal(p["net_invested"]).as_tuple().digits) for p in trend["points"])
     assert digits >= 28
+
+
+def _shapes(conn: sqlite3.Connection, name: str) -> dict[str, Any]:
+    """What a corpus's ledger holds, as the replay sees it at the corpus clock."""
+    bundle = load_ledger_bundle(conn)
+    today = CORPORA[name].now.date()
+    book = build_book(bundle.without_unregistered().valued_as_of(today), allow_oversell=True)
+    options = {s for s, i in bundle.instruments.items() if i.is_option}
+    return {
+        "stock_realized": sorted({r.kind for r in book.realized.rows if r.symbol not in options}),
+        "option_trades": sorted({(t.side.value, t.short_sale, t.close_reason or "")
+                                 for t in bundle.transactions if t.symbol in options}),
+        "option_cover": any(r.kind == "short_cover" and r.symbol in options
+                            for r in book.realized.rows),
+        "actions": sorted({a.kind.value for a in bundle.actions}),
+        "dividends": sorted({d.type.value for d in bundle.dividends}),
+        "future_rows": sum(1 for t in bundle.transactions if t.trade_date > today)
+        + sum(1 for d in bundle.dividends if d.effective_date > today),
+        "unreadable": len(bundle.unreadable_actions),
+        "oversold": len(book.oversold_positions),
+        "orphan": len(book.orphan_dividends),
+        "unbookable": [u.cause for u in book.unbookable_dividends],
+        "refused_closes": len(book.refused_closes),
+        "unapplied": len(book.unapplied_actions),
+    }
+
+
+def test_the_rich_corpora_hold_their_shapes(connect: Any) -> None:
+    """The shapes the wave-1 review found missing from the oracle, pinned so an edited seed
+    cannot quietly drop one (README "The rich corpora")."""
+    assert _shapes(connect("rich"), "rich") == {
+        "stock_realized": ["sale", "short_cover"],
+        "option_trades": [("BUY", False, ""), ("SELL", False, "expired"), ("SELL", True, "")],
+        "option_cover": True,
+        "actions": ["EXCHANGE", "OPTION_ADJUST", "SPINOFF", "SPLIT"],
+        "dividends": ["CASH", "DRIP", "NET", "STOCK"],
+        "future_rows": 2, "unreadable": 0, "oversold": 0, "orphan": 0, "unbookable": [],
+        "refused_closes": 0, "unapplied": 0,
+    }
+    refusals = _shapes(connect("rich_refusals"), "rich_refusals")
+    assert (refusals["unreadable"], refusals["oversold"], refusals["orphan"],
+            refusals["unbookable"], refusals["refused_closes"], refusals["unapplied"]) == (
+        1, 1, 1, ["short"], 1, 2)
+    conn = connect("rich_refusals")
+    # a holding never priced, and the FX gap on both fetched pairs
+    assert conn.execute("SELECT COUNT(*) FROM prices WHERE instrument = 'NOPX'"
+                        ).fetchone()[0] == 0
+    for base, quote in ((Currency.USD, Currency.TWD), (Currency.USD, Currency.MYR)):
+        assert get_fx_history(conn, base, quote, date(2026, 2, 2), date(2026, 2, 20)) == []
+
+
+def test_epoch1990_has_its_shape(connect: Any) -> None:
+    conn = connect("epoch1990")
+    first_close = conn.execute("SELECT MIN(as_of_date) FROM prices WHERE instrument = '^GSPC'"
+                               ).fetchone()[0]
+    assert first_close < "1990-01-01"
+    [opening] = load_ledger_bundle(conn).opening
+    assert opening.build_date.year == 1988
+    rates = get_fx_history(conn, Currency.USD, Currency.TWD, date(1900, 1, 1),
+                           date(1990, 12, 31))
+    assert [r.as_of.year for r in rates] == [1987]
+
+
+def test_record_the_1990_floor_in_v0131() -> None:
+    """RECORD (the committed v0.1.31 payload): the 1988 flow is uncovered — v0.1.31 reads the
+    index from 1990-01-01 although closes from 1987 are stored."""
+    bench = _payload("epoch1990")["benchmark"]
+    assert bench["available"] is True and bench["uncovered_markets"] == ["US"]
