@@ -3,8 +3,9 @@
 > **Spec:** `docs/spec/2026-10-18-settlement-store.md`, APPROVED 2026-10-18 (PERF-D1..D10, PERF-S1..S13;
 > Q1–Q7 at their recommended answers).
 > **Branch:** `perf/settlement-store`, off `main` at `43730cd` (v0.1.31).
-> **Status:** PLAN for owner review, revised after two independent plan reviews (§13). No code until
-> the owner approves it and answers §2.
+> **Status:** APPROVED 2026-10-18. The owner answered Q-P1 = (a) in chat (「Q-P1 選擇 (a)
+> 靜音時段結束後補發一次。」) and amended nothing, which is read as approval of the plan. Revised after
+> two independent plan reviews (§13).
 > **Execution:** subagent-driven, **at most 3 parallel subagents**, worktree-isolated, disjoint files.
 > **The brief:** this plan + the spec + the code are the whole brief; the review history is not
 > needed to build.
@@ -85,7 +86,7 @@ did, is doing and will do (PERF-D10, the run reports).
 | P1 | PERF-S10 is a mechanical rewrite of every `Depends(get_conn)` (192 router sites in 34 files + `auth_store.require_session`) to `Depends(get_conn, scope="function")`. A tokenizing scan test over the package only keeps it that way. `pyproject.toml` raises the FastAPI floor to the first version with `Depends(scope=)`; W0 confirms which, and 0.136.3 has it. The floor is recorded in CHANGELOG | measured: the same scope at the gate and the route gives one cached connection, and mixed scopes give two, so every site must agree. The floor stops a deploy from installing a FastAPI that ignores `scope`. Teardown errors now answer 500 (measured) — stated in CHANGELOG |
 | P2 | Read-only POSTs: `POST /api/whatif`, `/api/rebalance/preview`, `/api/prompts/preview`, declared in one table, `api/read_only.py`, created in W0 so B and C share it. `POST /api/insight-tasks/{id}/preflight` stays an ordinary POST. It gets an uncached settled build, and its action-log commit invalidates the cache | spec §12.2 makes preflight conditional on "writes nothing". It writes an action-log row (`api/action_log.py:107`). Dropping it from the action log would need an owner ruling, and with the store its build is a settled build anyway |
 | P3 | The quote jobs persist their `results` JSON in a new column, `job_runs.results`. The ALTER is a boot migration in the lifespan, never on the `create_scheduler_tables` run-once path and never on a GET path | `final_through`'s `unconfirmed_closes` needs the run's `held_failed`. `job_runs.payload` already means "insight task id". `config_store`'s run-once gate would never add the column on an existing DB, and `ensure_scheduler_seeded` is called by the 排程 GETs |
-| P4 | A failed **automatic** run sends one push through a new subscription, `settlement_failed` (zh name 「重新結算失敗」 in `shared/alert_rule_names.py`, severity warn). It is sent the way `digest_service._push` sends: guest/demo → suppressed, subscription, quiet hours. **Quiet-hours handling awaits the owner's answer (§2 Q-P1).** | there is no "system topic" in `ops/notify.py`, and every push respects quiet hours today |
+| P4 | A failed **automatic** run sends one push through a new subscription, `settlement_failed` (zh name 「重新結算失敗」 in `shared/alert_rule_names.py`, severity warn). It is sent the way `digest_service._push` sends: guest/demo → suppressed, subscription, quiet hours. **Quiet hours: owner ruling Q-P1 = (a)**. A push that falls inside quiet hours is held and sent once when they end (§2). | there is no "system topic" in `ops/notify.py`, and every push respects quiet hours today |
 | P5 | Flags `PD_SETTLE` (`on`/`off`), `PD_SETTLE_MODE` (`child`/`inline`), `PD_JOB_MODE` (`child`/`inline`) and `PD_PREWARM` (`1`/`0`) are read from `os.environ` in one module, `shared/flags.py`. Defaults: unit tests (`tests/conftest.py::_safe_db`) `on` / `inline` / `inline` / `0`; e2e servers **`PD_SETTLE=off`**, with settlement e2e opting in through a `flow_server(settle=True)` kwarg (child mode); prod `on` / `child` / `child` / `1`. **Inline mode is synchronous**: never on a request thread or a background thread | `Settings` is `lru_cache`d and holds no `PD_*` flag. Measured: 248 `flow_server` calls would each start a boot run, and the real clock puts golden's rows before the live window, so every existing edit flow would get the prompt modal. A background inline run's SQL would be attributed to GET routes by DEF-065's tracer |
 | P6 | One child-process runner, `shared/child_runner.py`, is used by the settlement service and the job dispatcher: spawn, a FIFO gate allowing one heavy child at a time (an in-process queue + `<data>/heavy-child.lock`), an exit callback on a waiter thread, terminate-and-wait. OS locks live in `shared/proc_lock.py` (W0.7 specifies them) | `scheduler/` must reach it without importing `api/` |
 | P7 | The run's `job_runs` row is created and finalised by the **parent** (`api/settlement_service.py`), and the child writes only the settle tables. Settlement jobs (`settlement_nightly`, `settlement_selfcheck`) and any job that only triggers a child always run in the web process, never in a job child | `portfolio/` may not import `scheduler/` (L5). A settlement job in a job child would hold the heavy gate while waiting for the settle child (measured: Windows `LK_LOCK` gives up after ~9 s), and its waiter would die with the job child |
@@ -103,6 +104,9 @@ did, is doing and will do (PERF-D10, the run reports).
 | # | Question | Recommended |
 | --- | --- | --- |
 | Q-P1 | An automatic re-settlement that fails at night (the 06:40 nightly run, the 04:30 Sunday self-check) sends a push. Today every push is dropped during quiet hours. What should this one do? (a) **send it once when quiet hours end**; (b) drop it like other pushes — the chip, the panel and the 排程中心 still show the failure; (c) send it immediately, ignoring quiet hours | (a). The failure is not urgent (every money figure stays live, and history keeps the previous version labelled), but the push exists because nobody watches the chip at night. Mechanics: the report records `notify_pending`; a one-shot scheduler job at quiet-hours end sends it, and boot sends any still pending outside quiet hours. The new 「重新結算失敗」 subscription is on by default and gets a whatsnew line |
+
+**Answered 2026-10-18:** (a), send it once when quiet hours end. The mechanics in the row are what E
+builds (§6.2).
 
 ## 3. Waves and dependencies
 
@@ -787,7 +791,10 @@ did, is doing and will do (PERF-D10, the run reports).
       起 489 天，耗時 14 秒」);
     - for a self-check difference, `partial` / `selfcheck_diff` naming the first differing day and
       table;
-    - push on a failed automatic run (P4, Q-P1);
+    - push on a failed automatic run (P4). Inside quiet hours, set the report's `notify_pending` and
+      add a one-shot scheduler job at quiet-hours end that sends it once (Q-P1 = (a)). `on_boot` sends a
+      still-pending one when it boots outside quiet hours. Tests: outside → sent now; inside → held,
+      then sent once at the end; guest/demo → never; subscription off → never; two boots → one push;
     - `flight.note_write()`, pre-warm, then the chained run.
   - **Waiter** — on an abnormal exit with the report not final (OOM, kill):
     - `end_without_publish(…, 'interrupted')`, or `failed` if it never claimed;
@@ -1209,6 +1216,7 @@ did, is doing and will do (PERF-D10, the run reports).
 | --- | --- |
 | 2026-10-18 | First draft from the approved spec and three read-only code surveys (calc core; infrastructure; frontend, tests and audit tooling) |
 | 2026-10-18 | **Plan review**, two independent reviewers (Opus 5.5, max effort), both READY-WITH-FIXES, folded in full. **Coverage**: the references are now v0.1.31 payloads generated by v0.1.31's code plus frozen modules (P9), so store-on vs off no longer compares the new engine with itself; `total_market_value − options ≡ trend_total_value`; `unconfirmed_closes` reaches the worker through `RunRequest` (P12); a partial publish trims this run's diff and restatements ≥ N; `trigger_schema_version` recorded last at boot and re-recorded by `claim`; the waiter handles an abnormal exit; 準備中 never reads 已中斷; the cache re-stamps sub-day fields; P11 retires only `snapshot_monthly`; quiet hours put to the owner (Q-P1); plus the minor items (prologue order fixture, forced fallback, `kpis_as_of` takes a book, the run-report sections each with an owner, `through ≥ settled_through`, `on_boot` precedence, cutover per period, tax tie-out columns, buttons, allowlist for `/periods/{kind}/{period}`, walking every route). **Executability** (verified with throwaway scripts): `RunRequest` and the `run_from` table (incl. nightly and self-check); the run-report store moved into B; P13 seams instead of a `scheduler → api` import; settlement jobs never in a job child (P7); the router and boot hook mounted in W0; lazy `litellm` through PEP 562 `__getattr__`; the actor's local import, no-op without the table, unqualified TEMP-trigger name, read-only POSTs excluded, `user:guest`; children run the worktree's code; a stub mechanism across processes; e2e default `PD_SETTLE=off` and synchronous inline mode; `kpis_as_of`'s return set; `build_book` decided after W4 (P15); the lock specification; F's stubs on `fresh_page`; the ASGI send-probe spike; GZip subclass; `connect_path`, db_stats, DEF-062 name, tax-sheet extraction; stored trigger text; a wave-3 merge |
+| 2026-10-18 | **Owner approval**: 「Q-P1 選擇 (a) 靜音時段結束後補發一次。」. Q-P1 = (a) (P4, §2, E's waiter); status APPROVED; next, W0 |
 
 ## Appendix — code map (surveyed at `473fe5a`; re-check line numbers before editing)
 

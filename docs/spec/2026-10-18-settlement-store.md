@@ -6,7 +6,7 @@ owner's run-report addition, a fresh-eyes final pass, a second fold verification
 (no blocker, no money-formula regression; its text-level fixes folded). The owner acknowledged the
 spec in chat on 2026-10-18 (「審查規格沒問題，開始進行計劃plan」); Q1–Q7 (§21) stand at their
 recommended answers. Implementation follows the plan
-`docs/superpowers/plans/2026-10-18-settlement-store.md`, once the owner approves it.
+`docs/superpowers/plans/2026-10-18-settlement-store.md`, approved by the owner on 2026-10-18 (Q-P1 = (a)).
 **Branch:** `perf/settlement-store` (off `main` at `43730cd`, v0.1.31).
 **Builds on:** `docs/reports/2026-10-16-prod-performance-audit.md` (the audit, P1–P7) and
 `docs/reports/2026-10-18-performance-plan.md` (the owner's proposal, the measurements, the plan).
