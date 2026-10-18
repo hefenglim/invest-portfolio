@@ -1,0 +1,160 @@
+{
+ "about": "v0.1.31 reference payloads (PERF plan W0.2); see README.md beside this file",
+ "source": "473fe5a28052647472b45a124f8d78a143052254",
+ "generator": "scripts/perf/make_reference_payloads.py",
+ "corpora": {
+  "golden": {
+   "now": "2026-06-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "tests/conftest.py::_seed_golden over init_golden_base",
+   "fingerprint": "3a2d6f9668e6124af39cb19e485665c445816d9ff89409305f934bb15fe7ec97",
+   "first_ledger_date": "2026-01-05",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "d208465308b11f8f522dfa44806a285a98fd7fe61d96f6226a774b47649baa37",
+    "month_end/2026-01.json": "4985b0dfbe3d8c80832f4f236286480ff214e162d9d0be5eb01cb6c83690f36a",
+    "month_end/2026-02.json": "c3eb9d17baa93324bf99829acd774953a06177c785b7ea57162f402a0948f46e",
+    "month_end/2026-03.json": "6d7d259c9a8f838cdfbda6c890a85b290a3e98765e93a7b04245e2b835c9e9de",
+    "month_end/2026-04.json": "6d11749bf9d605abe874ddabf5c74500d83c4ddef92f1c4f658a25730f4717a4",
+    "month_end/2026-05.json": "eab110d5f0f0c6b8d717e99859a33f310ba9ff06a0aefc6fb02c8b55da908885",
+    "tax_2026/dividends_2026.csv": "1500b37003ca3b3710d0e1eb4b828ae585f8b8cb58af76aa4384d8dd87b7bf1a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "2e7f7ef67f9564d51cc2d223cd97dbc118b89b5d4e678e2c749878a79d19300d"
+   }
+  },
+  "demo": {
+   "now": "2026-08-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "scripts/seed_demo.py::seed over init_golden_base, clock pinned",
+   "fingerprint": "3862ccbb26462723c1aa7f53fe0ac94386ae187c06699fcb2db8e5f041ecb614",
+   "first_ledger_date": "2026-01-02",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31",
+    "2026-06-30",
+    "2026-07-31"
+   ],
+   "files": {
+    "dashboard.json": "7bc607e00e4b238ee334d5a74a62dac4a94ab21231f22372549fc381f2438776",
+    "month_end/2026-01.json": "87b71ea84a0854b07440441fcd28a1a8c445f311489a8b0c2c597827168005a1",
+    "month_end/2026-02.json": "1e9b54badb8f4d134b287a02be39585867826800c174e6c6b196e6ccdc4a856a",
+    "month_end/2026-03.json": "02249761675bc322414fcc3a0bf17fe44a0be8452060b55366fcedc26a0e611e",
+    "month_end/2026-04.json": "030af8c6e4afe86a9be11856d1e554af54b732abc734c0c6b64a59b9651b8165",
+    "month_end/2026-05.json": "cd51881195b261eac907744174d9ae768c61c5a4ccc92fdd0faa939e0b495dab",
+    "month_end/2026-06.json": "2ae6f6cb0a67c4361423dca1ec9c7696d5bf9255f0eac13f5c74d28bc2f07067",
+    "month_end/2026-07.json": "269289913e1d9339a20393b07f5a4d1770b289d38141d216b72ec2e23509a7f8",
+    "tax_2026/dividends_2026.csv": "24084a3e77ca67a867a3307d63a6cca3dabf2dd8128c31eaac962c6e4b4f0bca",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "78fc59fabed97ebde10ec5d880e92bacc284e0cab054923460eef12820e4ca8b"
+   }
+  },
+  "doubled_demo": {
+   "now": "2026-08-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "demo + every transaction and dividend before now repeated at +1 day",
+   "fingerprint": "933d0712474b78b168eb1619be33022960b3a6ecbfcadf6c5be65ebdf290d745",
+   "first_ledger_date": "2026-01-02",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31",
+    "2026-06-30",
+    "2026-07-31"
+   ],
+   "files": {
+    "dashboard.json": "0477b069a07263824de658a379cc3d58471547488b2421bad5ae91db8983a52e",
+    "month_end/2026-01.json": "b1d0a66266fbc5ede99843b2e41cd5a988379efc16b1ffa01e4ec86e767a19de",
+    "month_end/2026-02.json": "a673066f79fdddff10afcbff63fa944d2a4877f541f1d5b17023430fcc5efbd2",
+    "month_end/2026-03.json": "fb042d194997914a2903c0d04bc35c6e995f0daf6553f34e2595b548eb1d2706",
+    "month_end/2026-04.json": "605241ce055e5809eac83de8ed0ae9f0f9dd72a914ab7c51ccb193c40c750ac5",
+    "month_end/2026-05.json": "1a50b8fa21ac32fd4b01ab889c998ca26f9f8b28e9607896bd5362e56ac4b4e7",
+    "month_end/2026-06.json": "d04a3ff8c6a752e3b24c57562e46521ce2efa2849bb53b4e8d4cae38857b0f5c",
+    "month_end/2026-07.json": "009f9ca4862d6af69d8f66700d3b1943923c38beeec7957ce71e20626765073e",
+    "tax_2026/dividends_2026.csv": "f8aec4efd4d31f2fdd6891d85c1d41965780ffeb186ab14d695cbac002411408",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "b2a8a82b6f5685c5f54147d4dfe43fca6ab15c6aacbbec912b910bba9f133e15"
+   }
+  },
+  "usd_reporting": {
+   "now": "2026-06-11T14:30:00+08:00",
+   "reporting": "USD",
+   "summary": "golden + one earlier USD/TWD rate, reporting currency USD",
+   "fingerprint": "6eca3c7488a4c9418b62c3c4f834fe647627d16f8cf3faccba26bc7eb9b2a2ad",
+   "first_ledger_date": "2026-01-05",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "2e3f24af9a4995424fac0feb22e476643e7bb26788d25b71b7e9d8293f18bb33",
+    "month_end/2026-01.json": "e71d5d519600ae84920be0917eb0b80ab3621a4253e4fe866ea1792913c0ef18",
+    "month_end/2026-02.json": "ba032fc40d2f600bf27c14a08db1a31a379aa6703e33499ba22bca4ba68308d9",
+    "month_end/2026-03.json": "0105585a2895d5dca6f603383f867b56ef5bcba4b9304c3d41f84c927fb9d93b",
+    "month_end/2026-04.json": "19d204b0cdc6dbfa48bd9284fb9ba6741044d8900a6eb8470b9613e42469a50a",
+    "month_end/2026-05.json": "53c6e0bcd55d0c94e4b8a9e939aba6a914bd3dcb675224ba15ee5b1abe4ef46c",
+    "tax_2026/dividends_2026.csv": "1500b37003ca3b3710d0e1eb4b828ae585f8b8cb58af76aa4384d8dd87b7bf1a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "2e7f7ef67f9564d51cc2d223cd97dbc118b89b5d4e678e2c749878a79d19300d"
+   }
+  },
+  "unquoted_ccy_cash": {
+   "now": "2026-06-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "golden + MYR/TWD rate + a MYR REBATE (PERF-F2)",
+   "fingerprint": "dd4355780087ddcde856f81ed4a71c20c05f8634027999395c1b99cd77b86841",
+   "first_ledger_date": "2026-01-05",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "678e52912f8b61de187466d54e05e1988c08e095dc8d8f389015848795954390",
+    "month_end/2026-01.json": "4985b0dfbe3d8c80832f4f236286480ff214e162d9d0be5eb01cb6c83690f36a",
+    "month_end/2026-02.json": "c3eb9d17baa93324bf99829acd774953a06177c785b7ea57162f402a0948f46e",
+    "month_end/2026-03.json": "a75a9cca38a7d6d86273e1b5c2411c3809ddcd38d9b64be282cd83c10c8cd55b",
+    "month_end/2026-04.json": "0449e52b0432c1e9ea2a6f59def2e73f386a9b49d234d22def8fdb5e982d121c",
+    "month_end/2026-05.json": "2fed08f61e94ed9ae1ee0c9b077ea05af90841b3d43388a600b1ed9419306b54",
+    "tax_2026/dividends_2026.csv": "1500b37003ca3b3710d0e1eb4b828ae585f8b8cb58af76aa4384d8dd87b7bf1a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "2e7f7ef67f9564d51cc2d223cd97dbc118b89b5d4e678e2c749878a79d19300d"
+   }
+  }
+ }
+}

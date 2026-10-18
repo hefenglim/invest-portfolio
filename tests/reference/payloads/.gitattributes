@@ -1,0 +1,5 @@
+# Reference payloads are compared BYTE FOR BYTE (tests/reference/test_reference_payloads.py).
+# The tax CSVs end their lines in CRLF (export/artifact.py::csv_blob) and the JSON files in LF;
+# with core.autocrlf=true (this repo is developed on Windows) git would rewrite either on
+# commit or checkout, and the same commit would then hash differently on Windows and Linux.
+* -text

@@ -1,0 +1,323 @@
+{
+ "as_of": "2026-05-31T23:59:00+08:00",
+ "reporting_currency": "USD",
+ "kpis": {
+  "reporting_currency": "USD",
+  "total_market_value": "0",
+  "total_return": "0.00000",
+  "total_return_rate": "0",
+  "realized_total": "0.00000",
+  "unrealized_total": "0.00000",
+  "total_return_fx_complete": null,
+  "principal_fx_effect": null,
+  "trading_financing_cost": null,
+  "fx_complete_reason": "最新一日有標的缺價，含匯兌總損益暫不計算（不以較早日期替代，否則與上方資產損益不同日，兩者的差額會失去意義）",
+  "xirr": null,
+  "xirr_window_days": 146,
+  "fx_realized": "0.00000",
+  "fx_unrealized": "0.00000"
+ },
+ "holdings": [
+  {
+   "account_id": "tw_broker",
+   "account_name": "{account:tw_broker}",
+   "symbol": "2330",
+   "name": "TSMC",
+   "market": "TW",
+   "sector": "Semiconductors",
+   "board": "TWSE",
+   "quote_ccy": "TWD",
+   "shares": "1000",
+   "original_avg": "500",
+   "adjusted_avg": "495",
+   "original_cost_total": "500000",
+   "adjusted_cost_total": "495000",
+   "dividend_portion": "5000",
+   "payback_ratio": "0.01",
+   "market_price": null,
+   "market_value": null,
+   "unrealized_pnl": null,
+   "capital_gain": null,
+   "price_stale": true,
+   "price_as_of": null,
+   "weight": null,
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": null
+  },
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "AAPL",
+   "name": "Apple",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "10",
+   "original_avg": "100",
+   "adjusted_avg": "100",
+   "original_cost_total": "1000",
+   "adjusted_cost_total": "1000",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": null,
+   "market_value": null,
+   "unrealized_pnl": null,
+   "capital_gain": null,
+   "price_stale": true,
+   "price_as_of": null,
+   "weight": null,
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": null
+  }
+ ],
+ "holdings_subtotals": [
+  {
+   "account_id": null,
+   "market": null,
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": null,
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  },
+  {
+   "account_id": "schwab",
+   "market": null,
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  },
+  {
+   "account_id": null,
+   "market": "TW",
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  },
+  {
+   "account_id": null,
+   "market": "US",
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": "TW",
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  },
+  {
+   "account_id": "schwab",
+   "market": "US",
+   "total_market_value": "0",
+   "unrealized_total": "0"
+  }
+ ],
+ "realized": {
+  "rows": [],
+  "by_currency": {}
+ },
+ "returns": {
+  "by_currency": {
+   "TWD": {
+    "realized": "0",
+    "unrealized": "0",
+    "total_return": "0",
+    "gross_invested": "500000",
+    "rate": "0"
+   },
+   "USD": {
+    "realized": "0",
+    "unrealized": "0",
+    "total_return": "0",
+    "gross_invested": "1000",
+    "rate": "0"
+   }
+  },
+  "reporting_currency": "USD",
+  "reporting_total_return": "0.00000",
+  "xirr": null
+ },
+ "allocation": {
+  "by_sector": {},
+  "weights": {},
+  "reporting_currency": "USD"
+ },
+ "currency_view": {
+  "by_currency_value": {},
+  "by_currency_reporting": {},
+  "reporting_total_value": "0",
+  "reporting_currency": "USD"
+ },
+ "fx": {
+  "by_account": {
+   "moomoo_my": {
+    "account_id": "moomoo_my",
+    "home_ccy": "MYR",
+    "foreign_ccy": "USD",
+    "avg_rate": null,
+    "current_spot": null,
+    "foreign_cash": "0",
+    "foreign_stock_value": "0",
+    "realized_fx": null,
+    "unrealized_fx_stocks": null,
+    "unrealized_fx_cash": null,
+    "unrealized_fx_total": null,
+    "spot_delta": null,
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   },
+   "schwab": {
+    "account_id": "schwab",
+    "home_ccy": "TWD",
+    "foreign_ccy": "USD",
+    "avg_rate": "32",
+    "current_spot": "32",
+    "foreign_cash": "0",
+    "foreign_stock_value": "0",
+    "realized_fx": "0",
+    "unrealized_fx_stocks": "0",
+    "unrealized_fx_cash": "0",
+    "unrealized_fx_total": "0",
+    "spot_delta": "0",
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   }
+  },
+  "reporting_currency": "USD",
+  "reporting_realized_fx": "0.00000",
+  "reporting_unrealized_fx": "0.00000",
+  "excluded_accounts": [],
+  "reporting_unavailable_reason": null
+ },
+ "dividends": {
+  "by_year": [
+   {
+    "year": 2026,
+    "by_currency": {
+     "TWD": "5000"
+    }
+   }
+  ],
+  "total_by_currency": {
+   "TWD": "5000"
+  },
+  "ttm_net": {
+   "TWD": "5000"
+  }
+ },
+ "ex_dividend_calendar": [],
+ "trend": {
+  "points": [
+   {
+    "date": "2026-05-31",
+    "total_value": "0",
+    "net_invested": "16517.73119122257053291536050",
+    "incomplete": true,
+    "net_worth": "-16468.75000"
+   }
+  ],
+  "reporting_currency": "USD",
+  "available": true
+ },
+ "benchmark": {
+  "available": false,
+  "reason": "所有投入流量都落在基準指數的歷史之外或缺少基準，無法計算基準對照",
+  "terminal_value": null,
+  "net_invested": null,
+  "benchmark_return": null,
+  "excess": null,
+  "uncovered_markets": [
+   "TW",
+   "US"
+  ],
+  "uncovered_ratio": "1",
+  "by_market": []
+ },
+ "freshness": {
+  "prices": [
+   {
+    "symbol": "2330",
+    "as_of": null,
+    "stale": true
+   },
+   {
+    "symbol": "AAPL",
+    "as_of": null,
+    "stale": true
+   }
+  ],
+  "fx": [
+   {
+    "base": "MYR",
+    "quote": "USD",
+    "as_of": null,
+    "stale": true,
+    "source": null
+   },
+   {
+    "base": "TWD",
+    "quote": "USD",
+    "as_of": "2026-01-08",
+    "stale": true,
+    "source": "test"
+   },
+   {
+    "base": "USD",
+    "quote": "MYR",
+    "as_of": null,
+    "stale": true,
+    "source": null
+   },
+   {
+    "base": "USD",
+    "quote": "TWD",
+    "as_of": "2026-01-08",
+    "stale": true,
+    "source": "test"
+   }
+  ],
+  "any_stale": true,
+  "missing_prices": [
+   "2330",
+   "AAPL"
+  ],
+  "missing_fx": [
+   "MYR/USD",
+   "USD/MYR"
+  ],
+  "xirr_unavailable_reason": "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）",
+  "trend_unavailable_reason": null,
+  "fx_unavailable_reason": null,
+  "unregistered_symbols": [],
+  "last_backup_at": null,
+  "fx_triangulation": [],
+  "scheduler_running": false
+ },
+ "dividend_projection": {
+  "year": 2026,
+  "by_currency": {},
+  "basis": "declared_only"
+ },
+ "unapplied_actions": []
+}
