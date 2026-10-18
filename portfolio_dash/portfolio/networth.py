@@ -88,6 +88,7 @@ def daily_cash_series(
     reporting: Currency,
     *,
     end: date,
+    start: date | None = None,
 ) -> dict[date, CashDay]:
     """Per-day reporting-currency cash total, replaying each pool's dated lines.
 
@@ -96,7 +97,11 @@ def daily_cash_series(
     summed; a non-zero pool with no on-or-before FX marks the day incomplete and is
     excluded from the sum (a zero-balance pool missing FX is silently skipped). The
     reporting pool needs no FX. Unregistered symbols are skipped exactly as
-    ``cash_balances`` skips them (an unbookable row never poisons the series)."""
+    ``cash_balances`` skips them (an unbookable row never poisons the series).
+
+    *start* (PERF spec §8.3): days before it are not emitted. The balances are still built
+    from EVERY line — each pool's running statement is an exact sum from its first line — so
+    a day's value does not depend on *start*."""
     # Enumerate every touched (account, ccy) pool via the verified balance engine.
     pool_keys = sorted(
         cash_balances(movements, fx_conversions, transactions, dividends, instruments),
@@ -122,7 +127,7 @@ def daily_cash_series(
         return {}
 
     out: dict[date, CashDay] = {}
-    day = first_date
+    day = first_date if start is None else max(first_date, start)
     while day <= end:
         total = _ZERO
         incomplete = False
