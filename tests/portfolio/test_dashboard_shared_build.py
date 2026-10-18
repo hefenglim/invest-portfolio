@@ -55,14 +55,21 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 @pytest.fixture
-def db_file(tmp_path: Path) -> Iterator[Path]:
+def db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Golden in a file that IS the application's database (``DB_PATH``): the result cache
+    serves only that file, so a key exists for it and for no other."""
     path = tmp_path / "ledger.db"
     conn = _connect(path)
     init_golden_base(conn)
     _seed_golden(conn)
     conn.commit()
     conn.close()
-    yield path
+    monkeypatch.setenv("DB_PATH", str(path))
+    get_settings.cache_clear()
+    try:
+        yield path
+    finally:
+        get_settings.cache_clear()
 
 
 def test_the_key_shares_only_a_committed_file_database_outside_a_write(db_file: Path) -> None:

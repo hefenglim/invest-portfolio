@@ -11,6 +11,7 @@ itself is exercised in ``test_result_cache_dashboard.py``.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import subprocess
@@ -25,6 +26,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from portfolio_dash.shared import flight, result_cache
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import connect_path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -40,15 +42,36 @@ def _fresh_cache() -> Iterator[None]:
     assert flight._writes_in_progress == 0
 
 
-@pytest.fixture
-def db(tmp_path: Path) -> Path:
-    path = tmp_path / "cache.db"
-    conn = connect_path(path)
+def _make_db(path: Path, *, wal: bool = True) -> Path:
+    conn = connect_path(path) if wal else sqlite3.connect(path)
     conn.execute("CREATE TABLE t (x INTEGER)")
     conn.execute("INSERT INTO t VALUES (1)")
     conn.commit()
     conn.close()
     return path
+
+
+def _point_app_at(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make *path* the application's database: the only file the cache serves."""
+    monkeypatch.setenv("DB_PATH", str(path))
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _settings_cleared() -> Iterator[None]:
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = _make_db(tmp_path / "cache.db")
+    _point_app_at(path, monkeypatch)
+    return path
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _own(d: dict[str, int]) -> dict[str, int]:
@@ -58,8 +81,8 @@ def _own(d: dict[str, int]) -> dict[str, int]:
 class Reader:
     """A caller: its own connection, a stub computation that reads ``t.x`` and counts runs."""
 
-    def __init__(self, path: Path) -> None:
-        self.conn = connect_path(path)
+    def __init__(self, path: Path, conn: sqlite3.Connection | None = None) -> None:
+        self.conn = conn if conn is not None else connect_path(path)
         self.runs = 0
 
     def compute(self) -> dict[str, int]:
@@ -305,6 +328,116 @@ def test_an_in_memory_database_is_never_cached() -> None:
         assert result_cache.key_for(conn, name="probe", now=NOW) is None
     finally:
         conn.close()
+
+
+# --- only the application's database; the version connection never writes -----------------
+
+
+def _readonly_like_a_script(path: Path) -> sqlite3.Connection:
+    """``scripts/merge_reconcile.py::_open_readonly``'s shape: mode=ro + a write-deny
+    authorizer (the snapshot must leave the file byte-identical)."""
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                           check_same_thread=False)
+    writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+              sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_INDEX,
+              sqlite3.SQLITE_CREATE_TRIGGER, sqlite3.SQLITE_DROP_TABLE,
+              sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ATTACH}
+
+    def deny_writes(action: int, *_args: object) -> int:
+        return sqlite3.SQLITE_DENY if action in writes else sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_writes)
+    return conn
+
+
+def test_a_file_that_is_not_the_apps_database_is_never_cached_nor_held_open(
+    tmp_path: Path, db: Path,
+) -> None:
+    """A script's copy (here a rollback-journal file, opened like ``merge_reconcile``'s
+    read-only snapshot) computes directly, opens no version connection, is left byte for byte
+    as it was — and can be deleted the moment its own connection closes (on Windows an open
+    file cannot be)."""
+    copy = _make_db(tmp_path / "copy.db", wal=False)
+    before = _sha(copy)
+    other = Reader(copy, _readonly_like_a_script(copy))
+    try:
+        assert result_cache.key_for(other.conn, name="probe", now=NOW) is None
+        assert other.read() == other.read() == {"x": 1}
+        assert other.runs == 2
+        assert result_cache.stats()["probe"].uncached == 2
+        assert result_cache._versions == {}, "a version connection was opened on the copy"
+    finally:
+        other.close()
+    assert _sha(copy) == before
+    copy.unlink()                                  # nothing else holds it open
+    assert not copy.exists()
+
+
+def test_the_version_connection_is_read_only_and_never_converts_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app's database in rollback-journal mode, read through a mode=ro caller: a cached
+    read leaves the file byte-identical and its journal mode unchanged (``journal_mode = WAL``
+    on it would be a write), and the version connection itself cannot write."""
+    path = _make_db(tmp_path / "rj.db", wal=False)
+    _point_app_at(path, monkeypatch)
+    before = _sha(path)
+    reader = Reader(path, _readonly_like_a_script(path))
+    try:
+        assert reader.read() == reader.read() == {"x": 1}
+        assert reader.runs == 1
+        assert len(result_cache._versions) == 1
+        held = next(iter(result_cache._versions.values())).conn
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            held.execute("CREATE TABLE z (x)")
+    finally:
+        reader.close()
+    assert _sha(path) == before, "a cached read changed the file"
+    _commit(path)                                  # a commit still misses
+    reader = Reader(path, _readonly_like_a_script(path))
+    try:
+        assert reader.read() == {"x": 2}
+    finally:
+        reader.close()
+    result_cache.reset()
+    probe = sqlite3.connect(path)
+    try:
+        assert probe.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        probe.close()
+
+
+def test_a_read_only_version_connection_reads_a_wal_file_with_live_side_files(
+    db: Path, reader: Reader,
+) -> None:
+    """The app's WAL database with its -wal/-shm present (a writer holds it open): the
+    read-only version connection opens, and every commit — another connection's, another
+    process's — and a checkpoint move what it reads."""
+    writer = sqlite3.connect(db)
+    try:
+        writer.execute("UPDATE t SET x = 2")
+        writer.commit()
+        assert db.with_name(db.name + "-wal").exists()
+        assert db.with_name(db.name + "-shm").exists()
+        assert reader.read() == {"x": 2}
+        first = result_cache.key_for(reader.conn, name="probe", now=NOW)
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        second = result_cache.key_for(reader.conn, name="probe", now=NOW)
+        assert first is not None and second is not None
+        assert first.data_version != second.data_version
+    finally:
+        writer.close()
+
+
+def test_the_apps_database_is_matched_by_file_not_by_spelling(
+    db: Path, reader: Reader, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative = Path(os.path.relpath(db, Path.cwd())) if db.drive == Path.cwd().drive else db
+    monkeypatch.setenv("DB_PATH", str(relative))
+    get_settings.cache_clear()
+    assert result_cache.is_app_database(str(db))
+    assert result_cache.key_for(reader.conn, name="probe", now=NOW) is not None
+    assert not result_cache.is_app_database(str(db.with_name("other.db")))
 
 
 def test_the_key_names_the_callers_own_file(db: Path, reader: Reader) -> None:

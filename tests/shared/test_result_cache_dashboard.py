@@ -30,6 +30,7 @@ import pytest
 from portfolio_dash.portfolio import dashboard
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.shared import result_cache
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency
 from tests.reference.canon import canon, first_difference
 from tests.reference.corpora import (
@@ -89,13 +90,22 @@ def _fresh_cache() -> Iterator[None]:
 
 
 @pytest.fixture
-def corpus(tmp_path_factory: pytest.TempPathFactory, tmp_path: Path) -> CorpusFactory:
+def corpus(tmp_path_factory: pytest.TempPathFactory, tmp_path: Path,
+           monkeypatch: pytest.MonkeyPatch) -> Iterator[CorpusFactory]:
+    """A private copy of a corpus, made the application's database (``DB_PATH``): the result
+    cache serves only that file."""
     templates = tmp_path_factory.getbasetemp() / TEMPLATE_DIR_NAME
 
     def make(name: str) -> CorpusDB:
-        return copy_corpus(name, templates, tmp_path / f"{name}.db")
+        db = copy_corpus(name, templates, tmp_path / f"{name}.db")
+        monkeypatch.setenv("DB_PATH", str(db.path))
+        get_settings.cache_clear()
+        return db
 
-    return make
+    try:
+        yield make
+    finally:
+        get_settings.cache_clear()
 
 
 def _clocks(day_of: datetime) -> tuple[datetime, datetime]:

@@ -19,10 +19,19 @@ reporting, extra)``:
 * ``day`` is ``now.date()``: an entry never outlives the day it was computed for. A field
   that depends on ``now`` beyond its date is set per request by the caller's ``restamp``.
 
-**What the dedicated connection obeys** (all measured in W0.1): it is opened by
-:func:`shared.db.connect_path` (the one raw open of the file), kept in autocommit
-(``isolation_level=None``) because ``data_version`` FREEZES while that connection holds a
-read transaction, executes nothing but ``PRAGMA data_version``, and is used under a lock.
+**The cache serves the web process's OWN database only** — the file ``get_settings().db_path``
+names. A connection to any other file (a script's read-only snapshot, the perf harness's
+scratch copy, an ad-hoc database, a test corpus) computes directly, uncached, and opens no
+version connection: this module never holds a file open that its owner may want to delete
+(Windows refuses to delete an open file) or must leave byte-identical. The comparison is on
+resolved paths, falling back to ``os.path.samefile``.
+
+**What the dedicated connection obeys** (all measured in W0.1): it is opened READ-ONLY by
+:func:`shared.db.connect_path` (``read_only=True``: a ``mode=ro`` URI and no pragma — it can
+neither write nor convert the file; ``data_version`` moves on a read-only connection exactly
+as on a writable one, measured 2026-10-19), kept in autocommit (``isolation_level=None``)
+because ``data_version`` FREEZES while that connection holds a read transaction, executes
+nothing but ``PRAGMA data_version``, and is used under a lock.
 The file is the caller's own (``PRAGMA database_list``). The value is paired with the
 connection's epoch — a counter that moves whenever a version connection is (re)opened — so a
 reopened connection, whose counter restarts, can never reproduce an older key. The file's
@@ -37,8 +46,8 @@ the entry unreachable for the same reason: the key is the one taken at compute S
 
 **No caching** (the key is ``None`` and the computation runs alone, exactly as before) while
 a write window is open anywhere in the process, when the caller's connection is in a
-transaction (its own uncommitted changes must be in its answer), or for a database with no
-file (``:memory:``, a temp database).
+transaction (its own uncommitted changes must be in its answer), for a database with no
+file (``:memory:``, a temp database), or for a file that is not the application's database.
 
 **Entries:** the latest one per ``name``. Every reader receives its own deep copy (``copy``),
 made from a stored value nobody mutates; then the caller's ``restamp`` sets the sub-day
@@ -72,6 +81,7 @@ from pathlib import Path
 from typing import NamedTuple, cast
 
 from portfolio_dash.shared import flags, flight
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import connect_path
 
 logger = logging.getLogger(__name__)
@@ -136,6 +146,19 @@ def db_file(conn: sqlite3.Connection) -> str | None:
     return path or None
 
 
+def is_app_database(path: str) -> bool:
+    """``True`` when *path* is the application's own database (``get_settings().db_path``) —
+    the only file this cache keeps results for and holds a version connection on."""
+    configured = get_settings().db_path
+    if os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+            os.path.abspath(configured)):
+        return True
+    try:
+        return os.path.samefile(path, configured)
+    except OSError:
+        return False
+
+
 def _identity(path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(path)
@@ -146,7 +169,9 @@ def _identity(path: str) -> tuple[int, int] | None:
 
 def _open_version_conn(path: str, identity: tuple[int, int]) -> _VersionConn:
     global _epoch
-    conn = connect_path(Path(path))
+    # Read-only and pragma-free: the version connection never writes and never converts the
+    # file (``journal_mode = WAL`` on a rollback-journal file is a write).
+    conn = connect_path(Path(path), read_only=True)
     conn.isolation_level = None  # autocommit: data_version freezes inside a read transaction
     _epoch += 1
     return _VersionConn(conn=conn, epoch=_epoch, identity=identity)
@@ -187,7 +212,8 @@ def key_for(
     """The cache key of this request, or ``None`` when it must compute alone.
 
     *extra* must determine the result together with the rest of the key; pass a ``Decimal``
-    as its ``str`` (equal Decimals with different exponents print differently).
+    as its ``str`` (equal Decimals with different exponents print differently). A file that
+    is not the application's database (:func:`is_app_database`) is never cached.
     """
     if conn.in_transaction:
         return None
@@ -195,7 +221,7 @@ def key_for(
     if generation is None:
         return None
     path = db_file(conn)
-    if path is None:
+    if path is None or not is_app_database(path):
         return None
     version = data_version(path)
     if version is None:
@@ -389,6 +415,7 @@ __all__ = [
     "data_version",
     "db_file",
     "invalidate",
+    "is_app_database",
     "key_for",
     "read_snapshot",
     "reset",

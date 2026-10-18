@@ -20,7 +20,7 @@ def get_connection() -> sqlite3.Connection:
     return connect_path(settings.db_path)
 
 
-def connect_path(path: Path) -> sqlite3.Connection:
+def connect_path(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
     """THE one raw open of the personal database file (``tests/architecture/
     test_db_open_surface.py`` pins it): ``Row`` rows, foreign keys, WAL.
 
@@ -28,6 +28,11 @@ def connect_path(path: Path) -> sqlite3.Connection:
     connection and the settlement worker (which receives the path, not the settings) open
     theirs through it too (PERF, 2026-10-18), so every connection to the file is configured
     alike.
+
+    ``read_only=True`` opens the file through a ``mode=ro`` URI and sets NO pragma: such a
+    connection can neither write nor change the file. ``PRAGMA journal_mode = WAL`` on a
+    rollback-journal file is itself a write — it converts the file — so a reader that must
+    leave the file as it found it (the result cache's version connection) never issues it.
     """
     # check_same_thread=False: FastAPI runs the sync `get_conn` dependency in an anyio
     # threadpool, so a connection may be created on one worker thread and closed on
@@ -35,8 +40,14 @@ def connect_path(path: Path) -> sqlite3.Connection:
     # gets its OWN connection — never shared or used concurrently across threads — so
     # only the create-vs-close thread can differ, with no concurrent access. Disabling
     # the same-thread guard is therefore safe and necessary here.
-    conn = sqlite3.connect(path, check_same_thread=False)
+    if read_only:
+        target, uri = f"{Path(path).resolve().as_uri()}?mode=ro", True
+    else:
+        target, uri = str(path), False
+    conn = sqlite3.connect(target, uri=uri, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    if read_only:
+        return conn
     conn.execute("PRAGMA foreign_keys = ON")  # must be set per connection
     # WAL persists per database file; re-setting it per connection is harmless. It
     # falls back to 'memory' journaling for an in-memory db, which is fine in tests.

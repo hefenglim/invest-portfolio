@@ -142,6 +142,9 @@ def cached_client(
 ) -> Iterator[tuple[TestClient, str, CorpusDB]]:
     db = copy_corpus("golden", tmp_path_factory.getbasetemp() / TEMPLATE_DIR_NAME,
                      tmp_path / "golden.db")
+    # The cache serves only the application's database: make the copy that database.
+    monkeypatch.setenv("DB_PATH", str(db.path))
+    get_settings.cache_clear()
     counted_build = dashboard._build_dashboard          # the counting stub over the real build
 
     def wired(conn: sqlite3.Connection, *, now: datetime, reporting: Currency
@@ -174,6 +177,7 @@ def cached_client(
         yield TestClient(app), preflight, db
     finally:
         app.dependency_overrides.clear()
+        get_settings.cache_clear()
 
 
 def test_the_second_identical_request_builds_nothing(
@@ -203,20 +207,15 @@ def test_a_prewarm_leaves_the_next_alerts_request_a_hit(
     cached_client: tuple[TestClient, str, CorpusDB], counts: dict[str, Counter],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, _preflight, db = cached_client
-    monkeypatch.setenv("DB_PATH", str(db.path))
-    get_settings.cache_clear()
+    client, _preflight, db = cached_client               # DB_PATH already names the copy
     monkeypatch.setattr(deps, "get_now", lambda: db.now)
-    try:
-        _send(client, "GET", "/api/dashboard", None)     # warm-up: a first GET may seed
-        result_cache.invalidate()
-        alert_inputs.prewarm_today()
-        assert counts["build"].n >= 1 and counts["assemble"].n >= 1
-        for c in counts.values():
-            c.n = 0
-        _send(client, "GET", "/api/alerts", None)
-        assert counts["assemble"].n == 0, "GET /api/alerts re-read its 400-day inputs"
-        _send(client, "GET", "/api/dashboard", None)
-        assert counts["build"].n == 0, "the pre-warmed dashboard was rebuilt"
-    finally:
-        get_settings.cache_clear()
+    _send(client, "GET", "/api/dashboard", None)         # warm-up: a first GET may seed
+    result_cache.invalidate()
+    alert_inputs.prewarm_today()
+    assert counts["build"].n >= 1 and counts["assemble"].n >= 1
+    for c in counts.values():
+        c.n = 0
+    _send(client, "GET", "/api/alerts", None)
+    assert counts["assemble"].n == 0, "GET /api/alerts re-read its 400-day inputs"
+    _send(client, "GET", "/api/dashboard", None)
+    assert counts["build"].n == 0, "the pre-warmed dashboard was rebuilt"

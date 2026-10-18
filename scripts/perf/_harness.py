@@ -195,6 +195,11 @@ class Workspace:
         # The app's boot opened a log file under <copy>/logs; on Windows an open file cannot
         # be removed, and a log written from a real ledger must not outlive the run.
         _close_file_handlers_under(self.tmp)
+        # The working copy IS the app's database (DB_PATH), so the result cache holds a
+        # read-only version connection on it: close it before the copy is removed.
+        cache = sys.modules.get("portfolio_dash.shared.result_cache")
+        if cache is not None:
+            cache.reset()
         shutil.rmtree(self.tmp, ignore_errors=True)
         if self.tmp.exists():
             log(f"could not remove the working copy at {self.tmp}; delete it by hand")
