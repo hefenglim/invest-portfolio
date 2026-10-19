@@ -3,6 +3,10 @@
 Year-cut by trade date (sell date / dividend date / conversion date). Per-currency
 rows are never summed across currencies. Reporting conversion uses trade-date FX.
 
+The row selection of the three sheets is ``portfolio/period_close.py``'s (PERF plan §6.1): a
+month or year close lists the same rows, so the two tie out sheet by sheet. This module formats
+them and sums the subtotals; it selects nothing of its own.
+
 Options (spec §9): an option close is a capital gain or loss like any sale — the replay's own
 ``sale`` / ``short_cover`` rows on a contract already land on the capital-gains sheet (an
 expiry, an assignment and an exercise included: R5 keeps the premium as option P&L). On a
@@ -25,13 +29,12 @@ from portfolio_dash.data_ingestion.store import (
     load_ledger_bundle,
 )
 from portfolio_dash.export.artifact import ExportArtifact, csv_blob, zip_artifact
-from portfolio_dash.forex.fx_pnl import realized_fx_rows_as_of
+from portfolio_dash.portfolio import period_close
 from portfolio_dash.portfolio.cost_basis import build_book
 from portfolio_dash.portfolio.options import ledger_has_options
 from portfolio_dash.portfolio.results import RealizedRow
 from portfolio_dash.pricing.store import get_fx_on
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import FXConversion, valued_rows_as_of
 from portfolio_dash.shared.options import ASSET_OPTION, ASSET_STOCK, contract_name
 from portfolio_dash.shared.wire import decimal_str
@@ -117,22 +120,21 @@ def build_tax_package_zip(
     # the same digits.
     recon_year: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
     recon_other_years: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
-    post_close_divs: list[RealizedRow] = []
+    first, last = date(year, 1, 1), date(year, 12, 31)
     for r in book.realized.rows:
         if r.sell_date.year != year:
             recon_other_years[r.quote_ccy] += r.realized
             continue
         recon_year[r.quote_ccy] += r.realized
-        if r.kind == "dividend":
-            post_close_divs.append(r)
-        # CAPITAL GAINS ONLY. A post-close cash dividend also rides in `realized.rows`
-        # (kind="dividend", audit H2) so it reaches 總報酬, but for tax it is INCOME and is
-        # already reported on the dividends sheet below, straight from the dividend ledger.
-        # Without this filter the same payout would appear on both sheets.
-        # A short COVER (2026-07-31) is a capital gain/loss like any sale and belongs here;
-        # it has no dividend-ledger counterpart, so excluding it would simply lose it.
-        if r.kind not in ("sale", "short_cover"):
-            continue
+    post_close_divs: list[RealizedRow] = period_close.post_close_dividend_rows(
+        book.realized.rows, start=first, end=last)
+    # CAPITAL GAINS ONLY (``period_close.realized_rows``: sale / short_cover). A post-close cash
+    # dividend also rides in `realized.rows` (kind="dividend", audit H2) so it reaches 總報酬,
+    # but for tax it is INCOME and is already reported on the dividends sheet below, straight
+    # from the dividend ledger. Without this filter the same payout would appear on both
+    # sheets. A short COVER (2026-07-31) is a capital gain/loss like any sale and belongs here;
+    # it has no dividend-ledger counterpart, so excluding it would simply lose it.
+    for r in period_close.realized_rows(book.realized.rows, start=first, end=last):
         rate = _rate_on(conn, r.sell_date, r.quote_ccy, reporting)
         # A short cover has no dividend history, so original == adjusted and the two realized
         # columns coincide — the split only separates them on a long that took dividends.
@@ -161,9 +163,7 @@ def build_tax_package_zip(
 
     div_rows: list[list[str]] = []
     div_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
-    for d in divs:
-        if d.date.year != year or d.type is DividendType.STOCK:
-            continue
+    for d in period_close.dividend_rows(divs, start=first, end=last):
         ccy = instruments[d.symbol].quote_ccy
         div_rows.append([
             d.date.isoformat(), d.account_id, d.symbol, d.type.value.lower(),
@@ -173,30 +173,24 @@ def build_tax_package_zip(
 
     fx_rows: list[list[str]] = []
     fx_subtotal: dict[Currency, Decimal] = defaultdict(lambda: _ZERO)
-    for acct in accounts.values():
-        if acct.settlement_ccy == acct.funding_ccy:
-            continue
-        home, foreign = acct.funding_ccy, acct.settlement_ccy
-        acct_convs = [c for c in convs if c.account_id == acct.account_id]
-        # Same weighted average the dashboard uses — foreign cash movements that carry a
-        # home cost are part of the basis (spec 2026-07-30). Reading a different average
-        # here would make the tax package disagree with 換匯損益 on the same reconversion.
-        #
-        # ⚠ That is not a hypothetical: it HAPPENED. When QA-02 date-bounded the dashboard's
-        # realized-FX rate (manual §8.2, 「回換前 avg_rate」) this call site kept the ALL-TIME
-        # average, and the two surfaces reported 2,500 vs 10,000 for one 2026-02-20
-        # reconversion — the exact disagreement the paragraph above forbids in writing.
-        # ``realized_fx_rows_as_of`` is now the ONE entry point, so a future divergence would
-        # have to be written on purpose rather than left behind by an unshared argument.
-        acct_moves = [m for m in moves if m.account_id == acct.account_id]
-        for fr in realized_fx_rows_as_of(acct_convs, acct_moves, home, foreign):
-            if fr.date.year != year:
-                continue
-            fx_rows.append([fr.date.isoformat(), acct.account_id, fr.home_ccy.value,
-                            fr.foreign_ccy.value, decimal_str(fr.foreign_sold),
-                            decimal_str(fr.home_received), decimal_str(fr.rate_used),
-                            decimal_str(fr.realized)])
-            fx_subtotal[fr.home_ccy] += fr.realized
+    # Same weighted average the dashboard uses — foreign cash movements that carry a home
+    # cost are part of the basis (spec 2026-07-30). Reading a different average here would
+    # make the tax package disagree with 換匯損益 on the same reconversion.
+    #
+    # ⚠ That is not a hypothetical: it HAPPENED. When QA-02 date-bounded the dashboard's
+    # realized-FX rate (manual §8.2, 「回換前 avg_rate」) this call site kept the ALL-TIME
+    # average, and the two surfaces reported 2,500 vs 10,000 for one 2026-02-20 reconversion —
+    # the exact disagreement the paragraph above forbids in writing. ``realized_fx_rows_as_of``
+    # is the ONE entry point (``period_close.fx_realized_rows`` calls it per account), so a
+    # future divergence would have to be written on purpose.
+    for item in period_close.fx_realized_rows(accounts.values(), convs, moves,
+                                             start=first, end=last):
+        fr = item.row
+        fx_rows.append([fr.date.isoformat(), item.account_id, fr.home_ccy.value,
+                        fr.foreign_ccy.value, decimal_str(fr.foreign_sold),
+                        decimal_str(fr.home_received), decimal_str(fr.rate_used),
+                        decimal_str(fr.realized)])
+        fx_subtotal[fr.home_ccy] += fr.realized
 
     realized_cols = _REALIZED_COLS + _OPTION_COLS if has_options else _REALIZED_COLS
     files: dict[str, bytes] = {
