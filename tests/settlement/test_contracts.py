@@ -125,9 +125,9 @@ def test_phases_are_the_eight_of_the_spec() -> None:
     ]
 
 
-def test_the_worker_entry_is_a_stub_until_wave_two(tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError):
-        settle_worker.run(1, db_path=tmp_path / "x.db")
+def test_the_worker_entry_ends_nothing_without_its_run(tmp_path: Path) -> None:
+    """Wave 2 (package D) implemented the run; a run id with no report is left alone."""
+    assert settle_worker.run(1, db_path=tmp_path / "x.db") is None
 
 
 def test_the_worker_imports_no_web_llm_or_provider_module() -> None:
