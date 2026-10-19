@@ -5,16 +5,21 @@ business logic. This module is import-safe without APScheduler so it is fully
 unit-testable; the APScheduler wiring lives in ``runtime.py``.
 """
 
+import contextlib
 import inspect
 import json
 import logging
+import os
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Set
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from portfolio_dash.data_ingestion.store import list_corporate_actions
 from portfolio_dash.llm_insight import alerts_bridge
@@ -38,7 +43,7 @@ from portfolio_dash.pricing.refs import FxPair, InstrumentRef
 from portfolio_dash.pricing.registry import Registry
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.pricing.store import SplitFactorFn
-from portfolio_dash.shared import config_store
+from portfolio_dash.shared import child_runner, config_store, flags, proc_lock
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.clock import app_now
@@ -2049,23 +2054,404 @@ def set_progress(job_id: str, msg: str) -> None:
     invoked synchronously outside the run wrappers), so wiring progress calls into
     shared code paths is always safe. Transient bookkeeping only — never persisted;
     it dies with the run (:func:`_clear_running`).
+
+    In a job worker child (PERF spec §16) the message is ALSO written to the run's progress
+    sidecar (:func:`enable_progress_sidecar`), which the web process reads in
+    :func:`running_progress` — the child's registry is invisible to the 排程中心's poll.
     """
     with _INFLIGHT_LOCK:
         entry = _INFLIGHT_JOBS.get(job_id)
         if entry is not None:
             entry.progress = msg
+        sidecar = _SIDECAR if entry is not None else None
+    if sidecar is not None and sidecar.job_id == job_id:
+        sidecar.write(msg)
 
 
 def running_job_ids() -> set[str]:
-    """A thread-safe snapshot copy of the job_ids whose func is executing right now."""
+    """A thread-safe snapshot copy of the job_ids whose func is executing right now.
+
+    Since PERF (spec §16): also every job whose worker CHILD process has started. A child
+    still waiting for the heavy gate is not running — the 排程中心 reads it as 已排入 (its
+    row exists and is unfinished), with :func:`queued_progress` saying why."""
     with _INFLIGHT_LOCK:
-        return set(_INFLIGHT_JOBS)
+        ids = set(_INFLIGHT_JOBS)
+        ids.update(c.job_id for c in _CHILD_RUNS.values() if c.started())
+    return ids
 
 
 def running_progress() -> dict[str, str | None]:
-    """Thread-safe snapshot: running job_id -> its current progress message (or None)."""
+    """Thread-safe snapshot: running job_id -> its current progress message (or None).
+
+    A job running in a worker child reports the message its sidecar holds (``None`` until
+    the child's first :func:`set_progress`)."""
     with _INFLIGHT_LOCK:
-        return {job_id: entry.progress for job_id, entry in _INFLIGHT_JOBS.items()}
+        out = {job_id: entry.progress for job_id, entry in _INFLIGHT_JOBS.items()}
+        children = [c for c in _CHILD_RUNS.values() if c.started()]
+    for child in sorted(children, key=lambda c: c.run_id):
+        out[child.job_id] = read_progress_sidecar(child.progress_path, run_id=child.run_id)
+    return out
+
+
+# --- Job worker children (PERF-D4; spec §16; plan §7.2) -------------------------------
+# A scheduled job — its cron fire AND a manual 立即執行 / 立即產生 of it — runs in a child
+# process, ``python -m <worker> <job_id> <run_id> --now <iso> --trigger schedule|manual``,
+# when ``PD_JOB_MODE=child`` (prod) and the composition root registered the worker module
+# (:func:`register_job_worker`; ``scheduler/`` never names an ``api`` module). The worker
+# binds the same runner seams as the app and runs the job on the row THIS process created
+# (:func:`run_in_worker` → :func:`_run_static_on_row`, the body of :func:`run_job_outcome`),
+# so ``job_runs``, ``usage_tally`` and :class:`JobOutcome` are unchanged.
+#
+# What stays in this process:
+# - the settlement jobs (:data:`WEB_PROCESS_JOB_IDS`, plan P7): they only start a settle
+#   child, and a job child would hold the heavy gate while waiting for it;
+# - the interactive doors (PERF-S13): the refresh-quotes door (:func:`run_job_outcome`), the
+#   insight task door (:func:`run_insight_func`), the AI door, the news door — a child per
+#   click would add the library import to every click;
+# - the after-job hook (P13): asked here before the spawn and called here after the child's
+#   row is final, because the settlement service lives in the web process.
+#
+# Every job child is HEAVY: ``child_runner``'s gate runs one heavy child at a time across the
+# settlement and the jobs (spec §9.1), so a fire or a manual run may wait its turn. While it
+# waits it is not running — its row exists and is unfinished, the 排程中心's 已排入 — and
+# :func:`queued_progress` gives the sentence the 排程 page shows under it.
+#
+# Liveness is the OS lock (``shared/proc_lock.py``): the child holds ``job-<run_id>.lock``
+# for its whole life. A child that dies before finishing its row is finalised here
+# (:func:`_child_exited`, 「工作子程序異常結束」); a row left ``running`` by a process that is
+# gone (a restart) is finalised at boot (:func:`close_abandoned_runs`).
+
+#: The job worker's module, registered by the composition root. ``None`` (a scheduler-only
+#: process, or a test): every job runs in-process whatever ``PD_JOB_MODE`` says.
+_JOB_WORKER_MODULE: str | None = None
+
+#: Under a queued run's 已排入 chip while it waits for the heavy gate (``queued_progress``).
+QUEUED_BEHIND_GATE = "排隊中：同一時間只執行一項背景工作，前一項完成後隨即開始。"
+#: ``job_runs.detail`` of a run whose worker child ended without finishing its row.
+WORKER_DIED = "工作子程序異常結束"
+#: ``job_runs.detail`` of a run whose worker child could not be started at all.
+WORKER_NOT_STARTED = "工作子程序無法啟動"
+#: ``job_runs.detail`` of a run left ``running`` by a process that is gone (boot).
+ABANDONED_AT_BOOT = "系統重新啟動時此工作尚未完成"
+
+#: How long a child waits for its own ``job-<run_id>.lock`` (nobody else ever takes it; a
+#: status probe holds it for an instant — never ``try_lock``, shared/proc_lock.py).
+WORKER_LOCK_TIMEOUT_S = 10.0
+
+TriggerSourceArg = Literal["schedule", "manual"]
+
+
+def register_job_worker(module: str | None) -> None:
+    """Register (or clear with None) the job worker's module (app wiring seam, spec §16)."""
+    global _JOB_WORKER_MODULE
+    _JOB_WORKER_MODULE = module
+
+
+def job_worker_module() -> str | None:
+    """The registered job worker module, or None (every job runs in-process)."""
+    return _JOB_WORKER_MODULE
+
+
+def progress_sidecar_path(run_id: int, data: Path | None = None) -> Path:
+    """``<data>/job-<run_id>.progress.json`` — a job child's live progress (spec §16)."""
+    return (data if data is not None else proc_lock.data_dir()) / f"job-{run_id}.progress.json"
+
+
+@dataclass
+class _Sidecar:
+    """The progress sidecar of the run a job worker child executes."""
+
+    job_id: str
+    run_id: int
+    path: Path
+
+    def write(self, progress: str | None) -> None:
+        """Replace the file (temp file + ``os.replace``). Never raises: the sidecar is a live
+        view, never the record — the row is. On Windows a reader holding the file open makes
+        the replace fail for an instant: retried briefly, then left to the next write."""
+        text = json.dumps({"job_id": self.job_id, "run_id": self.run_id, "pid": os.getpid(),
+                           "progress": progress,
+                           "updated_at": datetime.now(UTC).isoformat()}, ensure_ascii=False)
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self.path)
+                    return
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.02)
+        except OSError:
+            logger.debug("job %s: progress sidecar not written", self.job_id, exc_info=True)
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+
+_SIDECAR: _Sidecar | None = None
+
+
+def enable_progress_sidecar(job_id: str, run_id: int, path: Path) -> None:
+    """In a job worker child: also write *job_id*'s :func:`set_progress` messages to *path*.
+
+    Writes the file at once (progress ``None``), so a reader can see the child's pid."""
+    global _SIDECAR
+    sidecar = _Sidecar(job_id=job_id, run_id=run_id, path=path)
+    with _INFLIGHT_LOCK:
+        _SIDECAR = sidecar
+    sidecar.write(None)
+
+
+def read_progress_sidecar(path: Path, *, run_id: int) -> str | None:
+    """The progress message in a run's sidecar, or None. Never raises: a missing,
+    half-written or foreign file reads as None."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("run_id") != run_id:
+        return None
+    progress = data.get("progress")
+    return progress if isinstance(progress, str) else None
+
+
+@dataclass
+class _ChildRun:
+    """A run this process handed to a job worker child (keyed by run id: a manual run and a
+    cron fire of one job may overlap, as they always could in-process)."""
+
+    job_id: str
+    run_id: int
+    progress_path: Path
+    lock_path: Path
+    handle: child_runner.ChildHandle | None = None
+
+    def started(self) -> bool:
+        handle = self.handle
+        return handle is not None and handle.state == "running"
+
+    def waiting(self) -> bool:
+        handle = self.handle
+        return handle is None or handle.state == "queued"
+
+
+_CHILD_RUNS: dict[int, _ChildRun] = {}
+
+
+def queued_progress() -> dict[str, str]:
+    """job_id -> :data:`QUEUED_BEHIND_GATE` for every run handed to a worker child that is
+    still waiting for the heavy gate (its process not started yet). The 排程中心 shows the
+    sentence under the run's 已排入 chip, so a run that waits minutes behind a re-settlement
+    says why it has not started."""
+    with _INFLIGHT_LOCK:
+        return {c.job_id: QUEUED_BEHIND_GATE for c in _CHILD_RUNS.values() if c.waiting()}
+
+
+def child_dispatchable(conn: sqlite3.Connection, job_id: str) -> bool:
+    """Whether a run of *job_id* may run in a job worker child (spec §16, plan P7).
+
+    Every static job of :data:`JOBS` and every kind=insight task — except the settlement
+    jobs (:data:`WEB_PROCESS_JOB_IDS`, which only start a child) and a retired job (which
+    runs nowhere). An id nothing in this process can run is not dispatchable."""
+    if _insight_payload(conn, job_id) is not None:
+        return True
+    return (job_id in _jobs_by_id() and job_id not in WEB_PROCESS_JOB_IDS
+            and job_id not in RETIRED_JOB_IDS)
+
+
+def runs_in_child(conn: sqlite3.Connection, job_id: str) -> bool:
+    """Whether a run of *job_id* starting now goes to a job worker child:
+    ``PD_JOB_MODE=child``, a registered worker module, and a dispatchable job."""
+    return (_JOB_WORKER_MODULE is not None and flags.job_mode() == "child"
+            and child_dispatchable(conn, job_id))
+
+
+def _remove_quietly(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
+def _worker_args(job_id: str, run_id: int, now: datetime,
+                 trigger: TriggerSourceArg) -> list[str]:
+    args = [job_id, str(run_id), "--now", now.isoformat(), "--trigger", trigger]
+    key = getattr(now.tzinfo, "key", None)
+    if isinstance(key, str):
+        # The child rebuilds *now* in the same named zone (not a fixed offset), so every
+        # date it derives is the one the in-process run derives.
+        args += ["--tz", key]
+    return args
+
+
+def parse_worker_now(text: str, tz: str | None) -> datetime:
+    """The child's *now*: the parent's ISO instant, in the parent's named zone when given."""
+    now = datetime.fromisoformat(text)
+    return now.astimezone(ZoneInfo(tz)) if tz else now
+
+
+def _run_in_child(job_id: str, run_id: int, *, now: datetime,
+                  trigger: TriggerSourceArg) -> None:
+    """Hand run *run_id* (its ``running`` row already committed) to a job worker child and
+    wait until the child is gone and its row final (:func:`_child_exited`).
+
+    Waiting keeps every caller's contract: the cron fire returns after the run, as the
+    in-process run does (APScheduler's one-instance rule still holds), and the manual run's
+    daemon thread ends with it."""
+    module = _JOB_WORKER_MODULE
+    if module is None:  # pragma: no cover - runs_in_child checked it
+        raise RuntimeError("no job worker module registered")
+    data = proc_lock.data_dir()
+    entry = _ChildRun(job_id=job_id, run_id=run_id,
+                      progress_path=progress_sidecar_path(run_id, data),
+                      lock_path=proc_lock.job_lock_path(run_id, data))
+    with _INFLIGHT_LOCK:
+        _CHILD_RUNS[run_id] = entry
+    try:
+        handle = child_runner.spawn(
+            module, _worker_args(job_id, run_id, now, trigger), heavy=True,
+            on_exit=lambda result: _child_exited(entry, result, now=now))
+    except BaseException:
+        with _INFLIGHT_LOCK:
+            _CHILD_RUNS.pop(run_id, None)
+        raise
+    with _INFLIGHT_LOCK:
+        entry.handle = handle
+    handle.wait()
+
+
+#: Attempts at finalising a dead child's row while another writer holds the database.
+_CLOSE_ATTEMPTS = 6
+_CLOSE_BACKOFF_S = 0.25
+
+
+def _child_exited(entry: _ChildRun, result: child_runner.ChildResult, *,
+                  now: datetime) -> None:
+    """The waiter's half (``child_runner`` ``on_exit``): finalise the row if the child did
+    not, then drop the run from the registry and delete its sidecar and lock file.
+
+    The row is final BEFORE the registry forgets the run, so the 排程中心 never reads a
+    finished run as 已排入 on the way out (FU-D36's finalise-then-clear order)."""
+    try:
+        for attempt in range(_CLOSE_ATTEMPTS):
+            try:
+                _close_if_open(entry, result, now=now)
+                break
+            except sqlite3.OperationalError as exc:
+                busy = "locked" in str(exc) or "busy" in str(exc)
+                if not busy or attempt == _CLOSE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_CLOSE_BACKOFF_S * (attempt + 1))
+    except Exception:  # noqa: BLE001 — the waiter must never raise; boot closes the row
+        logger.exception("job %s run %s: the row of an ended worker could not be finalised",
+                         entry.job_id, entry.run_id)
+    finally:
+        with _INFLIGHT_LOCK:
+            if _CHILD_RUNS.get(entry.run_id) is entry:
+                del _CHILD_RUNS[entry.run_id]
+        _remove_quietly(entry.progress_path)
+        _remove_quietly(entry.lock_path)
+
+
+def _close_if_open(entry: _ChildRun, result: child_runner.ChildResult, *,
+                   now: datetime) -> None:
+    with session() as conn:
+        row = conn.execute("SELECT finished_at FROM job_runs WHERE id = ?",
+                           (entry.run_id,)).fetchone()
+        if row is None or row["finished_at"] is not None:
+            return
+        if result.started:
+            logger.warning("job %s run %s: worker exited %s without finishing its row; "
+                           "stderr tail:\n%s", entry.job_id, entry.run_id, result.returncode,
+                           result.stderr_tail[-2000:])
+            _close_abandoned(conn, entry.run_id, detail=WORKER_DIED, reason="worker_died",
+                             now=now)
+        else:
+            logger.warning("job %s run %s: worker not started: %s", entry.job_id,
+                           entry.run_id, result.error)
+            _close_abandoned(conn, entry.run_id, detail=WORKER_NOT_STARTED,
+                             reason="worker_not_started", now=now)
+
+
+def _close_abandoned(conn: sqlite3.Connection, run_id: int, *, detail: str, reason: str,
+                     now: datetime, commit: bool = True) -> None:
+    """Finalise a run row nobody will finish, as ``error``. The ONE closer here that passes
+    no spend: the run's ``usage_tally`` lived in a process that is gone (a dead worker
+    child, a restart), so what it spent is unknown here — the spend columns stay as they are
+    (NULL), and the calls it made stay in ``llm_usage``, so in the quota and the per-agent
+    totals."""
+    finish_job_run(conn, run_id, status="error", detail=detail, reason=reason, now=now,
+                   commit=commit)
+
+
+def close_abandoned_runs(conn: sqlite3.Connection, *, now: datetime) -> list[int]:
+    """BOOT ONLY (on the boot session, before the scheduler starts): finalise every
+    unfinished ``job_runs`` row no live process owns, and delete the job lock and sidecar
+    files nobody holds. Returns the closed run ids.
+
+    A row is owned while its ``job-<run_id>.lock`` is held — a worker child that outlived
+    the previous web process (POSIX ``start_new_session``) still finishes its own row. Any
+    other unfinished row was left by a process that is gone: a worker that never started (it
+    was queued in the dead process), an in-process run (a manual 立即執行 thread, the insight
+    task door), a settlement trigger job. ``settlement`` rows are the settlement service's
+    (its boot ends them with their reports) and are never touched here. The update joins the
+    caller's transaction (``commit=False``)."""
+    data = proc_lock.data_dir()
+    closed: list[int] = []
+    rows = conn.execute(
+        "SELECT id FROM job_runs WHERE finished_at IS NULL AND job_id != ? ORDER BY id",
+        (SETTLEMENT_JOB_ID,)).fetchall()
+    with _INFLIGHT_LOCK:
+        mine = set(_CHILD_RUNS)
+    for row in rows:
+        run_id = int(row["id"])
+        if run_id in mine or proc_lock.is_held(proc_lock.job_lock_path(run_id, data)):
+            continue
+        _close_abandoned(conn, run_id, detail=ABANDONED_AT_BOOT, reason="interrupted",
+                         now=now, commit=False)
+        closed.append(run_id)
+    for lock_file in sorted(data.glob("job-*.lock")):
+        if not proc_lock.is_held(lock_file):
+            _remove_quietly(lock_file)
+    for sidecar in sorted(data.glob("job-*.progress.json")):
+        stem = sidecar.name.removesuffix(".progress.json")
+        if not proc_lock.is_held(data / f"{stem}.lock"):
+            _remove_quietly(sidecar)
+    return closed
+
+
+def run_in_worker(conn: sqlite3.Connection, job_id: str, run_id: int, *, now: datetime,
+                  trigger: TriggerSourceArg) -> bool:
+    """The job worker child's half: run *job_id* on its row *run_id* (created and committed
+    by the parent) exactly as the in-process run does. Returns whether the row is final.
+
+    A row that is missing, belongs to another job, or is already final (the parent or a boot
+    gave up on it) is not run. A static job runs through :func:`_run_static_on_row` (the
+    body of :func:`run_job_outcome`); a kind=insight task through :func:`_execute_insight`
+    with the run id, as the 排程中心's manual run always did, and the trigger the parent
+    passed (``schedule`` for a cron fire)."""
+    row = conn.execute("SELECT job_id, finished_at FROM job_runs WHERE id = ?",
+                       (run_id,)).fetchone()
+    if row is None or row["job_id"] != job_id:
+        logger.warning("job worker: run %s is not a run of %s; nothing run", run_id, job_id)
+        return False
+    if row["finished_at"] is not None:
+        logger.warning("job worker: run %s of %s is already final; nothing run", run_id,
+                       job_id)
+        return True
+    payload = _insight_payload(conn, job_id)
+    if payload is not None:
+        _execute_insight(conn, job_id, payload, now=now, run_id=run_id,
+                         trigger=InsightTrigger(source=trigger))
+    else:
+        spec = _jobs_by_id().get(job_id)
+        if spec is None:
+            _close_abandoned(conn, run_id, detail=f"執行失敗：{unknown_job_message(job_id)}",
+                             reason="unknown_job", now=now)
+        else:
+            _run_static_on_row(conn, job_id, spec.func, run_id, now=now)
+    final = conn.execute("SELECT finished_at FROM job_runs WHERE id = ?",
+                         (run_id,)).fetchone()
+    return final is not None and final["finished_at"] is not None
 
 
 def run_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
@@ -2099,11 +2485,23 @@ def run_job_outcome(
     )
     run_id = int(cur.lastrowid or 0)
     conn.commit()
+    return run_id, _run_static_on_row(conn, job_id, spec.func, run_id, now=now)
+
+
+def _run_static_on_row(
+    conn: sqlite3.Connection, job_id: str, func: JobFunc, run_id: int, *, now: datetime
+) -> JobOutcome:
+    """Run a static job's func on its EXISTING ``job_runs`` row and finalise the row.
+
+    The body :func:`run_job_outcome` always had, shared since PERF (spec §16) with the job
+    worker child (:func:`run_in_worker`), so a job run in a child writes its row exactly as
+    the in-process run does: the same ``usage_tally`` around the func, the same
+    :class:`JobOutcome` normalisation, the same one UPDATE (:func:`_finalize_run`)."""
     _mark_running(job_id)
     try:
         with usage_tally() as usage:
             try:
-                outcome = _outcome_of(spec.func(conn, now=now))
+                outcome = _outcome_of(func(conn, now=now))
             except Exception as exc:  # noqa: BLE001 — swallow + log; never crash the scheduler
                 outcome = JobOutcome("error", failure_detail(exc))
         # finished_at shares *now*'s timezone (M1 fix): a UTC finish next to a +08:00 start
@@ -2115,7 +2513,7 @@ def run_job_outcome(
         )
     finally:
         _clear_running(job_id)
-    return run_id, outcome
+    return outcome
 
 
 def start_job_run(
@@ -2277,6 +2675,11 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             run_id = int(rid["id"])
             payload = _insight_payload(conn, job_id)
             if payload is not None:
+                if runs_in_child(conn, job_id):
+                    # PERF spec §16: a manual run of a scheduled task goes where its cron
+                    # fire goes — a job worker child — on the row the request inserted.
+                    _run_in_child(job_id, run_id, now=now, trigger="manual")
+                    return
                 _execute_insight(
                     conn, job_id, payload, now=now, run_id=run_id,
                     trigger=InsightTrigger(source="manual"),
@@ -2293,6 +2696,15 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             # start_run inserting the row) is the honest 已排入 state. Clear only
             # after finish_job_run commits, so the poll never reads a done run as queued.
             after = _begin_after_job(job_id)
+            if runs_in_child(conn, job_id):
+                # PERF spec §16: in a job worker child. The after-job hook still brackets
+                # the run HERE, in the web process: asked before the spawn, called once the
+                # child is gone and the row is final (plan P7 / P13).
+                try:
+                    _run_in_child(job_id, run_id, now=now, trigger="manual")
+                finally:
+                    _end_after_job(job_id, after)
+                return
             _mark_running(job_id)
             try:
                 with usage_tally() as usage:
@@ -2497,6 +2909,13 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
             )
             _record_skipped_overlap(conn, job_id, payload, now=now)
             return None
+        if runs_in_child(conn, job_id):
+            # PERF spec §16: scheduled AI generation runs in a job worker child. The row is
+            # inserted here (as the manual doors insert theirs) so this process can finalise
+            # it if the child dies; the child's runner finalises it on every other path.
+            run_id = start_insight_run(conn, payload, now=now)
+            _run_in_child(job_id, run_id, now=now, trigger="schedule")
+            return None
         # DEF-030: the SAME executor as both manual doors (in-flight mark + progress, the
         # runner call, the failure record) — only the trigger and the absent run_id differ.
         _execute_insight(
@@ -2519,6 +2938,12 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
     # history before the live window.
     after = _begin_after_job(job_id)
     try:
+        if runs_in_child(conn, job_id):
+            # PERF spec §16: in a job worker child, on the row inserted here; this call
+            # returns once the child is gone and the row is final, as run_job does.
+            run_id = start_job_run(conn, job_id, now=now)
+            _run_in_child(job_id, run_id, now=now, trigger="schedule")
+            return run_id
         return run_job(conn, job_id, now=now)
     finally:
         _end_after_job(job_id, after)

@@ -351,6 +351,16 @@
     }
     if (st && st.queued) {
       wrap.appendChild(_pill('pill-queued', '已排入'));
+      /* PERF spec §16: a scheduled job runs in a worker process, one heavy process at a
+         time, so a manual run can wait minutes behind a re-settlement or another job. The
+         server then says why it has not started (`progress` on a QUEUED entry, e.g.
+         「排隊中：同一時間只執行一項背景工作，…」) — its sentence, shown as it is, never one
+         written here; an entry without one reads 已排入 alone, as before. */
+      if (st.progress) {
+        const p = el('div', 'run-msg run-progress', st.progress);
+        p.title = st.progress;
+        wrap.appendChild(p);
+      }
       return wrap;
     }
     const lr = (st && st.last_run) || fallbackLast || null;
