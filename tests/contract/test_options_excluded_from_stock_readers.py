@@ -104,6 +104,16 @@ _ALLOWLIST: dict[str, str] = {
     "portfolio/dashboard.py::kpis_as_of": (
         "the valuation's KPI half, extracted from _build_dashboard (PERF §11.2): it values "
         "every position and splits the options out itself (opt_syms / split_holdings)"),
+    "portfolio/period_close.py::kpi_at": (
+        "a close's notes: past_expiry_holdings looks FOR contracts past their expiry in the "
+        "book (OPT-D2); the KPI half is kpis_as_of, which splits the options out itself"),
+    "portfolio/settle_worker.py::_Run._close": (
+        "writes the close's position rows (period_close.holdings_at): every position at D, "
+        "stocks and contracts each tagged asset_type (OPT-D5 keeps them apart where listed); "
+        "no stock-only figure is derived from them"),
+    "portfolio/settle_worker.py::_Run._valuate": (
+        "the live progress's position count (RunCurrent.positions, 「N 個部位」): every "
+        "position the valuation replays, contracts included — a count, never a stock figure"),
     "api/routers/input_center.py::_holdings_or_none": (
         "the manual door's preview book: option mode closes a contract position (W3)"),
     "api/routers/input_center.py::_position_preview": (
