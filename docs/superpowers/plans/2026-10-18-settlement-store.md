@@ -1275,7 +1275,10 @@ FIXED-WITH-NOTES, notes closed). What the reviews caught and the fixes changed:
   under memory pressure), stress phase 1 164 / 19,948 / 0, `engine_equality` equal on the stress
   DB (96 event days) and both scratch DBs (461), the prefix property on both engines.
 - PERF-F2 and the price-basis split edge are **confirmed** (`xfail(strict=True)` tests), not fixed;
-  reported to the owner.
+  reported to the owner. **Owner ruling 2026-10-19:** finish and deploy this release first (v0.1.32
+  keeps its byte-identical guarantee against v0.1.31), then fix each as its own change after the
+  deploy. The two `xfail(strict=True)` tests stay as they are until then; each fix flips its test
+  and regenerates the affected reference payloads with the reason recorded.
 - Process: give each parallel reviewer its own scratch folder (two collided); run one pytest
   process per agent on this 8 GB machine.
 
