@@ -330,9 +330,11 @@ def test_a_change_whose_previous_schedule_is_unknown_falls_back_to_what_ran(
     conn: sqlite3.Connection,
 ) -> None:
     """A change stamped before ``previous_schedule`` existed: the days before it are judged
-    by the latest finished row that day (documented limit: a missed fire with an intraday
-    refresh, or no row at all, then reads as answered / not due)."""
+    by the latest finished row that day — a FAILED one still blocks (08-14's re-run ended
+    ``partial``) — with the documented limit that a missed fire with an intraday refresh
+    (08-12), or no row at all (08-13), then reads as answered / not due."""
     _missed_fires(conn)
+    _run(conn, "quotes_tw", datetime(2026, 8, 14, 15, 0, tzinfo=TPE), "partial", ["2330"])
     conn.execute("UPDATE schedule_config SET cron = '30 14 * * mon-fri', "
                  "updated_at = '2026-08-14T20:00:00+08:00', previous_schedule = NULL, "
                  "stamped_schedule = '30 14 * * mon-fri|Asia/Taipei|1' "
@@ -340,7 +342,7 @@ def test_a_change_whose_previous_schedule_is_unknown_falls_back_to_what_ran(
     conn.commit()
     result = service.final_through(conn, datetime(2026, 8, 15, 6, 40, tzinfo=TPE),
                                    since=service.SINCE_GO_LIVE)
-    assert result.through == date(2026, 8, 14) and result.blocked_on is None
+    assert (result.through, result.blocked_on) == (date(2026, 8, 13), date(2026, 8, 14))
 
 
 def test_a_job_switched_off_still_has_its_past_judged(conn: sqlite3.Connection) -> None:
@@ -352,3 +354,26 @@ def test_a_job_switched_off_still_has_its_past_judged(conn: sqlite3.Connection) 
     result = service.final_through(conn, datetime(2026, 8, 15, 6, 40, tzinfo=TPE),
                                    since=service.SINCE_GO_LIVE)
     assert result.blocked_on == date(2026, 8, 12)
+
+
+def test_a_hand_edit_seen_by_a_boot_still_blocks_a_missed_fire_before_it(
+    conn: sqlite3.Connection,
+) -> None:
+    """Fold round 2 (F2c): the boot that stamps a hand edit keeps the schedule it departed
+    from as ``previous_schedule``, so a missed 14:00 fire before the edit (08-12: only an
+    intraday refresh) still blocks after that boot — not only before it."""
+    _missed_fires(conn)
+    now = datetime(2026, 8, 15, 6, 40, tzinfo=TPE)
+    strict = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    conn.execute("UPDATE schedule_config SET cron = '30 14 * * mon-fri' "
+                 "WHERE job_id = 'quotes_tw'")
+    conn.commit()
+    unseen = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    migrate_job_runs_results(conn)  # the next boot stamps the hand edit
+    seen = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    assert strict.blocked_on == unseen.blocked_on == seen.blocked_on == date(2026, 8, 12)
+    row = conn.execute("SELECT updated_at, stamped_schedule, previous_schedule "
+                       "FROM schedule_config WHERE job_id = 'quotes_tw'").fetchone()
+    assert row[0] is not None
+    assert (row[1], row[2]) == ("30 14 * * mon-fri|Asia/Taipei|1",
+                                "0 14 * * mon-fri|Asia/Taipei|1")

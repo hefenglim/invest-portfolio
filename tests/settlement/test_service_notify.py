@@ -20,8 +20,10 @@ import pytest
 
 from portfolio_dash.api import settlement_service as service
 from portfolio_dash.ops import notify
+from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.settlement_models import RunReport, RunRequest, RunScope, RunSummary
 from portfolio_dash.portfolio.settlement_store import TriggerCheck
+from portfolio_dash.scheduler import jobs
 from portfolio_dash.shared.alert_rule_names import rule_name
 from portfolio_dash.shared.config import get_settings
 from tests.reference.corpora import open_db
@@ -327,3 +329,57 @@ def test_boot_pushes_an_automatic_failure_whose_waiter_never_closed_it(
     service.start_after_boot(plan)
     assert len(world.sent.calls) == 1
     assert sup.job_row(world.path, failed)["status"] == "error"
+
+
+def _later_run(world: _World, *, scope: RunScope, status: str, lo: date, hi: date) -> int:
+    """A finished run with this scope, status and range (its report as the store keeps it),
+    standing in for whatever ran after a failure: ``_mooted`` reads only these."""
+    conn = open_db(world.path)
+    try:
+        run_id = jobs.start_job_run(conn, jobs.SETTLEMENT_JOB_ID, now=world.now)
+        st.create_run(conn, RunRequest(scope=scope, reason="nightly", through=hi),
+                      run_id=run_id, trigger_text="t", started_at=world.now)
+        conn.execute("UPDATE settle_run SET status = ?, range_from = ?, range_to = ?, "
+                     "finished_at = ? WHERE run_id = ?",
+                     (status, lo.isoformat(), hi.isoformat(), world.now.isoformat(), run_id))
+        jobs.finish_job_run(conn, run_id, status="ok", detail="完成", now=world.now)
+        conn.commit()
+    finally:
+        conn.close()
+    return run_id
+
+
+def test_a_held_push_is_mooted_only_by_a_published_non_selfcheck_run_that_covers_it(
+    world: _World,
+) -> None:
+    """Fold round 2: each check of ``_mooted`` decides one case. The failed nightly settles
+    2026-02-02 through yesterday; a later run that does NOT hold that range, a later PARTIAL
+    run that does, and a later SELF-CHECK that does each leave the push to be sent; only a
+    later published dirty run that holds it drops the push."""
+    service.start_run(scope="full", reason="button")
+    sup.back_dated_trade(world.path, date(2026, 2, 2))
+    yesterday = sup.state(world.path).settled_through
+    assert yesterday is not None
+    sent = 0
+    cases: list[tuple[RunScope, str, date]] = [
+        ("dirty", "published", date(2026, 3, 1)),   # starts too late
+        ("dirty", "partial", date(2026, 1, 1)),     # partial
+        ("selfcheck", "published", date(2026, 1, 1)),  # a self-check
+    ]
+    for scope, status, lo in cases:
+        world.now = NIGHT
+        run_id = _failed_nightly()
+        failed = sup.report(world.path, run_id)
+        assert (failed.summary.range_from, failed.summary.range_to) == (date(2026, 2, 2),
+                                                                        yesterday)
+        _later_run(world, scope=scope, status=status, lo=lo, hi=yesterday)
+        world.now = MORNING
+        assert service.send_pending_notifications() == 1, (scope, status, lo)
+        sent += 1
+        assert len(world.sent.calls) == sent and not _pending(world, run_id)
+    world.now = NIGHT
+    run_id = _failed_nightly()
+    _later_run(world, scope="dirty", status="published", lo=date(2026, 1, 1), hi=yesterday)
+    world.now = MORNING
+    assert service.send_pending_notifications() == 0  # the positive control: covered
+    assert len(world.sent.calls) == sent and not _pending(world, run_id)
