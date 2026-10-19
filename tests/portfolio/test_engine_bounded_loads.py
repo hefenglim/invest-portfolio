@@ -320,3 +320,49 @@ def test_a_price_before_1900_is_not_read(tmp_path: Any) -> None:
             assert got == _v0131_overlay(conn, now, TWD, "0050", window), window
     finally:
         conn.close()
+
+
+
+def test_the_performance_route_reads_no_close_or_rate_before_1900(tmp_path: Any) -> None:
+    """The performance route's own 1900 floors, for closes AND for FX (fold verification,
+    2026-10-19): on a ledger whose first trend day is COMPLETE, a benchmark close stored for
+    1899 or a USD/TWD rate stored for 1899 would move the overlay's first point, so v0.1.31's
+    floor is visible here (the test above cannot see it: its first day is incomplete)."""
+    from portfolio_dash.pricing.results import FxRow
+    from portfolio_dash.pricing.store import upsert_fx
+
+    conn = _fresh(tmp_path)
+    try:
+        upsert_instrument(conn, Instrument(symbol="OLD", market=Market.TW, quote_ccy=TWD,
+                                           sector="Utilities", name="Old Co", board="TWSE"))
+        insert_transaction(conn, account_id="tw_broker", symbol="OLD", side=Side.BUY,
+                           quantity=Decimal("1000"), price=Decimal("10"), fees=Decimal("20"),
+                           tax=Decimal("0"), trade_date=date(1900, 1, 2))
+        rows = [("OLD", Market.TW, date(1900, 1, 2), "10"),
+                ("OLD", Market.TW, date(1900, 1, 15), "10.5"),
+                ("OLD", Market.TW, date(1900, 1, 29), "11"),
+                ("0050", Market.TW, date(1899, 12, 29), "9.5"),
+                ("0050", Market.TW, date(1900, 1, 15), "10.5"),
+                ("0050", Market.TW, date(1900, 1, 29), "11"),
+                ("^GSPC", Market.US, date(1900, 1, 2), "100"),
+                ("^GSPC", Market.US, date(1900, 1, 15), "101"),
+                ("^GSPC", Market.US, date(1900, 1, 29), "103")]
+        fetched = datetime(1900, 1, 30, 12, 0)
+        upsert_prices(conn, [PriceRow(instrument=s, market=m, as_of=d, close=Decimal(v),
+                                      source="test") for s, m, d, v in rows],
+                      fetched_at=fetched)
+        upsert_fx(conn, [FxRow(base=Currency.USD, quote=TWD, as_of=d, rate=Decimal(r),
+                               source="test")
+                         for d, r in ((date(1899, 12, 30), "30"), (date(1900, 1, 15), "31"))],
+                  fetched_at=fetched)
+        conn.commit()
+        now = datetime(1900, 2, 1, 14, 30, tzinfo=TAIPEI)
+        assert not _build_dashboard(conn, now=now, reporting=TWD).trend.points[0].incomplete
+        for benchmark in ("0050", "sp500"):
+            for window in ("1y", "all"):
+                got = performance_twr(benchmark=benchmark, window=window, conn=conn, now=now,
+                                      reporting=TWD)
+                want = _v0131_overlay(conn, now, TWD, benchmark, window)
+                assert got == want, (benchmark, window)
+    finally:
+        conn.close()

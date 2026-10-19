@@ -91,8 +91,9 @@ columns) do not move it.
     from its ex-date; SPLIT + EXCHANGE + SPINOFF; two same-day buys; a buy and a dividend
     dated after the clock; an FX gap (2026-02-02..02-20 on every pair, MYR/TWD derived); a
     stale held price (1155 stops 2026-06-01); a foreign deposit with its cost, two conversions
-    and the three XIRR cash kinds. No refusal, so XIRR, B, B − A and the benchmark are all
-    computed over these shapes;
+    and the three XIRR cash kinds. No refusal, so XIRR, B and the benchmark are all computed
+    over these shapes (B − A is withheld here: the adjusted put is still open at the clock,
+    OPT-D20);
   - **`rich_refusals`** — `rich`, reporting USD, plus a 賣超, a dividend with no position, a
     dividend paid on the open declared short, a close row with nothing to close, a readable
     action the replay refuses (a SPLIT on a symbol never held) and an UNREADABLE stored action
