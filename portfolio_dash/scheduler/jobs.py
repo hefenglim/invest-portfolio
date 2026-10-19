@@ -6,6 +6,7 @@ unit-testable; the APScheduler wiring lives in ``runtime.py``.
 """
 
 import inspect
+import json
 import logging
 import sqlite3
 import threading
@@ -860,6 +861,16 @@ def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     return _outcome_of(runner(conn, now=now))
 
 
+# --- The settlement (PERF spec 2026-10-18 §9.1, §9.4) -------------------------
+
+#: ``job_runs.job_id`` of every settlement run's own row (spec §9.4). Not a schedulable job:
+#: it has no ``schedule_config`` row and is not in :data:`JOBS`.
+SETTLEMENT_JOB_ID = "settlement"
+
+#: The market quote jobs whose verdicts decide ``final_through`` (spec §9.1).
+QUOTE_JOB_IDS: tuple[str, ...] = ("quotes_tw", "quotes_us", "quotes_my")
+
+
 # signal_scan runner seam (P2 batch 2): the scan reads pricing/portfolio + the rule engine
 # and writes signal_states/alert_events; that orchestration lives in the api seam
 # (api/signals_service.scan_signals), registered at app startup — so scheduler/ never
@@ -1557,6 +1568,7 @@ JOBS: list[JobSpec] = [
         "digest_weekly", digest_weekly, "0 17 * * sun", "Asia/Taipei", True,
         "Weekly action list (assemble + push)",
     ),
+
 ]
 
 DEFAULT_BOARD: dict[Market, str] = {Market.US: "", Market.MY: ".KL", Market.TW: "TWSE"}
@@ -1938,23 +1950,29 @@ def run_job_outcome(
         _finalize_run(
             conn, run_id, finished_at=datetime.now(tz=now.tzinfo or UTC).isoformat(),
             status=outcome.status, detail=outcome.detail, usage=usage,
+            results=outcome.results,
         )
     finally:
         _clear_running(job_id)
     return run_id, outcome
 
 
-def start_job_run(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int:
+def start_job_run(
+    conn: sqlite3.Connection, job_id: str, *, now: datetime, commit: bool = True
+) -> int:
     """Insert a 'running' ``job_runs`` row (finished_at NULL) and return its id.
 
     Used by ``POST /api/scheduler/jobs/{id}/run`` to obtain the run id synchronously
-    (on the request conn) before the background thread finalizes the row.
+    (on the request conn) before the background thread finalizes the row. ``commit=False``
+    leaves the row in the caller's transaction: the settlement service writes it together
+    with the run's ``preparing`` report (one commit, so no row exists without the other).
     """
     cur = conn.execute(
         "INSERT INTO job_runs (job_id, started_at, status) VALUES (?, ?, 'running')",
         (job_id, now.isoformat()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid or 0)
 
 
@@ -1979,6 +1997,8 @@ def finish_job_run(
     detail: str,
     now: datetime | None = None,
     usage: UsageTally | None = None,
+    reason: str | None = None,
+    results: dict[str, Any] | None = None,
 ) -> None:
     """Finalize a running ``job_runs`` row with its terminal status + detail (+ its spend).
 
@@ -1988,10 +2008,14 @@ def finish_job_run(
     (owner 2026-09-30: ``evaluate_insights`` #212 spent $0.0021532 on a row that said
     nothing). Without one — the insight runner's error exits, which record their own
     spend on the success path — the spend columns are left as they are.
+
+    ``reason`` sets ``job_runs.reason`` — an outcome CODE (``cancelled``, ``interrupted``,
+    ``failed:<class>``, ``selfcheck_diff``), never a sentence (DEF-073: the sentence is
+    ``detail``). ``results`` is the job's structured results JSON (plan P3).
     """
     finished_at = datetime.now(tz=now.tzinfo if now is not None else UTC).isoformat()
     _finalize_run(conn, run_id, finished_at=finished_at, status=status, detail=detail,
-                  usage=usage)
+                  usage=usage, reason=reason, results=results)
 
 
 def _finalize_run(
@@ -2002,8 +2026,25 @@ def _finalize_run(
     status: str,
     detail: str,
     usage: UsageTally | None,
+    reason: str | None = None,
+    results: dict[str, Any] | None = None,
 ) -> None:
-    """The one UPDATE that closes a static job's run row (both wrappers and every door)."""
+    """The one UPDATE that closes a static job's run row (both wrappers and every door).
+
+    ``results`` (plan P3): a job's structured results — the quote jobs' ``held_failed``,
+    which the settlement's ``final_through`` reads — stored as JSON in ``job_runs.results``.
+    The column is added by the lifespan's boot migration (``migrate_job_runs_results``); on a
+    database that never ran it the results are dropped, never the run row's verdict."""
+    if reason is not None:
+        conn.execute("UPDATE job_runs SET reason = ? WHERE id = ?", (reason, run_id))
+    if results:
+        try:
+            conn.execute(
+                "UPDATE job_runs SET results = ? WHERE id = ?",
+                (json.dumps(results, ensure_ascii=False, sort_keys=True, default=str), run_id),
+            )
+        except sqlite3.OperationalError:
+            logger.debug("job_runs.results missing (boot migration not run); results dropped")
     if usage is None:
         conn.execute(
             "UPDATE job_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
@@ -2094,7 +2135,7 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
                         outcome = JobOutcome("error", failure_detail(exc))
                 finish_job_run(
                     conn, run_id, status=outcome.status, detail=outcome.detail, now=now,
-                    usage=usage,
+                    usage=usage, results=outcome.results,
                 )
             finally:
                 _clear_running(job_id)

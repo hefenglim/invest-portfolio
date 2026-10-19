@@ -74,14 +74,25 @@ EVENT_RULE_NAMES: dict[str, str] = {
     "calibration_regression": "AI 成績轉差",
 }
 
+#: Notification subscriptions that are NOT alert rules and never reach ``alert_events``: a
+#: system notice a service pushes itself, gated exactly like a rule's push (guest / demo,
+#: subscription, quiet hours). ``settlement_failed`` (PERF plan P4, 2026-10-18): a failed
+#: AUTOMATIC re-settlement — the nightly run, the weekly self-check, a boot or job run — which
+#: nobody is watching the status chip for.
+SYSTEM_NOTICE_NAMES: dict[str, str] = {
+    "settlement_failed": "重新結算失敗",
+}
+
 
 def rule_name(rule_id: str | None) -> str:
-    """The zh display name of *rule_id* (an alert rule or an ``alert_events`` event id).
+    """The zh display name of *rule_id* (an alert rule, an ``alert_events`` event id, or a
+    system notice's subscription id).
 
     An unknown or missing id answers :data:`UNNAMED_RULE` and logs a warning — never the id.
     """
     if rule_id:
-        name = ALERT_RULE_NAMES.get(rule_id) or EVENT_RULE_NAMES.get(rule_id)
+        name = (ALERT_RULE_NAMES.get(rule_id) or EVENT_RULE_NAMES.get(rule_id)
+                or SYSTEM_NOTICE_NAMES.get(rule_id))
         if name:
             return name
     logger.warning("alert rule id %r has no display name (DEF-062)", rule_id)

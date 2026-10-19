@@ -1,0 +1,198 @@
+"""The failed-settlement push (plan P4, owner ruling Q-P1 = (a): send once when quiet hours end).
+
+Sent the way ``digest_service._push`` sends — guest / demo suppressed, the subscription, quiet
+hours — through a new subscription ``settlement_failed`` (「重新結算失敗」, warn, on by default).
+Inside quiet hours the report records ``notify_pending`` and a one-shot job at the window's end
+sends it once; boot sends a still-pending one when it boots outside quiet hours.
+
+The waiter itself pushes (a failed AUTOMATIC run, here the nightly one); the clock it reads and
+the channel it sends to are replaced, so nothing leaves the machine.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from portfolio_dash.api import settlement_service as service
+from portfolio_dash.ops import notify
+from portfolio_dash.shared.alert_rule_names import rule_name
+from portfolio_dash.shared.config import get_settings
+from tests.reference.corpora import open_db
+from tests.settlement import service_support as sup
+from tests.settlement import stub_settle_worker as stub
+from tests.settlement.conftest import CorpusFactory
+
+NIGHT = datetime(2026, 10, 19, 6, 41, tzinfo=sup.TPE)  # inside 22:00–08:00
+MORNING = datetime(2026, 10, 19, 8, 0, 5, tzinfo=sup.TPE)
+NOON = datetime(2026, 10, 19, 12, 0, tzinfo=sup.TPE)
+WINDOW_END = datetime(2026, 10, 19, 8, 0, tzinfo=sup.TPE)
+
+
+class _Sender:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str, str | None]] = []
+
+    def __call__(self, channels: list[Any], title: str, body: str, severity: str,
+                 link: str | None) -> dict[str, str]:
+        self.calls.append((title, body, severity, link))
+        return {ch.name: "ok" for ch in channels}
+
+
+class _Scheduler:
+    def __init__(self) -> None:
+        self.jobs: list[tuple[Any, Any, str]] = []
+
+    def add_job(self, fn: Any, trigger: Any, *, id: str,  # noqa: A002 — APScheduler's name
+                replace_existing: bool) -> None:
+        assert replace_existing
+        self.jobs.append((fn, trigger, id))
+
+
+class _World:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.now = NIGHT
+        self.sent = _Sender()
+        self.scheduler = _Scheduler()
+
+
+@pytest.fixture
+def world(corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> Iterator[_World]:
+    w = _World(sup.prepare(corpus_db("golden").path, monkeypatch))
+    sup.protect(w.path)
+    _configure(w.path, quiet=True, subscribed=True)
+    monkeypatch.setattr(service, "_now", lambda: w.now)
+    monkeypatch.setattr(notify, "dispatch", w.sent)
+    service.bind_scheduler(w.scheduler)
+    yield w
+    service.reset_for_tests()
+    get_settings.cache_clear()
+
+
+def _configure(path: Path, *, quiet: bool, subscribed: bool) -> None:
+    conn = open_db(path)
+    try:
+        cfg = notify.load_config(conn)
+        cfg.ntfy.enabled = True
+        cfg.quiet_hours = notify.QuietHours(enabled=quiet, start="22:00", end="08:00")
+        cfg.subscriptions[notify.SETTLEMENT_FAILED] = subscribed
+        notify.save_config(conn, cfg, now=NOON)
+    finally:
+        conn.close()
+
+
+def _failed_nightly() -> int:
+    stub.PLAN.append("fail")
+    started = service.start_automatic(scope="nightly", reason="nightly")
+    assert started.ended is not None and started.ended.status == "failed"
+    return started.ended.run_id
+
+
+def _pending(w: _World, run_id: int) -> bool:
+    return bool(sup.report(w.path, run_id).notify_pending)
+
+
+def test_the_subscription_is_named_warned_and_on_by_default(world: _World) -> None:
+    assert rule_name(notify.SETTLEMENT_FAILED) == "重新結算失敗"
+    assert ("settlement_failed", "重新結算失敗", "warn") in notify.RULE_CATALOG
+    conn = open_db(world.path)
+    try:
+        cfg = notify.load_config(conn)
+        cfg.subscriptions.pop(notify.SETTLEMENT_FAILED)
+        notify.save_config(conn, cfg, now=NOON)
+        assert notify.load_config(conn).subscriptions[notify.SETTLEMENT_FAILED] is True
+    finally:
+        conn.close()
+
+
+def test_quiet_hours_end_is_the_next_window_edge() -> None:
+    quiet = notify.QuietHours(enabled=True, start="22:00", end="08:00")
+    assert notify.quiet_hours_end(quiet, NIGHT) == WINDOW_END
+    late = datetime(2026, 10, 19, 23, 0, tzinfo=sup.TPE)
+    assert notify.quiet_hours_end(quiet, late) == WINDOW_END + timedelta(days=1)
+    assert notify.quiet_hours_end(quiet, NOON) is None
+    assert notify.quiet_hours_end(notify.QuietHours(enabled=False), NIGHT) is None
+
+
+def test_outside_quiet_hours_it_is_sent_now(world: _World) -> None:
+    world.now = NOON
+    run_id = _failed_nightly()
+    [(title, body, severity, _link)] = world.sent.calls
+    assert title == "portfolio-dash · 重新結算失敗" and severity == "warn"
+    assert body == (f"重新結算失敗（#{run_id}，每晚例行結算）：測試：逐日估值失敗。"
+                    "歷史走勢與月度成績維持前一版本，帳戶即時數字不受影響。")
+    assert not _pending(world, run_id) and world.scheduler.jobs == []
+
+
+def test_inside_quiet_hours_it_is_held_then_sent_once_at_the_end(world: _World) -> None:
+    run_id = _failed_nightly()
+    assert world.sent.calls == [] and _pending(world, run_id)
+    [(fn, trigger, job_id)] = world.scheduler.jobs
+    assert job_id == service.NOTIFY_JOB_ID
+    assert trigger.run_date == WINDOW_END + timedelta(seconds=1)
+    world.now = MORNING  # the window's end: the one-shot job fires
+    fn()
+    assert len(world.sent.calls) == 1 and not _pending(world, run_id)
+    fn()
+    assert service.send_pending_notifications() == 0
+    assert len(world.sent.calls) == 1
+
+
+def test_a_boot_inside_quiet_hours_holds_it_again(world: _World) -> None:
+    run_id = _failed_nightly()
+    service.start_after_boot(service.BootPlan())
+    assert world.sent.calls == [] and _pending(world, run_id)
+    assert len(world.scheduler.jobs) == 2  # rescheduled for the window's end
+
+
+def test_two_boots_outside_quiet_hours_send_one_push(world: _World) -> None:
+    run_id = _failed_nightly()
+    world.now = NOON
+    service.start_after_boot(service.BootPlan())
+    service.start_after_boot(service.BootPlan())
+    assert len(world.sent.calls) == 1 and not _pending(world, run_id)
+
+
+def test_guest_or_demo_never_pushes(world: _World) -> None:
+    conn = open_db(world.path)
+    conn.execute("DELETE FROM auth_users")
+    conn.commit()
+    conn.close()
+    held = _failed_nightly()
+    world.now = NOON
+    sent = _failed_nightly()
+    assert service.notify_failure(sent, now=NOON) == "suppressed"
+    assert world.sent.calls == [] and world.scheduler.jobs == []
+    assert not _pending(world, held) and not _pending(world, sent)
+
+
+def test_an_unsubscribed_owner_is_never_pushed(world: _World) -> None:
+    _configure(world.path, quiet=True, subscribed=False)
+    run_id = _failed_nightly()
+    world.now = NOON
+    assert service.notify_failure(run_id) == "unsubscribed"
+    assert world.sent.calls == [] and not _pending(world, run_id)
+
+
+def test_a_held_push_is_dropped_when_the_owner_unsubscribes_meanwhile(world: _World) -> None:
+    run_id = _failed_nightly()
+    _configure(world.path, quiet=True, subscribed=False)
+    world.now = MORNING
+    assert service.send_pending_notifications() == 0
+    assert world.sent.calls == [] and not _pending(world, run_id)
+
+
+def test_only_a_failed_automatic_run_is_pushed(world: _World) -> None:
+    world.now = NOON
+    stub.PLAN.append("fail")
+    service.start_run(scope="full", reason="button", started_by="user:owner")
+    assert world.sent.calls == []  # a person started it and sees the failure
+    service.start_automatic(scope="nightly", reason="nightly")  # it publishes
+    assert world.sent.calls == []
+    _failed_nightly()
+    assert len(world.sent.calls) == 1
