@@ -275,17 +275,55 @@ def pending_positions(book: Book) -> list[PendingPosition]:
     return out
 
 
+def unconfirmed_at(day: date, price_dates: Mapping[str, date | None],
+                   keys: Mapping[date, Sequence[str]],
+                   carried: Sequence[PriceDate] = ()) -> list[PriceDate]:
+    """The closes at *day* no ``ok`` quote run confirmed (§9.1, §11.2
+    ``notes.unconfirmed_closes``), in symbol order.
+
+    *keys* is ``RunRequest.unconfirmed_closes``: each day ``k`` a quote fire was settled by the
+    4-day rule, with the held symbols its run failed (``held_failed``). ``k`` is the fire's
+    local date in its job's timezone — a ``quotes_us`` fire judges New York's session ``k``, a
+    ``quotes_tw`` fire Taipei's — so it is a TRADING day and need not be a period end: a
+    Saturday month end D is settled on Friday's close. **Rule:** a held symbol ``s`` is
+    unconfirmed at D when some key ``k`` with ``k ≤ D`` lists ``s`` and the price D is valued at
+    is dated on or before ``k`` — that price is not newer than the close the failed run should
+    have brought. A later confirmed close (dated after ``k``) clears it; a missing price is
+    already ``missing_prices``.
+
+    *carried* are the marks the previous generation stored for this close: a request covers
+    only the fires its window examines (``job_runs`` may have been pruned since), so a mark
+    stays while the close is still valued at the SAME price date — a recompute (a full run, the
+    weekly self-check) never drops one the window no longer sees.
+    """
+    found: dict[str, date] = {}
+    for k, symbols in keys.items():
+        if k > day:
+            continue
+        for s in symbols:
+            on = price_dates.get(s)
+            if on is not None and on <= k and s not in found:
+                found[s] = on
+    for mark in carried:
+        if mark.symbol in found or mark.price_date is None:
+            continue
+        if price_dates.get(mark.symbol) == mark.price_date:
+            found[mark.symbol] = mark.price_date
+    return [PriceDate(symbol=s, price_date=found[s]) for s in sorted(found)]
+
+
 def kpi_at(day: date, *, book: Book, ledger: CloseLedger, conn_source: OnOrBefore,
            reporting: Currency, options_value_excluded: bool,
-           unconfirmed: Sequence[str] = ()) -> CloseKpi:
+           unconfirmed: Mapping[date, Sequence[str]] | None = None,
+           carried: Sequence[PriceDate] = ()) -> CloseKpi:
     """The KPI block of the close ending on *day* (§11.2) — since inception, as at *day*.
 
     *book* is the dashboard-path replay of ``ledger.bundle.valued_as_of(day)`` (the run's
     ``iter_books`` yields it); *conn_source* the :class:`OnOrBefore` source of *day*, built on
     the run's ONE :class:`~portfolio_dash.pricing.store.FxSeriesCache`;
     *options_value_excluded* the OR of the settled days' ``options_open`` over
-    ``(previous end, day]``; *unconfirmed* the held symbols whose close for *day* no ``ok``
-    quote run confirmed (``RunRequest.unconfirmed_closes``).
+    ``(previous end, day]``; *unconfirmed* ``RunRequest.unconfirmed_closes`` and *carried* the
+    previous generation's marks for this close (:func:`unconfirmed_at`).
 
     KPI 總市值 is read exactly as the dashboard reads it: the stock grand subtotal plus the
     選擇權 block's own market value (``KpiBlock.market_value_with``). Every FX list is sorted
@@ -299,13 +337,9 @@ def kpi_at(day: date, *, book: Book, ledger: CloseLedger, conn_source: OnOrBefor
     options = options_block_of(block, conn_source,
                                trend_excludes_value=options_value_excluded)
     reads = sorted(block.fx_reads.items(), key=lambda kv: (kv[0][0].value, kv[0][1].value))
-    unconfirmed_dates: list[PriceDate] = []
-    for symbol in unconfirmed:
-        read = block.price_reads.get(symbol)
-        if read is None and symbol not in block.price_reads:
-            read = conn_source.price(symbol)
-        unconfirmed_dates.append(PriceDate(symbol=symbol,
-                                           price_date=None if read is None else read.as_of))
+    unconfirmed_dates = unconfirmed_at(
+        day, {s: None if pr is None else pr.as_of for s, pr in block.price_reads.items()},
+        unconfirmed or {}, carried)
     past_expiry: list[str] = []
     for h in past_expiry_holdings(block.book.holdings, block.bundle.instruments, day):
         if h.symbol not in past_expiry:
@@ -384,12 +418,25 @@ def period_twr(index: TwrIndex, points: Mapping[date, TrendPoint], *, start_end:
     return index.values[end] / base - _ONE, None
 
 
+def kpi_incomplete(kpi: PeriodKpi) -> bool:
+    """The KPI block itself is incomplete: a figure is blank, a held price or a rate is
+    missing, or a position is 待釐清."""
+    n = kpi.notes
+    return (kpi.total_market_value is None or kpi.total_return is None
+            or bool(n.missing_prices or n.missing_fx or n.pending_positions))
+
+
 def with_trend(kpi: PeriodKpi, *, point: TrendPoint | None, twr: Decimal | None,
                twr_reason: str | None) -> PeriodKpi:
-    """The KPI block with the settled day D's trend figures and the period's TWR. A day with no
-    trend point (the series is unavailable there) carries none and is ``incomplete``."""
+    """The KPI block with the settled day D's trend figures and the period's TWR.
+
+    ``notes.incomplete`` is the settled day's own flag. A day with NO trend point (the series
+    is unavailable there, :data:`TREND_UNAVAILABLE_ZH`) carries no trend figure and says so in
+    ``notes.trend_unavailable``; its ``incomplete`` then states the KPIs' own completeness
+    (:func:`kpi_incomplete`) — a missing trend is not a missing price."""
     notes = kpi.notes.model_copy(update={
-        "incomplete": True if point is None else point.incomplete})
+        "incomplete": kpi_incomplete(kpi) if point is None else point.incomplete,
+        "trend_unavailable": TREND_UNAVAILABLE_ZH if point is None else None})
     return kpi.model_copy(update={
         "trend_total_value": None if point is None else point.total_value,
         "net_invested": None if point is None else point.net_invested,
@@ -417,20 +464,23 @@ def holdings_at(block: KpiBlock) -> list[PeriodHolding]:
     out: list[PeriodHolding] = []
     for h in block.valued:
         is_option = h.symbol in block.option_symbols
+        price: Decimal | None = h.market_price
         price_as_of: date | None = None
         if is_option:
+            # the 選擇權 block's rule (``options._open_row``): a 待釐清 contract has no price
             last = block.last_trades.get(h.symbol)
-            if h.market_price is not None and last is not None:
-                price_as_of = last.on
+            priced = last if not (h.oversold or h.unbookable_close) else None
+            price = None if priced is None else priced.price
+            price_as_of = None if priced is None else priced.on
         else:
+            # the holdings row's rule: the date of the price read, whatever the valuation did
             read = block.price_reads.get(h.symbol)
-            if h.market_price is not None and read is not None:
-                price_as_of = read.as_of
+            price_as_of = None if read is None else read.as_of
         out.append(PeriodHolding(
             account_id=h.account_id, symbol=h.symbol,
             asset_type=ASSET_OPTION if is_option else ASSET_STOCK, quote_ccy=h.quote_ccy,
             shares=h.shares, original_cost_total=h.original_cost_total,
-            adjusted_cost_total=h.adjusted_cost_total, price=h.market_price,
+            adjusted_cost_total=h.adjusted_cost_total, price=price,
             price_as_of=price_as_of, market_value=h.market_value,
             unrealized=h.unrealized_pnl,
             flags={f: True for f in _FLAG_FIELDS if getattr(h, f)}))
@@ -454,12 +504,24 @@ def cash_at(day: date, *, book: Book, ledger: CloseLedger, fx_cache: FxSeriesCac
                                   reporting_value=balance))
             continue
         read = rate_read(fx_cache, reporting, day, ccy)
+        if read is None:
+            # an empty pool is worth nothing in any currency and needs no rate (the cash
+            # series skips it the same way); a non-empty one has no reporting value
+            out.append(PeriodCash(account_id=account_id, ccy=ccy, balance=balance,
+                                  reporting_value=balance if balance == _ZERO else None))
+            continue
         out.append(PeriodCash(
             account_id=account_id, ccy=ccy, balance=balance,
-            reporting_value=None if read is None else convert(balance, read.rate),
-            fx_rate=None if read is None else read.rate,
-            fx_as_of=None if read is None else read.as_of))
+            reporting_value=convert(balance, read.rate), fx_rate=read.rate,
+            fx_as_of=read.as_of))
     return out
+
+
+def missing_cash_fx(cash: Sequence[PeriodCash], reporting: Currency) -> list[str]:
+    """The pairs of the cash pools at D with no rate to *reporting* (``reporting_value`` None),
+    sorted — ``notes.missing_cash_fx``."""
+    return sorted({f"{c.ccy.value}/{reporting.value}" for c in cash
+                   if c.reporting_value is None})
 
 
 # ---------------------------------------------------------------------------------------------
@@ -667,6 +729,8 @@ __all__ = [
     "fx_realized_rows",
     "holdings_at",
     "kpi_at",
+    "kpi_incomplete",
+    "missing_cash_fx",
     "own_date_rates",
     "pending_positions",
     "period_start",
@@ -674,5 +738,6 @@ __all__ = [
     "post_close_dividend_rows",
     "rate_read",
     "realized_rows",
+    "unconfirmed_at",
     "with_trend",
 ]

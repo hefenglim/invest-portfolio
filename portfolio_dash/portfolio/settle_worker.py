@@ -59,17 +59,32 @@ day — ``value_series`` over books from ONE ``iter_books`` pass, ``compose_net_
 the trend's pair set — v0.1.31 then shows no trend at all; PERF-F2 is the confirmed case): the
 days before U are valued over the ledger cut at U − 1 (every point there is what the truncated
 world shows); a day from U on has no value in any v0.1.31 view, so it is stored as a
-PLACEHOLDER — ``total_value = net_invested = 0``, ``incomplete``, ``net_worth`` and
-``cash_total`` NULL, ``cash_incomplete`` — and the closes from U on carry no trend figure and no
-當期報酬. The read path serves stored days only while the live series is available, and every
-write that can make it available marks the store dirty at or before U — except PERF-F2's own
-pair-set edge (a later row in a new quote currency), which the weekly self-check catches.
+PLACEHOLDER (``SettledDay.placeholder``: ``total_value = net_invested = 0``, ``incomplete``,
+``net_worth`` and ``cash_total`` NULL, ``cash_incomplete``) and the closes from U on carry no
+trend figure and no 當期報酬 (``notes.trend_unavailable``). A placeholder carries no figure:
+
+- **it never outlives the condition that made it** — a run that would start after the first
+  placeholder of the published generation starts at it instead (the change that makes the
+  series available may be dated after U: PERF-F2's pair-set edge, a later row in a new quote
+  currency, marks the store dirty only from its own date), and so values every placeholder day
+  again; the claim's range is widened accordingly (``settle_run.range_from``);
+- **it is never a figure in a report**: a day with a value on one side and a placeholder on
+  the other is ``value_to_none`` / ``none_to_value``, a placeholder on both is no change, and a
+  placeholder day is never counted as 「新結算」 / 「移除」;
+- the read path serves a placeholder day live whenever the live series is available
+  (``settlement_store.first_placeholder_day``).
+
+A run's first period (the first month and the first year it closes) starts at the ledger's
+first row, not at its calendar start: a deposit or a reconversion before the trend's first
+month is in that period's activity, so every year is the sum of its months and ties out with
+its own cash and with the tax package.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
 import os
 import sqlite3
 import time
@@ -116,6 +131,7 @@ from portfolio_dash.portfolio.settlement_models import (
     DayValue,
     DiffRow,
     HistoryResult,
+    PeriodCash,
     RunChanges,
     RunCurrent,
     RunFailure,
@@ -150,6 +166,8 @@ from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Account, Instrument
 from portfolio_dash.shared.models.ledger import LedgerBundle, valued_rows_as_of
 from portfolio_dash.shared.money import to_db
+
+logger = logging.getLogger(__name__)
 
 #: The progress file in the data folder (§9.5).
 PROGRESS_FILE = "settlement-progress.json"
@@ -434,10 +452,25 @@ class _Loaded:
     transactions: list[StoredTransaction]
     dividends: list[StoredDividend]
     first_day: date | None
+    #: The ledger's first row counting by the run's last day (any ledger: trades, dividends by
+    #: their effective date, openings, corporate actions, cash movements, FX conversions) —
+    #: where the first period's activity starts.
+    first_row: date | None = None
     price_history: PriceHistory = field(default_factory=dict)
     fx_history: FxHistory = field(default_factory=dict)
     prices_read: int = 0
     fx_rows_read: int = 0
+
+
+def _first_row(cut: LedgerBundle, movements: Sequence[StoredCashMovement],
+               conversions: Sequence[StoredFxConversion], through: date) -> date | None:
+    """The first day any ledger row of the run counts on (the first period's start)."""
+    days = ([t.trade_date for t in cut.transactions]
+            + [d.effective_date for d in cut.dividends]
+            + [o.build_date for o in cut.opening] + [a.date for a in cut.actions]
+            + [m.date for m in movements]
+            + [c.date for c in conversions if c.date <= through])
+    return min(days) if days else None
 
 
 def _histories(conn: sqlite3.Connection, cache: FxSeriesCache, cut: LedgerBundle,
@@ -535,12 +568,14 @@ def _bench_state(conn: sqlite3.Connection, cut: LedgerBundle, flows: Sequence[Re
 
 
 class _Failure(Exception):
-    """A phase failed: *reason* is the zh sentence the report shows."""
+    """A phase failed: *reason* is the zh sentence the report shows; *error_class* the class
+    of the exception behind it, when one is (a refused swap: ``SwapRefused``)."""
 
-    def __init__(self, phase: str, reason: str) -> None:
+    def __init__(self, phase: str, reason: str, *, error_class: str | None = None) -> None:
         super().__init__(reason)
         self.phase = phase
         self.reason = reason
+        self.error_class = error_class
 
 
 _DIFF_FIELDS: tuple[str, ...] = ("total_value", "net_invested", "net_worth")
@@ -565,18 +600,26 @@ def _diff_rows(run_id: int, old: dict[date, st.SettledDay], new: dict[date, st.S
     rows: list[DiffRow] = []
     for day in sorted(set(old) | set(new)):
         a, b = old.get(day), new.get(day)
+        # a placeholder is "no value": never a figure, never a settled (new / dropped) day
+        a_value = a is not None and not a.placeholder
+        b_value = b is not None and not b.placeholder
         if a is None and b is not None:
-            rows.append(DiffRow(run_id=run_id, day=day, field="total_value", kind="new_day",
-                                after=b.total_value, flags_after=_flags(b)))
+            if b_value:
+                rows.append(DiffRow(run_id=run_id, day=day, field="total_value",
+                                    kind="new_day", after=b.total_value, flags_after=_flags(b)))
             continue
         if b is None and a is not None:
-            rows.append(DiffRow(run_id=run_id, day=day, field="total_value",
-                                kind="dropped_day", before=a.total_value,
-                                flags_before=_flags(a)))
+            if a_value:
+                rows.append(DiffRow(run_id=run_id, day=day, field="total_value",
+                                    kind="dropped_day", before=a.total_value,
+                                    flags_before=_flags(a)))
             continue
         assert a is not None and b is not None
+        if not a_value and not b_value:
+            continue
         for name in _DIFF_FIELDS:
-            before, after = getattr(a, name), getattr(b, name)
+            before = getattr(a, name) if a_value else None
+            after = getattr(b, name) if b_value else None
             if _text(before) == _text(after):
                 continue
             kind = ("value_to_none" if after is None else "none_to_value" if before is None
@@ -584,7 +627,7 @@ def _diff_rows(run_id: int, old: dict[date, st.SettledDay], new: dict[date, st.S
             rows.append(DiffRow.model_validate({
                 "run_id": run_id, "day": day, "field": name, "kind": kind, "before": before,
                 "after": after, "flags_before": _flags(a), "flags_after": _flags(b)}))
-        if a.incomplete != b.incomplete:
+        if a_value and b_value and a.incomplete != b.incomplete:
             rows.append(DiffRow(run_id=run_id, day=day, field="incomplete", kind="flag_flip",
                                 before=Decimal(int(a.incomplete)),
                                 after=Decimal(int(b.incomplete)),
@@ -643,6 +686,9 @@ class _Run:
         self.claim: st.Claim | None = None
         self.lines: list[str] = []
         self.read: sqlite3.Connection | None = None
+        self.run_from: date | None = None
+        #: The swap committed: from here on nothing ends the run as failed.
+        self.swapped = False
 
     # ------------------------------------------------------------------------------------
     def execute(self) -> RunStatus:
@@ -655,13 +701,16 @@ class _Run:
                 stored = st.get_run(self.conn, self.run_id)
                 if stored is not None and stored.summary.status in st.END_STATUSES:
                     return stored.summary.status  # already ended (a cancel before the start)
-                return self._end_failed(None, f"無法開始結算（{exc}）")
+                # its text is English; the sentence is derived from the state
+                return self._end_failed(None, self._refusal_text(),
+                                        error_class=type(exc).__name__)
             current = "load"
             loaded = self._load()
             current = "check"
             review = self._check(loaded)
             current = "replay"
             plan = self._plan(loaded)
+            self.run_from = plan.run_from
             current = "valuate"
             series = self._valuate(loaded, review, plan)
             current = "close"
@@ -672,15 +721,27 @@ class _Run:
             current = "swap"
             return self._swap(loaded, review, series, closes, bench)
         except _Failure as exc:
-            return self._end_failed(exc.phase, exc.reason)
+            if self.swapped:  # pragma: no cover - _after_swap catches its own faults
+                return self._stored_status()
+            return self._end_failed(exc.phase, exc.reason, error_class=exc.error_class)
         except UnbookableLedgerError as exc:
-            return self._end_failed(current or None, str(exc))
+            if self.swapped:  # pragma: no cover - _after_swap catches its own faults
+                return self._stored_status()
+            return self._end_failed(current or None, str(exc),
+                                    error_class=type(exc).__name__)
         except Exception as exc:  # every other fault ends the run, named, never silently
+            if self.swapped:  # pragma: no cover - _after_swap catches its own faults
+                return self._stored_status()
             label = PHASE_LABELS.get(current, "開始結算")
             return self._end_failed(current or None,
-                                    f"{label}時發生錯誤（{type(exc).__name__}）")
+                                    f"{label}時發生錯誤（{type(exc).__name__}）",
+                                    error_class=type(exc).__name__)
         finally:
             self._release_snapshot()
+
+    def _stored_status(self) -> RunStatus:
+        stored = st.get_run(self.conn, self.run_id)
+        return "published" if stored is None else stored.summary.status
 
     def _release_snapshot(self) -> None:
         """End the read transaction (the closes and the benchmark state are done)."""
@@ -725,6 +786,20 @@ class _Run:
         self.tracker.write(force=True)
         self.tracker.save()
 
+    def _refusal_text(self) -> str:
+        """Why the claim was refused, in a zh sentence read off the state (the store's
+        ``ClaimRefused`` text is English, and it reaches ``job_runs.detail``, DEF-073)."""
+        state = st.store_state(self.conn, reporting=self.reporting)
+        if state.run_id is not None and state.run_id != self.run_id:
+            return f"另一次重新結算（#{state.run_id}）仍在進行，本次未執行"
+        report = st.get_run(self.conn, self.run_id)
+        if report is None:
+            return "找不到這次重新結算的報告，本次未執行"
+        if report.summary.status != "preparing":
+            return (f"這次重新結算的狀態已是「{report.summary.status_text}」，"
+                    "不在準備中，本次未執行")
+        return "結算資料表尚未建立完成，本次未執行"
+
     def _consequence(self, state: st.StoreState, changes: RunChanges) -> str:
         """What stays if this run does not publish (§9.5 ``on_cancel``), from the state."""
         if state.generation == 0 or state.settled_through is None:
@@ -761,6 +836,7 @@ class _Run:
             movements=valued_rows_as_of(movements_all, through),
             conversions=list_fx_conversions(read), transactions=transactions,
             dividends=dividends, first_day=trend_start(cut))
+        loaded.first_row = _first_row(cut, loaded.movements, loaded.conversions, through)
         if loaded.first_day is not None and loaded.first_day <= through:
             (loaded.price_history, loaded.fx_history, loaded.prices_read,
              loaded.fx_rows_read) = _histories(read, loaded.cache, cut, loaded.first_day,
@@ -793,8 +869,8 @@ class _Run:
         claim = self.claim
         first = loaded.first_day
         through = claim.run_through
-        start = claim.run_from
-        plan = _Plan()
+        start = self._widen_to_placeholders(claim)
+        plan = _Plan(run_from=start)
         if first is not None and start is not None:
             plan.value_start = max(start, first)
         if plan.value_start is not None and plan.value_start <= through and first is not None:
@@ -809,6 +885,30 @@ class _Run:
                            "逐日估值時一次重播", done=events, total=events)
         return plan
 
+    def _widen_to_placeholders(self, claim: st.Claim) -> date | None:
+        """The run's first day: the claim's, or the published generation's first PLACEHOLDER
+        day when that is earlier (see the module docstring) — the run then values every
+        placeholder day again, and its range (``settle_run.range_from`` / ``days``, the
+        report's ``range``) says so."""
+        start = claim.run_from
+        if start is None or claim.generation == 0 or claim.scope == "selfcheck":
+            return start
+        first_placeholder = st.first_placeholder_day(self.conn, claim.generation)
+        if first_placeholder is None or first_placeholder >= start:
+            return start
+        days = max((claim.run_through - first_placeholder).days + 1, 0)
+        kept = len(st.read_days(self.conn, claim.generation,
+                                end=first_placeholder - _ONE_DAY))
+        st.update_run(self.conn, self.run_id, range_from=first_placeholder, days=days)
+        t = self.tracker
+        rng = t.progress.range.model_copy(update={
+            "from_": first_placeholder, "days": days, "kept_before": kept})
+        t.progress = t.progress.model_copy(update={"range": rng})
+        t.report = t.report.model_copy(update={"range": rng})
+        self.lines.append(f"前一版自 {first_placeholder.isoformat()} 起沒有走勢資料："
+                          "本次自該日起一併重新估值")
+        return first_placeholder
+
     # ------------------------------------------------------------------------------------
     def _valuate(self, loaded: _Loaded, review: LedgerReview, plan: _Plan) -> _Series:
         t = self.tracker
@@ -817,8 +917,8 @@ class _Run:
         through = claim.run_through
         new_gen = claim.generation + 1
         series = _Series()
-        if claim.generation > 0 and claim.run_from is not None:
-            st.copy_before(self.conn, claim.generation, new_gen, claim.run_from)
+        if claim.generation > 0 and plan.run_from is not None:
+            st.copy_before(self.conn, claim.generation, new_gen, plan.run_from)
         start = plan.value_start
         days_total = 0 if start is None or start > through else (through - start).days + 1
         t.start("valuate", total=days_total, unit="天")
@@ -974,9 +1074,13 @@ class _Run:
         rates = pc.own_date_rates(loaded.cache, self.reporting)
         first = loaded.first_day
         assert first is not None
-        first_month = date(first.year, first.month, 1)
+        first_row = loaded.first_row if loaded.first_row is not None else first
         closes: list[_Close] = []
         kpi_cache: dict[date, pc.CloseKpi] = {}
+        cash_cache: dict[date, list[PeriodCash]] = {}
+        previous = ({(p.kind, p.period): p for p in st.read_periods(
+            self.conn, claim.generation, start=plan.periods[0][2], end=plan.periods[-1][2])}
+            if claim.generation > 0 else {})
         for n, (kind, period, end) in enumerate(plan.periods, start=1):
             book = series.month_end_books[end]
             prev = _prev_end(kind, end)
@@ -985,27 +1089,35 @@ class _Run:
             excluded = any(options_open.get(lo + timedelta(days=i), False)
                            for i in range((end - lo).days + 1))
             if end not in kpi_cache:
+                before = previous.get(("M", f"{end:%Y-%m}"))
                 kpi_cache[end] = pc.kpi_at(
                     end, book=book, ledger=ledger,
                     conn_source=OnOrBefore(loaded.read, end, fx_cache=loaded.cache),
                     reporting=self.reporting, options_value_excluded=excluded,
-                    unconfirmed=self.request.unconfirmed_closes.get(end, []))
+                    unconfirmed=self.request.unconfirmed_closes,
+                    carried=() if before is None else before.kpi.notes.unconfirmed_closes)
+                cash_cache[end] = pc.cash_at(end, book=book, ledger=ledger,
+                                             fx_cache=loaded.cache, reporting=self.reporting)
             ck = kpi_cache[end]
-            kpi = ck.kpi.model_copy(update={"notes": ck.kpi.notes.model_copy(
-                update={"options_value_excluded": excluded})})
+            cash = cash_cache[end]
+            kpi = ck.kpi.model_copy(update={"notes": ck.kpi.notes.model_copy(update={
+                "options_value_excluded": excluded,
+                "missing_cash_fx": pc.missing_cash_fx(cash, self.reporting)})})
             twr, why = pc.period_twr(index, points, start_end=start_end, end=end)
             kpi = pc.with_trend(kpi, point=series.points.get(end), twr=twr, twr_reason=why)
-            # A period starts on its first calendar day, never before the month of the series'
-            # first day: the first year is then exactly the sum of its months (spec §18).
-            act = pc.activity(start=max(pc.period_start(kind, end), first_month), end=end,
-                              book=book, ledger=ledger, reporting=self.reporting,
-                              rate_at=rates)
+            # A period starts on its first calendar day — the FIRST month and the FIRST year
+            # at the ledger's first row instead, so a row before the trend's first month is in
+            # their activity: every year is the sum of its months and ties out with its cash.
+            begin = pc.period_start(kind, end)
+            if (end.year, end.month if kind == "M" else 0) == (
+                    first.year, first.month if kind == "M" else 0):
+                begin = min(begin, first_row)
+            act = pc.activity(start=begin, end=end, book=book, ledger=ledger,
+                              reporting=self.reporting, rate_at=rates)
             closes.append(_Close(
                 period=st.SettledPeriod(kind=kind, period=period, end_day=end, kpi=kpi,
                                         activity=act),
-                holdings=pc.holdings_at(ck.block),
-                cash=pc.cash_at(end, book=book, ledger=ledger, fx_cache=loaded.cache,
-                                reporting=self.reporting)))
+                holdings=pc.holdings_at(ck.block), cash=cash))
             t.tick("close", n)
         st.write_periods(self.conn, new_gen, [c.period for c in closes])
         for c in closes:
@@ -1047,7 +1159,7 @@ class _Run:
         state = st.store_state(self.conn, reporting=self.reporting,
                                expected_calc_version=self.calc)
         same_ccy = state.reporting_ccy == self.reporting
-        lo = claim.run_from
+        lo = self.run_from
         hi = claim.run_through
         history = HistoryResult()
         restatement_ids: list[int] = []
@@ -1077,10 +1189,6 @@ class _Run:
                 restatement_ids = st.write_restatements(self.conn, self.run_id, drafts)
             if claim.scope == "selfcheck" and old_gen > 0:
                 selfcheck = self._selfcheck(old_gen, new_gen, lo, hi)
-        if history.new_days:
-            self.lines.append(f"新結算 {history.new_days} 天")
-        if history.dropped_days:
-            self.lines.append(f"移除 {history.dropped_days} 天")
         if loaded.first_day is None:
             self.lines.append("帳本尚無資料，無需結算")
         report = t.report.model_copy(update={
@@ -1096,12 +1204,28 @@ class _Run:
                              reporting=self.reporting)
         except st.SwapRefused as exc:
             if exc.reason == "incomplete":
-                raise _Failure("swap", "切換前的完整性檢查未通過（新版本的逐日或月結列數不符）"
-                               ) from exc
-            raise _Failure("swap", f"無法切換版本（{exc.reason}）") from exc
+                raise _Failure("swap", "切換前的完整性檢查未通過（新版本的逐日或月結列數不符）",
+                               error_class=type(exc).__name__) from exc
+            raise _Failure("swap", f"無法切換版本（{exc.reason}）",
+                           error_class=type(exc).__name__) from exc
+        self.swapped = True
+        try:
+            return self._after_swap(result, review)
+        except Exception as exc:  # the swap committed: the run published, whatever follows
+            return self._after_swap_failed(result, exc)
+
+    def _after_swap(self, result: st.SwapResult, review: LedgerReview) -> RunStatus:
+        """The report of a run whose swap committed: its lines from the PUBLISHED result (the
+        swap trims a partial publish's history), its state, then ``finalise_run``."""
+        t = self.tracker
         stored = st.get_run(self.conn, self.run_id)
         assert stored is not None
         lines = list(self.lines)
+        history = stored.history if result.status != "superseded" else None
+        if history is not None and history.new_days:
+            lines.append(f"新結算 {history.new_days} 天")
+        if history is not None and history.dropped_days:
+            lines.append(f"移除 {history.dropped_days} 天")
         if result.status == "partial" and result.handed_from is not None:
             lines.append(f"結算期間有新的變更：已發布至 "
                          f"{(result.handed_from - _ONE_DAY).isoformat()}，"
@@ -1131,6 +1255,24 @@ class _Run:
                                                       for p in t.progress.phases]})
         status = st.finalise_run(self.conn, self.run_id, result.status, t.report)
         self._final_progress(status)
+        return status
+
+    def _after_swap_failed(self, result: st.SwapResult, exc: Exception) -> RunStatus:
+        """A fault after the swap committed: the generation is published (or the run already
+        superseded) — the report says so with the fault noted, and nothing is raised."""
+        status: RunStatus = result.status
+        note = f"版本已切換，整理報告時發生錯誤（{type(exc).__name__}）"
+        try:
+            stored = st.get_run(self.conn, self.run_id) or self.tracker.report
+            report = stored.model_copy(update={
+                "summary_lines": [*self.lines, note],
+                "steps": [p.model_copy() for p in self.tracker.progress.phases],
+                "summary": self._final_summary(stored)})
+            status = st.finalise_run(self.conn, self.run_id, result.status, report)
+        except Exception:  # noqa: BLE001 — the published state stands; the record is best-effort
+            logger.exception("settlement run %s: the report after the swap", self.run_id)
+        with contextlib.suppress(Exception):
+            self._final_progress(status)
         return status
 
     @staticmethod
@@ -1186,7 +1328,10 @@ class _Run:
             if snapshots is None:
                 snapshots = st.cutover_snapshots(self.conn, self.reporting)
             snap = snapshots.get(new.period)
-            if snap is None:
+            # only a MONTH-END freeze: the nightly job rewrote the current month every
+            # evening, so a row last written before the month's last day (the go-live month)
+            # was never that month's close and restates nothing
+            if snap is None or snap.as_of is None or snap.as_of.date() != new.end_day:
                 continue
             k = new.kpi
             pairs: list[tuple[str, str, str, Decimal | None, Decimal | None]] = [
@@ -1242,7 +1387,8 @@ class _Run:
             first_table=None if first is None else first[1])
 
     # ------------------------------------------------------------------------------------
-    def _end_failed(self, phase: str | None, reason: str) -> RunStatus:
+    def _end_failed(self, phase: str | None, reason: str, *,
+                    error_class: str | None = None) -> RunStatus:
         """Every failure: the end transaction of §9.4 through ``finalise_run`` (put back,
         ``dirty_from`` restored, the generation above the published one deleted), the report
         naming the phase, the reason and the consequence derived from the state."""
@@ -1255,7 +1401,8 @@ class _Run:
         st.discard_run_results(self.conn, self.run_id)
         report = t.report.model_copy(update={"history": None, "restatement_ids": []})
         failure = RunFailure(phase=PHASE_LABELS.get(phase, phase) if phase else None,
-                             reason_text=reason, consequence=consequence)
+                             reason_text=reason, consequence=consequence,
+                             error_class=error_class)
         lines = [*self.lines, "本次未生效，已退回待結算"]
         report = report.model_copy(update={
             "failure": failure, "summary_lines": lines,
@@ -1287,6 +1434,8 @@ class _Run:
 class _Plan:
     """The days the run values and the periods it closes."""
 
+    #: The run's first day (the claim's, widened to the first placeholder).
+    run_from: date | None = None
     value_start: date | None = None
     days: list[date] = field(default_factory=list)
     periods: list[tuple[Literal["M", "Y"], str, date]] = field(default_factory=list)

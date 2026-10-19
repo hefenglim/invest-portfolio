@@ -417,6 +417,10 @@ class RunFailure(_Model):
     reason_text: str
     cancelled_by: str | None = None
     consequence: str | None = None
+    #: (W2-D, optional) The class of the exception that ended the run (``ValueError``,
+    #: ``UnbookableLedgerError``, ``SwapRefused`` …) — ``job_runs.reason`` 「failed:<class>」
+    #: (spec §9.4) for a run the worker ended itself; ``None`` when no exception ended it.
+    error_class: str | None = None
 
 
 class SelfcheckResult(_Model):
@@ -622,6 +626,12 @@ class PeriodNotes(_Model):
     options_past_expiry: list[str] = Field(default_factory=list)
     #: Computed when the close is READ, never stored; ``None`` on a stale row (§11.2).
     dividends_receivable: list[ReceivableDividend] | None = None
+    #: (W2-D, optional) Why the close carries no trend figure (證券市值, 淨投入, 淨資產, 當期報酬):
+    #: the series is unavailable on D. Not an ``incomplete`` KPI — the KPIs may be complete.
+    trend_unavailable: str | None = None
+    #: (W2-D, optional) Cash pools at D with no rate to the reporting currency (pair, e.g.
+    #: ``MYR/TWD``): their ``reporting_value`` is ``None``.
+    missing_cash_fx: list[str] = Field(default_factory=list)
 
 
 class PeriodKpi(_Model):

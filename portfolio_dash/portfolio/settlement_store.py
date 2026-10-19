@@ -1877,6 +1877,17 @@ class SettledDay:
     incomplete: bool
     options_open: bool
 
+    @property
+    def placeholder(self) -> bool:
+        """(W2-D) A day the settlement could not value: the trend is unavailable from it on (a
+        flow without an on-or-before rate in the trend's pair set — v0.1.31 shows no trend at
+        all then). Written as ``total_value = net_invested = 0``, ``incomplete``,
+        ``cash_incomplete`` and ``net_worth`` / ``cash_total`` NULL — the only rows with a NULL
+        ``cash_total`` (a valued day always stores its cash, 0 without any). It carries no
+        figure: a reader serves the day live, a run values it again
+        (:func:`first_placeholder_day`)."""
+        return self.cash_total is None
+
 
 @dataclass(frozen=True)
 class SettledPeriod:
@@ -2570,6 +2581,8 @@ class SnapshotRow:
     """One ``portfolio_snapshots`` row (the retired 23:50 freeze), as stored."""
 
     month: str
+    #: When the nightly job last wrote the row (its own clock, an aware ISO time).
+    as_of: datetime | None
     reporting_ccy: str
     total_value: Decimal | None
     total_return: Decimal | None
@@ -2590,14 +2603,27 @@ def cutover_snapshots(conn: sqlite3.Connection, reporting: Currency) -> dict[str
     out: dict[str, SnapshotRow] = {}
     for r in conn.execute(
             "SELECT month, reporting_ccy, total_value, total_return, total_return_rate, xirr, "
-            "by_currency FROM portfolio_snapshots WHERE reporting_ccy = ? ORDER BY month",
+            "by_currency, as_of FROM portfolio_snapshots WHERE reporting_ccy = ? ORDER BY month",
             (reporting.value,)):
         by_ccy = json.loads(r[6] or "{}")
+        try:
+            as_of = None if r[7] is None else datetime.fromisoformat(str(r[7]))
+        except ValueError:
+            as_of = None
         out[str(r[0])] = SnapshotRow(
-            month=str(r[0]), reporting_ccy=str(r[1]), total_value=_dec(r[2]),
+            month=str(r[0]), as_of=as_of, reporting_ccy=str(r[1]), total_value=_dec(r[2]),
             total_return=_dec(r[3]), total_return_rate=_dec(r[4]), xirr=_dec(r[5]),
             by_currency={str(k): from_db(str(v)) for k, v in by_ccy.items()})
     return out
+
+
+def first_placeholder_day(conn: sqlite3.Connection, generation: int) -> date | None:
+    """The first day *generation* stores as a placeholder (:attr:`SettledDay.placeholder`), or
+    ``None``. A run that starts after it values again from it (a placeholder never outlives the
+    condition that made it); a reader whose live series is available serves it live."""
+    row = conn.execute("SELECT MIN(day) FROM settled_day WHERE generation = ? "
+                       "AND cash_total IS NULL", (generation,)).fetchone()
+    return _day(row[0]) if row is not None else None
 
 
 def generation_rows(conn: sqlite3.Connection, generation: int, *, start: date,
@@ -2638,6 +2664,7 @@ __all__ = [
     "claimed_attempts",
     "cutover_snapshots",
     "discard_run_results",
+    "first_placeholder_day",
     "earliest_claimed_change",
     "generation_rows",
     "last_successful_run",

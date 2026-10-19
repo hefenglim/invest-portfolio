@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import zipfile
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
@@ -23,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from portfolio_dash.export.tax import build_tax_package_zip
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.settlement_models import PeriodActivity
 from portfolio_dash.shared.enums import Currency
@@ -323,6 +325,49 @@ def test_an_unconfirmed_close_carries_its_symbol_and_price_date(corpus_db: Corpu
     assert note.price_date <= friday
 
 
+def test_a_weekend_month_end_carries_fridays_unconfirmed_close(corpus_db: CorpusFactory
+                                                              ) -> None:
+    """``RunRequest.unconfirmed_closes`` is keyed by the quote FIRE's trading day, not by the
+    close: a Saturday month end (rich, 2026-01-31) is valued at Friday's 2330 close, so
+    Friday's partial run marks it (spec §9.1 「never passes unmarked」). A key whose session the
+    valued price is newer than does not (a later close was confirmed)."""
+    db = corpus_db("rich")
+    prepare(db)
+    saturday, friday = date(2026, 1, 31), date(2026, 1, 30)
+    assert start_run(db, 1, unconfirmed={friday: ["2330"], date(2026, 1, 29): ["AAPL"],
+                                         date(2026, 2, 2): ["XYZ"]}) == "published"
+    closes = {c.period: c for c in _closes(db)[1] if c.kind == "M"}
+    january = closes["2026-01"]
+    assert january.end_day == saturday
+    assert [(n.symbol, n.price_date) for n in january.kpi.notes.unconfirmed_closes] == [
+        ("2330", friday)]  # AAPL's price is dated 01-30, after its 01-29 key; XYZ's key > D
+    assert not closes["2026-02"].kpi.notes.unconfirmed_closes  # newer closes since
+
+
+def test_a_recompute_keeps_the_marks_its_request_no_longer_sees(corpus_db: CorpusFactory
+                                                               ) -> None:
+    """E builds the request from the ``job_runs`` its window still holds. A full run or the
+    weekly self-check whose request lacks an old key keeps the previous generation's mark while
+    the close is valued at the same price date — no spurious self-check difference, no mark
+    dropped."""
+    db = corpus_db("rich")
+    prepare(db)
+    friday = date(2026, 1, 30)
+    assert start_run(db, 1, unconfirmed={friday: ["2330"]}) == "published"
+    assert start_run(db, 2, scope="selfcheck", reason="selfcheck") == "published"
+    conn = open_db(db.path)
+    try:
+        report = st.get_run(conn, 2)
+        assert report is not None and report.selfcheck is not None
+        assert report.selfcheck.differences == 0
+    finally:
+        conn.close()
+    assert start_run(db, 3) == "published"  # a full run, no unconfirmed closes requested
+    january = next(c for c in _closes(db)[1] if c.period == "2026-01" and c.kind == "M")
+    assert [(n.symbol, n.price_date) for n in january.kpi.notes.unconfirmed_closes] == [
+        ("2330", friday)]
+
+
 def test_a_dividend_between_its_ex_date_and_its_payment_is_not_activity_yet(
         corpus_db: CorpusFactory) -> None:
     db = corpus_db("golden")
@@ -335,6 +380,55 @@ def test_a_dividend_between_its_ex_date_and_its_payment_is_not_activity_yet(
     assert april.kpi.notes.dividends_receivable is None  # computed when the close is read
     may = closes["2026-05"]
     assert any(d.net and d.net.native == Decimal("3000") for d in may.activity.dividends)
+
+
+# ---------------------------------------------------------------------------------------------
+# the first period starts at the ledger's first row
+# ---------------------------------------------------------------------------------------------
+
+
+def test_rows_before_the_first_month_are_in_the_first_period(corpus_db: CorpusFactory) -> None:
+    """``rich``'s trend starts 2025-10-01. A TWD deposit on 2025-03-03 and a TWD → USD → TWD
+    round trip in April / May (a realized-FX row before the first trade) are in the first
+    month's and the first year's activity, so the year is still the sum of its months, its
+    deposits are the cash it holds, and it ties out with the tax package built for 2025."""
+    db = corpus_db("rich")
+    _x(db, "INSERT INTO cash_movements (account_id, date, kind, ccy, amount, note) "
+           "VALUES ('tw_broker', '2025-03-03', 'DEPOSIT', 'TWD', '777777', 'probe')")
+    _x(db, "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy, "
+           "to_amount) VALUES ('schwab', '2025-04-01', 'TWD', '31000', 'USD', '1000')")
+    _x(db, "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy, "
+           "to_amount) VALUES ('schwab', '2025-05-02', 'USD', '500', 'TWD', '16000')")
+    closes = _settled(db)
+    year = next(c for c in closes if c.kind == "Y" and c.period == "2025")
+    months = [c for c in closes if c.kind == "M" and c.end_day.year == 2025]
+    assert months[0].period == "2025-10"
+    assert _flow_lines(year.activity) == _sum_months(months)
+    deposits = {(m.account_id, m.amount.ccy.value): m for m in months[0].activity.cash_movements
+                if m.kind == "DEPOSIT"}
+    assert deposits[("tw_broker", "TWD")].amount.native >= Decimal("777777")
+    fx = {(x.account_id, x.realized.ccy.value): x.realized.native
+          for x in year.activity.fx_realized}
+    assert fx[("schwab", "TWD")] == Decimal("16000") - Decimal("500") * Decimal("31")
+    # the tax package built for 2025 ties out sheet by sheet
+    conn = open_db(db.path)
+    try:
+        art = build_tax_package_zip(conn, now=db.now, year=2025, reporting=db.reporting)
+    finally:
+        conn.close()
+    with zipfile.ZipFile(io.BytesIO(art.content)) as zf:
+        sheets = {info.filename: zf.read(info).decode("utf-8-sig") for info in zf.infolist()}
+    fx_sheet: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+    for row in csv.DictReader(io.StringIO(sheets["fx_realized_2025.csv"])):
+        fx_sheet[(row["account_id"], row["home_ccy"])] += Decimal(row["realized"])
+    assert fx == dict(fx_sheet)
+    realized: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+    for row in csv.DictReader(io.StringIO(sheets["realized_gains_2025.csv"])):
+        realized[(row["quote_ccy"], row.get("asset_type") or "stock")] += Decimal(
+            row["realized_adjusted"])
+    mine = {(k[3].value, k[2]): v for k, v in _flow_lines(year.activity).items()
+            if k[0] == "realized" and k[1] == "trade" and k[4] == "n"}
+    assert mine == dict(realized)
 
 
 # ---------------------------------------------------------------------------------------------

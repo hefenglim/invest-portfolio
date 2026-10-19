@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -168,6 +169,9 @@ def test_the_go_live_restates_a_retired_snapshot_once(demo: CorpusDB) -> None:
              "'TWD', '1', '2', '0.1', NULL, '{\"TWD\": \"1\"}')")
     _x(demo, "INSERT INTO portfolio_snapshots VALUES ('2026-04', '2026-04-30T23:50:00+08:00', "
              "'USD', '1', '2', '0.1', NULL, '{}')")
+    # the go-live month: the nightly job's row of 05-18 was never May's month-end freeze
+    _x(demo, "INSERT INTO portfolio_snapshots VALUES ('2026-05', '2026-05-18T23:50:00+08:00', "
+             "'TWD', '1', '2', '0.1', NULL, '{}')")
     assert start_run(demo, 1) == "published"
     conn = open_db(demo.path)
     try:
@@ -203,6 +207,7 @@ def test_a_failed_and_a_superseded_report_say_what_happened(demo: CorpusDB,
     r = _report(demo, 2)
     assert r.failure is not None and r.failure.phase == "月結與年結"
     assert r.failure.reason_text == "月結與年結時發生錯誤（ValueError）"
+    assert r.failure.error_class == "ValueError"  # job_runs.reason 「failed:ValueError」
     assert r.failure.consequence == "保留第 1 版（結算至 2026-08-10），今天這段照常即時計算"
     steps = {s.key: s.status for s in r.steps}
     assert steps["valuate"] == "done" and steps["close"] == "failed"
@@ -237,3 +242,25 @@ def test_the_findings_of_the_tolerant_replay_are_listed_and_the_run_completes(
     assert r.state is not None and r.state.pending_positions
     check = next(s for s in r.steps if s.key == "check")
     assert "以待釐清處理" in (check.detail or "")
+
+
+def test_a_cash_pool_without_a_rate_is_named_in_the_notes(corpus_db: CorpusFactory) -> None:
+    """``golden`` stores no MYR rate: a MYR deposit makes a cash pool whose reporting value at
+    D is unknown — the close names the pair (MINOR 10)."""
+    db = corpus_db("golden")
+    _x(db, "INSERT INTO cash_movements (account_id, date, kind, ccy, amount) "
+           "VALUES ('moomoo_my', '2026-02-03', 'DEPOSIT', 'MYR', '1000')")
+    prepare(db)
+    assert start_run(db, 1) == "published"
+    conn = open_db(db.path)
+    try:
+        g = int(conn.execute("SELECT generation FROM settle_meta").fetchone()[0])
+        feb = st.read_period(conn, g, "M", "2026-02")
+        assert feb is not None and feb.kpi.notes.missing_cash_fx == ["MYR/TWD"]
+        jan = st.read_period(conn, g, "M", "2026-01")
+        assert jan is not None and jan.kpi.notes.missing_cash_fx == []
+        pool = [c for c in st.read_period_cash(conn, g, "M", "2026-02")
+                if c.account_id == "moomoo_my" and c.ccy.value == "MYR"]
+        assert [(c.balance, c.reporting_value) for c in pool] == [(Decimal("1000"), None)]
+    finally:
+        conn.close()

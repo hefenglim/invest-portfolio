@@ -154,6 +154,7 @@ def test_a_failure_in_any_phase_leaves_the_published_generation_whole(
     assert report.failure is not None
     assert report.failure.phase == PHASE_LABELS[phase]
     assert "RuntimeError" in report.failure.reason_text
+    assert report.failure.error_class == "RuntimeError"
     assert report.failure.consequence == (
         "保留第 1 版（結算至 2026-08-10）；這 1 筆交易變更回到待結算")
     assert "本次未生效，已退回待結算" in report.summary_lines
@@ -180,6 +181,7 @@ def test_a_refused_swap_fails_the_run_and_never_reads_done(demo: CorpusDB,
     assert start_run(demo, 2) == "failed"
     report = _report(demo, 2)
     assert report.failure is not None and "完整性檢查" in report.failure.reason_text
+    assert report.failure.error_class == "SwapRefused"
     assert report.summary.status_text != "完成"
     assert _state(demo).generation == 1
     # a generation nobody was shown leaves no history and no restatement behind
@@ -274,6 +276,7 @@ def test_a_change_before_the_start_supersedes_the_run(demo: CorpusDB,
     assert report.summary.status_text == "已併入下一輪"
     assert "本次未生效，已退回待結算" in report.summary_lines
     assert report.history is None and report.changes.handed_back
+    assert not any(line.startswith("新結算") for line in report.summary_lines)
     assert start_run(demo, 3, scope="dirty", reason="chained", previous=2) == "published"
     assert _published(demo) == _fresh(demo, tmp_path)
 
@@ -290,6 +293,11 @@ def test_a_partial_first_generation_and_its_chained_run(corpus_db: CorpusFactory
     state = _state(db)
     assert state.generation == 1 and state.settled_through == date(2026, 6, 1)
     assert state.held_through == date(2026, 6, 1)
+    first = _report(db, 1)
+    assert first.history is not None
+    # the lines are the PUBLISHED result's: the trimmed history, never the computed range
+    assert first.history.new_days == (date(2026, 6, 1) - first.range.from_).days + 1
+    assert f"新結算 {first.history.new_days} 天" in first.summary_lines
     assert start_run(db, 2, scope="dirty", reason="chained", previous=1) == "published"
     assert _published(db) == _fresh(db, tmp_path)
 
@@ -490,3 +498,54 @@ def test_a_price_counter_put_back_merges_with_the_one_written_during_the_run(
         assert counter.latest == date.fromisoformat(rows[1][0])
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# a fault after the swap committed ends nothing as failed (MINOR 6)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_fault_after_the_swap_leaves_the_run_published(demo: CorpusDB,
+                                                         monkeypatch: pytest.MonkeyPatch
+                                                         ) -> None:
+    _backdated_buy(demo, date(2026, 3, 4))
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("after the swap")
+
+    monkeypatch.setattr(st, "stale_range", boom)
+    assert start_run(demo, 2, scope="dirty", reason="prompt") == "published"  # never raises
+    monkeypatch.undo()
+    state = _state(demo)
+    assert state.generation == 2 and state.dirty_from is None
+    report = _report(demo, 2)
+    assert report.summary.status == "published" and report.summary.finished_at is not None
+    assert report.failure is None
+    assert "版本已切換，整理報告時發生錯誤（RuntimeError）" in report.summary_lines
+    conn = open_db(demo.path)
+    try:
+        assert st.restatements_of_run(conn, 2)  # the published run's results stay
+        trail = conn.execute("SELECT claimed_run_id, settled_run_id FROM settle_change_log"
+                             ).fetchall()
+        assert [tuple(r) for r in trail] == [(2, 2)]
+    finally:
+        conn.close()
+    import json
+
+    progress = json.loads((demo.path.parent / settle_worker.PROGRESS_FILE).read_bytes())
+    assert progress["status"] == "published"
+
+
+# ---------------------------------------------------------------------------------------------
+# a refused claim reads a zh sentence (MINOR 9, DEF-073)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_refused_claim_says_why_in_a_zh_sentence(demo: CorpusDB) -> None:
+    _x(demo, "UPDATE settle_meta SET run_id = 99")
+    assert start_run(demo, 2) == "failed"
+    report = _report(demo, 2)
+    assert report.failure is not None
+    assert report.failure.reason_text == "另一次重新結算（#99）仍在進行，本次未執行"
+    assert report.failure.error_class == "ClaimRefused"
+    assert _state(demo).run_id == 99  # the other run's state is not touched
