@@ -33,11 +33,11 @@ contains the first live day or overlaps the stale range; ``stale`` (更新前版
 ``settlement_service.final_through``, the same rule that caps the nightly run — it depends on
 the price data, never on the store).
 
-The 23:50 snapshot (``portfolio_snapshots``) is neither read nor served here any more: it stays
-in the database as the record of the old frozen values (and the old side of the go-live
-restatement, ``settlement_store.cutover_snapshots``). :func:`ensure_table`,
-:func:`write_snapshot` and :func:`snapshot_job` remain only for the boot DDL and the nightly
-runner ``api/app.py`` still registers; the main session retires that runner (plan W4).
+The 23:50 snapshot (``portfolio_snapshots``) is neither written, read nor served by the app any
+more (plan P11, W4: its nightly runner and its boot DDL are gone). An existing database keeps the
+table as the record of the old frozen values — the old side of the go-live restatement,
+``settlement_store.cutover_snapshots``, which reads it when present. :func:`ensure_table` and
+:func:`write_snapshot` stay as the table's one definition, for tests that build such a database.
 
 Orchestration only: every number comes from ``portfolio/`` (``period_close``,
 ``settlement_store``, ``dashboard``); this module selects, labels and serialises.
@@ -118,9 +118,9 @@ def ensure_table(conn: sqlite3.Connection) -> None:
 def write_snapshot(conn: sqlite3.Connection, *, now: datetime) -> str:
     """The retired 23:50 freeze: upsert the current month's dashboard KPIs.
 
-    Nothing reads these rows any more (``GET /api/snapshots`` serves the closes); the nightly
-    runner that calls this is retired by the main session at plan W4. Optional KPIs store
-    NULL — honest degradation, never fabricated. Returns a short run summary.
+    No app path calls this any more (its nightly runner left at plan W4) and nothing serves the
+    rows (``GET /api/snapshots`` serves the closes): it builds the legacy row for tests of the
+    go-live restatement. Optional KPIs store NULL. Returns a short run summary.
     """
     ensure_table(conn)
     reporting = get_settings().reporting_currency
@@ -152,11 +152,6 @@ def write_snapshot(conn: sqlite3.Connection, *, now: datetime) -> str:
     )
     conn.commit()
     return f"快照已寫入 {month}"
-
-
-def snapshot_job(conn: sqlite3.Connection, *, now: datetime) -> str:
-    """The retired nightly runner (``snapshot_monthly``) — removed from the registry at W4."""
-    return write_snapshot(conn, now=now)
 
 
 # =============================================================================================
@@ -626,7 +621,6 @@ __all__ = [
     "parse_period",
     "period_detail",
     "period_rows",
-    "snapshot_job",
     "snapshot_rows",
     "write_snapshot",
 ]

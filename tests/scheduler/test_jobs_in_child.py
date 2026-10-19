@@ -289,7 +289,7 @@ def test_bind_runtime_calls_every_register_seam_of_the_scheduler() -> None:
               if isinstance(n, ast.FunctionDef) and n.name == "bind_runtime")
     called = {c.func.attr for c in ast.walk(fn)
               if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
-    assert len(_SEAMS) >= 15, _SEAMS
+    assert len(_SEAMS) >= 14, _SEAMS  # 15 until W4 retired the snapshot runner's seam
     assert set(_SEAMS) - called == set()
     assert len(_SEAM_GLOBALS) == len(_SEAMS)  # one global per seam, found by the scan
 

@@ -36,7 +36,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from portfolio_dash.api import digest_service, signals_service, snapshots
+from portfolio_dash.api import digest_service, signals_service
 from portfolio_dash.api import dividend_inbox as inbox
 from portfolio_dash.pricing import ingest
 from portfolio_dash.pricing.defaults import default_registry
@@ -97,7 +97,7 @@ def test_the_detector_sees_the_reported_sentences() -> None:
 def db(golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
        ) -> Iterator[sqlite3.Connection]:
     for name in ("_DIVIDEND_SCAN_RUNNER", "_NEWS_RUNNER", "_DIGEST_RUNNER", "_INSIGHT_RUNNER",
-                 "_SNAPSHOT_RUNNER", "_SIGNAL_SCAN_RUNNER", "_FUNDAMENTALS_RUNNER",
+                 "_SIGNAL_SCAN_RUNNER", "_FUNDAMENTALS_RUNNER",
                  "_EVALUATION_RUNNER", "_CALIBRATION_RUNNER", "_ALERT_COMPUTE_RUNNER",
                  "_ALERT_HELD_FN", "_HELD_SYMBOLS_FN", "_SETTLEMENT_RUNNER",
                  "_AFTER_JOB_HOOK"):
@@ -142,7 +142,6 @@ def _stub_seams(monkeypatch: pytest.MonkeyPatch, *, failing: bool) -> None:
              else ingest.SnapshotSweep(written=2, empty=1))
     for fn in ("ingest_consensus", "ingest_fundamentals_union"):
         monkeypatch.setattr(jobs.ingest, fn, lambda conn, *, now, **kw: sweep)
-    monkeypatch.setattr(jobs, "_SNAPSHOT_RUNNER", snapshots.snapshot_job)
     monkeypatch.setattr(jobs, "_SIGNAL_SCAN_RUNNER", signals_service.scan_signals)
     monkeypatch.setattr(jobs, "_DIGEST_RUNNER", digest_service.run_digest)
     monkeypatch.setattr(jobs, "_DIVIDEND_SCAN_RUNNER", inbox.scan_job)
@@ -216,7 +215,7 @@ def test_every_job_writes_a_chinese_detail(
 
 def test_the_no_runner_branch_speaks_chinese_too(db: sqlite3.Connection) -> None:
     """A scheduler-only process (no runner registered) — 「no … runner registered」 before."""
-    for job_id in ("digest_daily", "digest_weekly", "snapshot_monthly", "signal_scan",
+    for job_id in ("digest_daily", "digest_weekly", "signal_scan",
                    "news_daily", "fundamentals_av_weekly", "evaluate_insights",
                    "generate_calibrations", "settlement_nightly", "settlement_selfcheck"):
         _, outcome = run_job_outcome(db, job_id, now=NOW)

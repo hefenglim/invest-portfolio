@@ -909,31 +909,6 @@ def register_dividend_scan_runner(fn: DividendScanRunner | None) -> None:
     _DIVIDEND_SCAN_RUNNER = fn
 
 
-# 月度快照 runner seam (R6 item 8) — the writer needs build_dashboard (portfolio
-# via the api service), registered at app startup like the other runners.
-SnapshotRunner = Callable[..., "str | JobOutcome"]
-_SNAPSHOT_RUNNER: SnapshotRunner | None = None
-
-
-def register_snapshot_runner(fn: SnapshotRunner | None) -> None:
-    """Register (or clear with None) the monthly-snapshot runner (app wiring seam)."""
-    global _SNAPSHOT_RUNNER
-    _SNAPSHOT_RUNNER = fn
-
-
-def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
-    """Daily: upsert the current month's KPI snapshot (month-rollover = final).
-
-    DEF-067 class scan: the runner's bare string stays ``ok`` — it writes the row or
-    raises; a KPI it cannot compute is stored NULL (honest degradation), and the price /
-    FX fetch that lost it is reported by its own quote job."""
-    runner = _SNAPSHOT_RUNNER
-    if runner is None:
-        return _no_runner("月度快照")
-    set_progress("snapshot_monthly", "寫入本月 KPI 快照")
-    return _outcome_of(runner(conn, now=now))
-
-
 # --- The settlement (PERF spec 2026-10-18 §9.1, plan P7 / P13) ----------------
 # ``scheduler/`` reaches the settlement ONLY through these two seams, bound by the app
 # (``api/settlement_service.py`` is L6; a direct import would point up the ladder and cycle
@@ -970,8 +945,8 @@ WEB_PROCESS_JOB_IDS: frozenset[str] = frozenset({"settlement_nightly", "settleme
 #: so their ``schedule_config`` rows stay, their ``job_runs`` history stays readable, and
 #: ``build_scheduler`` / the 排程 listing skip EXACTLY these ids — skipping "anything not in
 #: JOBS" would also drop the dynamic ``insight:<id>`` rows and stop every scheduled AI task.
-#: ``snapshot_monthly`` stays in :data:`JOBS` (and its runner seam stays registered) until the
-#: settlement's month closes replace it at W4.
+#: ``snapshot_monthly`` (the 23:50 月度快照) left :data:`JOBS` with its runner seam at W4: the
+#: settlement's month closes replace it; an existing database keeps its row and its history.
 RETIRED_JOB_IDS: frozenset[str] = frozenset({"snapshot_monthly"})
 
 
@@ -1642,12 +1617,6 @@ JOBS: list[JobSpec] = [
     JobSpec(
         "dividend_inbox_scan", dividend_inbox_scan, "30 15 * * mon-fri", "Asia/Taipei",
         True, "Dividend detection sweep + pending count (feeds 待確認匯入)",
-    ),
-    # 月度快照 (R6 item 8): nightly upsert of the current month's KPI row — the
-    # value standing at month rollover IS the month-end record.
-    JobSpec(
-        "snapshot_monthly", snapshot_monthly, "50 23 * * *", "Asia/Taipei", True,
-        "Monthly KPI snapshot (nightly upsert of the current month)",
     ),
     # External-snapshot ingest (spec 20.4).
     JobSpec(

@@ -18,8 +18,8 @@ Not here, because they are not seams a job reaches (they stay in the lifespan):
 ``settlement_service.bind_scheduler`` (the live scheduler, web process only) and
 ``settlement_service.start_after_boot`` (the boot run).
 
-``register_snapshot_runner`` is still bound: ``snapshot_monthly`` is retired (plan P11) but
-stays in ``JOBS`` until W4 removes it, and its seam with it.
+``snapshot_monthly`` and its runner seam are gone (plan P11, W4): the settlement's month
+closes replace the 23:50 月度快照.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from portfolio_dash.api import (
     news_service,
     settlement_service,
     signals_service,
-    snapshots,
 )
 from portfolio_dash.api.routers import actions
 from portfolio_dash.scheduler import jobs
@@ -60,8 +59,6 @@ def bind_runtime() -> None:
     jobs.register_calibration_runner(insight_service.generate_calibrations_for_all)
     # 待確認匯入 daily scan (R5): full scan (events + pending count) via the api seam.
     jobs.register_dividend_scan_runner(dividend_inbox.scan_job)
-    # 月度快照 (R6 item 8): retired by plan P11; the seam goes with the job at W4.
-    jobs.register_snapshot_runner(snapshots.snapshot_job)
     # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
     jobs.register_news_runner(news_service.run_news_daily)
     # Digests (P3 batch 3): daily close summary + weekly action list (assemble + store + push).

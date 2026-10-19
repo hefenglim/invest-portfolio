@@ -59,7 +59,6 @@ from portfolio_dash.api.routers import (
     whatsnew,
 )
 from portfolio_dash.api.settlement_service import on_boot as settlement_on_boot
-from portfolio_dash.api.snapshots import ensure_table as ensure_snapshots_table
 from portfolio_dash.api.static_cache import StaticCacheFiles
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -177,7 +176,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_dividend_inbox_tables(conn)  # pending_dividend_skips
         ensure_rebate_tables(conn)  # rebate_skips
         ensure_option_expiry_tables(conn)  # option_expiry_skips (options spec §7.2)
-        ensure_snapshots_table(conn)  # portfolio_snapshots (月度快照)
         action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
         # The settlement store (PERF spec 2026-10-18 §6, §7), after every table it borrows.
         # Order matters (plan W0.6): (1) every step above; (2) the settle DDL and the

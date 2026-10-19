@@ -98,6 +98,9 @@ def test_a_retired_job_is_not_mounted_but_an_insight_task_still_is(
 ) -> None:
     ensure_scheduler_seeded(conn)
     bind_insight_schedule(conn, 5, cron="0 9 * * *")
+    # a database from before W4 keeps the retired job's row (ensure_job_rows never deletes)
+    conn.execute("INSERT OR IGNORE INTO schedule_config (job_id, cron, timezone, enabled) "
+                 "VALUES ('snapshot_monthly', '50 23 * * *', 'Asia/Taipei', 1)")
     assert "snapshot_monthly" in {
         str(r[0]) for r in conn.execute("SELECT job_id FROM schedule_config")}
 
