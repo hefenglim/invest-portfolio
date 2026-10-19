@@ -72,6 +72,7 @@ from portfolio_dash.portfolio.settlement_models import (
     PHASE_LABELS,
     PHASES,
     SELFCHECK_DIFF_REASON,
+    SETTLE_TABLE_ZH,
     ChangeRecord,
     PendingChanges,
     RunChanges,
@@ -1027,21 +1028,13 @@ def _range_text(summary: RunSummary) -> str:
 
 #: The settle tables a self-check compares, in the owner's words (DEF-073: no table name in a
 #: ``job_runs.detail``).
-_SETTLE_TABLE_ZH: dict[str, str] = {
-    "settled_day": "逐日結算",
-    "settled_period": "月結與年結",
-    "settled_period_holding": "期末持倉",
-    "settled_period_cash": "期末現金",
-}
-
-
 def _selfcheck_where(report: RunReport) -> str:
     """「N 處，最早於 D（逐日結算）」 from the worker's ``selfcheck`` result, else the history."""
     check = report.selfcheck
     first = (check.first_day if check is not None and check.first_day is not None
              else report.history.first_changed_day if report.history is not None else None)
     count = f"{check.differences} 處，" if check is not None and check.differences else ""
-    table = (f"（{_SETTLE_TABLE_ZH.get(check.first_table, '結算資料')}）"
+    table = (f"（{SETTLE_TABLE_ZH.get(check.first_table, '結算資料')}）"
              if check is not None and check.first_table else "")
     at = f"最早於 {first.isoformat()}{table}" if first is not None else ""
     return f"{count}{at}" if count or at else ""

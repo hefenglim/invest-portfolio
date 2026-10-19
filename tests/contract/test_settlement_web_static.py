@@ -39,6 +39,12 @@ def test_the_change_vocabularies_mirror_python() -> None:
     assert _js_object("CHANGE_OP_ZH") == sm.CHANGE_OP_ZH
 
 
+def test_the_self_check_table_words_mirror_python() -> None:
+    """One self-check report names its first differing table twice — the worker's summary line
+    and the panel's 最早差異 row: the same words (they read 逐日結算 and 逐日走勢 before)."""
+    assert _js_object("SETTLE_TABLE_ZH") == sm.SETTLE_TABLE_ZH
+
+
 def test_the_run_reasons_and_phases_mirror_python() -> None:
     assert _js_object("RUN_REASON_ZH") == sm.RUN_REASON_ZH
     assert f"const JOB_REASON_ZH = '{sm.JOB_REASON_ZH}';" in _SETTLE

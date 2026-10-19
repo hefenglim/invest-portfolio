@@ -1267,9 +1267,10 @@
       host.appendChild(fl.node);
     }
   }
-  /* The settle tables a self-check compares (settle_worker._selfcheck), in the panel's words. */
+  /* The settle tables a self-check compares (settle_worker._selfcheck): the words of
+     settlement_models.SETTLE_TABLE_ZH, which the report's summary line and job_runs.detail use. */
   const SETTLE_TABLE_ZH = {
-    settled_day: '逐日走勢', settled_period: '月結與年結',
+    settled_day: '逐日結算', settled_period: '月結與年結',
     settled_period_holding: '期末持倉', settled_period_cash: '期末現金',
   };
   function selfcheckResult(host, sc) {
