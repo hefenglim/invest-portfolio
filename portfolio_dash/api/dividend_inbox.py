@@ -352,6 +352,16 @@ def detect(
             for d in ledger_dates.get((account_id, symbol, family), [])
         )
 
+    # PERF plan §7.2: the binding is a property of (account, market), read once per pair —
+    # it was read (two statements) for every event × account.
+    models: dict[tuple[str, Market], str] = {}
+
+    def model_of(account_id: str, market: Market) -> str:
+        key = (account_id, market)
+        if key not in models:
+            models[key] = dividend_model_for(conn, account_id, market)
+        return models[key]
+
     out: list[PendingDividend] = []
     for symbol, first_date in sorted(acq.items()):
         inst = instruments.get(symbol)
@@ -361,14 +371,17 @@ def detect(
             if ev.ex_date < first_date or ev.ex_date > today:
                 continue
             for account_id in accounts:
-                held = shares_on(conn, account_id, symbol, before=ev.ex_date)
+                # The request's ONE index (PERF plan §7.2): without it every entitlement
+                # read re-read the whole corporate-action ledger — 58 full reads of 459
+                # statements on the demo corpus with two years of quarterly events.
+                held = shares_on(conn, account_id, symbol, before=ev.ex_date, index=actions)
                 if held <= _ZERO:
                     continue
                 # Per-market dividend model: the instrument's market selects the
                 # account's (account, market) binding when present, else the
                 # account-level scalar. For a dual-market account (merged Moomoo) a US
                 # holding resolves drip_us and an MY holding resolves cash -- same acct.
-                model = dividend_model_for(conn, account_id, inst.market)
+                model = model_of(account_id, inst.market)
 
                 def _mk(  # noqa: PLR0913 — a typed builder beats an untyped **dict
                     fingerprint: str, kind: str, per_share: Decimal,

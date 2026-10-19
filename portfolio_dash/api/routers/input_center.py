@@ -161,6 +161,21 @@ _ZERO = Decimal("0")
 _BOM = "\ufeff"
 
 
+def _share_bearing_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every (account, symbol) with a row in a ledger ``current_shares`` reads its shares
+    from — ``opening_inventory``, ``transactions``, ``dividends`` (``data_ingestion``'s
+    tables, read by direct SQL: the cross-layer table-read convention), in ONE statement.
+
+    A pair outside this set and named by no corporate action has no share event at all, so
+    ``current_shares`` would answer 0 for it (its short-circuit path sums three empty
+    reads): skipping it changes no answer. Every dividend row counts, not only the
+    share-adding ones — a superset only keeps a pair that then reads 0, as before."""
+    return {(str(r[0]), str(r[1])) for r in conn.execute(
+        "SELECT account_id, symbol FROM opening_inventory "
+        "UNION SELECT account_id, symbol FROM transactions "
+        "UNION SELECT account_id, symbol FROM dividends")}
+
+
 @router.get("/input/context")
 def context(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     rows = conn.execute(
@@ -211,11 +226,19 @@ def context(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> d
         for i in insts
     ]
     holdings: dict[str, dict[str, str]] = {}
+    # PERF plan §7.2: ONE action index for the request (trap #21) — every `current_shares`
+    # call read the whole corporate-action ledger again — and only the positions a share can
+    # come from are asked at all. Measured on the demo corpus (3 accounts × 10 instruments):
+    # 137 statements before, 30 of them full reads of `corporate_actions`.
+    actions = load_action_index(conn)
+    bearing = _share_bearing_pairs(conn)
     for a in accts:
         per = {
             inst.symbol: decimal_str(sh)
             for inst in insts
-            if (sh := current_shares(conn, a.account_id, inst.symbol)) != 0
+            if ((a.account_id, inst.symbol) in bearing
+                or actions.for_symbol(a.account_id, inst.symbol))
+            and (sh := current_shares(conn, a.account_id, inst.symbol, index=actions)) != 0
         }
         if per:
             holdings[a.account_id] = per
