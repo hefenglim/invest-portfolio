@@ -2236,3 +2236,36 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
    The first request-level test written for it went through `PUT /api/ui-prefs`, whose store
    writer commits inside the route — it passed with the fix removed. Only a route that leaves
    its write to the dependency, run against the mutation, pinned the real ordering.
+
+## The settlement-store release: what the reviews and the merges caught (2026-10-18..20)
+
+- **A stub that encodes shapes the backend never sends makes a broken panel pass (wave 2, F).**
+  The chip and panel e2e ran on `page.route` stubs written before the backend existed: a `seq`
+  injected after the model dump, `queued` in the progress file, an unrendered `{started_by}`, no
+  `counters`. Every flow was green while, on the real backend, a second same-day change was never
+  asked about and a price-only run's trail read 「沒有待結算的變更」. Rule: a stub is built from the
+  real shapes, and one contract test compares every stub builder's keys with the real route
+  (`tests/contract/test_settlement_stub_shapes.py`); the flows that matter run on the real backend.
+- **An oracle that reads the app's derived column agrees with the app's bug (wave 3, I).** The
+  month-end oracle priced from `prices.close`, which the app computes; a 4 → 2 dp price-cap
+  regression produced 0 failures. Rule: the oracle reads only the fixture's own inputs, and a
+  separate family checks the stored column against them. Prove detection with an app-side
+  mutation, never assume it.
+- **"Any later run moots the failure" was too broad (wave 2, E fold).** Dropping a held push once a
+  later run published silenced every quiet-hours self-check failure behind the 06:40 nightly — the
+  owner's Q-P1 (a) undone by a fix's own rule. Rule: a later event moots a failure only when it did
+  the failed run's work (a self-check by a self-check; a run by one that covers its range).
+- **A `python -m` child runs its module as `__main__` (wave 2 merge).** A `PD_TEST_STUBS` module
+  that patched `portfolio_dash.portfolio.settle_worker` patched a second copy; the child's classes
+  live in `sys.modules["__main__"]`. The stub never fired and the test timed out. Patch both.
+- **Subsets miss what the full suite sees (every merge).** Package agents ran their own files and
+  the guard scans they knew; each merge's full non-e2e run still found an unregistered reader
+  (OPT-D10, X1, ruling 11), a stale wiring pin, and 18 test-file mypy errors. Rule: the full
+  non-e2e suite (foreground chunks, ≤ 10 min each) and bare `mypy --strict` at EVERY merge, not
+  only before the release.
+- **A failed spawn must release what it took (wave 3, H).** `spawn` queued its heavy-gate ticket
+  before the waiter thread started; one `can't start new thread` under memory pressure wedged every
+  later job and settlement for the life of the process, and the pre-inserted job row stayed
+  `running`. Rule: anything acquired before a step that can fail is released on that failure, and
+  the caller's row and in-process state are ended, never left active.
+
