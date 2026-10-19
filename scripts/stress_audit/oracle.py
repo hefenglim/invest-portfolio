@@ -61,6 +61,14 @@ open or extend a lot books nothing), the §4.3 ``OPTION_ADJUST`` field table wit
 ``ratio_from == 1`` (OPT-D11 / D16), the OPT-D6 fee branch and the §5 last-trade valuation.
 An oracle that imported the app's parser would agree with a mis-parsed strike by
 construction.
+
+MONTH-END VALUES — TRANSCRIBED FROM ``docs/spec/2026-10-18-settlement-store.md`` §11.2
+-------------------------------------------------------------------------------------
+Layer 5 (:func:`period_end`) is the KPI block of a period close "as at D": the ledger valued as
+at D, the latest stored close on or before D re-expressed for the splits since (the read
+divides), FX on or before D, 總市值 / 總報酬 (A) / the blended rate / XIRR since inception, and
+every ``notes`` fact. Its inputs include the stored ``prices`` and ``fx_rates`` rows, read back
+by the harness like the ledger; nothing in it comes from ``kpis_as_of`` or ``period_close.py``.
 """
 
 from __future__ import annotations
@@ -684,6 +692,17 @@ class OracleResult:
     # rule). Options spec §5 (clarified 2026-10-10, final review R1-M2): a refused
     # ``OPTION_ADJUST`` moved nothing, so it propagates no price — :func:`option_price_on`.
     refused_action_ids: frozenset[int] = field(default_factory=frozenset)
+    # PERF spec §11.2 (``total_return_rate``) + manual §7.1: the rate's denominator, per quote
+    # currency — the cumulative ORIGINAL all-in cost put in. Only an opening and a buy's LONG
+    # part add to it; a buy that covers a declared short adds nothing (the cover is funded by
+    # the proceeds already received, domain-ledger.md "gross_invested excludes short
+    # capital"), a sale never takes anything out, a DRIP / 配股 adds no cost and a corporate
+    # action moves no money (manual §4.4). Never reduced: it is a cumulative input, not a lot.
+    gross_invested: dict[str, Decimal] = field(default_factory=dict)
+    # Every (account, symbol) the replay ever drove into an UNDECLARED oversell (賣超), flat
+    # positions included — the BOOK records it (CR-11, domain-ledger.md), while ``holdings``
+    # drops a position netted back to exactly zero. ``notes.pending_positions`` reads it.
+    oversold_keys: frozenset[tuple[str, str]] = field(default_factory=frozenset)
 
 
 class EventPriority(IntEnum):
@@ -1130,6 +1149,7 @@ def replay(facts: Facts) -> OracleResult:
     orphan_dividends: list[tuple[str, str, date]] = []    # CR-02 — see OracleResult
     refused_closes: list[RefusedClose] = []               # options spec §4.4
     refused_actions: set[int] = set()                     # options spec §5 (R1-M2)
+    gross: dict[str, Decimal] = defaultdict(lambda: ZERO)  # PERF §11.2 rate denominator
 
     def refuse_dividend(dv: DivFact) -> None:
         refused_dividends.append((dv.account_id, dv.symbol, dv.d))
@@ -1152,6 +1172,7 @@ def replay(facts: Facts) -> OracleResult:
             pos.shares += ev.shares
             pos.original_total += ev.orig_total
             pos.adjusted_total += ev.orig_total
+            gross[pos.quote_ccy] += ev.orig_total            # opening capital is put in
         elif kind == "tx":
             assert isinstance(ev, TxFact)
             key = (ev.account_id, ev.symbol)
@@ -1196,6 +1217,9 @@ def replay(facts: Facts) -> OracleResult:
                     pos.shares += to_long
                     pos.original_total += cost
                     pos.adjusted_total += cost
+                    # Only the LONG part is new money (a cover is funded by the short's
+                    # proceeds): the rate's denominator, never the covered shares.
+                    gross[pos.quote_ccy] += cost
             elif ev.short_sale:
                 # DECLARED short sale: long lot first (ordinary realized P&L), remainder
                 # opens/extends the short lot holding its net proceeds. Costs pro rata.
@@ -1313,7 +1337,11 @@ def replay(facts: Facts) -> OracleResult:
                         refused_dividend_ids=frozenset(refused_divs),
                         orphan_dividends=orphan_dividends,
                         refused_closes=refused_closes,
-                        refused_action_ids=frozenset(refused_actions))
+                        refused_action_ids=frozenset(refused_actions),
+                        gross_invested=dict(gross),
+                        oversold_keys=frozenset(
+                            k for k, p in positions.items()
+                            if p.ever_oversold or p.shares < ZERO))
 
 
 def facts_through(facts: Facts, day: date) -> Facts:
@@ -1742,7 +1770,8 @@ _DAYCOUNT = 365.0                # ACT/365F, same as pyxirr default -> same root
 
 
 def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
-                   reporting: str, fx_on, fx_now, as_of: date):
+                   reporting: str, fx_on, fx_now, as_of: date, *,
+                   signed_stocks: bool = False):
     """Build the reporting-currency (dates, amounts:float) cashflow series.
 
     Signs (domain-ledger.md): opening -original_cost_total @ build_date; buy
@@ -1753,6 +1782,13 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
     like the app's get_fx_on); the terminal value at current spot via ``fx_now(base,
     quote)`` (latest, like the app's resolver). Raises KeyError if any required rate or
     price is missing (mirrors the app returning None in that case).
+
+    ``signed_stocks`` (the month-end oracle, PERF spec §11.2): an open declared STOCK short
+    enters the terminal value on its signed quantity too — domain-ledger.md: "every existing
+    formula works unchanged on the signed quantity", and the short's negative value is a
+    liability (a pure short round trip then reads as a borrowing rate, the documented
+    interpretive limit). Off by default: the live KPI family gates itself off while a stock
+    short is open, and its comparisons are unchanged.
     """
     insts = facts.instruments
     dates: list[date] = []
@@ -1793,7 +1829,8 @@ def xirr_cashflows(res: OracleResult, facts: Facts, prices: dict[str, Decimal],
         # the terminal value at its last trade price on its SIGNED quantity (a sold contract
         # is a negative value). A stock short never reaches here: the caller gates the KPI
         # family off while one is open.
-        if h.shares == ZERO or (h.shares < ZERO and not is_option(h.symbol)):
+        if h.shares == ZERO or (h.shares < ZERO and not is_option(h.symbol)
+                                and not signed_stocks):
             continue
         p = prices.get(h.symbol)
         if p is None:
@@ -2030,3 +2067,337 @@ def integrity_findings(
             continue      # an acked oversell legitimately emits no realized row
         out.append(("sell.has_realized_row", f"{key[0]}/{key[1]} sold {key[2].isoformat()}"))
     return out
+
+
+# ===================================================================================
+# LAYER 5 — MONTH-END VALUES (PERF spec 2026-10-18 §11.2, the KPI block of a period close)
+# ===================================================================================
+# Transcribed from ``docs/spec/2026-10-18-settlement-store.md`` §11.2 (and §11.4 for which
+# day a row is valued at), never from ``portfolio/dashboard.py::kpis_as_of`` or
+# ``portfolio/period_close.py`` — the same independence rule as every layer above. A period
+# close is the KPI block "as at D": the ledger valued as at D, the latest stored close ON OR
+# BEFORE D re-expressed for the splits since that close, FX on or before D, and every figure
+# since inception. Called with D = today it must equal the LIVE KPI block (the live dashboard
+# reads "latest stored", which on or before today is the same row) — which is how the harness
+# proves this transcription before a single period route exists.
+#
+# The INPUTS are stored facts read back by the harness exactly like the ledger: the ``prices``
+# rows (instrument, as_of_date, close) and the ``fx_rates`` rows. The ARITHMETIC is this
+# module's.
+
+#: Parameter (``pricing/store.py`` ``_DEFAULT_MAX_AGE``, documented there): a price or rate is
+#: STALE when ``(D − its date).days > 4`` — the live 4-day maximum age, applied before D.
+STALE_AFTER_DAYS = 4
+#: Manual §7.2.1 (owner ruling 2026-08-05): a window shorter than 30 days is not annualised —
+#: ``xirr`` is null while ``xirr_window_days`` is still reported; 30 days IS annualised.
+XIRR_MIN_WINDOW_DAYS = 30
+
+#: ``{symbol: [(as_of_date, close), ...]}`` — stored closes, ascending by date.
+Closes = dict[str, list[tuple[date, Decimal]]]
+#: ``{(base, quote): [(as_of_date, rate), ...]}`` — stored rates, ascending by date.
+FxRows = dict[tuple[str, str], list[tuple[date, Decimal]]]
+
+
+def month_end(d: date) -> date:
+    """The last calendar day of *d*'s month."""
+    nxt = date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
+    return date.fromordinal(nxt.toordinal() - 1)
+
+
+def month_ends(first: date, last: date) -> list[date]:
+    """Every calendar month end from *first*'s month on, up to and including *last*."""
+    out: list[date] = []
+    d = month_end(first)
+    while d <= last:
+        out.append(d)
+        d = month_end(date.fromordinal(d.toordinal() + 1))
+    return out
+
+
+def first_ledger_day(facts: Facts) -> date | None:
+    """The first day any ledger row counts on — closes start at its month (spec §11.2, W2-D:
+    "every period's activity lies inside its own calendar period"). Dividends count on their
+    EFFECTIVE date (a 配股 with an ex-date from the ex-date)."""
+    days = ([t.trade_date for t in facts.txs] + [o.build_date for o in facts.openings]
+            + [dv.effective for dv in facts.divs] + [c.d for c in facts.cash]
+            + [f.d for f in facts.fxs] + [a.d for a in facts.actions])
+    return min(days) if days else None
+
+
+def _on_or_before(series: list[tuple[date, Decimal]] | None,
+                  day: date) -> tuple[date, Decimal] | None:
+    """The latest ``(date, value)`` of an ascending *series* dated on or before *day*."""
+    best: tuple[date, Decimal] | None = None
+    for d, v in series or ():
+        if d > day:
+            break
+        best = (d, v)
+    return best
+
+
+def _splits_of(actions: list[CorpFact], symbol: str) -> list[CorpFact]:
+    """The SPLIT rows of *symbol*, in replay order, one per market event.
+
+    The action ledger is per ACCOUNT, but a split is ONE market event on the symbol: the same
+    split recorded in two accounts must re-express a price once, not twice. Keyed on (date,
+    ratio) — two different splits on one day are two events.
+    """
+    seen: set[tuple[date, Decimal, Decimal]] = set()
+    out: list[CorpFact] = []
+    for a in sorted((a for a in actions if a.kind == SPLIT and a.from_symbol == symbol),
+                    key=lambda a: (a.d, a.id)):
+        key = (a.d, a.ratio_to, a.ratio_from)
+        if key not in seen:
+            seen.add(key)
+            out.append(a)
+    return out
+
+
+def price_at(closes: Closes, actions: list[CorpFact], symbol: str,
+             day: date) -> tuple[Decimal, date] | None:
+    """The price a held stock is valued at as at *day*, and the date of the close it came from.
+
+    Spec §11.2, row "price of a held stock": the latest stored close with ``as_of_date ≤ D``,
+    re-expressed for the splits in ``(priced_on, D]``. The stored close is AS TRADED on its
+    own date (data-and-pricing.md "The stored price basis"), so a close carried forward across
+    a split meets a share count that the split has already multiplied: the READ DIVIDES —
+    ``price × ratio_from / ratio_to``, one action at a time, the division last (never a
+    product of quotients, trap #2a). A non-trading D (a weekend, a holiday) carries the last
+    close forward exactly this way, which is the weekend-split edge §18 names.
+
+    ``None`` when no close is stored on or before *day* — the "held stock with no such price"
+    row: no market value, no unrealized part, XIRR all-or-nothing.
+    """
+    row = _on_or_before(closes.get(symbol), day)
+    if row is None:
+        return None
+    priced_on, price = row
+    for act in _splits_of(actions, symbol):
+        if priced_on < act.d <= day:
+            price = price * act.ratio_from / act.ratio_to
+    return price, priced_on
+
+
+def fx_rate_at(fx_rows: FxRows, base: str, quote: str,
+               day: date) -> tuple[Decimal, date] | None:
+    """Spec §11.2 row "FX": the latest rate on or before *day* — the DIRECT pair if one is
+    stored on or before the day, else the inverse of the reverse pair — with the date of the
+    stored row it came from. ``None`` when neither exists."""
+    if base == quote:
+        return ONE, day
+    direct = _on_or_before(fx_rows.get((base, quote)), day)
+    if direct is not None:
+        return direct[1], direct[0]
+    inverse = _on_or_before(fx_rows.get((quote, base)), day)
+    if inverse is not None:
+        return ONE / inverse[1], inverse[0]
+    return None
+
+
+def fx_resolver(fx_rows: FxRows):
+    """``fx_on(day, base, quote)`` over the stored rows — the trade-date resolver XIRR and the
+    trend's flows use (each flow at its OWN date's rate). Raises ``KeyError`` when no rate is
+    stored on or before the day, exactly like the fixture-schedule resolver it generalises."""
+    def resolve(day: date, base: str, quote: str) -> Decimal:
+        got = fx_rate_at(fx_rows, base, quote, day)
+        if got is None:
+            raise KeyError(f"no FX on/before {day} for {base}/{quote}")
+        return got[0]
+    return resolve
+
+
+def xirr_first_flow(facts: Facts, res: OracleResult) -> date | None:
+    """The first dated flow of the XIRR series (the window's start, manual §7.2.1): an
+    opening's build date, a trade, a booked cash dividend's payment date, a trading /
+    financing cash movement (AI-D42). ``None`` when the ledger has no flow at all."""
+    days = ([o.build_date for o in facts.openings] + [t.trade_date for t in facts.txs]
+            + [dv.d for dv in facts.divs
+               if dv.type in CASH_DIVIDEND_TYPES and dv.id not in res.refused_dividend_ids]
+            + [m.d for m in facts.cash if m.kind.upper() in XIRR_CASH_KINDS])
+    return min(days) if days else None
+
+
+@dataclass
+class PeriodEnd:
+    """The oracle's KPI block of a close as at ``day`` (spec §11.2) — since inception."""
+
+    day: date
+    facts: Facts                                   # the ledger valued as at D
+    res: OracleResult                              # the book at D (dashboard path)
+    #: every VALUED held position's price: a stock's re-expressed close, an option's last trade
+    prices: dict[str, tuple[Decimal, date]]
+    #: the price read for every held STOCK symbol (valued or not), ``None`` when absent
+    price_reads: dict[str, tuple[Decimal, date] | None]
+    missing_prices: list[str]
+    stale_prices: dict[str, date]
+    #: ccy -> (rate to the reporting currency on or before D, the stored row's date)
+    rates: dict[str, tuple[Decimal, date]]
+    missing_fx: list[str]
+    #: held positions with no honest value: 賣超, an unapplied action, a refused close (§4.4)
+    unvalued: list[tuple[str, str]]
+    #: why the money KPIs are NOT judged at D (``None`` = judged): a held 賣超 / unapplied
+    #: action, whose value the rules leave undefined rather than wrong
+    gate: str | None
+    total_market_value: Decimal | None
+    by_currency_value: dict[str, Decimal]
+    total_return: Decimal | None
+    total_return_rate: Decimal | None
+    xirr: Decimal | None
+    xirr_window_days: int | None
+    #: ``None`` when an XIRR value is expected; else why it is withheld / not judged
+    xirr_withheld: str | None
+    pending: set[tuple[str, str, str]]
+    options_past_expiry: list[str]
+    #: (account, symbol, ex_date, pay_date, net) — non-STOCK rows with ex_date ≤ D < pay date
+    receivable: list[tuple[str, str, date, date, Decimal]]
+
+
+def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
+               reporting: str) -> PeriodEnd:
+    """The month-end values at *day*, from the WHOLE ledger *facts* (spec §11.2).
+
+    * book — the replay of the ledger valued as at D (every row counts from its own date);
+    * a held stock's price — :func:`price_at`; with none, it is left out of 總市值 and of the
+      unrealized part of 總報酬 while its cost stays in the rate's denominator, and XIRR is
+      withheld (all-or-nothing) — and named in ``missing_prices``;
+    * an option — its last ordinary trade on or before D (:func:`option_prices`, R2);
+    * FX — :func:`fx_rate_at` for every currency a figure converts;
+    * ``total_market_value`` — Σ price × SIGNED shares (stocks and options), converted;
+      ``by_currency_value`` — the native stock market value per quote currency (OPT-D5: the
+      currency view is a stock-only list);
+    * ``total_return`` (A) — Σ_ccy (realized + unrealized) converted at D's FX (manual §7.1);
+      ``total_return_rate`` — A ÷ Σ_ccy gross_invested converted (manual §7.1, blended);
+    * ``xirr`` — flows counting by D at their own dates' FX, terminal at D, ``as_of = D``.
+
+    Without a rate for a needed currency 總市值, 總報酬 and the rate are blank (``None``).
+    """
+    f = facts_valued_as_of(facts, day)
+    res = replay(f)
+    opt_px = option_prices(f, day)
+    held = {k: h for k, h in res.holdings.items() if h.shares != ZERO}
+
+    prices: dict[str, tuple[Decimal, date]] = {}
+    reads: dict[str, tuple[Decimal, date] | None] = {}
+    missing: list[str] = []
+    stale: dict[str, date] = {}
+    unvalued: list[tuple[str, str]] = []
+    for (acct, sym), h in sorted(held.items()):
+        if not is_option(sym) and sym not in reads:
+            got = price_at(closes, f.actions, sym, day)
+            reads[sym] = got
+            if got is None:
+                missing.append(sym)
+            elif (day - got[1]).days > STALE_AFTER_DAYS:
+                stale[sym] = got[1]
+        if h.oversold or h.unbookable_action or h.unbookable_close:
+            # domain-ledger.md: "only a 賣超 or an unapplied action drops a value"; options
+            # §4.4: "on a 待釐清 contract no price, value or obligation".
+            unvalued.append((acct, sym))
+            continue
+        px = opt_px.get(sym) if is_option(sym) else reads.get(sym)
+        if px is not None:
+            prices[sym] = px
+
+    gate: str | None = None
+    if any(held[k].oversold for k in unvalued):
+        gate = "oversold"
+    elif any(held[k].unbookable_action for k in unvalued):
+        gate = "unapplied_action"
+
+    valued = {k: h for k, h in held.items() if k not in unvalued and h.symbol in prices}
+    needed = (set(res.realized_by_ccy) | set(res.gross_invested)
+              | {h.quote_ccy for h in valued.values()}) - {reporting}
+    rates: dict[str, tuple[Decimal, date]] = {}
+    missing_fx: list[str] = []
+    for ccy in sorted(needed):
+        got = fx_rate_at(fx_rows, ccy, reporting, day)
+        if got is None:
+            missing_fx.append(f"{ccy}/{reporting}")
+        else:
+            rates[ccy] = got
+
+    def conv(amount: Decimal, ccy: str) -> Decimal:
+        return amount if ccy == reporting else amount * rates[ccy][0]
+
+    by_ccy: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    unreal: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    mv: Decimal | None = None
+    tr: Decimal | None = None
+    rate: Decimal | None = None
+    for (_acct, sym), h in valued.items():
+        p = prices[sym][0]
+        unreal[h.quote_ccy] += (p - h.adjusted_avg) * h.shares
+        if not is_option(sym):
+            by_ccy[h.quote_ccy] += p * h.shares
+    if not missing_fx:
+        mv = ZERO
+        for (_acct, sym), h in valued.items():
+            mv += conv(prices[sym][0] * h.shares, h.quote_ccy)
+        # Per currency (realized + unrealized) THEN convert — never the two converted totals
+        # added, which differ by 1 ULP at 28 digits (the live KPI family's rule).
+        tr = ZERO
+        for ccy in set(res.realized_by_ccy) | set(unreal):
+            tr += conv(res.realized_by_ccy.get(ccy, ZERO) + unreal.get(ccy, ZERO), ccy)
+        denominator = ZERO
+        for ccy, amount in res.gross_invested.items():
+            denominator += conv(amount, ccy)
+        rate = None if denominator == ZERO else tr / denominator
+
+    first = xirr_first_flow(f, res)
+    window = None if first is None else (day - first).days
+    xirr: Decimal | None = None
+    withheld: str | None
+    if gate is not None:
+        withheld = f"gate:{gate}"
+    elif res.orphan_dividends:
+        withheld = "orphan_dividend"
+    elif res.refused_closes:
+        withheld = "refused_close"
+    elif res.action_refusals:
+        withheld = "unapplied_action"
+    elif missing:
+        withheld = "missing_price"
+    elif missing_fx:
+        withheld = "missing_fx"
+    elif window is None:
+        withheld = "no_flows"
+    elif window < XIRR_MIN_WINDOW_DAYS:
+        withheld = "window"
+    else:
+        on = fx_resolver(fx_rows)
+        try:
+            dates, amounts = xirr_cashflows(
+                res, f, {s: p for s, (p, _on) in prices.items()}, reporting, on,
+                lambda base, quote: on(day, base, quote), day, signed_stocks=True)
+        except KeyError:
+            withheld = "missing_rate"
+        else:
+            xirr = xirr_solve(dates, amounts)
+            withheld = None if xirr is not None else "unsolvable"
+
+    pending: set[tuple[str, str, str]] = set()
+    for acct, sym in res.oversold_keys:
+        pending.add((acct, sym, "oversold"))
+    for a in f.actions:
+        if a.id in res.refused_action_ids:
+            pending.add((a.account_id, a.from_symbol, "unapplied_action"))
+    for acct, sym, _d in res.refused_dividends:
+        pending.add((acct, sym, "refused_dividend"))
+    for rc in res.refused_closes:
+        pending.add((rc.account_id, rc.symbol, "refused_close"))
+
+    past_expiry: set[str] = set()
+    for h in held.values():
+        terms = parse_occ(h.symbol) if is_option(h.symbol) else None
+        if terms is not None and terms.expiry < day:
+            past_expiry.add(h.symbol)
+    receivable = [(dv.account_id, dv.symbol, dv.ex_date, dv.d, dv.net) for dv in facts.divs
+                  if dv.type.upper() != "STOCK" and dv.ex_date is not None
+                  and dv.ex_date <= day < dv.d]
+
+    return PeriodEnd(
+        day=day, facts=f, res=res, prices=prices, price_reads=reads, missing_prices=missing,
+        stale_prices=stale, rates=rates, missing_fx=missing_fx, unvalued=unvalued, gate=gate,
+        total_market_value=mv, by_currency_value=dict(by_ccy), total_return=tr,
+        total_return_rate=rate, xirr=xirr, xirr_window_days=window, xirr_withheld=withheld,
+        pending=pending, options_past_expiry=sorted(past_expiry), receivable=receivable)
