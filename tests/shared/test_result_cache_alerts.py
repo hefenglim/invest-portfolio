@@ -231,7 +231,7 @@ def test_the_dashboard_key_is_the_key_its_value_was_served_under(
     real = result_cache.cached_keyed
 
     def served_then_commit(*a: object, **kw: object) -> object:
-        out = real(*a, **kw)  # type: ignore[arg-type]
+        out: object = real(*a, **kw)  # type: ignore[arg-type]
         _refresh_quote(db, "AAPL", Market.US, "125")
         return out
 

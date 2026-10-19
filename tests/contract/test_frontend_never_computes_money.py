@@ -57,9 +57,11 @@ def _money_fields() -> set[str]:
     names: set[str] = set()
     # The 選擇權 block (options spec §7.1, 2026-10-09): premiums, 口數, the obligation and the
     # option totals are server strings too — 口 ↔ 股當量 and every premium total included.
-    for model in (HoldingRow, KpiSummary, OptionOpenRow, OptionObligationSubtotal,
-                  OptionContractRealized, OptionRealizedRow, OptionMoney, OptionRealizedYear,
-                  OptionRealizedUnderlying, *_settlement_models()):
+    models: list[type[BaseModel]] = [
+        HoldingRow, KpiSummary, OptionOpenRow, OptionObligationSubtotal, OptionContractRealized,
+        OptionRealizedRow, OptionMoney, OptionRealizedYear, OptionRealizedUnderlying,
+        *_settlement_models()]
+    for model in models:
         names |= {n for n, f in model.model_fields.items()
                   if "Decimal" in str(f.annotation)}
     return names

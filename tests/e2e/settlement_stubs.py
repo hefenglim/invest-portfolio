@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import Page, Route
+from pydantic import BaseModel
 
 from portfolio_dash.api import settlement_service as service
 from portfolio_dash.portfolio.settlement_models import (
@@ -51,8 +52,9 @@ GUEST = "user:guest"      # the e2e servers run in guest mode: the viewer is 'us
 _TPE = ZoneInfo("Asia/Taipei")
 
 
-def _dump(model: Any) -> Any:
-    return model.model_dump(mode="json", by_alias=True)
+def _dump(model: BaseModel) -> dict[str, Any]:
+    out: dict[str, Any] = model.model_dump(mode="json", by_alias=True)
+    return out
 
 
 def trigger(reason: str, at: str, *, started_by: str | None = GUEST, cause: str = "",
@@ -98,7 +100,8 @@ def restatement(i: int, **kw: Any) -> dict[str, Any]:
 
 def diff_row(run_id: int, day: str, field: str, kind: str, **kw: Any) -> dict[str, Any]:
     """One ``GET /api/settlement/runs/{id}/diff`` row (``settle_run_diff``)."""
-    return _dump(DiffRow(run_id=run_id, day=day, field=field, kind=kind, **kw))
+    return _dump(DiffRow.model_validate(
+        {"run_id": run_id, "day": day, "field": field, "kind": kind, **kw}))
 
 
 def report(run_id: int, **kw: Any) -> dict[str, Any]:
@@ -173,8 +176,9 @@ def table(name: str, changes: int, earliest: str, latest: str, *,
           keys: int | None = None) -> dict[str, Any]:
     from portfolio_dash.portfolio.settlement_models import CHANGE_TABLE_ZH
 
-    return _dump(ChangeTableCount(table=name, label=CHANGE_TABLE_ZH[name], changes=changes,
-                                  keys=keys, earliest=earliest, latest=latest))
+    return _dump(ChangeTableCount.model_validate(
+        {"table": name, "label": CHANGE_TABLE_ZH[name], "changes": changes, "keys": keys,
+         "earliest": earliest, "latest": latest}))
 
 
 def change(i: int, *, run_id: int | None = None, viewer: str | None = GUEST,

@@ -109,7 +109,9 @@ def test_the_duplicate_reads_are_gone(live_server: str, fresh_page: Page) -> Non
     stub = SettleStub(status("clean"))
     with stubbed(fresh_page, stub):
         fresh_page.set_viewport_size({"width": 1440, "height": 900})
-        count = lambda rows, p: sum(1 for r in rows if r["path"] == p)  # noqa: E731
+        def count(rows: list[dict[str, Any]], p: str) -> int:
+            return sum(1 for r in rows if r["path"] == p)
+
         fresh_page.goto(live_server + "/trades.html", wait_until="networkidle")
         t = _timings(fresh_page)
         assert count(t, "/api/input/context") == 1, t
