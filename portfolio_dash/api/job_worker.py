@@ -67,9 +67,12 @@ def attach_append_log(log_dir: Path | None = None) -> logging.Handler:
     2026-10-20). Not stderr either: the runner keeps only the last 16 KiB of it and logs that
     only when the child fails, so a run that succeeded would lose its INFO lines, which the
     in-process run wrote to ``app.log``. Appending from two processes is safe for single JSON
-    lines; when the web process rotates while this child runs, the child's lines land in the
-    renamed file (POSIX) or the rename waits until the child has closed it (Windows), and the
-    child lives for one job.
+    lines. When the web process rotates while this child runs: on POSIX (the deployed hosts)
+    the rename succeeds and the child's remaining lines land in the renamed file; on Windows
+    (a dev machine only) the rename FAILS while the child holds the file open — the web
+    process's ``RotatingFileHandler`` reports the error and drops that record, and each failed
+    rollover still shifts the numbered backups (fold verification H, 2026-10-20, measured). A
+    child lives for one job, so this is bounded to rollovers during a job on a Windows dev box.
     """
     target = log_dir if log_dir is not None else get_settings().db_path.parent / "logs"
     target.mkdir(parents=True, exist_ok=True)
