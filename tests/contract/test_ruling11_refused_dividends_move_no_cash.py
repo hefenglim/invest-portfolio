@@ -578,6 +578,9 @@ _POOL_READERS = {
         "api/routers/cash.py::bind_cash_pool", "api/routers/cash.py::pool_balances",
         "api/routers/cash.py::probe", "portfolio/dashboard.py::_build_dashboard",
         "portfolio/networth.py::daily_cash_series",
+        # the settlement (PERF 2026-10-18): month-end cash and the stored net-worth series,
+        # both fed `booked_dividends(…, book.refused_dividends)` — the dashboard's rows
+        "portfolio/period_close.py::cash_at", "portfolio/settle_worker.py::_valuate",
     },
     "pool_lines": {
         "api/routers/cash.py::_pool_dip", "api/routers/cash.py::bind_cash_pool",
@@ -589,11 +592,17 @@ _POOL_READERS = {
         "export/cash_statement.py::build_cash_statement_csv",
         "export/cash_statement.py::build_cash_statement_report_html",
     },
-    "daily_cash_series": {"portfolio/dashboard.py::_build_dashboard"},
+    "daily_cash_series": {"portfolio/dashboard.py::_build_dashboard",
+                          "portfolio/settle_worker.py::_valuate"},
     "compute_fx_summary": {"portfolio/dashboard.py::_build_dashboard"},
     "build_reporting_flows": {
         "portfolio/dashboard.py::_benchmark_comparison",
         "portfolio/timeseries.py::daily_value_series",
+        # the settlement's trend flows and its search for the first unconvertible day, each
+        # passed the replay's `refused_dividends`
+        "portfolio/settle_worker.py::_valuate",
+        "portfolio/settle_worker.py::_first_unconvertible_day",
+        "portfolio/settle_worker.py::bad",
     },
 }
 
