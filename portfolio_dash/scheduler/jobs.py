@@ -328,12 +328,13 @@ def migrate_job_runs_results(conn: sqlite3.Connection) -> None:
       settlement's ``final_through`` reads to name the unconfirmed closes of a day settled by
       the 4-day rule. NULL on every other row. ``job_runs.payload`` already means the insight
       task id, hence a column of its own.
-    - ``schedule_config.updated_at`` + ``stamped_schedule`` (review E #2): when a job's cron,
-      timezone or enabled flag last changed (NULL = never), and the schedule as stamped then
-      (:func:`schedule_key`). :func:`update_schedule` stamps both; a boot stamps a schedule
-      that was edited behind its back (a hand edit, a script) with the boot time.
-      ``final_through`` judges the fires before ``updated_at`` without the current cron — and
-      ALL past fires when the schedule differs from its stamp (edited since the last boot) — so
+    - ``schedule_config.updated_at`` + ``stamped_schedule`` + ``previous_schedule`` (review E
+      #2, fold #2): when a job's cron, timezone or enabled flag last changed (NULL = never),
+      the schedule as stamped then, and the schedule in effect BEFORE that change
+      (:func:`schedule_key`). :func:`update_schedule` stamps all three; a boot stamps a schedule
+      edited behind its back (a hand edit, a script) with the boot time, its previous schedule
+      being the last stamp. ``final_through`` judges the fires before ``updated_at`` by the
+      previous schedule and the later ones by the current one — exact for the LAST change — so
       a schedule change never rewrites history.
 
     Called from the lifespan only — never from :func:`create_scheduler_tables`, whose callers
@@ -343,6 +344,7 @@ def migrate_job_runs_results(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "job_runs", "results", "TEXT")
     _add_column_if_missing(conn, "schedule_config", "updated_at", "TEXT")
     _add_column_if_missing(conn, "schedule_config", "stamped_schedule", "TEXT")
+    _add_column_if_missing(conn, "schedule_config", "previous_schedule", "TEXT")
     stamp_time = datetime.now(UTC).isoformat()
     for row in conn.execute(
             "SELECT job_id, cron, timezone, enabled, stamped_schedule FROM schedule_config"
@@ -352,34 +354,48 @@ def migrate_job_runs_results(conn: sqlite3.Connection) -> None:
             conn.execute("UPDATE schedule_config SET stamped_schedule = ? WHERE job_id = ?",
                          (current, row[0]))
         elif row[4] != current:  # edited behind the 排程 page's back since the last boot
-            conn.execute("UPDATE schedule_config SET stamped_schedule = ?, updated_at = ? "
-                         "WHERE job_id = ?", (current, stamp_time, row[0]))
+            conn.execute("UPDATE schedule_config SET previous_schedule = stamped_schedule, "
+                         "stamped_schedule = ?, updated_at = ? WHERE job_id = ?",
+                         (current, stamp_time, row[0]))
     conn.commit()
 
 
 def schedule_key(cron: str, tz: str, enabled: bool) -> str:
-    """A schedule as ``schedule_config.stamped_schedule`` records it."""
+    """A schedule as ``schedule_config.stamped_schedule`` / ``previous_schedule`` record it."""
     return f"{cron}|{tz}|{1 if enabled else 0}"
+
+
+def parse_schedule_key(key: str | None) -> tuple[str, str, bool] | None:
+    """``(cron, timezone, enabled)`` of a :func:`schedule_key`, or ``None``."""
+    if not key:
+        return None
+    parts = key.split("|")
+    if len(parts) != 3:
+        return None
+    return parts[0], parts[1], parts[2] == "1"
 
 
 def update_schedule(conn: sqlite3.Connection, job_id: str, *, cron: str, tz: str,
                     enabled: bool, now: datetime) -> bool:
     """Store a job's schedule; returns whether it changed. A change stamps
-    ``schedule_config.updated_at`` with *now* (the boot migration adds the column; without it
-    the stamp is skipped), so ``final_through`` never re-judges the fires before the change by
-    the new cron (review E #2)."""
+    ``schedule_config.updated_at`` with *now* and keeps the schedule in effect until then in
+    ``previous_schedule`` (the boot migration adds the columns; without them the stamp is
+    skipped), so ``final_through`` judges the fires before the change by the schedule that was
+    in effect then, never by the new one (review E #2, fold #2)."""
     row = conn.execute("SELECT cron, timezone, enabled FROM schedule_config WHERE job_id = ?",
                        (job_id,)).fetchone()
     changed = row is None or (str(row[0]), str(row[1]), bool(row[2])) != (cron, tz, enabled)
+    old = None if row is None else schedule_key(str(row[0]), str(row[1]), bool(row[2]))
     conn.execute(
         "UPDATE schedule_config SET cron = ?, timezone = ?, enabled = ? WHERE job_id = ?",
         (cron, tz, 1 if enabled else 0, job_id),
     )
     if changed:
         try:
-            conn.execute("UPDATE schedule_config SET updated_at = ?, stamped_schedule = ? "
-                         "WHERE job_id = ?",
-                         (now.isoformat(), schedule_key(cron, tz, enabled), job_id))
+            # the schedule in effect until now: the row this change replaces
+            conn.execute("UPDATE schedule_config SET previous_schedule = ?, updated_at = ?, "
+                         "stamped_schedule = ? WHERE job_id = ?",
+                         (old, now.isoformat(), schedule_key(cron, tz, enabled), job_id))
         except sqlite3.OperationalError:
             logger.debug("schedule_config.updated_at missing (boot migration not run)")
     conn.commit()

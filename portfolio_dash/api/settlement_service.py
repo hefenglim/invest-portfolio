@@ -388,32 +388,66 @@ def _verdict(runs: Sequence[_JobRun], starts: Sequence[datetime], fire: datetime
 SINCE_GO_LIVE = date(1900, 1, 1)
 
 
-def _schedule_rows(conn: sqlite3.Connection,
-                   now: datetime) -> list[tuple[str, bool, str, str, datetime | None]]:
-    """The quote jobs' schedules and when each last changed: ``updated_at`` (stamped by the
-    排程 page or a boot), or *now* when the schedule differs from its stamp — edited by hand
-    since the last boot, at a moment nobody recorded, so no past fire can be trusted to the
-    current cron. ``None`` = never changed (or a database whose boot migration has not run)."""
+#: ``(cron, timezone, enabled)``, the schedule in effect over ``[from, until)``.
+_Segment = tuple[tuple[str, str, bool], datetime | None, datetime]
+
+
+@dataclass(frozen=True)
+class _Schedule:
+    """A quote job's schedule now (in effect from ``changed_at``), and the ones before it."""
+
+    job_id: str
+    enabled: bool
+    cron: str
+    tz: str
+    #: When the CURRENT schedule took effect (``None`` = always, as far as is known).
+    changed_at: datetime | None = None
+    #: The earlier schedules, each over ``[from, until)``.
+    past: tuple[_Segment, ...] = ()
+    #: Before this moment the schedule is unknown: days are judged by what ran.
+    unknown_before: datetime | None = None
+
+
+def _schedule_rows(conn: sqlite3.Connection, now: datetime) -> list[_Schedule]:
+    """The quote jobs' schedules over time (review E #2, fold #2):
+
+    - a stamped change (``updated_at``, by the 排程 page or a boot): the current schedule from
+      it, ``previous_schedule`` before it;
+    - a schedule that differs from its stamp — edited by hand since the last boot, at a moment
+      nobody recorded — the current schedule from *now*, the stamp from ``updated_at`` to now,
+      ``previous_schedule`` before ``updated_at``;
+    - a stamped change whose previous schedule is unknown: days before it by what ran;
+    - never changed: the current schedule throughout.
+    """
     marks = ", ".join("?" for _ in jobs.QUOTE_JOB_IDS)
+    base = "SELECT job_id, enabled, cron, timezone"
+    where = f" FROM schedule_config WHERE job_id IN ({marks}) ORDER BY job_id"
     try:
-        rows = conn.execute(
-            f"SELECT job_id, enabled, cron, timezone, updated_at, stamped_schedule "
-            f"FROM schedule_config WHERE job_id IN ({marks}) ORDER BY job_id",
-            jobs.QUOTE_JOB_IDS).fetchall()
+        rows = [tuple(r) for r in conn.execute(
+            base + ", updated_at, stamped_schedule, previous_schedule" + where,
+            jobs.QUOTE_JOB_IDS).fetchall()]
     except sqlite3.OperationalError:
         try:
-            rows = [(*r, None, None) for r in conn.execute(
-                f"SELECT job_id, enabled, cron, timezone FROM schedule_config "
-                f"WHERE job_id IN ({marks}) ORDER BY job_id", jobs.QUOTE_JOB_IDS).fetchall()]
+            rows = [(*r, None, None, None) for r in conn.execute(
+                base + where, jobs.QUOTE_JOB_IDS).fetchall()]
         except sqlite3.OperationalError:
             return []
-    out: list[tuple[str, bool, str, str, datetime | None]] = []
+    out: list[_Schedule] = []
     for r in rows:
         job_id, enabled, cron, tz = str(r[0]), bool(r[1]), str(r[2]), str(r[3])
-        changed = None if r[4] is None else _aware(str(r[4]))
+        updated = None if r[4] is None else _aware(str(r[4]))
+        stamped = jobs.parse_schedule_key(None if r[5] is None else str(r[5]))
+        previous = jobs.parse_schedule_key(None if r[6] is None else str(r[6]))
+        past: list[_Segment] = []
+        changed = updated
         if r[5] is not None and r[5] != jobs.schedule_key(cron, tz, enabled):
             changed = now
-        out.append((job_id, enabled, cron, tz, changed))
+            if stamped is not None:
+                past.append((stamped, updated, now))
+        if updated is not None and previous is not None:
+            past.append((previous, None, updated))
+        unknown = updated if updated is not None and previous is None else None
+        out.append(_Schedule(job_id, enabled, cron, tz, changed, tuple(past), unknown))
     return out
 
 
@@ -432,12 +466,17 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
     qualifies regardless and lists its row's ``held_failed`` in ``unconfirmed_closes``.
     Nothing is due with ``PD_DISABLE_SCHEDULER=1``.
 
-    **A schedule change never rewrites history** (review E #2). The CURRENT cron says nothing
-    about the fires before the schedule last changed (``schedule_config.updated_at``, stamped
-    by ``jobs.update_schedule`` and by a boot after a hand edit; a hand edit not yet seen by a
-    boot counts as changed now): before that moment a day is judged by the latest finished
-    row of the job on that local date, whatever time it ran, and a day with no row at all was
-    not due.
+    **A schedule change never rewrites history** (review E #2, fold #2). The fires before the
+    schedule last changed (``schedule_config.updated_at``, stamped by ``jobs.update_schedule``
+    and by a boot after a hand edit) are judged by the schedule in effect until then
+    (``previous_schedule``), the later ones by the current one — each strictly, so a day whose
+    fire wrote no row still blocks. A hand edit not yet seen by a boot counts as changed now:
+    the stamped schedule judges from ``updated_at`` until now, ``previous_schedule`` before it
+    (:func:`_schedule_rows`). That is exact for the LAST stamped change: the previous schedule
+    is applied to every fire before it, so the days before an OLDER change are judged by the
+    wrong one if the two differ. Only when the previous schedule is unknown (a change stamped
+    before it was recorded) are the days before the change judged by the latest finished row
+    that day, a day with no row read as not due.
 
     *since* bounds the fires examined (:data:`SINCE_GO_LIVE` = every quote run since go-live,
     what a run's ``unconfirmed_closes`` needs); without it only the days that can still block
@@ -464,37 +503,58 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
         else:
             blocked.setdefault(day, set()).add(job_id)
 
-    for job_id, enabled, cron, tz_name, changed_at in schedule:
-        if not enabled:
-            continue  # a market job the owner switched off: nothing is due
+    def start_in(tz: ZoneInfo, first_run: datetime) -> datetime:
+        # Go-live: the first row's own local DATE — the fire that wrote that row (it starts a
+        # moment after its fire time) is due, every fire before that day is not.
+        go_live = datetime.combine(first_run.astimezone(tz).date(), dtime.min, tz)
+        return max(go_live, datetime.combine(window_from, dtime.min, tz))
+
+    for sched in schedule:
+        job_id = sched.job_id
         first_run = go_lives.get(job_id)
         if first_run is None:
             continue  # before go-live: nothing is due
         runs = runs_by_job.get(job_id, [])
-        try:
-            tz = ZoneInfo(tz_name)
-            trigger = CronTrigger.from_crontab(cron, timezone=tz)
-        except Exception:  # noqa: BLE001 — an unusable schedule row fires nothing
-            logger.warning("final_through: cannot read the schedule of %s", job_id)
-            continue
         starts = [r.started for r in runs]
-        # Go-live: the first row's own local DATE — the fire that wrote that row (it starts a
-        # moment after its fire time) is due, every fire before that day is not.
-        go_live = datetime.combine(first_run.astimezone(tz).date(), dtime.min, tz)
-        start = max(go_live, datetime.combine(window_from, dtime.min, tz))
+        # (cron, tz, from, until): the current schedule from its change on, the earlier ones
+        # over their own spans; a disabled schedule fires nothing (a market job the owner
+        # switched off).
+        segments: list[tuple[str, str, datetime | None, datetime | None]] = []
+        if sched.enabled:
+            segments.append((sched.cron, sched.tz, sched.changed_at, None))
+        for (p_cron, p_tz, p_enabled), lo_at, hi_at in sched.past:
+            if p_enabled:
+                segments.append((p_cron, p_tz, lo_at, hi_at))
         strict_days: set[date] = set()
-        for fire in _fires(trigger, start, yesterday, tz):
-            if changed_at is not None and fire < changed_at:
-                continue  # the current cron was not in effect then
-            day = fire.astimezone(tz).date()
-            strict_days.add(day)
-            judge(job_id, day, None if fire > now else _verdict(runs, starts, fire, day, tz))
-        if changed_at is None:
+        for seg_cron, seg_tz, lo, hi in segments:
+            try:
+                tz = ZoneInfo(seg_tz)
+                trigger = CronTrigger.from_crontab(seg_cron, timezone=tz)
+            except Exception:  # noqa: BLE001 — an unusable schedule row fires nothing
+                logger.warning("final_through: cannot read the schedule of %s", job_id)
+                continue
+            for fire in _fires(trigger, start_in(tz, first_run), yesterday, tz):
+                if lo is not None and fire < lo:
+                    continue
+                if hi is not None and fire >= hi:
+                    break
+                day = fire.astimezone(tz).date()
+                strict_days.add(day)
+                judge(job_id, day, None if fire > now else _verdict(runs, starts, fire, day,
+                                                                    tz))
+        unknown_before = sched.unknown_before
+        if unknown_before is None:
             continue
-        # Before the change: every day the job ran, by its latest finished row that day.
+        # The schedule before this change is unknown: every day the job ran before it, by its
+        # latest finished row that day.
+        try:
+            tz = ZoneInfo(sched.tz)
+        except Exception:  # noqa: BLE001
+            continue
+        start = start_in(tz, first_run)
         before: dict[date, _JobRun | None] = {}
         for run in runs:
-            if run.started < start or run.started >= changed_at:
+            if run.started < start or run.started >= unknown_before:
                 continue
             day = run.started.astimezone(tz).date()
             if day > yesterday or day in strict_days:
@@ -752,6 +812,53 @@ def _clear_stale(conn: sqlite3.Connection, now: datetime) -> int | None:
     return None
 
 
+def _close_job_rows(conn: sqlite3.Connection, now: datetime) -> list[RunEnd]:
+    """Close every ``settlement`` ``job_runs`` row still ``running`` while its report has
+    ENDED (fold #3): the worker ended the run, then the waiter failed before the row. Mapped
+    through ``job_status_for`` like any finished run; returns what it closed, so the caller
+    can send the push of an automatic failure once its session has committed."""
+    marks = ", ".join("?" for _ in store.END_STATUSES)
+    rows = conn.execute(
+        f"SELECT j.id FROM job_runs j JOIN settle_run r ON r.run_id = j.id "
+        f"WHERE j.job_id = ? AND j.finished_at IS NULL AND r.status IN ({marks}) ORDER BY j.id",
+        (jobs.SETTLEMENT_JOB_ID, *sorted(store.END_STATUSES))).fetchall()
+    closed: list[RunEnd] = []
+    for row in rows:
+        run_id = int(row[0])
+        try:
+            with _savepoint(conn, "settle_job_row"):
+                closed.append(_finalise(conn, run_id, exit_info=None, cancel_by=None,
+                                        now=now))
+        except Exception:  # noqa: BLE001 — a report that no longer reads: close the row only
+            logger.exception("settlement run %s: its job row is closed without its report",
+                             run_id)
+            jobs.finish_job_run(conn, run_id, status="error",
+                                detail="重新結算紀錄無法讀取，已結束此筆排程紀錄",
+                                reason="interrupted", now=now, usage=_no_ai(), commit=False)
+    return closed
+
+
+def _push_closed(closed: Sequence[RunEnd], now: datetime) -> None:
+    """The push a failed waiter never sent: an automatic run that FAILED (fold #3)."""
+    for ended in closed:
+        if _is_automatic(ended.reason) and ended.status == "failed":
+            try:
+                notify_failure(ended.run_id, now=now)
+            except Exception:  # noqa: BLE001 — a push is an observer
+                logger.warning("settlement failure push for run %s failed", ended.run_id,
+                               exc_info=True)
+
+
+def _clean_up(now: datetime) -> tuple[int | None, list[RunEnd]]:
+    """Before a start, on a session of its own (so a refusal keeps it): close the job rows of
+    ended runs and end every stale run (review E #4, fold #3). Returns the run still active,
+    if any, and the job rows closed."""
+    with session(actor=ACTOR_BOOT) as conn:
+        closed = _close_job_rows(conn, now)
+        busy = _clear_stale(conn, now)
+    return busy, closed
+
+
 def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
               now: datetime | None = None, previous_run_id: int | None = None,
               why: str | None = None, mark_resumed: bool = False) -> Started:
@@ -767,10 +874,15 @@ def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
     with _S.lock:
         if _S.active is not None:
             raise AlreadyRunning(_S.active.run_id)
+        # A report left active by a waiter that could not finish it (its lock free, no run
+        # here) is ended 中斷 first, never refused or queued behind (review E #4); a job row
+        # its waiter left open is closed, and an automatic failure among them pushed (fold #3).
+        busy, closed = _clean_up(now)
+        _push_closed(closed, now)
+        if busy is not None:
+            raise AlreadyRunning(busy)
         with session(actor=started_by or ACTOR_BOOT) as conn:
-            # A report left active by a waiter that could not finish it (its lock free, no
-            # run here) is ended 中斷 first, never refused or queued behind (review E #4).
-            busy = _clear_stale(conn, now)
+            busy = _db_active_run(conn)  # another process started one meanwhile
             if busy is not None:
                 raise AlreadyRunning(busy)
             request = build_request(conn, scope=scope, reason=reason, started_by=started_by,
@@ -1327,10 +1439,43 @@ def notify_failure(run_id: int, *, now: datetime | None = None,
     return "sent"
 
 
-def _published_after(conn: sqlite3.Connection, run_id: int) -> bool:
-    row = conn.execute("SELECT 1 FROM settle_run WHERE run_id > ? AND status IN "
-                       "('published', 'partial') LIMIT 1", (run_id,)).fetchone()
-    return row is not None
+def _covers(later: RunReport, failed: RunReport) -> bool:
+    """*later* (a published, non-self-check run) settled what *failed* would have: a full run,
+    or one whose range holds the failed run's (from its first day — any first day when the
+    failed run never claimed — through its last day or, unclaimed, its ``through``)."""
+    if later.inputs.scope == "full":
+        return True
+    lo, hi = later.summary.range_from, later.summary.range_to
+    if lo is None or hi is None:
+        return False
+    f_lo = failed.summary.range_from
+    f_hi = failed.summary.range_to or failed.inputs.through
+    return hi >= f_hi and (f_lo is None or lo <= f_lo)
+
+
+def _mooted(conn: sqlite3.Connection, failed: RunReport) -> bool:
+    """A held failure push is dropped only when a LATER run did what the failed one would have
+    done (fold #1, owner ruling Q-P1): a failed self-check by a later COMPLETED self-check; any
+    other failed run by a later PUBLISHED run that covers its range (``_covers``). The nightly
+    run that publishes every morning therefore never swallows a failed Sunday self-check."""
+    selfcheck = failed.inputs.scope == "selfcheck"
+    for row in conn.execute(
+            "SELECT run_id FROM settle_run WHERE run_id > ? AND status IN "
+            "('published', 'partial') ORDER BY run_id", (failed.summary.run_id,)).fetchall():
+        try:
+            later = store.get_run(conn, int(row[0]))
+        except ValueError:  # a report that no longer reads moots nothing
+            continue
+        if later is None:
+            continue
+        if selfcheck:
+            if later.inputs.scope == "selfcheck":
+                return True
+            continue
+        if (later.summary.status == "published" and later.inputs.scope != "selfcheck"
+                and _covers(later, failed)):
+            return True
+    return False
 
 
 def _pending_notify_ids(conn: sqlite3.Connection) -> list[int]:
@@ -1366,10 +1511,9 @@ def send_pending_notifications(*, now: datetime | None = None,
             for run_id in ids:
                 report = store.get_run(conn, run_id)
                 _set_notify_pending(conn, run_id, False)
-                # A later run published: 「歷史走勢…維持前一版本」 is no longer true, so the
-                # held push is dropped (review E #7).
-                if verdict is None and report is not None and not _published_after(conn,
-                                                                                    run_id):
+                # A later run did what this one would have: 「歷史走勢…維持前一版本」 is no
+                # longer true, so the held push is dropped (review E #7, fold #1).
+                if verdict is None and report is not None and not _mooted(conn, report):
                     sendable.append(report)
             conn.commit()
     if defer_at is not None:
@@ -1560,12 +1704,16 @@ class BootPlan:
     start: BootStart | None = None
     #: The runs boot ended as 中斷（未續跑）.
     interrupted: tuple[int, ...] = ()
+    #: Automatic runs that FAILED whose waiter never closed their job row nor sent their push
+    #: (fold #3): :func:`start_after_boot` pushes them.
+    push: tuple[int, ...] = ()
 
 
 _BOOT_INTERRUPTED = "系統重新啟動時結算尚未完成"
 
 
-def _end_orphans(conn: sqlite3.Connection, now: datetime) -> tuple[int, ...]:
+def _end_orphans(conn: sqlite3.Connection,
+                 now: datetime) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Boot step 1 (always, even with ``PD_SETTLE=off``): end every ``preparing`` / ``running``
     report as 中斷（未續跑） with its ``job_runs`` row — terminating an orphan child that still
     holds the lock first and waiting for the lock to free — then every ``settlement`` row
@@ -1576,28 +1724,17 @@ def _end_orphans(conn: sqlite3.Connection, now: datetime) -> tuple[int, ...]:
         _stop_orphan(run_id)
         _end_stale(conn, run_id, now, reason_text=_BOOT_INTERRUPTED)
         ended.append(run_id)
-    rows = conn.execute(
-        "SELECT j.id, r.run_id FROM job_runs j LEFT JOIN settle_run r ON r.run_id = j.id "
-        "WHERE j.job_id = ? AND j.finished_at IS NULL ORDER BY j.id",
-        (jobs.SETTLEMENT_JOB_ID,)).fetchall()
-    for row in rows:
-        run_id = int(row[0])
-        if row[1] is None:
-            jobs.finish_job_run(conn, run_id, status="error",
-                                detail="重新結算未能開始：系統在建立紀錄前中斷",
-                                reason="interrupted", now=now, usage=_no_ai(), commit=False)
-            continue
-        try:
-            with _savepoint(conn, "settle_job_row"):
-                _finalise(conn, run_id, exit_info=None, cancel_by=None, now=now)
-        except Exception:  # noqa: BLE001 — a report that no longer reads: close the row only
-            logger.exception("settlement run %s: its job row is closed without its report",
-                             run_id)
-            jobs.finish_job_run(conn, run_id, status="error",
-                                detail="重新結算紀錄無法讀取，已結束此筆排程紀錄",
-                                reason="interrupted", now=now, usage=_no_ai(), commit=False)
+    for row in conn.execute(
+            "SELECT j.id FROM job_runs j LEFT JOIN settle_run r ON r.run_id = j.id "
+            "WHERE j.job_id = ? AND j.finished_at IS NULL AND r.run_id IS NULL ORDER BY j.id",
+            (jobs.SETTLEMENT_JOB_ID,)).fetchall():
+        jobs.finish_job_run(conn, int(row[0]), status="error",
+                            detail="重新結算未能開始：系統在建立紀錄前中斷",
+                            reason="interrupted", now=now, usage=_no_ai(), commit=False)
+    closed = _close_job_rows(conn, now)
     store.cleanup_orphans(conn)
-    return tuple(ended)
+    return tuple(ended), tuple(e.run_id for e in closed
+                               if _is_automatic(e.reason) and e.status == "failed")
 
 
 def _latest_ended(conn: sqlite3.Connection) -> RunSummary | None:
@@ -1658,9 +1795,9 @@ def on_boot(conn: sqlite3.Connection, *, trigger_check: TriggerCheck) -> BootPla
 
 def _on_boot(conn: sqlite3.Connection, trigger_check: TriggerCheck) -> BootPlan:
     now = _now()
-    interrupted = _end_orphans(conn, now)
+    interrupted, push = _end_orphans(conn, now)
     if not flags.settle_enabled():
-        return BootPlan(interrupted=interrupted)
+        return BootPlan(interrupted=interrupted, push=push)
     state = store.store_state(conn, reporting=_reporting())
     start: BootStart | None = None
     if state.generation == 0 or state.settled_through is None:
@@ -1683,7 +1820,7 @@ def _on_boot(conn: sqlite3.Connection, trigger_check: TriggerCheck) -> BootPlan:
                               mark_resumed=True)
     if start is not None and start.reason == "boot" and start.why:
         _note_not_resumed(conn, interrupted, start.why)
-    return BootPlan(start=start, interrupted=interrupted)
+    return BootPlan(start=start, interrupted=interrupted, push=push)
 
 
 def start_after_boot(plan: BootPlan) -> int | None:
@@ -1694,6 +1831,12 @@ def start_after_boot(plan: BootPlan) -> int | None:
         send_pending_notifications()
     except Exception:  # noqa: BLE001
         logger.warning("held settlement pushes could not be sent at boot", exc_info=True)
+    now = _now()
+    for run_id in plan.push:
+        try:
+            notify_failure(run_id, now=now)
+        except Exception:  # noqa: BLE001 — a push is an observer
+            logger.warning("settlement failure push for run %s failed", run_id, exc_info=True)
     start = plan.start
     if start is None or not flags.settle_enabled():
         return None

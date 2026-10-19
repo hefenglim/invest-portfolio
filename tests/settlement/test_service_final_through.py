@@ -274,3 +274,81 @@ def test_a_hand_edited_schedule_is_judged_by_what_ran(conn: sqlite3.Connection) 
     row = conn.execute("SELECT updated_at, stamped_schedule FROM schedule_config "
                        "WHERE job_id = 'quotes_tw'").fetchone()
     assert row[0] is not None and row[1] == "30 14 * * mon-fri|Asia/Taipei|1"
+
+
+def _missed_fires(conn: sqlite3.Connection) -> None:
+    """quotes_tw at 14:00 from 08-03 to 08-14: 08-12's fire missed (only a 10:00 ok refresh
+    ran that day), 08-13 wrote no row at all."""
+    _disable(conn, "quotes_us")
+    _disable(conn, "quotes_my")
+    migrate_job_runs_results(conn)  # the boot: stamps today's schedules
+    for day in _weekdays(date(2026, 8, 3), date(2026, 8, 14)):
+        if day not in (date(2026, 8, 12), date(2026, 8, 13)):
+            _run(conn, "quotes_tw", datetime(day.year, day.month, day.day, 14, 0, 2, tzinfo=TPE))
+    _run(conn, "quotes_tw", datetime(2026, 8, 12, 10, 0, tzinfo=TPE))
+
+
+def test_before_a_change_the_previous_cron_still_judges_a_missed_fire(
+    conn: sqlite3.Connection,
+) -> None:
+    """Fold #2 (the verifier's probe): the days before a schedule change are judged by the
+    cron in effect THEN, strictly — an intraday refresh never answers a missed 14:00 fire, and
+    a day with no row still blocks — never leniently by "any row that day"."""
+    _missed_fires(conn)
+    now = datetime(2026, 8, 15, 6, 40, tzinfo=TPE)
+    strict = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    assert (strict.through, strict.blocked_on) == (date(2026, 8, 11), date(2026, 8, 12))
+    update_schedule(conn, "quotes_tw", cron="30 14 * * mon-fri", tz="Asia/Taipei",
+                    enabled=True, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    row = conn.execute("SELECT previous_schedule, stamped_schedule FROM schedule_config "
+                       "WHERE job_id = 'quotes_tw'").fetchone()
+    assert tuple(row) == ("0 14 * * mon-fri|Asia/Taipei|1", "30 14 * * mon-fri|Asia/Taipei|1")
+    assert service.final_through(conn, now, since=service.SINCE_GO_LIVE) == strict
+    # a hand edit (not yet stamped by a boot) is judged by the stamp it departs from
+    conn.execute("UPDATE schedule_config SET cron = '45 14 * * mon-fri' "
+                 "WHERE job_id = 'quotes_tw'")
+    conn.commit()
+    hand = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    assert (hand.through, hand.blocked_on) == (date(2026, 8, 11), date(2026, 8, 12))
+
+
+def test_a_missed_fire_older_than_four_days_is_still_unconfirmed_after_a_change(
+    conn: sqlite3.Connection,
+) -> None:
+    _missed_fires(conn)
+    conn.execute("DELETE FROM job_runs WHERE started_at LIKE '2026-08-05%'")
+    conn.commit()
+    update_schedule(conn, "quotes_tw", cron="30 14 * * mon-fri", tz="Asia/Taipei",
+                    enabled=True, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    result = service.final_through(conn, datetime(2026, 8, 15, 6, 40, tzinfo=TPE),
+                                   since=service.SINCE_GO_LIVE)
+    assert result.unconfirmed_closes == {date(2026, 8, 5): []}
+    assert result.blocked_on == date(2026, 8, 12)
+
+
+def test_a_change_whose_previous_schedule_is_unknown_falls_back_to_what_ran(
+    conn: sqlite3.Connection,
+) -> None:
+    """A change stamped before ``previous_schedule`` existed: the days before it are judged
+    by the latest finished row that day (documented limit: a missed fire with an intraday
+    refresh, or no row at all, then reads as answered / not due)."""
+    _missed_fires(conn)
+    conn.execute("UPDATE schedule_config SET cron = '30 14 * * mon-fri', "
+                 "updated_at = '2026-08-14T20:00:00+08:00', previous_schedule = NULL, "
+                 "stamped_schedule = '30 14 * * mon-fri|Asia/Taipei|1' "
+                 "WHERE job_id = 'quotes_tw'")
+    conn.commit()
+    result = service.final_through(conn, datetime(2026, 8, 15, 6, 40, tzinfo=TPE),
+                                   since=service.SINCE_GO_LIVE)
+    assert result.through == date(2026, 8, 14) and result.blocked_on is None
+
+
+def test_a_job_switched_off_still_has_its_past_judged(conn: sqlite3.Connection) -> None:
+    """Switched off on 08-14: the fires before that were due under the previous (enabled)
+    schedule, so 08-12's missed fire still blocks."""
+    _missed_fires(conn)
+    update_schedule(conn, "quotes_tw", cron="0 14 * * mon-fri", tz="Asia/Taipei",
+                    enabled=False, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    result = service.final_through(conn, datetime(2026, 8, 15, 6, 40, tzinfo=TPE),
+                                   since=service.SINCE_GO_LIVE)
+    assert result.blocked_on == date(2026, 8, 12)

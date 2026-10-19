@@ -361,10 +361,24 @@ def test_a_job_that_changed_history_before_the_window_starts_a_run(
     mark = _mark(path)
     _job_writes(path, price_day=window + timedelta(days=1))  # a revised close inside the window
     assert service.settle_after_job("history_daily", mark=mark) is None
-    # The OWNER's pending change before the window is the prompt's, not the job's.
+    # The OWNER's pending change before the window is the prompt's, not the job's — made
+    # before the job's mark, or WHILE the job runs (after the mark): only the job's own rows
+    # count (fold #4, M9b).
     sup.back_dated_trade(path, date(2026, 2, 2))
     mark = _mark(path)
     _job_writes(path, price_day=window + timedelta(days=2))
+    assert service.settle_after_job("history_daily", mark=mark) is None
+    mark = _mark(path)
+    owner = open_db(path)
+    try:
+        install_actor(owner, "user:owner")
+        insert_transaction(owner, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                           quantity=Decimal("1"), price=Decimal("500"), fees=Decimal("0"),
+                           tax=Decimal("0"), trade_date=date(2026, 2, 4))
+        owner.commit()
+    finally:
+        owner.close()
+    _job_writes(path, price_day=window + timedelta(days=3))
     assert service.settle_after_job("history_daily", mark=mark) is None
     assert len(sup.runs(path)) == 1
     # The job revises a close before the window: it starts the run.
@@ -464,3 +478,62 @@ def test_a_resumed_selfcheck_names_its_difference() -> None:
     assert service.run_detail(report) == \
         "每週自檢發現差異：2 處，最早於 2025-03-03（月結與年結），與已發布版本不同，耗時 12 秒"
     assert service._job_reason("published", report, None) == "selfcheck_diff"
+
+
+def _fail_waiter_once(monkeypatch: pytest.MonkeyPatch,
+                      before: Any = None) -> dict[str, int]:
+    """The waiter's finalisation fails once (the session dies), as for a locked database
+    past every retry; *before* runs at that moment."""
+    real = service._finalise_with_retry
+    calls = {"n": 0}
+
+    def failing(run_id: int, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            if before is not None:
+                before()
+            return None
+        return real(run_id, **kwargs)
+
+    monkeypatch.setattr(service, "_finalise_with_retry", failing)
+    return calls
+
+
+def test_waiter_failure_starts_the_queued_run(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #4 (fold #4, M4c): a waiter that cannot finalise still starts the run queued
+    behind it, which first closes the job row the waiter left open (fold #3)."""
+    service.start_run(scope="full", reason="button")
+    _fail_waiter_once(monkeypatch, before=lambda: service._enqueue(
+        service._Pending(scope="nightly", reason="nightly")))
+    stuck = service.start_run(scope="full", reason="button").run_id
+    runs = sup.runs(path)
+    assert runs[-1].reason == "nightly" and runs[-1].status == "published"
+    assert sup.report(path, stuck).summary.status == "published"  # the worker ended it
+    row = sup.job_row(path, stuck)
+    assert row["status"] == "ok" and row["finished_at"] is not None
+    assert service._S.queue == []
+
+
+def test_a_job_row_left_running_behind_an_ended_report_is_closed_by_the_next_start(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fold #3: the real worker's normal path ends the report itself; a waiter that fails
+    after it leaves the job row ``running``. The next start closes it through
+    ``job_status_for`` and sends the push an automatic failure never got."""
+    service.start_run(scope="full", reason="button")
+    _fail_waiter_once(monkeypatch)
+    stub.PLAN.append("fail")
+    failed = service.start_automatic(scope="nightly", reason="nightly").run_id
+    assert failed is not None
+    assert sup.report(path, failed).summary.status == "failed"
+    assert sup.job_row(path, failed)["finished_at"] is None
+    assert sup.PUSHES == []
+    service.start_run(scope="full", reason="button")
+    row = sup.job_row(path, failed)
+    assert (row["status"], row["reason"]) == ("error", "failed:RuntimeError")
+    assert row["detail"] == "重新結算失敗（逐日估值）：測試：逐日估值失敗"
+    assert sup.PUSHES == [failed]  # the automatic failure's push, once
+    service.start_run(scope="full", reason="button")
+    assert sup.PUSHES == [failed]
