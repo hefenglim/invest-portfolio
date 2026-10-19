@@ -44,6 +44,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -60,39 +61,55 @@ from tests.reference import corpora
 _FROM = re.compile(r"\bFROM\s+(\w+)", re.IGNORECASE)
 
 
+#: The clock every request of this file runs at (the demo corpus's own).
+CORPUS_NOW = corpora.CORPORA["demo"].now
+
+
+def build_corpus(dest: Path, template_dir: Path) -> Path:
+    """The demo corpus at *dest*, plus quarterly synthetic dividend events for every stock
+    over the two years before its clock — the inbox's detection loop is symbol × event ×
+    account. Also the input of ``medium_route_bodies/`` (see :data:`_BODY_ROUTES`)."""
+    path = corpora.copy_db(corpora.ensure_template("demo", template_dir), dest)
+    conn = corpora.open_db(path)
+    try:
+        init_golden_base(conn)  # idempotent: every table a medium route reads
+        ensure_inbox_tables(conn)
+        for s in conn.execute("SELECT symbol, market, quote_ccy FROM instruments "
+                              "WHERE asset_type = 'stock'").fetchall():
+            day = CORPUS_NOW.date() - timedelta(days=730)
+            while day < CORPUS_NOW.date():
+                conn.execute(
+                    "INSERT OR IGNORE INTO dividend_events (instrument, market, ex_date, "
+                    "pay_date, cash_amount, stock_amount, currency, source, fetched_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (s["symbol"], s["market"], day.isoformat(),
+                     (day + timedelta(days=20)).isoformat(), "1.25",
+                     "0.5" if s["market"] == "TW" else None, s["quote_ccy"], "synthetic",
+                     CORPUS_NOW.isoformat()))
+                day += timedelta(days=91)
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def _template_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.getbasetemp() / corpora.TEMPLATE_DIR_NAME
+
+
 @pytest.fixture(scope="module")
 def demo_db(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[sqlite3.Connection,
                                                                         datetime]]:
-    """The demo corpus plus quarterly synthetic dividend events for every stock over the two
-    years before its clock — the inbox's detection loop is symbol × event × account."""
-    base = tmp_path_factory.getbasetemp() / corpora.TEMPLATE_DIR_NAME
-    path = corpora.copy_db(corpora.ensure_template("demo", base),
-                           tmp_path_factory.mktemp("medium_routes") / "demo.db")
+    """:func:`build_corpus`, opened once for the module's ceiling measurements."""
+    path = build_corpus(tmp_path_factory.mktemp("medium_routes") / "demo.db",
+                        _template_dir(tmp_path_factory))
     conn = corpora.open_db(path)
-    init_golden_base(conn)  # idempotent: every table a medium route reads
-    ensure_inbox_tables(conn)
-    now = corpora.CORPORA["demo"].now
-    for s in conn.execute("SELECT symbol, market, quote_ccy FROM instruments "
-                          "WHERE asset_type = 'stock'").fetchall():
-        day = now.date() - timedelta(days=730)
-        while day < now.date():
-            conn.execute(
-                "INSERT OR IGNORE INTO dividend_events (instrument, market, ex_date, pay_date, "
-                "cash_amount, stock_amount, currency, source, fetched_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (s["symbol"], s["market"], day.isoformat(),
-                 (day + timedelta(days=20)).isoformat(), "1.25",
-                 "0.5" if s["market"] == "TW" else None, s["quote_ccy"], "synthetic",
-                 now.isoformat()))
-            day += timedelta(days=91)
-    conn.commit()
-    yield conn, now
+    yield conn, CORPUS_NOW
     conn.close()
 
 
-@pytest.fixture
-def client(demo_db: tuple[sqlite3.Connection, datetime]) -> Iterator[TestClient]:
-    conn, now = demo_db
+@contextmanager
+def _client_on(conn: sqlite3.Connection, now: datetime) -> Iterator[TestClient]:
     enable_socket()
     app = create_app()
     app.dependency_overrides[get_conn] = lambda: conn
@@ -101,6 +118,12 @@ def client(demo_db: tuple[sqlite3.Connection, datetime]) -> Iterator[TestClient]
         yield TestClient(app)
     finally:
         disable_socket(allow_unix_socket=True)
+
+
+@pytest.fixture
+def client(demo_db: tuple[sqlite3.Connection, datetime]) -> Iterator[TestClient]:
+    with _client_on(*demo_db) as c:
+        yield c
 
 
 @contextmanager
@@ -245,3 +268,41 @@ def test_the_count_and_the_list_still_agree(client: TestClient) -> None:
     rows = client.get("/api/dividend-inbox").json()
     count = client.get("/api/dividend-inbox/count").json()
     assert rows["total_count"] == len(rows["rows"]) == count["count"]
+
+
+# ------------------------------------------------------------------ the bodies stay the same
+
+#: The routes this package changed, and the file holding each one's body as the UNFIXED code
+#: answered it (``medium_route_bodies/``). Generated once (package H review, 2026-10-20):
+#: :func:`build_corpus` built the database with this checkout; then the code of ``16a70b5``
+#: (the wave-3 base, before the fixes), in a scratch git worktree at that commit, served each
+#: route from a copy of it at the request clock :data:`CORPUS_NOW`, and the raw response
+#: bytes were saved. The demo corpus's EXCHANGE (VRTB → VRTA) and SPINOFF (KEMB → KEMG) land
+#: shares on positions with no ledger row of their own — the case the 輸入中心's pair filter
+#: must still ask about (``actions.for_symbol``).
+_BODY_ROUTES: dict[str, str] = {
+    "/api/input/context": "input_context.json",
+    "/api/instruments": "instruments.json",
+    "/api/instruments?include_options=true": "instruments_with_options.json",
+    "/api/dividend-inbox": "dividend_inbox.json",
+    "/api/dividend-inbox/count": "dividend_inbox_count.json",
+    "/api/dividend-inbox/skipped": "dividend_inbox_skipped.json",
+}
+_BODIES = Path(__file__).resolve().parent / "medium_route_bodies"
+
+
+@pytest.mark.parametrize("route", sorted(_BODY_ROUTES))
+def test_a_fixed_route_answers_the_body_the_unfixed_code_answered(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, route: str,
+) -> None:
+    path = build_corpus(tmp_path / "demo.db", _template_dir(tmp_path_factory))
+    conn = corpora.open_db(path)
+    try:
+        with _client_on(conn, CORPUS_NOW) as c:
+            r = c.get(route)
+    finally:
+        conn.close()
+    assert r.status_code == 200, r.text[:300]
+    expected = (_BODIES / _BODY_ROUTES[route]).read_bytes()
+    assert b"\n" not in expected  # one JSON line: no line-ending conversion can touch it
+    assert r.content == expected, route
