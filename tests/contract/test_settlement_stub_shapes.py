@@ -87,6 +87,10 @@ def real(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
                                         params={"state": f"run:{rid}"}).json()
         out["diff"] = client.get(f"/api/settlement/runs/{rid}/diff").json()
         out["run_id"] = rid
+        # package G's period closes: the year rows 月度成績's 年 toggle reads, and month rows
+        out["periods_y"] = client.get("/api/settlement/periods", params={"kind": "Y"}).json()
+        out["periods_m"] = client.get("/api/settlement/periods",
+                                      params={"kind": "M", "limit": 3}).json()
         sup.fake_preparing_run(path, reason="button", started_by=stubs.GUEST)
         out["status_preparing"] = client.get("/api/settlement/status").json()
         yield out
@@ -144,3 +148,14 @@ def test_the_trigger_stub_is_what_the_route_serves(real: dict[str, Any]) -> None
     hm = served.split(" 於 ")[1][:5]
     at = real["report"]["summary"]["started_at"][:11] + hm + ":00+08:00"
     assert served == stubs.trigger("prompt", at, cause=served.split("確認提示：")[1][:-1])
+
+
+def test_the_period_stub_has_the_route_keys(real: dict[str, Any]) -> None:
+    """``stubs.period`` (the year close the 月度成績 flows stub) ≡ package G's real
+    ``GET /api/settlement/periods`` rows — a store close and the live current period alike."""
+    assert real["periods_y"]["rows"] and real["periods_m"]["rows"]
+    assert {r["source"] for r in real["periods_m"]["rows"]} == {"store", "live"}
+    stub = {"rows": [stubs.period("2025")], "total_count": 1}
+    assert not _keys(stub, real["periods_y"])
+    for row in real["periods_m"]["rows"]:
+        assert not _keys(stub, {"rows": [row], "total_count": 1}), row["period"]

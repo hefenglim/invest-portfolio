@@ -71,10 +71,8 @@ _NO_CALLER_ALLOWED: dict[tuple[str, str], str] = {
 #: package G mounts /api/settlement/periods* in wave 3; this file's entry lands in wave 2 with
 #: the frontend that does NOT call it). Until the route exists the stale-entry check below
 #: cannot see it, so it skips these; once the route exists the entry is an ordinary one and
-#: this set should be emptied (W4).
-_LANDING_LATER: set[tuple[str, str]] = {
-    ("GET", "/api/settlement/periods/{kind}/{period}"),
-}
+#: this set should be emptied (W4). Emptied in wave 3: package G mounted the route.
+_LANDING_LATER: set[tuple[str, str]] = set()
 
 _VERB = {"get": "GET", "post": "POST", "put": "PUT", "del": "DELETE", "download": None}
 _CALL = re.compile(r"(?:pdApi|window\.pdApi|api)\.(get|post|put|del|download)\(")

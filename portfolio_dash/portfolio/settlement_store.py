@@ -58,9 +58,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 import portfolio_dash
+from portfolio_dash.portfolio.returns import DividendIdentity, dividend_key
 from portfolio_dash.portfolio.settlement_models import (
     ACTIVE_RUN_STATUSES,
     CHANGE_TABLE_ZH,
@@ -74,6 +75,7 @@ from portfolio_dash.portfolio.settlement_models import (
     PeriodCash,
     PeriodHolding,
     PeriodKpi,
+    ReceivableDividend,
     Restatement,
     RunReport,
     RunRequest,
@@ -86,6 +88,9 @@ from portfolio_dash.portfolio.settlement_models import (
 )
 from portfolio_dash.pricing.benchmarks import BENCHMARKS
 from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.assets import Instrument
+from portfolio_dash.shared.models.enums import DividendType
+from portfolio_dash.shared.models.ledger import Dividend, LedgerBundle, counts_by
 from portfolio_dash.shared.money import from_db, to_db
 
 #: Bumped whenever a settle table's shape or meaning changes; part of :func:`calc_version`, so
@@ -2662,8 +2667,144 @@ def generation_rows(conn: sqlite3.Connection, generation: int, *, start: date,
     return out
 
 
+# =============================================================================================
+# The read path (W3-G, additions): what a reader serves from the store (§10, §11.2, §11.4)
+# =============================================================================================
+
+
+_Date = date
+
+
+class _DatedRow(Protocol):
+    """A cash movement or an FX conversion, stored or not: a row with its own date."""
+
+    @property
+    def date(self) -> _Date: ...
+
+
+@dataclass(frozen=True)
+class SettledPrefix:
+    """The trend days a reader serves from the store (§10 step 4).
+
+    *days* are the published generation's rows for ``[first_day, live_from)``, contiguous and
+    none of them a placeholder; *live_from* is the first day the reader values live; *stale*
+    the part of the store's stale range (PERF-D3) inside *days*, or ``None``.
+    """
+
+    days: list[SettledDay]
+    live_from: date
+    stale: tuple[date, date] | None
+
+
+def settled_prefix(conn: sqlite3.Connection, state: StoreState, *, first_day: date,
+                   today: date) -> SettledPrefix:
+    """The days before the live part of a build as at *today*, from the published generation
+    (§10 steps 3–4). Reads only.
+
+    The stored rows start at the series' OWN first day *first_day* (a row the store holds
+    before it — the first trade deleted — is not served) and stop at the earliest of:
+
+    - :func:`live_from` (never after *today*: a store settled past a reader's clock serves
+      only the reader's days);
+    - the first PLACEHOLDER day (:func:`first_placeholder_day`, W2-D): a placeholder carries
+      no figure, so from it on the reader values live — and when the live series is
+      unavailable the whole trend is, exactly as v0.1.31 answers (PERF-F2);
+    - the first day the generation does not hold (a gap; the series start moved earlier than
+      the generation's ``first_day``): never a day served from nowhere.
+
+    An unusable store serves nothing: every day is live.
+    """
+    if not state.usable:
+        return SettledPrefix(days=[], live_from=first_day, stale=None)
+    stop = min(live_from(state, today), today + _ONE_DAY)
+    placeholder = first_placeholder_day(conn, state.generation)
+    if placeholder is not None:
+        stop = min(stop, placeholder)
+    days: list[SettledDay] = []
+    if stop > first_day:
+        expected = first_day
+        for d in read_days(conn, state.generation, start=first_day, end=stop - _ONE_DAY):
+            if d.day != expected or d.placeholder:
+                break
+            days.append(d)
+            expected += _ONE_DAY
+    served_live = first_day + timedelta(days=len(days))
+    stale = stale_range(state, today)
+    served_stale = None
+    if stale is not None and stale[0] < served_live:
+        served_stale = (stale[0], min(stale[1], served_live - _ONE_DAY))
+    return SettledPrefix(days=days, live_from=served_live, stale=served_stale)
+
+
+#: 待結算 (§11.2 ``period_twr``): a period whose ``(previous end, D]`` contains the first live
+#: day or overlaps the stale range would join stale and live days — a back-dated position's
+#: whole gain booked as one day's return (fold verification #2).
+TWR_PENDING_ZH = "待結算：此期間包含尚未重新結算的日子，當期報酬暫不計算"
+
+
+def twr_pending(start: date, end: date, *, live_from: date | None,
+                stale: tuple[date, date] | None) -> bool:
+    """Whether the period ``[start, end]`` (``start`` = the day after the previous period's
+    end) reads 待結算 (:data:`TWR_PENDING_ZH`): only while some history is stale, when the
+    period contains *live_from* or overlaps *stale*. Without a stale range every served day is
+    correct, so the join is too."""
+    if stale is None:
+        return False
+    if live_from is not None and start <= live_from <= end:
+        return True
+    return start <= stale[1] and stale[0] <= end
+
+
+def dividends_receivable(dividends: Iterable[Dividend], instruments: Mapping[str, Instrument],
+                         day: date, *, refused: Iterable[DividendIdentity] = ()
+                         ) -> list[ReceivableDividend]:
+    """``notes.dividends_receivable`` of a close at *day* (§11.2), computed when the close is
+    READ: every non-STOCK dividend with ``ex_date ≤ day < payment date`` — the price already
+    dropped, the payout counts from its payment date. Shown, never counted. A 配股 counts from
+    its ex-date, so it is already in *day*'s shares and never listed; a row without an ex-date
+    is never guessed onto the list; a row the replay refuses (*refused*, the replay's
+    ``Book.refused_dividends``) is 待釐清 — named in ``notes.pending_positions`` — not a
+    receivable. Ledger order."""
+    keys = {dividend_key(d) for d in refused}
+    out: list[ReceivableDividend] = []
+    for dv in dividends:
+        if dv.type is DividendType.STOCK or dv.ex_date is None:
+            continue
+        if not dv.ex_date <= day < dv.date:
+            continue
+        inst = instruments.get(dv.symbol)
+        if inst is None or dividend_key(dv) in keys:
+            continue
+        out.append(ReceivableDividend(account_id=dv.account_id, symbol=dv.symbol,
+                                      ex_date=dv.ex_date, pay_date=dv.date,
+                                      ccy=inst.quote_ccy, net=dv.net))
+    return out
+
+
+def ledger_first_row(cut: LedgerBundle, movements: Iterable[_DatedRow],
+                     conversions: Iterable[_DatedRow], through: date) -> date | None:
+    """The first day any ledger row counts on by *through* — where the first period's activity
+    starts, and so the first close (W2-D: "the closes start at the month of the ledger's first
+    row"): trades, dividends by their effective date and openings of *cut* (the registered
+    ledger), its corporate actions, and the cash movements and FX conversions counting by
+    *through*. ``tests/settlement/test_read_path_periods.py`` holds it equal to the worker's
+    own rule on every corpus."""
+    days = ([t.trade_date for t in cut.transactions]
+            + [d.effective_date for d in cut.dividends]
+            + [o.build_date for o in cut.opening] + [a.date for a in cut.actions]
+            + [m.date for m in movements if counts_by(m.date, through)]
+            + [c.date for c in conversions if counts_by(c.date, through)])
+    return min(days) if days else None
+
+
 __all__ = [
     "CALC_PACKAGES",
+    "TWR_PENDING_ZH",
+    "SettledPrefix",
+    "dividends_receivable",
+    "ledger_first_row",
+    "settled_prefix",
+    "twr_pending",
     "ClaimedAttempts",
     "ClaimedChange",
     "SnapshotRow",

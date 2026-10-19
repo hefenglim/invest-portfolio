@@ -800,6 +800,14 @@ class PeriodClose(_Model):
     stale: bool = False
     #: Restatement rows for this period exist (已重述 / 上線重述).
     restated: bool = False
+    #: (W3-G, optional) 暫定: the period's end day lies after ``final_through`` — the note
+    #: names the quote job that has not confirmed the closing prices yet (§11.4). ``None``
+    #: when final (and always on the current period, which is live).
+    provisional: str | None = None
+    #: (W3-G, optional) Every ``settle_restatement`` row of this period, oldest first (§14.6):
+    #: what 已重述 / 上線重述 explains — the field's label and unit, old and new value, when and
+    #: why. ``source`` is a machine reference, never shown.
+    restatements: list[Restatement] = Field(default_factory=list)
 
 
 class PeriodDetail(PeriodClose):

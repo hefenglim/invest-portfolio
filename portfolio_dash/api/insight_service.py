@@ -676,9 +676,17 @@ def _portfolio_return(
     (pending_data, never a fabricated miss). Built per card, deliberately not hoisted:
     a daily pass matures at most a handful of portfolio-scope cards (trap #21 is about
     per-symbol loops).
+
+    PERF spec §10 step 6: while ``[created, due_date]`` overlaps the STALE range (days served
+    from the previous generation of the settlement store, a back-dated change not yet
+    re-settled) the same ``None`` — pending_data. Scoring the card on a pre-correction series
+    would write an ``insight_evaluations`` row that feeds promotion; the next pass, after a
+    run re-settles those days, scores it on the corrected one.
     """
     data = build_dashboard(conn, now=now, reporting=reporting)
     if not data.trend.available:
+        return None
+    if data.history_state.overlaps_stale(created, due_date):
         return None
     index = twr_index(data.trend.points)
     if not index:

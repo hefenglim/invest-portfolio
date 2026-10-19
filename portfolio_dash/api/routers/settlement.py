@@ -11,6 +11,11 @@ every user-facing word is the server's. ``/periods*`` are package G's (wave 3).
   ``already_running`` / ``settle_off``. ``dirty`` is the prompt's confirmation (reason
   ``prompt``), ``full`` the 重新結算 button (reason ``button``).
 - ``POST /settlement/cancel`` → 200; 409 ``not_running`` / ``cannot_cancel``.
+- ``GET /settlement/periods?kind=M|Y&limit=`` — the month / year closes, newest first, the
+  current period (live) included: ``{rows: PeriodClose[], total_count}``;
+  ``/periods/{kind}/{period}`` — one close with its holdings and cash at its day; 404 for a
+  period the ledger does not have. Both read ``api/snapshots.py`` (the rule for which close is
+  served from the store and which live) and never write.
 
 The two POSTs carry the action-log labels 「重新結算」 / 「取消重新結算」 (``api/action_log.py``).
 """
@@ -25,6 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from portfolio_dash.api import settlement_service as service
+from portfolio_dash.api import snapshots
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting, request_actor
 from portfolio_dash.api.errors import error_body
 from portfolio_dash.shared.enums import Currency
@@ -32,6 +38,7 @@ from portfolio_dash.shared.enums import Currency
 router = APIRouter()
 
 _RUNS_MAX = 100
+_PERIODS_MAX = 120
 _ROWS_MAX = 500
 _STATE = re.compile(r"^(pending|run:[0-9]+)$")
 _DIFF_FIELDS = frozenset({"total_value", "net_invested", "net_worth", "incomplete"})
@@ -143,6 +150,46 @@ def settlement_changes(
                                 limit=limit, offset=offset)
     if body is None:
         return _not_found(int(state.split(":", 1)[1]))
+    return body
+
+
+@router.get("/settlement/periods")
+def settlement_periods(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+    kind: str = "M",
+    limit: int = 24,
+) -> Any:
+    """The period closes (KPI + activity), newest first — the current period live, the past
+    ones settled or computed live (spec §11.4). ``total_count`` counts every period the ledger
+    has."""
+    if kind not in ("M", "Y"):
+        return _bad("kind 必須是 M（月）或 Y（年）", "kind")
+    refused = _paging(limit, 0, _PERIODS_MAX)
+    if refused is not None:
+        return refused
+    return snapshots.period_rows(conn, kind="M" if kind == "M" else "Y", limit=limit,
+                                 now=now, reporting=reporting)
+
+
+@router.get("/settlement/periods/{kind}/{period}")
+def settlement_period(
+    kind: str,
+    period: str,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    now: datetime = Depends(get_now),
+    reporting: Currency = Depends(get_reporting),
+) -> Any:
+    """One close with its holdings and its cash at its day (spec §11.3)."""
+    parsed = snapshots.parse_period(kind, period)
+    if parsed is None:
+        return _bad("期間必須是 M／YYYY-MM（月）或 Y／YYYY（年）", "period")
+    body = snapshots.period_detail(conn, kind=parsed[0], period=parsed[1], now=now,
+                                   reporting=reporting)
+    if body is None:
+        return JSONResponse(status_code=404, content=error_body(
+            "not_found", f"沒有 {parsed[1]} 的期間資料：早於帳本第一筆紀錄，或尚未開始"))
     return body
 
 
