@@ -23,7 +23,6 @@ from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.settlement_models import (
-    RunFailure,
     RunReport,
     RunRequest,
     RunSummary,
@@ -115,10 +114,8 @@ def test_a_failed_run_is_an_error_row_with_its_class_and_phase(path: Path) -> No
     assert started.ended is not None and started.ended.status == "failed"
     row = sup.job_row(path, started.run_id)
     assert row["status"] == "error"
-    # The class comes from the worker's RunFailure.error_class (package D adds the field; until
-    # it lands the stub cannot set it and the code reads 'failed').
-    has_class = "error_class" in RunFailure.model_fields
-    assert row["reason"] == ("failed:RuntimeError" if has_class else "failed")
+    # The class comes from the worker's RunFailure.error_class (the child exits 0).
+    assert row["reason"] == "failed:RuntimeError"
     assert row["detail"] == "重新結算失敗（逐日估值）：測試：逐日估值失敗"
     failure = sup.report(path, started.run_id).failure
     assert failure is not None and failure.consequence  # derived from the state

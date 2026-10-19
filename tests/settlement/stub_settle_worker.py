@@ -174,11 +174,9 @@ def run(run_id: int, *, db_path: Path) -> None:
             st.end_without_publish(conn, run_id, "failed")
             failed = st.get_run(conn, run_id)
             assert failed is not None
-            extra = ({"error_class": "RuntimeError"}
-                     if "error_class" in RunFailure.model_fields else {})
             st.finalise_run(conn, run_id, "failed", failed.model_copy(update={
                 "failure": RunFailure(phase="valuate", reason_text="測試：逐日估值失敗",
-                                      **extra)}))
+                                      error_class="RuntimeError")}))
             return
         if behaviour == "change_during" and claim.run_from is not None:
             other = connect_path(db_path)

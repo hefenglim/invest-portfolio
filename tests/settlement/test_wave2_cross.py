@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from portfolio_dash.api import settlement_service as service
+from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.settlement_store import TriggerCheck
 from portfolio_dash.shared import child_runner, proc_lock
@@ -259,4 +260,25 @@ def test_a_real_child_that_dies_before_claiming_ends_failed(
     assert (after.generation, after.dirty_from, after.run_id) == (
         before.generation, before.dirty_from, None)
     assert not proc_lock.is_held(proc_lock.settlement_lock_path())
+
+
+def test_a_real_phase_failure_records_its_class_on_the_job_row(
+    golden: tuple[Path, datetime], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real worker catches a phase's exception, ends the run itself and returns: the
+    class reaches ``job_runs.reason`` through ``RunFailure.error_class`` (spec §9.4), never
+    through a traceback (wave-2 review E #3)."""
+    path, now = golden
+
+    def broken(self: object, *args: object, **kwargs: object) -> object:
+        raise ValueError("a broken valuation")
+
+    monkeypatch.setattr(settle_worker._Run, "_valuate", broken)
+    started = service.start_run(scope="full", reason="button", now=now)
+    report = sup.report(path, started.run_id)
+    assert report.summary.status == "failed"
+    assert report.failure is not None and report.failure.error_class == "ValueError"
+    row = sup.job_row(path, started.run_id)
+    assert (row["status"], row["reason"]) == ("error", "failed:ValueError")
+    assert "（ValueError）" in row["detail"]
 

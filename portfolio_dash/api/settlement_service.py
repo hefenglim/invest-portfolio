@@ -982,7 +982,7 @@ def _job_reason(status: str, report: RunReport, exit_info: _Exit | None) -> str 
         # The worker ends a failed run itself and exits 0 (review E #3): the class it records
         # on the failure (``RunFailure.error_class``, package D) comes first; a child that
         # died with a traceback is read from its stderr.
-        cls = getattr(report.failure, "error_class", None) if report.failure else None
+        cls = report.failure.error_class if report.failure is not None else None
         if not cls and exit_info is not None:
             cls = exit_info.error_class
         return f"failed:{cls}" if cls else "failed"
