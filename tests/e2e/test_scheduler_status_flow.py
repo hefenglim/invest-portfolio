@@ -188,6 +188,64 @@ def test_a_queued_run_shows_the_servers_sentence_under_its_chip(
     assert not console_errors and not page_errors, (console_errors, page_errors)
 
 
+def test_the_digest_card_follows_a_queued_run_instead_of_timing_out(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """The 今日摘要 card's 立即產生 follows the RUN (package H review #7): while the job waits
+    for the heavy gate the card shows the server's queued sentence and keeps polling — it used
+    to give up after 90 s with 「產生逾時」 — and once the run ends without a digest it says why
+    in the run's own words. The run door and the status are stubbed; the card and the page are
+    real (no digest exists on the flow database, so /latest answers null throughout)."""
+    base_url = flow_server(_seed_scheduler)
+    page = fresh_page
+    console_errors, page_errors = _watch_errors(page)
+    phase = {"now": "queued"}
+    failure = "執行失敗：RuntimeError：推播通道無回應"
+
+    def run(route: Route) -> None:
+        route.fulfill(status=202, content_type="application/json",
+                      body=json.dumps({"run_id": 7, "kind": "daily"}))
+
+    def status(route: Route) -> None:
+        if phase["now"] == "queued":
+            job = {"running": False, "queued": True, "progress": QUEUED_BEHIND_GATE,
+                   "last_run": None}
+        else:
+            job = {"running": False, "queued": False, "progress": None, "last_run": {
+                "status": "error", "ok": False, "message": failure,
+                "started_at": "2026-06-11T14:30:00+08:00",
+                "finished_at": "2026-06-11T14:30:05+08:00", "duration_seconds": 5.0,
+                "cost": None}}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"active": phase["now"] == "queued", "jobs": {"digest_daily": job}},
+            ensure_ascii=False))
+
+    page.route("**/api/digest/run", run)
+    page.route("**/api/scheduler/status*", status)
+    try:
+        page.goto(base_url + "/index.html", wait_until="load")
+        panel = page.locator("#digest-daily-panel")
+        button = panel.locator(".digest-gen-btn")
+        button.wait_for(state="visible", timeout=30_000)
+        button.click()
+        panel.locator(".digest-run-note").filter(has_text=QUEUED_BEHIND_GATE).wait_for(
+            state="visible", timeout=30_000)
+        assert button.inner_text() == "已排入" and button.is_disabled()
+        page.wait_for_timeout(5_000)  # still following the queued run, not giving up
+        assert panel.locator(".digest-run-note").count() == 1
+        assert page.locator(".toast").filter(has_text="產生逾時").count() == 0
+        phase["now"] = "failed"
+        page.locator(".toast").filter(has_text=failure).wait_for(state="visible",
+                                                                  timeout=30_000)
+        panel.locator(".digest-gen-btn").filter(has_text="立即產生").wait_for(
+            state="visible", timeout=10_000)
+        assert panel.locator(".digest-run-note").count() == 0
+    finally:
+        page.unroute("**/api/digest/run", run)
+        page.unroute("**/api/scheduler/status*", status)
+    assert not console_errors and not page_errors, (console_errors, page_errors)
+
+
 def test_a_run_behind_the_heavy_gate_reads_queued_then_succeeds_in_a_worker(
     flow_server: FlowServerFactory, fresh_page: Page, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

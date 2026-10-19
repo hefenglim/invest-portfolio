@@ -13,11 +13,19 @@ nobody stubbed fails loudly instead of reaching the network.
 ``PD_TEST_MODE=1``) and the import installs them with plain ``setattr`` — before the worker
 binds its runtime, so the runners the composition root reads off their modules are these.
 
+The model provider is stubbed one level below the accounting: ``shared/llm._call_provider``
+answers every call with one valid insight card and a usage block (1,000 prompt and 100
+completion tokens), and nothing reports structured-output support, so a run's usage is
+metered, priced, booked through ``log_usage`` into ``llm_usage`` and counted by the run's
+``usage_tally`` exactly as a real reply would be — without importing LiteLLM.
+
 ``PD_STUB_JOB`` picks one job (``PD_STUB_JOB_ID``) and replaces its func:
 
 - ``pid``: returns 「程序 <os.getpid()>」 — proves which process ran it;
 - ``slow``: reports progress, then sleeps ``PD_STUB_SLEEP_S`` seconds (a run to kill);
-- ``die``: reports progress, then ends the process with code 3 (a worker dying mid-run).
+- ``die``: reports progress, then ends the process with code 3 (a worker dying mid-run);
+- ``write``: writes one cash movement (a ledger row the settlement's change trail records,
+  with the writing connection's actor) and returns 「寫入 1 筆現金異動」.
 
 The worker module itself is never patched here; were it, its functions live in ``__main__``
 in a ``python -m`` child (see ``tests/settlement/worker_stubs.py``).
@@ -29,19 +37,63 @@ import dataclasses
 import os
 import time
 from collections.abc import Callable
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from portfolio_dash.api import dividend_inbox as inbox
 from portfolio_dash.api import fundamentals_service, news_service
+from portfolio_dash.data_ingestion.store import insert_cash_movement
 from portfolio_dash.pricing import ingest
 from portfolio_dash.pricing.results import RefreshSummary
 from portfolio_dash.scheduler import jobs
+from portfolio_dash.shared import llm
+from portfolio_dash.shared.enums import Currency
 
 Patch = Callable[[object, str, Any], None]
 
 #: The progress message the ``slow`` / ``die`` jobs report before they stop.
 STUB_PROGRESS = "測試：工作進行中"
+#: The day and account of the ``write`` job's cash movement (the golden ledger's account).
+WRITE_DAY = date(2026, 1, 2)
+WRITE_ACCOUNT = "schwab"
+#: The one card every stubbed model call answers with (``tests/scheduler/
+#: test_run_records_its_spend.py``'s card).
+CARD = ('{"title":"洞察","summary":"量縮","body_md":"**2330** 量縮整理。","tags":["TW"],'
+        '"symbol":null,"confidence":70,"prediction":null}')
+
+
+class _Usage:
+    prompt_tokens = 1000
+    completion_tokens = 100
+
+
+class _Message:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _Choice:
+    def __init__(self, content: str) -> None:
+        self.message = _Message(content)
+
+
+class _Reply:
+    """A provider reply in the shape ``shared/llm`` reads (``choices[0].message.content``,
+    ``usage.prompt_tokens`` / ``completion_tokens``)."""
+
+    def __init__(self, content: str) -> None:
+        self.choices = [_Choice(content)]
+        self.usage = _Usage()
+
+
+def _call_provider(model: Any, messages: Any, extra: Any) -> _Reply:
+    return _Reply(CARD)
+
+
+def _no_response_format(model: Any) -> bool:
+    return False
 
 _SWEEP = ingest.SnapshotSweep(written=2, empty=1)
 _NEWS = {"organized": 2, "headline_only": 1, "skipped_existing": 3, "refetched": 1,
@@ -92,6 +144,10 @@ def _replaced_func(mode: str, job_id: str) -> jobs.JobFunc:
     def func(conn: Any, *, now: Any) -> str:
         if mode == "pid":
             return f"程序 {os.getpid()}"
+        if mode == "write":
+            insert_cash_movement(conn, account_id=WRITE_ACCOUNT, move_date=WRITE_DAY,
+                                 kind="DEPOSIT", ccy=Currency.TWD, amount=Decimal("1"))
+            return "寫入 1 筆現金異動"
         jobs.set_progress(job_id, STUB_PROGRESS)
         if mode == "die":
             os._exit(3)
@@ -118,6 +174,8 @@ def install(patch: Patch, *, mode: str = "", job_id: str = "") -> None:
     patch(news_service, "run_news_daily", _news_daily)
     patch(jobs.backup_ops, "check_integrity", _integrity)
     patch(jobs.backup_ops, "backup_database", _backup)
+    patch(llm, "_call_provider", _call_provider)
+    patch(llm, "_supports_response_format", _no_response_format)
     if mode:
         by_id = {spec.id: spec for spec in jobs.JOBS}
         by_id[job_id] = dataclasses.replace(by_id[job_id], func=_replaced_func(mode, job_id))
