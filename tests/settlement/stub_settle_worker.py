@@ -13,7 +13,8 @@ Each call consumes the next behaviour of a plan:
   the file named by ``PD_STUB_SETTLE_PLAN`` (read-modify-write, one child at a time).
 
 Behaviours: ``publish`` (default), ``fail``, ``die_before_claim``, ``die_after_claim``,
-``sleep`` (claims, then sleeps until terminated), ``selfcheck_diff``, ``change_during``
+``sleep`` (claims, then sleeps until terminated), ``selfcheck_diff`` (a self-check that
+found 3 differences; any self-check-scope ``publish`` is clean), ``change_during``
 (commits a back-dated trade after the claim, so the swap publishes partially).
 """
 
@@ -40,6 +41,7 @@ from portfolio_dash.portfolio.settlement_models import (
     RunFailure,
     RunPhase,
     RunProgress,
+    SelfcheckResult,
 )
 from portfolio_dash.shared import proc_lock
 from portfolio_dash.shared.config import get_settings
@@ -130,11 +132,16 @@ def _publish(conn: sqlite3.Connection, run_id: int, claim: st.Claim, *,
                          through=claim.run_through, first_day=first, reporting=reporting)
     report = st.get_run(conn, run_id)
     assert report is not None
-    if selfcheck_diff:
+    if claim.scope == "selfcheck" or selfcheck_diff:
+        # the real worker's self-check result (``RunReport.selfcheck``)
         report = report.model_copy(update={
-            "summary": report.summary.model_copy(update={"selfcheck_diff": True}),
-            "history": HistoryResult(first_changed_day=claim.run_from,
-                                     note="settled_day 與已發布版本不同")})
+            "summary": report.summary.model_copy(update={"selfcheck_diff": selfcheck_diff}),
+            "selfcheck": SelfcheckResult(
+                compared_through=claim.run_through, differences=3 if selfcheck_diff else 0,
+                first_day=claim.run_from if selfcheck_diff else None,
+                first_table="settled_day" if selfcheck_diff else None),
+            "history": HistoryResult(first_changed_day=claim.run_from) if selfcheck_diff
+            else report.history})
     st.finalise_run(conn, run_id, result.status, report)
 
 
@@ -162,12 +169,17 @@ def run(run_id: int, *, db_path: Path) -> None:
         if behaviour == "sleep":
             time.sleep(120)
         if behaviour == "fail":
+            # As the real worker (review E #3): it catches the phase's exception, ends the run
+            # itself with the class on the failure, and RETURNS (the child exits 0).
             st.end_without_publish(conn, run_id, "failed")
             failed = st.get_run(conn, run_id)
             assert failed is not None
+            extra = ({"error_class": "RuntimeError"}
+                     if "error_class" in RunFailure.model_fields else {})
             st.finalise_run(conn, run_id, "failed", failed.model_copy(update={
-                "failure": RunFailure(phase="valuate", reason_text="測試：逐日估值失敗")}))
-            raise RuntimeError("stub failure in valuate")
+                "failure": RunFailure(phase="valuate", reason_text="測試：逐日估值失敗",
+                                      **extra)}))
+            return
         if behaviour == "change_during" and claim.run_from is not None:
             other = connect_path(db_path)
             try:

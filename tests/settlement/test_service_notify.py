@@ -46,11 +46,13 @@ class _Sender:
 class _Scheduler:
     def __init__(self) -> None:
         self.jobs: list[tuple[Any, Any, str]] = []
+        self.options: list[dict[str, Any]] = []
 
     def add_job(self, fn: Any, trigger: Any, *, id: str,  # noqa: A002 — APScheduler's name
-                replace_existing: bool) -> None:
+                replace_existing: bool, **options: Any) -> None:
         assert replace_existing
         self.jobs.append((fn, trigger, id))
+        self.options.append(options)
 
 
 class _World:
@@ -135,6 +137,8 @@ def test_inside_quiet_hours_it_is_held_then_sent_once_at_the_end(world: _World) 
     [(fn, trigger, job_id)] = world.scheduler.jobs
     assert job_id == service.NOTIFY_JOB_ID
     assert trigger.run_date == WINDOW_END + timedelta(seconds=1)
+    # a throttled VM that wakes late still sends it (APScheduler's default grace is 1 s)
+    assert world.scheduler.options == [{"misfire_grace_time": None, "coalesce": True}]
     world.now = MORNING  # the window's end: the one-shot job fires
     fn()
     assert len(world.sent.calls) == 1 and not _pending(world, run_id)
@@ -196,3 +200,25 @@ def test_only_a_failed_automatic_run_is_pushed(world: _World) -> None:
     assert world.sent.calls == []
     _failed_nightly()
     assert len(world.sent.calls) == 1
+
+
+def test_a_held_push_is_dropped_once_a_later_run_published(world: _World) -> None:
+    """Review E #7: 「歷史走勢與月度成績維持前一版本」 is no longer true once a later run
+    published, so the held push is not sent at the window's end — and its flag is cleared."""
+    run_id = _failed_nightly()
+    assert _pending(world, run_id)
+    service.start_run(scope="full", reason="button")  # the owner settles at 07:00
+    world.now = MORNING
+    assert service.send_pending_notifications() == 0
+    assert world.sent.calls == [] and not _pending(world, run_id)
+
+
+def test_a_real_scheduler_keeps_the_one_shot_job_through_a_late_wake(world: _World) -> None:
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    real = BackgroundScheduler()
+    service.bind_scheduler(real)
+    _failed_nightly()
+    [job] = real.get_jobs()
+    assert job.id == service.NOTIFY_JOB_ID
+    assert job.misfire_grace_time is None and job.coalesce is True

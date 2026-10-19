@@ -383,6 +383,40 @@ def _verdict(runs: Sequence[_JobRun], starts: Sequence[datetime], fire: datetime
     return found
 
 
+#: ``final_through``'s *since* for "every quote run since go-live" (``job_runs`` is never
+#: pruned, so the whole history is there and small: about 250 rows per job and year).
+SINCE_GO_LIVE = date(1900, 1, 1)
+
+
+def _schedule_rows(conn: sqlite3.Connection,
+                   now: datetime) -> list[tuple[str, bool, str, str, datetime | None]]:
+    """The quote jobs' schedules and when each last changed: ``updated_at`` (stamped by the
+    排程 page or a boot), or *now* when the schedule differs from its stamp — edited by hand
+    since the last boot, at a moment nobody recorded, so no past fire can be trusted to the
+    current cron. ``None`` = never changed (or a database whose boot migration has not run)."""
+    marks = ", ".join("?" for _ in jobs.QUOTE_JOB_IDS)
+    try:
+        rows = conn.execute(
+            f"SELECT job_id, enabled, cron, timezone, updated_at, stamped_schedule "
+            f"FROM schedule_config WHERE job_id IN ({marks}) ORDER BY job_id",
+            jobs.QUOTE_JOB_IDS).fetchall()
+    except sqlite3.OperationalError:
+        try:
+            rows = [(*r, None, None) for r in conn.execute(
+                f"SELECT job_id, enabled, cron, timezone FROM schedule_config "
+                f"WHERE job_id IN ({marks}) ORDER BY job_id", jobs.QUOTE_JOB_IDS).fetchall()]
+        except sqlite3.OperationalError:
+            return []
+    out: list[tuple[str, bool, str, str, datetime | None]] = []
+    for r in rows:
+        job_id, enabled, cron, tz = str(r[0]), bool(r[1]), str(r[2]), str(r[3])
+        changed = None if r[4] is None else _aware(str(r[4]))
+        if r[5] is not None and r[5] != jobs.schedule_key(cron, tz, enabled):
+            changed = now
+        out.append((job_id, enabled, cron, tz, changed))
+    return out
+
+
 def final_through(conn: sqlite3.Connection, now: datetime, *,
                   since: date | None = None) -> FinalThrough:
     """The last day a run may settle (spec §9.1), from ``schedule_config`` and ``job_runs``,
@@ -393,39 +427,53 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
     in the job's OWN timezone is D (``quotes_us`` at 16:30 New York judges D although it fires
     on D + 1 in Taipei), at or after the job's first ``job_runs`` row (go-live). The fire's
     verdict is the latest finished row of that job started at or after the fire on the same
-    local date; a fire still in the future, or one with no finished row, is not ``ok``. A day
-    older than :data:`STALE_AGE_DAYS` qualifies regardless and lists its row's ``held_failed``
-    in ``unconfirmed_closes``. Nothing is due with ``PD_DISABLE_SCHEDULER=1``.
+    local date (a refresh earlier that day does not answer it); a fire still in the future,
+    or one with no finished row, is not ``ok``. A day older than :data:`STALE_AGE_DAYS`
+    qualifies regardless and lists its row's ``held_failed`` in ``unconfirmed_closes``.
+    Nothing is due with ``PD_DISABLE_SCHEDULER=1``.
 
-    *since* bounds the fires examined for ``unconfirmed_closes`` (a run passes its first
-    possible day); without it only the days that can still block are examined.
+    **A schedule change never rewrites history** (review E #2). The CURRENT cron says nothing
+    about the fires before the schedule last changed (``schedule_config.updated_at``, stamped
+    by ``jobs.update_schedule`` and by a boot after a hand edit; a hand edit not yet seen by a
+    boot counts as changed now): before that moment a day is judged by the latest finished
+    row of the job on that local date, whatever time it ran, and a day with no row at all was
+    not due.
+
+    *since* bounds the fires examined (:data:`SINCE_GO_LIVE` = every quote run since go-live,
+    what a run's ``unconfirmed_closes`` needs); without it only the days that can still block
+    are examined (the status poll).
     """
     today = _today(now)
     yesterday = today - _ONE_DAY
     if os.environ.get("PD_DISABLE_SCHEDULER") == "1":
         return FinalThrough(through=yesterday)
     window_from = since if since is not None else today - timedelta(days=STALE_AGE_DAYS + 1)
-    marks = ", ".join("?" for _ in jobs.QUOTE_JOB_IDS)
-    try:
-        schedule = conn.execute(
-            f"SELECT job_id, enabled, cron, timezone FROM schedule_config "
-            f"WHERE job_id IN ({marks}) ORDER BY job_id", jobs.QUOTE_JOB_IDS).fetchall()
-    except sqlite3.OperationalError:
+    schedule = _schedule_rows(conn, now)
+    if not schedule:
         return FinalThrough(through=yesterday)
     runs_by_job, go_lives = _quote_runs(conn, window_from)
     blocked: dict[date, set[str]] = {}
     unconfirmed: dict[date, set[str]] = {}
-    for row in schedule:
-        job_id = str(row[0])
-        if not row[1]:
+
+    def judge(job_id: str, day: date, answer: _JobRun | None) -> None:
+        if answer is not None and answer.status == "ok":
+            return
+        if (today - day).days > STALE_AGE_DAYS:
+            unconfirmed.setdefault(day, set()).update(
+                answer.held_failed if answer is not None else ())
+        else:
+            blocked.setdefault(day, set()).add(job_id)
+
+    for job_id, enabled, cron, tz_name, changed_at in schedule:
+        if not enabled:
             continue  # a market job the owner switched off: nothing is due
         first_run = go_lives.get(job_id)
         if first_run is None:
             continue  # before go-live: nothing is due
         runs = runs_by_job.get(job_id, [])
         try:
-            tz = ZoneInfo(str(row[3]))
-            trigger = CronTrigger.from_crontab(str(row[2]), timezone=tz)
+            tz = ZoneInfo(tz_name)
+            trigger = CronTrigger.from_crontab(cron, timezone=tz)
         except Exception:  # noqa: BLE001 — an unusable schedule row fires nothing
             logger.warning("final_through: cannot read the schedule of %s", job_id)
             continue
@@ -434,16 +482,30 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
         # moment after its fire time) is due, every fire before that day is not.
         go_live = datetime.combine(first_run.astimezone(tz).date(), dtime.min, tz)
         start = max(go_live, datetime.combine(window_from, dtime.min, tz))
+        strict_days: set[date] = set()
         for fire in _fires(trigger, start, yesterday, tz):
+            if changed_at is not None and fire < changed_at:
+                continue  # the current cron was not in effect then
             day = fire.astimezone(tz).date()
-            answer = None if fire > now else _verdict(runs, starts, fire, day, tz)
-            if answer is not None and answer.status == "ok":
+            strict_days.add(day)
+            judge(job_id, day, None if fire > now else _verdict(runs, starts, fire, day, tz))
+        if changed_at is None:
+            continue
+        # Before the change: every day the job ran, by its latest finished row that day.
+        before: dict[date, _JobRun | None] = {}
+        for run in runs:
+            if run.started < start or run.started >= changed_at:
                 continue
-            if (today - day).days > STALE_AGE_DAYS:
-                unconfirmed.setdefault(day, set()).update(
-                    answer.held_failed if answer is not None else ())
+            day = run.started.astimezone(tz).date()
+            if day > yesterday or day in strict_days:
+                continue
+            seen = before.get(day)
+            if run.finished and (seen is None or run.run_id > seen.run_id):
+                before[day] = run
             else:
-                blocked.setdefault(day, set()).add(job_id)
+                before.setdefault(day, None)
+        for day, answer in before.items():
+            judge(job_id, day, answer)
     if blocked:
         first = min(blocked)
         through = first - _ONE_DAY
@@ -460,32 +522,25 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
 # =============================================================================================
 
 
-def _run_start_candidate(conn: sqlite3.Connection, scope: RunScope,
-                         state: store.StoreState) -> date | None:
-    """The earliest day the run can start (for the unconfirmed-closes window)."""
-    if scope in ("full", "selfcheck") or state.generation == 0 or state.settled_through is None:
-        return store.first_ledger_day(conn)
-    nxt = state.settled_through + _ONE_DAY
-    return min(nxt, state.dirty_from) if state.dirty_from is not None else nxt
-
-
 def build_request(conn: sqlite3.Connection, *, scope: RunScope, reason: str,
                   started_by: str | None, now: datetime) -> RunRequest:
     """The run's inputs (P12): ``through`` = :func:`final_through`, never moved below the
     days the store already holds for a claiming scope (a job just enabled must not move
     ``settled_through`` back — the claim clamps the same way), and the unconfirmed closes of
-    the days the run can settle."""
+    every day up to ``through``."""
     state = store.store_state(conn, reporting=_reporting())
-    since = _run_start_candidate(conn, scope, state)
-    ft = final_through(conn, now, since=since if since is not None else _today(now))
+    # Every quote run since go-live, never only the run's first day on (review E #10): the
+    # claim may start earlier than any day known now (a back-dated change before it), and a
+    # full run or a self-check re-derives the marks of every old close. ``job_runs`` is never
+    # pruned, so the map is complete.
+    ft = final_through(conn, now, since=SINCE_GO_LIVE)
     through = ft.through
     if scope != "selfcheck":
         floor = max((d for d in (state.settled_through, state.held_through) if d is not None),
                     default=None)
         if floor is not None and floor > through:
             through = floor
-    closes = {d: syms for d, syms in ft.unconfirmed_closes.items()
-              if d <= through and (since is None or d >= since)}
+    closes = {d: syms for d, syms in ft.unconfirmed_closes.items() if d <= through}
     return RunRequest(scope=scope, reason=reason, started_by=started_by, through=through,
                       unconfirmed_closes=closes)
 
@@ -649,9 +704,52 @@ class AutoStart:
     ended: RunEnd | None = None
 
 
+def _active_run_ids(conn: sqlite3.Connection) -> list[int]:
+    """Every ``preparing`` / ``running`` run, oldest first, from the COLUMNS alone: a report
+    whose JSON no longer reads (``active_or_unfinished_runs`` validates every one) must not
+    stop the cleanup that ends it (review E #8)."""
+    marks = ", ".join("?" for _ in ACTIVE_RUN_STATUSES)
+    return [int(r[0]) for r in conn.execute(
+        f"SELECT run_id FROM settle_run WHERE status IN ({marks}) ORDER BY run_id",
+        sorted(ACTIVE_RUN_STATUSES))]
+
+
 def _db_active_run(conn: sqlite3.Connection) -> int | None:
-    runs = store.active_or_unfinished_runs(conn)
-    return runs[-1].run_id if runs else None
+    ids = _active_run_ids(conn)
+    return ids[-1] if ids else None
+
+
+_STALE_REASON = "結算程序已不在執行，紀錄未能結束"
+
+
+def _end_stale(conn: sqlite3.Connection, run_id: int, now: datetime, *,
+               reason_text: str) -> None:
+    """End a ``preparing`` / ``running`` run that nobody will finish — no waiter in this
+    process and its lock free — as 中斷, the way boot ends an orphan (review E #4). A report
+    that no longer reads ends through the columns alone (``end_without_publish``)."""
+    try:
+        with _savepoint(conn, "settle_stale"):
+            report = store.get_run(conn, run_id)
+            phase = _current_phase(report) if report is not None else None
+            _finalise(conn, run_id, exit_info=None, cancel_by=None, now=now,
+                      failure_override=RunFailure(phase=phase, reason_text=reason_text))
+    except Exception:  # noqa: BLE001 — never let one broken report wedge the service
+        logger.exception("settlement run %s could not be ended normally", run_id)
+        with _savepoint(conn, "settle_stale_columns"):
+            store.end_without_publish(conn, run_id, "interrupted")
+            jobs.finish_job_run(conn, run_id, status="error",
+                                detail=f"重新結算中斷：{reason_text}", reason="interrupted",
+                                now=now, usage=_no_ai(), commit=False)
+
+
+def _clear_stale(conn: sqlite3.Connection, now: datetime) -> int | None:
+    """The run still active, or ``None`` after ending every stale one (§9.4 liveness: the OS
+    lock, and this process's own waiter)."""
+    for run_id in _active_run_ids(conn):
+        if _in_process_alive(run_id) or proc_lock.is_held(_lock_path()):
+            return run_id
+        _end_stale(conn, run_id, now, reason_text=_STALE_REASON)
+    return None
 
 
 def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
@@ -670,7 +768,9 @@ def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
         if _S.active is not None:
             raise AlreadyRunning(_S.active.run_id)
         with session(actor=started_by or ACTOR_BOOT) as conn:
-            busy = _db_active_run(conn)
+            # A report left active by a waiter that could not finish it (its lock free, no
+            # run here) is ended 中斷 first, never refused or queued behind (review E #4).
+            busy = _clear_stale(conn, now)
             if busy is not None:
                 raise AlreadyRunning(busy)
             request = build_request(conn, scope=scope, reason=reason, started_by=started_by,
@@ -813,6 +913,28 @@ def _range_text(summary: RunSummary) -> str:
     return f"{summary.range_from.isoformat()} 起 {summary.days} 天"
 
 
+#: The settle tables a self-check compares, in the owner's words (DEF-073: no table name in a
+#: ``job_runs.detail``).
+_SETTLE_TABLE_ZH: dict[str, str] = {
+    "settled_day": "逐日結算",
+    "settled_period": "月結與年結",
+    "settled_period_holding": "期末持倉",
+    "settled_period_cash": "期末現金",
+}
+
+
+def _selfcheck_where(report: RunReport) -> str:
+    """「N 處，最早於 D（逐日結算）」 from the worker's ``selfcheck`` result, else the history."""
+    check = report.selfcheck
+    first = (check.first_day if check is not None and check.first_day is not None
+             else report.history.first_changed_day if report.history is not None else None)
+    count = f"{check.differences} 處，" if check is not None and check.differences else ""
+    table = (f"（{_SETTLE_TABLE_ZH.get(check.first_table, '結算資料')}）"
+             if check is not None and check.first_table else "")
+    at = f"最早於 {first.isoformat()}{table}" if first is not None else ""
+    return f"{count}{at}" if count or at else ""
+
+
 def run_detail(report: RunReport) -> str:
     """The run's ``job_runs.detail`` — one zh sentence (DEF-073), e.g.
     「重新結算 2025-06-16 起 489 天，耗時 14 秒」."""
@@ -820,13 +942,11 @@ def run_detail(report: RunReport) -> str:
     took = _seconds_text(s.duration_s)
     span = _range_text(s)
     failure = report.failure
-    if s.status == "published" and s.reason == "selfcheck":
+    if s.status == "published" and report.inputs.scope == "selfcheck":
+        # keyed on the run's SCOPE: a resumed self-check (reason ``resume``) is one too
         if s.selfcheck_diff:
-            first = report.history.first_changed_day if report.history is not None else None
-            at = f"自 {first.isoformat()} 起" if first is not None else ""
-            note = report.history.note if report.history is not None else None
-            tail = f"（{note}）" if note else ""
-            return f"每週自檢發現差異：{at}與已發布版本不同{tail}，{took}"
+            where = _selfcheck_where(report)
+            return f"每週自檢發現差異：{where + '，' if where else ''}與已發布版本不同，{took}"
         return f"每週自檢 {span}：與已發布版本一致，{took}"
     if s.status == "published":
         return f"重新結算 {span}，{took}"
@@ -859,22 +979,43 @@ def _job_reason(status: str, report: RunReport, exit_info: _Exit | None) -> str 
     if status == "interrupted":
         return "interrupted"
     if status == "failed":
-        cls = exit_info.error_class if exit_info is not None else None
+        # The worker ends a failed run itself and exits 0 (review E #3): the class it records
+        # on the failure (``RunFailure.error_class``, package D) comes first; a child that
+        # died with a traceback is read from its stderr.
+        cls = getattr(report.failure, "error_class", None) if report.failure else None
+        if not cls and exit_info is not None:
+            cls = exit_info.error_class
         return f"failed:{cls}" if cls else "failed"
     if report.summary.selfcheck_diff:
         return SELFCHECK_DIFF_REASON
     return None
 
 
+@contextlib.contextmanager
+def _savepoint(conn: sqlite3.Connection, name: str) -> Iterator[None]:
+    """A SAVEPOINT around a block: released on success, rolled back to on error (and the
+    error re-raised). Every service write inside commits nothing (``commit=False``), so the
+    savepoint really scopes them."""
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except BaseException:
+        conn.execute(f"ROLLBACK TO {name}")
+        conn.execute(f"RELEASE {name}")
+        raise
+    conn.execute(f"RELEASE {name}")
+
+
 def _finalise(conn: sqlite3.Connection, run_id: int, *, exit_info: _Exit | None,
               cancel_by: str | None, now: datetime,
               failure_override: RunFailure | None = None) -> RunEnd:
-    """End a run's report if its worker did not, then its ``job_runs`` row (one session)."""
+    """End a run's report if its worker did not, then its ``job_runs`` row, without
+    committing: the caller's session (or boot's savepoint) commits."""
     report = store.get_run(conn, run_id)
     if report is None:
         detail = "重新結算失敗：找不到這次結算的紀錄"
         jobs.finish_job_run(conn, run_id, status="error", detail=detail, reason="failed",
-                            now=now, usage=_no_ai())
+                            now=now, usage=_no_ai(), commit=False)
         return RunEnd(run_id=run_id, status="failed", job_status="error", detail=detail,
                       reason="", scope="dirty")
     stored = report.summary.status
@@ -904,7 +1045,8 @@ def _finalise(conn: sqlite3.Connection, run_id: int, *, exit_info: _Exit | None,
     job_status = job_status_for(status, selfcheck_diff=ended.summary.selfcheck_diff)
     detail = run_detail(ended)
     jobs.finish_job_run(conn, run_id, status=job_status, detail=detail,
-                        reason=_job_reason(status, ended, exit_info), now=now, usage=_no_ai())
+                        reason=_job_reason(status, ended, exit_info), now=now, usage=_no_ai(),
+                        commit=False)
     dirty_after = store.store_state(conn, reporting=_reporting()).dirty_from
     return RunEnd(run_id=run_id, status=status, job_status=job_status, detail=detail,
                   reason=ended.summary.reason, scope=ended.inputs.scope,
@@ -916,9 +1058,11 @@ def _follow_up(ended: RunEnd) -> _Pending | None:
     if not flags.settle_enabled():
         return None
     if ended.status == "cancelled":
+        # A cancel drops only the cancelled run's OWN follow-up (no chained run, no resume):
+        # a nightly or self-check queued behind it already wrote 「排在其後」 and still starts
+        # (review E #6).
         with _S.lock:
-            _S.queue = []
-        return None
+            return _S.queue.pop(0) if _S.queue else None
     if ended.status == "interrupted" and ended.reason != "resume":
         # At most one automatic resume in a row from the waiter: a child that keeps dying
         # (memory) must not respawn forever. Boot resumes again after a restart.
@@ -950,6 +1094,36 @@ def _schedule_prewarm() -> None:
     result_cache.schedule_prewarm(alert_inputs.prewarm_today, PREWARM_DELAY_S)
 
 
+#: The waiter's attempts at a busy / locked database, and the first pause (doubled each time).
+FINALISE_ATTEMPTS = 6
+FINALISE_BACKOFF_S = 0.25
+
+
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _finalise_with_retry(run_id: int, *, exit_info: _Exit, cancel_by: str | None,
+                         now: datetime) -> RunEnd | None:
+    """:func:`_finalise` on a session of its own, retried while the database is busy (review E
+    #4); ``None`` when it could not be done (logged)."""
+    for attempt in range(FINALISE_ATTEMPTS):
+        try:
+            with session(actor=ACTOR_BOOT) as conn:
+                return _finalise(conn, run_id, exit_info=exit_info, cancel_by=cancel_by,
+                                 now=now)
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc) or attempt == FINALISE_ATTEMPTS - 1:
+                logger.exception("settlement run %s could not be finalised", run_id)
+                return None
+            time.sleep(FINALISE_BACKOFF_S * 2 ** attempt)
+        except Exception:  # noqa: BLE001 — the waiter must never die silently with a live row
+            logger.exception("settlement run %s could not be finalised", run_id)
+            return None
+    return None
+
+
 def _after_exit(run_id: int, exit_info: _Exit) -> RunEnd | None:
     """The waiter (plan §6.2): finalise, push on a failed automatic run, ``note_write``,
     pre-warm, then the follow-up. Never raises."""
@@ -959,16 +1133,19 @@ def _after_exit(run_id: int, exit_info: _Exit) -> RunEnd | None:
     ended: RunEnd | None = None
     now = _now()
     try:
-        with session(actor=ACTOR_BOOT) as conn:
-            ended = _finalise(conn, run_id, exit_info=exit_info, cancel_by=cancel_by, now=now)
-    except Exception:  # noqa: BLE001 — the waiter must never die silently with a live row
-        logger.exception("settlement run %s could not be finalised", run_id)
+        ended = _finalise_with_retry(run_id, exit_info=exit_info, cancel_by=cancel_by, now=now)
     finally:
         with _S.lock:
             if _S.active is not None and _S.active.run_id == run_id:
                 _S.active = None
     flight.note_write()
     if ended is None:
+        # The report stays active: the next start ends it 中斷 (``_clear_stale``) — and a run
+        # queued behind it starts now, so it never waits on a run nobody finishes.
+        with _S.lock:
+            queued = _S.queue.pop(0) if _S.queue else None
+        if queued is not None:
+            _start_pending(queued)
         return None
     follow = _follow_up(ended)
     if _is_automatic(ended.reason) and (
@@ -1150,6 +1327,12 @@ def notify_failure(run_id: int, *, now: datetime | None = None,
     return "sent"
 
 
+def _published_after(conn: sqlite3.Connection, run_id: int) -> bool:
+    row = conn.execute("SELECT 1 FROM settle_run WHERE run_id > ? AND status IN "
+                       "('published', 'partial') LIMIT 1", (run_id,)).fetchone()
+    return row is not None
+
+
 def _pending_notify_ids(conn: sqlite3.Connection) -> list[int]:
     try:
         rows = conn.execute(
@@ -1183,7 +1366,10 @@ def send_pending_notifications(*, now: datetime | None = None,
             for run_id in ids:
                 report = store.get_run(conn, run_id)
                 _set_notify_pending(conn, run_id, False)
-                if verdict is None and report is not None:
+                # A later run published: 「歷史走勢…維持前一版本」 is no longer true, so the
+                # held push is dropped (review E #7).
+                if verdict is None and report is not None and not _published_after(conn,
+                                                                                    run_id):
                     sendable.append(report)
             conn.commit()
     if defer_at is not None:
@@ -1213,8 +1399,11 @@ def _defer_notify(at: datetime) -> None:
             try:
                 from apscheduler.triggers.date import DateTrigger
 
+                # No misfire limit, coalesced: a throttled VM that wakes late still sends it
+                # once (APScheduler's default grace is 1 s, review E #7).
                 scheduler.add_job(_send_pending_safely, DateTrigger(run_date=when),
-                                  id=NOTIFY_JOB_ID, replace_existing=True)
+                                  id=NOTIFY_JOB_ID, replace_existing=True,
+                                  misfire_grace_time=None, coalesce=True)
                 return
             except Exception:  # noqa: BLE001 — fall back to a timer
                 logger.warning("could not schedule the held settlement push", exc_info=True)
@@ -1261,40 +1450,89 @@ def scheduled_run(conn: sqlite3.Connection, scope: str, *, now: datetime) -> Job
     return trigger_outcome(label, start_automatic(scope=run_scope, reason=scope, now=now))
 
 
-def _seq() -> int | None:
+@dataclass(frozen=True)
+class TrailMark:
+    """Where the change trail stood before a job (review E #9): the last log row, and every
+    PENDING price / FX counter's count and earliest day."""
+
+    seq: int
+    last_log_id: int
+    counters: dict[int, tuple[int, str]]
+
+
+def trail_mark(conn: sqlite3.Connection) -> TrailMark | None:
+    """Read the mark (``None`` without a store). Reads the store's ``settle_dirty``,
+    ``settle_change_log`` and ``settle_change_agg`` by direct SQL (``portfolio/
+    settlement_store.py`` owns them; the cross-layer read convention)."""
     try:
-        with session() as conn:
-            return store.store_state(conn, reporting=_reporting()).seq
-    except Exception:  # noqa: BLE001 — no store yet: nothing to compare
+        seq = int(conn.execute("SELECT seq FROM settle_dirty WHERE id = 1").fetchone()[0])
+        last = conn.execute("SELECT MAX(id) FROM settle_change_log").fetchone()[0]
+        counters = {int(r[0]): (int(r[1]), str(r[2])) for r in conn.execute(
+            "SELECT id, changes, earliest FROM settle_change_agg "
+            "WHERE claimed_run_id IS NULL AND settled_run_id IS NULL")}
+    except (sqlite3.OperationalError, TypeError):
         return None
+    return TrailMark(seq=seq, last_log_id=int(last or 0), counters=counters)
+
+
+def job_earliest_change(conn: sqlite3.Connection, job_id: str,
+                        mark: TrailMark) -> date | None:
+    """The earliest day among the changes THIS job recorded since *mark*: its own trail rows
+    (actor ``job:<id>``) and the price / FX counters it created or moved earlier. A counter
+    that only grew keeps an earliest day older changes set, so it is not the job's — and that
+    older day was already pending, prompting the owner, before the job ran."""
+    days: list[date] = []
+    row = conn.execute(
+        f"SELECT MIN({store._AFFECTED_SQL}) FROM settle_change_log WHERE id > ? AND actor = ?",
+        (mark.last_log_id, f"job:{job_id}")).fetchone()
+    if row is not None and row[0]:
+        days.append(date.fromisoformat(str(row[0])))
+    for counter_id, changes, earliest in conn.execute(
+            "SELECT id, changes, earliest FROM settle_change_agg "
+            "WHERE claimed_run_id IS NULL AND settled_run_id IS NULL"):
+        before = mark.counters.get(int(counter_id))
+        if before is None or (int(changes) > before[0] and str(earliest) < before[1]):
+            days.append(date.fromisoformat(str(earliest)))
+    return min(days) if days else None
 
 
 def after_job_hook(job_id: str) -> Callable[[], None] | None:
-    """The after-job seam (``jobs.register_after_job_hook``, spec §9.1): read the change
-    trail's ``seq`` before the job; after it, start an automatic ``dirty`` run (reason
-    ``job:<id>``) when the job raised ``seq`` and ``dirty_from`` lies before the live window —
-    a change inside the window is already shown live and waits for the nightly run."""
+    """The after-job seam (``jobs.register_after_job_hook``, spec §9.1): mark the change trail
+    before the job; after it, start an automatic ``dirty`` run (reason ``job:<id>``) when the
+    JOB'S OWN recorded changes reach before the live window (review E #9) — a change inside
+    the window is already shown live and waits for the nightly run, and a pending change the
+    owner made is the prompt's, not the job's.
+
+    A quote job records nothing in the ordinary case: its quotes are dated after
+    ``settled_through`` (the trail bound), so they are live and unrecorded
+    (``tests/settlement/test_service_lifecycle.py`` pins it). What can reach the trail is a
+    provider revising a past close (``history_daily``'s look-back, a benchmark)."""
     if not flags.settle_enabled():
         return None
-    before = _seq()
-    if before is None:
+    try:
+        with session() as conn:
+            mark = trail_mark(conn)
+    except Exception:  # noqa: BLE001 — no store yet: nothing to compare
+        return None
+    if mark is None:
         return None
 
     def after() -> None:
-        settle_after_job(job_id, seq_before=before)
+        settle_after_job(job_id, mark=mark)
 
     return after
 
 
-def settle_after_job(job_id: str, *, seq_before: int,
+def settle_after_job(job_id: str, *, mark: TrailMark,
                      now: datetime | None = None) -> AutoStart | None:
     """:func:`after_job_hook`'s second half (public for tests)."""
     now = now or _now()
     with session() as conn:
         state = store.store_state(conn, reporting=_reporting())
-    if state.seq <= seq_before or not state.usable or state.dirty_from is None:
-        return None
-    if state.dirty_from >= store.window_start(_today(now)):
+        if state.seq <= mark.seq or not state.usable:
+            return None
+        earliest = job_earliest_change(conn, job_id, mark)
+    if earliest is None or earliest >= store.window_start(_today(now)):
         return None
     return start_automatic(scope="dirty", reason=f"{JOB_REASON_PREFIX}{job_id}", now=now)
 
@@ -1334,30 +1572,42 @@ def _end_orphans(conn: sqlite3.Connection, now: datetime) -> tuple[int, ...]:
     left unfinished by a web process that died after its run ended (or before its report
     existed)."""
     ended: list[int] = []
-    for summary in store.active_or_unfinished_runs(conn):
-        _stop_orphan(summary.run_id)
-        report = store.get_run(conn, summary.run_id)
-        phase = _current_phase(report) if report is not None else None
-        _finalise(conn, summary.run_id, exit_info=None, cancel_by=None, now=now,
-                  failure_override=RunFailure(phase=phase, reason_text=_BOOT_INTERRUPTED))
-        ended.append(summary.run_id)
+    for run_id in _active_run_ids(conn):
+        _stop_orphan(run_id)
+        _end_stale(conn, run_id, now, reason_text=_BOOT_INTERRUPTED)
+        ended.append(run_id)
     rows = conn.execute(
-        "SELECT id FROM job_runs WHERE job_id = ? AND finished_at IS NULL ORDER BY id",
+        "SELECT j.id, r.run_id FROM job_runs j LEFT JOIN settle_run r ON r.run_id = j.id "
+        "WHERE j.job_id = ? AND j.finished_at IS NULL ORDER BY j.id",
         (jobs.SETTLEMENT_JOB_ID,)).fetchall()
     for row in rows:
         run_id = int(row[0])
-        if store.get_run(conn, run_id) is None:
+        if row[1] is None:
             jobs.finish_job_run(conn, run_id, status="error",
                                 detail="重新結算未能開始：系統在建立紀錄前中斷",
-                                reason="interrupted", now=now, usage=_no_ai())
-        else:
-            _finalise(conn, run_id, exit_info=None, cancel_by=None, now=now)
+                                reason="interrupted", now=now, usage=_no_ai(), commit=False)
+            continue
+        try:
+            with _savepoint(conn, "settle_job_row"):
+                _finalise(conn, run_id, exit_info=None, cancel_by=None, now=now)
+        except Exception:  # noqa: BLE001 — a report that no longer reads: close the row only
+            logger.exception("settlement run %s: its job row is closed without its report",
+                             run_id)
+            jobs.finish_job_run(conn, run_id, status="error",
+                                detail="重新結算紀錄無法讀取，已結束此筆排程紀錄",
+                                reason="interrupted", now=now, usage=_no_ai(), commit=False)
     store.cleanup_orphans(conn)
     return tuple(ended)
 
 
 def _latest_ended(conn: sqlite3.Connection) -> RunSummary | None:
-    for summary in store.list_runs(conn, limit=10).items:
+    """The latest ended run's summary (``None`` when its report no longer reads)."""
+    try:
+        items = store.list_runs(conn, limit=10).items
+    except ValueError:  # a pydantic ValidationError: a report written by older code
+        logger.warning("a recent settlement report no longer reads", exc_info=True)
+        return None
+    for summary in items:
         if summary.status not in ACTIVE_RUN_STATUSES:
             return summary
     return None
@@ -1366,7 +1616,10 @@ def _latest_ended(conn: sqlite3.Connection) -> RunSummary | None:
 def _note_not_resumed(conn: sqlite3.Connection, run_ids: Sequence[int], why: str) -> None:
     """「結算中斷（未續跑）」 with the reason (spec §9.4): boot settles in full instead."""
     for run_id in run_ids:
-        report = store.get_run(conn, run_id)
+        try:
+            report = store.get_run(conn, run_id)
+        except ValueError:  # it ended through its columns: nothing to annotate
+            continue
         if report is None:
             continue
         failure = report.failure or RunFailure(reason_text=_BOOT_INTERRUPTED)
@@ -1390,7 +1643,20 @@ def on_boot(conn: sqlite3.Connection, *, trigger_check: TriggerCheck) -> BootPla
     5. An identical boot starts nothing.
 
     Starting is :func:`start_after_boot`'s, once this session has committed.
+
+    **Never raises** (review E #8): every write runs under one SAVEPOINT; on any error it is
+    rolled back, logged, and an empty plan returned — a settlement fault must not stop the
+    app from booting, with ``PD_SETTLE=off`` least of all.
     """
+    try:
+        with _savepoint(conn, "settle_boot"):
+            return _on_boot(conn, trigger_check)
+    except Exception:  # noqa: BLE001 — see above
+        logger.exception("the settlement boot step failed; booting without it")
+        return BootPlan()
+
+
+def _on_boot(conn: sqlite3.Connection, trigger_check: TriggerCheck) -> BootPlan:
     now = _now()
     interrupted = _end_orphans(conn, now)
     if not flags.settle_enabled():
@@ -1431,6 +1697,22 @@ def start_after_boot(plan: BootPlan) -> int | None:
     start = plan.start
     if start is None or not flags.settle_enabled():
         return None
+    if flags.settle_mode() == "inline" and not _sync_inline_boot():
+        # An inline boot run would block the async lifespan for the whole settlement (review
+        # E #11): outside tests it runs on a daemon thread, synchronously THERE (P5's "never
+        # on a background thread" keeps the tests' SQL tracers honest; nothing traces here).
+        threading.Thread(target=_boot_run, args=(start,), name="settlement-boot-run",
+                         daemon=True).start()
+        return None
+    return _boot_run(start)
+
+
+def _sync_inline_boot() -> bool:
+    """Inline boot runs stay synchronous in tests: ``PD_TEST_MODE=1``, or inside pytest."""
+    return os.environ.get("PD_TEST_MODE") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+
+
+def _boot_run(start: BootStart) -> int | None:
     try:
         result = start_automatic(scope=start.scope, reason=start.reason, why=start.why,
                                  previous_run_id=start.previous_run_id,
@@ -1471,6 +1753,24 @@ def _synth_progress(conn: sqlite3.Connection, summary: RunSummary) -> RunProgres
         phases=steps)
 
 
+def _selfcheck_differs(conn: sqlite3.Connection) -> bool:
+    """The LATEST completed self-check (scope ``selfcheck``, a resumed one included) found a
+    difference (review E #1): the chip keeps 自檢發現差異 through the nightly runs that follow,
+    until a later self-check comes back clean. A self-check that failed or was cancelled
+    checked nothing, so the one before it still stands."""
+    try:
+        row = conn.execute(
+            "SELECT run_id FROM settle_run WHERE status IN ('published', 'partial') AND "
+            "json_extract(report, '$.inputs.scope') = 'selfcheck' "
+            "ORDER BY run_id DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None:
+        return False
+    report = store.get_run(conn, int(row[0]))
+    return report is not None and report.summary.selfcheck_diff
+
+
 def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
            reporting: Currency) -> SettlementStatus:
     """``GET /api/settlement/status`` (spec §15). Reads only: the store, the trail, the run
@@ -1483,7 +1783,11 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
     window = store.window_start(today)
     first_live = store.live_from(state, today) if state.usable else None
     stale = store.stale_range(state, today)
-    active = store.active_or_unfinished_runs(conn)
+    try:
+        active = store.active_or_unfinished_runs(conn)
+    except ValueError:  # a report that no longer reads: the next start ends it
+        logger.warning("an active settlement report no longer reads", exc_info=True)
+        active = []
     current = active[-1] if active else None
     run_state: SettleState | None = None
     progress: RunProgress | None = None
@@ -1509,7 +1813,10 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
     # still the ones it will take
     queued = pending if run_state == "running" and has_pending else None
     last = _latest_ended(conn)
-    change_runs = store.list_runs(conn, limit=1, only_changes=True).items
+    try:
+        change_runs = store.list_runs(conn, limit=1, only_changes=True).items
+    except ValueError:
+        change_runs = []
     last_change = change_runs[0] if change_runs else None
     name: SettleState
     if run_state is not None:
@@ -1518,7 +1825,7 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
         name = "failed"
     elif last is not None and last.status == "interrupted" and not last.resumed:
         name = "interrupted"
-    elif last is not None and last.selfcheck_diff:
+    elif _selfcheck_differs(conn):
         name = "selfcheck_diff"
     elif state.dirty_day is not None or has_pending or (
             not state.usable and store.first_ledger_day(conn) is not None):

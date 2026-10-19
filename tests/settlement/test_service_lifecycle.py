@@ -9,18 +9,33 @@ unfinished, and the follow-up (chained / resume / queued).
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from portfolio_dash.api import settlement_service as service
+from portfolio_dash.data_ingestion.store import insert_transaction
 from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
-from portfolio_dash.shared import flight, result_cache
+from portfolio_dash.portfolio.settlement_models import (
+    RunFailure,
+    RunReport,
+    RunRequest,
+    RunSummary,
+    SelfcheckResult,
+)
+from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.pricing.store import upsert_prices
+from portfolio_dash.shared import flight, proc_lock, result_cache
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.db import install_actor
+from portfolio_dash.shared.enums import Market
+from portfolio_dash.shared.models.enums import Side
 from tests.contract.test_def073_job_details_speak_chinese import english_words
 from tests.reference.corpora import open_db
 from tests.settlement import service_support as sup
@@ -81,12 +96,13 @@ def test_a_run_while_another_is_active_is_refused_and_settling_off_starts_nothin
     path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     active = sup.fake_preparing_run(path)
-    with pytest.raises(service.AlreadyRunning) as busy:
-        service.start_run(scope="full", reason="button")
-    assert busy.value.run_id == active and busy.value.code == "already_running"
-    # An automatic start queues behind it instead of failing.
-    queued = service.start_automatic(scope="nightly", reason="nightly")
-    assert queued.queued_behind == active and queued.run_id is None
+    with proc_lock.lock(proc_lock.settlement_lock_path(), timeout=2):  # its child is alive
+        with pytest.raises(service.AlreadyRunning) as busy:
+            service.start_run(scope="full", reason="button")
+        assert busy.value.run_id == active and busy.value.code == "already_running"
+        # An automatic start queues behind it instead of failing.
+        queued = service.start_automatic(scope="nightly", reason="nightly")
+        assert queued.queued_behind == active and queued.run_id is None
     monkeypatch.setenv("PD_SETTLE", "off")
     with pytest.raises(service.SettlementOff):
         service.start_run(scope="full", reason="button")
@@ -94,12 +110,15 @@ def test_a_run_while_another_is_active_is_refused_and_settling_off_starts_nothin
 
 
 def test_a_failed_run_is_an_error_row_with_its_class_and_phase(path: Path) -> None:
-    stub.PLAN.append("fail")
+    stub.PLAN.append("fail")  # as the real worker: ends the run itself, returns normally
     started = service.start_run(scope="full", reason="button", started_by="user:guest")
     assert started.ended is not None and started.ended.status == "failed"
     row = sup.job_row(path, started.run_id)
     assert row["status"] == "error"
-    assert row["reason"] == "failed:RuntimeError"
+    # The class comes from the worker's RunFailure.error_class (package D adds the field; until
+    # it lands the stub cannot set it and the code reads 'failed').
+    has_class = "error_class" in RunFailure.model_fields
+    assert row["reason"] == ("failed:RuntimeError" if has_class else "failed")
     assert row["detail"] == "重新結算失敗（逐日估值）：測試：逐日估值失敗"
     failure = sup.report(path, started.run_id).failure
     assert failure is not None and failure.consequence  # derived from the state
@@ -267,43 +286,184 @@ def test_the_trigger_sentences(path: Path) -> None:
 
 def test_every_run_detail_is_a_chinese_sentence(path: Path) -> None:
     """DEF-073 over every end status the service can write (the identifiers aside)."""
-    for plan in (["publish"], ["fail"], ["die_before_claim"], ["die_after_claim", "publish"],
-                 ["selfcheck_diff"]):
+    service.start_run(scope="full", reason="button")
+    for plan in (["fail"], ["die_before_claim"], ["die_after_claim", "publish"]):
         stub.PLAN.extend(plan)
         service.start_run(scope="full", reason="button")
+    for plan in (["selfcheck_diff"], ["publish"]):  # a self-check with, then without, a difference
+        stub.PLAN.extend(plan)
+        service.start_automatic(scope="selfcheck", reason="selfcheck")
     conn = open_db(path)
     try:
         details = [str(r[0]) for r in conn.execute(
             "SELECT detail FROM job_runs WHERE job_id = 'settlement'")]
     finally:
         conn.close()
-    assert len(details) == 6
+    assert len(details) == 7
+    assert any(d.startswith("每週自檢發現差異：3 處，最早於 ") and "（逐日結算）" in d
+               for d in details), details
+    assert any(d.startswith("每週自檢 ") and "與已發布版本一致" in d for d in details), details
     for detail in details:
-        words = [w for w in english_words(detail) if w not in ("StubDied", "settled_day")]
+        words = [w for w in english_words(detail) if w != "StubDied"]
         assert not words, detail
         assert "," not in detail and ":" not in detail.replace("：", ""), detail
 
 
 
+def _mark(path: Path) -> service.TrailMark:
+    conn = open_db(path)
+    try:
+        mark = service.trail_mark(conn)
+    finally:
+        conn.close()
+    assert mark is not None
+    return mark
+
+
+def _job_writes(path: Path, *, price_day: date | None = None,
+                trade_day: date | None = None) -> None:
+    """Writes a job's connection makes (actor ``job:history_daily``, as ``trigger_job``)."""
+    conn = open_db(path)
+    try:
+        install_actor(conn, "job:history_daily")
+        if price_day is not None:
+            upsert_prices(conn, [PriceRow(instrument="2330", market=Market.TW, as_of=price_day,
+                                          close=Decimal("612.5"), source="test")],
+                          fetched_at=service._now())
+        if trade_day is not None:
+            insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                               quantity=Decimal("1"), price=Decimal("500"), fees=Decimal("0"),
+                               tax=Decimal("0"), trade_date=trade_day)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_quote_dated_after_settled_through_is_live_and_never_recorded(path: Path) -> None:
+    """Review E #9, verified: a quote job's own writes are today's (or the last session's)
+    closes, after ``settled_through`` — the trail's bound — so they raise no ``seq`` at all."""
+    service.start_run(scope="full", reason="button")
+    settled = sup.state(path).settled_through
+    assert settled is not None
+    seq = sup.state(path).seq
+    _job_writes(path, price_day=settled + timedelta(days=1))
+    assert sup.state(path).seq == seq and sup.state(path).dirty_from is None
+
+
 def test_a_job_that_changed_history_before_the_window_starts_a_run(
     path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Spec §9.1: "after a scheduled job whose run raised seq with dirty_from < W"."""
+    """Spec §9.1: "after a scheduled job whose run raised seq with dirty_from < W" — counted
+    on the JOB'S OWN changes (review E #9), never the trail's global dirty day."""
     service.start_run(scope="full", reason="button")
-    after = service.after_job_hook("quotes_tw")
+    after = service.after_job_hook("history_daily")
     assert after is not None
     after()  # the job changed nothing: no run
     assert len(sup.runs(path)) == 1
     window = st.window_start(service._now().date())
-    seq = sup.state(path).seq
-    sup.back_dated_trade(path, window + timedelta(days=1))  # inside the window: shown live
-    assert service.settle_after_job("quotes_tw", seq_before=seq) is None
-    seq = sup.state(path).seq
-    sup.back_dated_trade(path, date(2026, 2, 2))  # before the window
-    started = service.settle_after_job("quotes_tw", seq_before=seq)
+    mark = _mark(path)
+    _job_writes(path, price_day=window + timedelta(days=1))  # a revised close inside the window
+    assert service.settle_after_job("history_daily", mark=mark) is None
+    # The OWNER's pending change before the window is the prompt's, not the job's.
+    sup.back_dated_trade(path, date(2026, 2, 2))
+    mark = _mark(path)
+    _job_writes(path, price_day=window + timedelta(days=2))
+    assert service.settle_after_job("history_daily", mark=mark) is None
+    assert len(sup.runs(path)) == 1
+    # The job revises a close before the window: it starts the run.
+    mark = _mark(path)
+    _job_writes(path, price_day=date(2026, 3, 2))
+    started = service.settle_after_job("history_daily", mark=mark)
     assert started is not None and started.run_id is not None
     last = sup.runs(path)[-1]
-    assert last.reason == "job:quotes_tw" and last.status == "published"
-    assert sup.report(path, last.run_id).summary.trigger_text.startswith("排程工作「quotes_tw」")
+    assert last.reason == "job:history_daily" and last.status == "published"
+    assert sup.report(path, last.run_id).summary.trigger_text.startswith(
+        "排程工作「history_daily」")
+    # its own trail rows count too (a ledger write on the job's connection)
+    mark = _mark(path)
+    _job_writes(path, trade_day=date(2026, 2, 3))
+    assert service.settle_after_job("history_daily", mark=mark) is not None
     monkeypatch.setenv("PD_SETTLE", "off")
-    assert service.after_job_hook("quotes_tw") is None
+    assert service.after_job_hook("history_daily") is None
+
+
+def test_a_busy_database_is_retried_by_the_waiter(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #4: one ``database is locked`` while finalising does not leave the run open."""
+    real = service._finalise
+    calls = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_finalise", flaky)
+    monkeypatch.setattr(service, "FINALISE_BACKOFF_S", 0.01)
+    started = service.start_run(scope="full", reason="button")
+    assert calls["n"] == 2
+    assert sup.report(path, started.run_id).summary.status == "published"
+    assert sup.job_row(path, started.run_id)["status"] == "ok"
+
+
+def test_a_run_the_waiter_could_not_finish_is_ended_by_the_next_start(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #4: a waiter that fails for good leaves a ``running`` report with no run here
+    and its lock free; the next start (manual or automatic) ends it 中斷 instead of answering
+    409 or queueing behind it forever."""
+    service.start_run(scope="full", reason="button")  # generation 1
+    real = service._finalise
+    failing = {"on": True}
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        if failing["on"]:
+            raise RuntimeError("the waiter's session fails")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_finalise", broken)
+    stub.PLAN.append("die_after_claim")
+    stuck = service.start_run(scope="full", reason="button").run_id
+    assert sup.report(path, stuck).summary.status == "running"
+    assert service.active_run_id() is None
+    failing["on"] = False
+    nightly = service.start_automatic(scope="nightly", reason="nightly")
+    assert nightly.run_id is not None and nightly.queued_behind is None
+    ended = sup.report(path, stuck)
+    assert ended.summary.status == "interrupted"
+    assert ended.failure is not None
+    assert ended.failure.reason_text == "結算程序已不在執行，紀錄未能結束"
+    assert sup.job_row(path, stuck)["status"] == "error"
+    assert sup.report(path, nightly.run_id).summary.status == "published"
+
+
+def test_a_cancel_drops_only_its_own_follow_up() -> None:
+    """Review E #6: no chained run and no resume after a cancel, but a run QUEUED behind it
+    (its job row already said 「排在其後」) still starts."""
+    service.reset_for_tests()
+    cancelled = service.RunEnd(run_id=4, status="cancelled", job_status="skipped", detail="",
+                               reason="button", scope="full", dirty_after=date(2026, 2, 2))
+    assert service._follow_up(cancelled) is None  # dirt left: still no chained run
+    queued = service._Pending(scope="nightly", reason="nightly")
+    service._enqueue(queued)
+    assert service._follow_up(cancelled) == queued
+    assert service._S.queue == []
+
+
+def test_a_resumed_selfcheck_names_its_difference() -> None:
+    """Review E #5: keyed on the run's scope, not its reason."""
+    summary = RunSummary(run_id=7, status="published", status_text="完成", reason="resume",
+                         trigger_text="x", started_at=datetime(2026, 10, 18, 4, 30,
+                                                               tzinfo=sup.TPE),
+                         range_from=date(2025, 1, 2), days=600, duration_s=12.0,
+                         selfcheck_diff=True)
+    report = RunReport(summary=summary,
+                       inputs=RunRequest(scope="selfcheck", reason="resume",
+                                         through=date(2026, 10, 17)),
+                       selfcheck=SelfcheckResult(differences=2, first_day=date(2025, 3, 3),
+                                                 first_table="settled_period"))
+    assert service.run_detail(report) == \
+        "每週自檢發現差異：2 處，最早於 2025-03-03（月結與年結），與已發布版本不同，耗時 12 秒"
+    assert service._job_reason("published", report, None) == "selfcheck_diff"

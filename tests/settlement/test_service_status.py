@@ -110,17 +110,48 @@ def test_running_is_the_lock_never_the_heartbeat(path: Path) -> None:
     assert gone.state == "interrupted"  # the lock is free and the report is not preparing
 
 
-def test_a_failed_run_reads_failed_and_a_selfcheck_difference_its_own_state(
-    path: Path,
-) -> None:
+def test_a_failed_run_reads_failed(path: Path) -> None:
     stub.PLAN.append("fail")
     service.start_run(scope="full", reason="button")
     assert _status(path).state == "failed"
-    stub.PLAN.append("selfcheck_diff")
-    service.start_run(scope="full", reason="button")
-    assert _status(path).state == "selfcheck_diff"
     service.start_run(scope="full", reason="button")
     assert _status(path).state == "clean"
+
+
+def test_a_selfcheck_difference_lasts_until_a_later_selfcheck_is_clean(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #1: the 04:30 Sunday self-check's difference must not vanish with the 06:40
+    nightly run that follows it — it reads 自檢發現差異 until a self-check comes back clean,
+    below the active, failed and interrupted states."""
+    service.start_run(scope="full", reason="button")
+    stub.PLAN.append("selfcheck_diff")
+    service.start_automatic(scope="selfcheck", reason="selfcheck")
+    assert _status(path).state == "selfcheck_diff"
+    service.start_automatic(scope="nightly", reason="nightly")  # 06:40, publishes
+    assert _status(path).state == "selfcheck_diff"
+    stub.PLAN.append("fail")
+    service.start_automatic(scope="nightly", reason="nightly")
+    assert _status(path).state == "failed"  # a failure outranks it…
+    service.start_run(scope="full", reason="button")
+    assert _status(path).state == "selfcheck_diff"  # …and it is still there after
+    run_id = sup.fake_preparing_run(path)
+    with proc_lock.lock(proc_lock.settlement_lock_path(), timeout=2):
+        assert _status(path).state == "preparing"  # an active run outranks it
+    service.start_run(scope="full", reason="button")  # ends the stale one, publishes
+    assert sup.report(path, run_id).summary.status == "interrupted"
+    stub.PLAN.append("fail")
+    service.start_automatic(scope="selfcheck", reason="selfcheck")  # checked nothing
+    service.start_run(scope="full", reason="button")
+    assert _status(path).state == "selfcheck_diff"
+    service.start_automatic(scope="selfcheck", reason="selfcheck")  # clean this time
+    assert _status(path).state == "clean"
+    # a RESUMED self-check is a self-check too
+    stub.PLAN.extend(["die_after_claim", "selfcheck_diff"])
+    service.start_automatic(scope="selfcheck", reason="selfcheck")
+    assert sup.runs(path)[-1].reason == "resume"
+    assert _status(path).state == "selfcheck_diff"
+    del monkeypatch
 
 
 def test_an_interrupted_run_not_resumed_reads_interrupted(

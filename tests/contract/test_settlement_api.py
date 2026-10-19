@@ -26,6 +26,7 @@ from portfolio_dash.api import action_log
 from portfolio_dash.api import settlement_service as service
 from portfolio_dash.api.action_log import label_for, should_log
 from portfolio_dash.api.app import create_app
+from portfolio_dash.shared import proc_lock
 from portfolio_dash.shared.config import get_settings
 from tests.conftest import _seed_golden, init_golden_base
 from tests.reference.corpora import open_db
@@ -135,8 +136,9 @@ def test_refusals_speak_chinese(client: TestClient, db_path: Path,
     _error(client.post("/api/settlement/run", json={}), 400, "validation_error")
     _error(client.post("/api/settlement/cancel"), 409, "not_running")
     active = sup.fake_preparing_run(db_path)
-    message = _error(client.post("/api/settlement/run", json={"scope": "full"}), 409,
-                     "already_running")
+    with proc_lock.lock(proc_lock.settlement_lock_path(), timeout=2):  # its child is alive
+        message = _error(client.post("/api/settlement/run", json={"scope": "full"}), 409,
+                         "already_running")
     assert f"#{active}" in message
     _error(client.get("/api/settlement/runs/9999"), 404, "not_found")
     _error(client.get("/api/settlement/runs/9999/diff"), 404, "not_found")

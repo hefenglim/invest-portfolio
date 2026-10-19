@@ -322,17 +322,68 @@ def create_scheduler_tables(conn: sqlite3.Connection) -> None:
 
 
 def migrate_job_runs_results(conn: sqlite3.Connection) -> None:
-    """Boot migration (PERF plan P3, 2026-10-18): ``job_runs.results``, a quote job's results
-    JSON (its ``held_failed`` list), which the settlement's ``final_through`` reads to name the
-    unconfirmed closes of a day settled by the 4-day rule. NULL on every other row.
+    """Boot migration of the scheduler tables for the settlement (PERF plan P3, 2026-10-18):
+
+    - ``job_runs.results``, a quote job's results JSON (its ``held_failed`` list), which the
+      settlement's ``final_through`` reads to name the unconfirmed closes of a day settled by
+      the 4-day rule. NULL on every other row. ``job_runs.payload`` already means the insight
+      task id, hence a column of its own.
+    - ``schedule_config.updated_at`` + ``stamped_schedule`` (review E #2): when a job's cron,
+      timezone or enabled flag last changed (NULL = never), and the schedule as stamped then
+      (:func:`schedule_key`). :func:`update_schedule` stamps both; a boot stamps a schedule
+      that was edited behind its back (a hand edit, a script) with the boot time.
+      ``final_through`` judges the fires before ``updated_at`` without the current cron — and
+      ALL past fires when the schedule differs from its stamp (edited since the last boot) — so
+      a schedule change never rewrites history.
 
     Called from the lifespan only — never from :func:`create_scheduler_tables`, whose callers
     include the 排程 GETs (``ensure_scheduler_seeded``), so the ALTER can never run on a read
-    path (DEF-065). ``job_runs.payload`` already means the insight task id, hence a column of
-    its own.
+    path (DEF-065).
     """
     _add_column_if_missing(conn, "job_runs", "results", "TEXT")
+    _add_column_if_missing(conn, "schedule_config", "updated_at", "TEXT")
+    _add_column_if_missing(conn, "schedule_config", "stamped_schedule", "TEXT")
+    stamp_time = datetime.now(UTC).isoformat()
+    for row in conn.execute(
+            "SELECT job_id, cron, timezone, enabled, stamped_schedule FROM schedule_config"
+    ).fetchall():
+        current = schedule_key(str(row[1]), str(row[2]), bool(row[3]))
+        if row[4] is None:  # first boot with the column: today's schedule, never changed
+            conn.execute("UPDATE schedule_config SET stamped_schedule = ? WHERE job_id = ?",
+                         (current, row[0]))
+        elif row[4] != current:  # edited behind the 排程 page's back since the last boot
+            conn.execute("UPDATE schedule_config SET stamped_schedule = ?, updated_at = ? "
+                         "WHERE job_id = ?", (current, stamp_time, row[0]))
     conn.commit()
+
+
+def schedule_key(cron: str, tz: str, enabled: bool) -> str:
+    """A schedule as ``schedule_config.stamped_schedule`` records it."""
+    return f"{cron}|{tz}|{1 if enabled else 0}"
+
+
+def update_schedule(conn: sqlite3.Connection, job_id: str, *, cron: str, tz: str,
+                    enabled: bool, now: datetime) -> bool:
+    """Store a job's schedule; returns whether it changed. A change stamps
+    ``schedule_config.updated_at`` with *now* (the boot migration adds the column; without it
+    the stamp is skipped), so ``final_through`` never re-judges the fires before the change by
+    the new cron (review E #2)."""
+    row = conn.execute("SELECT cron, timezone, enabled FROM schedule_config WHERE job_id = ?",
+                       (job_id,)).fetchone()
+    changed = row is None or (str(row[0]), str(row[1]), bool(row[2])) != (cron, tz, enabled)
+    conn.execute(
+        "UPDATE schedule_config SET cron = ?, timezone = ?, enabled = ? WHERE job_id = ?",
+        (cron, tz, 1 if enabled else 0, job_id),
+    )
+    if changed:
+        try:
+            conn.execute("UPDATE schedule_config SET updated_at = ?, stamped_schedule = ? "
+                         "WHERE job_id = ?",
+                         (now.isoformat(), schedule_key(cron, tz, enabled), job_id))
+        except sqlite3.OperationalError:
+            logger.debug("schedule_config.updated_at missing (boot migration not run)")
+    conn.commit()
+    return changed
 
 
 def ensure_job_rows(conn: sqlite3.Connection) -> None:
@@ -2093,6 +2144,7 @@ def finish_job_run(
     usage: UsageTally | None = None,
     reason: str | None = None,
     results: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> None:
     """Finalize a running ``job_runs`` row with its terminal status + detail (+ its spend).
 
@@ -2105,11 +2157,13 @@ def finish_job_run(
 
     ``reason`` sets ``job_runs.reason`` — an outcome CODE (``cancelled``, ``interrupted``,
     ``failed:<class>``, ``selfcheck_diff``), never a sentence (DEF-073: the sentence is
-    ``detail``). ``results`` is the job's structured results JSON (plan P3).
+    ``detail``). ``results`` is the job's structured results JSON (plan P3). ``commit=False``
+    leaves the update in the caller's transaction (the settlement's boot writes run under one
+    savepoint, review E #8).
     """
     finished_at = datetime.now(tz=now.tzinfo if now is not None else UTC).isoformat()
     _finalize_run(conn, run_id, finished_at=finished_at, status=status, detail=detail,
-                  usage=usage, reason=reason, results=results)
+                  usage=usage, reason=reason, results=results, commit=commit)
 
 
 def _finalize_run(
@@ -2122,6 +2176,7 @@ def _finalize_run(
     usage: UsageTally | None,
     reason: str | None = None,
     results: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> None:
     """The one UPDATE that closes a static job's run row (both wrappers and every door).
 
@@ -2152,7 +2207,8 @@ def _finalize_run(
             (finished_at, status, detail, spend["cost_usd"], spend["llm_calls"],
              spend["tokens_in"], spend["tokens_out"], run_id),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def latest_run_unfinished(conn: sqlite3.Connection, job_id: str) -> bool:

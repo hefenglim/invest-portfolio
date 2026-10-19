@@ -247,3 +247,28 @@ def test_start_job_run_can_leave_the_row_in_the_callers_transaction(
     assert conn.in_transaction
     conn.rollback()
     assert conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0] == 0
+
+
+def test_the_boot_migration_adds_the_schedule_stamp(conn: sqlite3.Connection) -> None:
+    migrate_job_runs_results(conn)
+    migrate_job_runs_results(conn)  # idempotent
+    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(schedule_config)")}
+    assert "updated_at" in cols
+
+
+def test_the_schedule_page_stamps_a_change(api_client: TestClient,
+                                           golden_db: sqlite3.Connection) -> None:
+    """Review E #2: the 排程 PUT stamps ``schedule_config.updated_at`` when the schedule
+    changed (and only then), so final_through never re-judges older fires by the new cron."""
+    ensure_scheduler_seeded(golden_db)
+
+    def stamp() -> object:
+        return golden_db.execute(
+            "SELECT updated_at FROM schedule_config WHERE job_id = 'quotes_tw'").fetchone()[0]
+
+    same = api_client.put("/api/scheduler/jobs/quotes_tw", json={"cron": "0 14 * * mon-fri"})
+    assert same.status_code == 200, same.text
+    assert stamp() is None
+    moved = api_client.put("/api/scheduler/jobs/quotes_tw", json={"cron": "30 14 * * mon-fri"})
+    assert moved.status_code == 200, moved.text
+    assert str(stamp()).startswith("2026-06-11T14:30")  # the request's clock (GOLDEN_NOW)

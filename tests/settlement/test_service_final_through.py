@@ -18,7 +18,11 @@ import pytest
 
 from portfolio_dash.api import settlement_service as service
 from portfolio_dash.pricing import store as price_store
-from portfolio_dash.scheduler.jobs import QUOTE_JOB_IDS, migrate_job_runs_results
+from portfolio_dash.scheduler.jobs import (
+    QUOTE_JOB_IDS,
+    migrate_job_runs_results,
+    update_schedule,
+)
 
 TPE = ZoneInfo("Asia/Taipei")
 NY = ZoneInfo("America/New_York")
@@ -155,7 +159,11 @@ def test_a_same_day_rerun_after_a_failed_fire_counts(conn: sqlite3.Connection) -
     _run(conn, "quotes_tw", datetime(2026, 8, 7, 14, 0, 2, tzinfo=TPE), "partial", ["2330"])
     monday = datetime(2026, 8, 10, 6, 40, tzinfo=TPE)
     assert service.final_through(conn, monday).through == date(2026, 8, 6)
-    # a refresh earlier the same day does not answer the fire; one after it does
+    # a refresh earlier the same day (an ok intraday read, written AFTER the fire's row) does
+    # not answer the fire …
+    _run(conn, "quotes_tw", datetime(2026, 8, 7, 10, 0, tzinfo=TPE))
+    assert service.final_through(conn, monday).through == date(2026, 8, 6)
+    # … one after it does
     _run(conn, "quotes_tw", datetime(2026, 8, 7, 15, 30, tzinfo=TPE))
     assert service.final_through(conn, monday).through == date(2026, 8, 9)
 
@@ -173,3 +181,96 @@ def test_a_fire_whose_job_wrote_no_row_settles_after_four_days_with_an_empty_lis
                                    since=date(2026, 8, 1))
     assert result.through == date(2026, 8, 14)
     assert result.unconfirmed_closes == {date(2026, 8, 5): []}
+
+
+def _seed_14h(conn: sqlite3.Connection) -> None:
+    """quotes_tw alone, at 14:00 every weekday from July: ok, but the month end is partial."""
+    _disable(conn, "quotes_us")
+    _disable(conn, "quotes_my")
+    _ok_every_fire(conn, date(2026, 7, 1), date(2026, 8, 14), jobs=("quotes_tw",),
+                   except_={("quotes_tw", date(2026, 7, 31)): ("partial", ["2330"])})
+
+
+def test_a_schedule_change_never_rewrites_history(conn: sqlite3.Connection) -> None:
+    """Review E #2 (the cron-change probe): moving quotes_tw from 14:00 to 14:30 must neither
+    block four days nor mark every older weekday unconfirmed, nor lose 07-31's real list."""
+    _seed_14h(conn)
+    now = datetime(2026, 8, 15, 6, 40, tzinfo=TPE)
+    before = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    assert before.through == date(2026, 8, 14) and before.blocked_on is None
+    assert before.unconfirmed_closes == {date(2026, 7, 31): ["2330"]}
+    changed = update_schedule(conn, "quotes_tw", cron="30 14 * * mon-fri", tz="Asia/Taipei",
+                              enabled=True, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    assert changed
+    assert service.final_through(conn, now, since=service.SINCE_GO_LIVE) == before
+    # after the change the new cron judges: a fire at 14:30 that wrote no row blocks its day
+    _run(conn, "quotes_tw", datetime(2026, 8, 17, 14, 0, 2, tzinfo=TPE))  # the OLD time
+    later = service.final_through(conn, datetime(2026, 8, 18, 6, 40, tzinfo=TPE))
+    assert later.blocked_on == date(2026, 8, 17)
+    _run(conn, "quotes_tw", datetime(2026, 8, 17, 14, 30, 2, tzinfo=TPE))
+    assert service.final_through(conn, datetime(2026, 8, 18, 6, 40, tzinfo=TPE)).through == \
+        date(2026, 8, 17)
+
+
+def test_an_unchanged_save_stamps_nothing(conn: sqlite3.Connection) -> None:
+    _seed_14h(conn)
+    assert not update_schedule(conn, "quotes_tw", cron="0 14 * * mon-fri", tz="Asia/Taipei",
+                               enabled=True, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    stamp = conn.execute("SELECT updated_at FROM schedule_config WHERE job_id = 'quotes_tw'"
+                         ).fetchone()[0]
+    assert stamp is None
+
+
+def test_a_job_switched_on_again_does_not_block_its_quiet_weeks(
+    conn: sqlite3.Connection,
+) -> None:
+    """Disabled in late July, enabled again on 08-14: the weeks it was off were never due."""
+    _disable(conn, "quotes_us")
+    _disable(conn, "quotes_my")
+    _ok_every_fire(conn, date(2026, 7, 1), date(2026, 7, 24), jobs=("quotes_tw",))
+    _ok_every_fire(conn, date(2026, 8, 14), date(2026, 8, 14), jobs=("quotes_tw",))
+    update_schedule(conn, "quotes_tw", cron="0 14 * * mon-fri", tz="Asia/Taipei",
+                    enabled=False, now=datetime(2026, 7, 25, 9, 0, tzinfo=TPE))
+    update_schedule(conn, "quotes_tw", cron="0 14 * * mon-fri", tz="Asia/Taipei",
+                    enabled=True, now=datetime(2026, 8, 14, 9, 0, tzinfo=TPE))
+    result = service.final_through(conn, datetime(2026, 8, 15, 6, 40, tzinfo=TPE),
+                                   since=service.SINCE_GO_LIVE)
+    assert result.through == date(2026, 8, 14) and result.unconfirmed_closes == {}
+
+
+def test_a_run_request_carries_every_mark_since_go_live(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #10: the request's unconfirmed closes cover every quote run since go-live,
+    never only the days the run could start from when it was requested."""
+    _seed_14h(conn)
+    conn.execute("UPDATE settle_meta SET generation = 1, settled_through = '2026-08-10', "
+                 "held_through = '2026-08-10', calc_version = 'x', reporting_ccy = 'TWD' "
+                 "WHERE id = 1")
+    conn.commit()
+    request = service.build_request(conn, scope="dirty", reason="prompt", started_by=None,
+                                    now=datetime(2026, 8, 15, 6, 40, tzinfo=TPE))
+    assert request.unconfirmed_closes == {date(2026, 7, 31): ["2330"]}
+    assert request.through == date(2026, 8, 14)
+
+
+def test_a_hand_edited_schedule_is_judged_by_what_ran(conn: sqlite3.Connection) -> None:
+    """The reviewer's cron-change probe edits schedule_config by hand: the schedule no longer
+    matches its stamp, so history is judged by what ran (never by the new cron), and the next
+    boot stamps the edit."""
+    _disable(conn, "quotes_us")
+    _disable(conn, "quotes_my")
+    migrate_job_runs_results(conn)  # the boot: stamps today's schedules
+    _seed_14h(conn)
+    now = datetime(2026, 8, 15, 6, 40, tzinfo=TPE)
+    before = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    conn.execute("UPDATE schedule_config SET cron = '30 14 * * mon-fri' "
+                 "WHERE job_id = 'quotes_tw'")
+    conn.commit()
+    after = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    assert after == before
+    assert after.unconfirmed_closes == {date(2026, 7, 31): ["2330"]}
+    migrate_job_runs_results(conn)  # the next boot stamps the edit
+    row = conn.execute("SELECT updated_at, stamped_schedule FROM schedule_config "
+                       "WHERE job_id = 'quotes_tw'").fetchone()
+    assert row[0] is not None and row[1] == "30 14 * * mon-fri|Asia/Taipei|1"

@@ -82,6 +82,23 @@ def test_cancel_terminates_waits_and_keeps_the_current_version(
     assert len(sup.runs(path)) == 1  # a cancel starts no follow-up
 
 
+def test_a_cancel_keeps_a_run_queued_behind_it(path: Path, tmp_path: Path) -> None:
+    """Review E #6: the nightly run queued behind a cancelled one (its job row said
+    「排在其後」) still starts; the cancelled run's own follow-up (a chained run) does not."""
+    _plan(tmp_path, "sleep", "publish")
+    started = service.start_run(scope="full", reason="button", started_by="user:guest")
+    sup.wait_until(lambda: sup.report(path, started.run_id).summary.status == "running")
+    queued = service.start_automatic(scope="nightly", reason="nightly")
+    assert queued.queued_behind == started.run_id
+    result = service.cancel(by="user:guest")
+    assert result.cancelled
+    sup.wait_until(lambda: len(sup.runs(path)) == 2 and _done())
+    first, second = sup.runs(path)
+    assert first.status == "cancelled"
+    assert second.reason == "nightly" and second.status == "published"
+    assert second.previous_run_id is None
+
+
 def test_a_child_that_dies_before_claiming_ends_failed(path: Path, tmp_path: Path) -> None:
     _plan(tmp_path, "die_before_claim")
     started = service.start_run(scope="full", reason="button")

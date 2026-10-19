@@ -9,6 +9,7 @@ the ledger is empty; (5) an identical boot starts nothing.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -166,3 +167,73 @@ def test_boot_writes_only_rows_never_the_schema(path: Path) -> None:
         assert st.triggers_verified(conn)
     finally:
         conn.close()
+
+
+def test_on_boot_never_raises_and_rolls_its_writes_back(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #8: a settlement fault (here: the trail cannot be cleaned) must not stop the
+    app booting — with PD_SETTLE on or off. Every write of the step is rolled back."""
+    first = sup.fake_preparing_run(path)
+    second = sup.fake_preparing_run(path)
+
+    def broken(conn: object) -> int:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(st, "cleanup_orphans", broken)
+    for settle in ("on", "off"):
+        monkeypatch.setenv("PD_SETTLE", settle)
+        assert _boot(path) == service.BootPlan()
+        # the orphans ended inside the step were rolled back with it
+        assert sup.report(path, first).summary.status == "preparing"
+        assert sup.report(path, second).summary.status == "preparing"
+        assert sup.job_row(path, first)["finished_at"] is None
+
+
+def test_an_orphan_whose_report_no_longer_reads_still_ends(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One broken report ends through its columns; the others end normally."""
+    broken = sup.fake_preparing_run(path)
+    conn = open_db(path)
+    conn.execute("UPDATE settle_run SET report = '{\"not\": \"a report\"}' WHERE run_id = ?",
+                 (broken,))
+    conn.commit()
+    conn.close()
+    plan = _boot(path)
+    assert plan.interrupted == (broken,)
+    conn = open_db(path)
+    try:
+        status = conn.execute("SELECT status FROM settle_run WHERE run_id = ?",
+                              (broken,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert status == "interrupted"
+    row = sup.job_row(path, broken)
+    assert (row["status"], row["reason"]) == ("error", "interrupted")
+
+
+def test_an_inline_boot_run_outside_tests_runs_on_a_daemon_thread(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review E #11: PD_SETTLE_MODE=inline outside tests must not block the async lifespan
+    for a whole settlement; inside tests (PD_TEST_MODE=1, or pytest) it stays synchronous."""
+    import threading
+
+    plan = _boot(path)
+    assert plan.start is not None
+    seen: list[str] = []
+    real = service._boot_run
+
+    def recording(start: service.BootStart) -> int | None:
+        seen.append(threading.current_thread().name)
+        return real(start)
+
+    monkeypatch.setattr(service, "_boot_run", recording)
+    monkeypatch.setattr(service, "_sync_inline_boot", lambda: False)
+    assert service.start_after_boot(plan) is None  # returned at once
+    sup.wait_until(lambda: len(sup.runs(path)) == 1
+                   and sup.runs(path)[0].status == "published")
+    assert seen == ["settlement-boot-run"]
+    monkeypatch.undo()
+    assert service._sync_inline_boot()  # inside pytest

@@ -37,6 +37,7 @@ from portfolio_dash.scheduler.jobs import (
     running_progress,
     start_run,
     unknown_job_message,
+    update_schedule,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
 from portfolio_dash.shared.wire import decimal_str, stored_decimal_str
@@ -242,6 +243,7 @@ def update_job(
     body: _PutBody,
     request: Request,
     conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """§15.2 — edit cron/tz/enabled (subset merge), validate, persist + live reschedule."""
     ensure_job_rows(conn)
@@ -273,11 +275,9 @@ def update_job(
             content=error_body("invalid_cron", f"cron 表達式無效：{exc}", field="cron"),
         )
 
-    conn.execute(
-        "UPDATE schedule_config SET cron = ?, timezone = ?, enabled = ? WHERE job_id = ?",
-        (cron, tz, 1 if enabled else 0, job_id),
-    )
-    conn.commit()
+    # A change is stamped (``schedule_config.updated_at``): the settlement's final_through
+    # never re-judges the fires before it by the new cron (PERF review E #2).
+    update_schedule(conn, job_id, cron=cron, tz=tz, enabled=enabled, now=now)
     reschedule_job(get_scheduler(request), job_id, cron=cron, tz=tz, enabled=enabled)
 
     updated = conn.execute(
