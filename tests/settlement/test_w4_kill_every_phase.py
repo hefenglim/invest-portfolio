@@ -20,8 +20,10 @@ from typing import Any
 import pytest
 
 from portfolio_dash.api import settlement_service as service
-from portfolio_dash.shared import proc_lock
+from portfolio_dash.portfolio.settlement_store import TriggerCheck
+from portfolio_dash.shared import child_runner, proc_lock
 from portfolio_dash.shared.config import get_settings
+from tests.reference.corpora import open_db
 from tests.settlement import service_support as sup
 from tests.settlement.conftest import CorpusFactory
 from tests.settlement.test_wave2_cross import _child, _settled
@@ -93,3 +95,40 @@ def test_a_kill_in_any_phase_keeps_the_generation_and_the_resume_equals_fresh(
     common = sorted(set(fresh) & set(mine))
     assert len(common) == len(fresh), phase
     assert [mine[d] for d in common] == [fresh[d] for d in common], phase
+
+
+def test_an_orphan_child_that_outlives_a_restart_cannot_publish(
+    golden: tuple[Path, datetime], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The boot cannot stop the old process's child (simulated: the terminate is a no-op).
+    Boot ends its run 中斷 and clears the active run; when the orphan then reaches its swap,
+    the swap's ``run_id`` guard refuses it — nothing is published over boot's cleanup, the
+    run stays 中斷, and the change it claimed is back in the trail."""
+    path, now = golden
+    service.start_run(scope="full", reason="button", now=now)  # inline: G
+    generation = sup.state(path).generation
+    sup.back_dated_trade(path, BACK_DATED)
+    marker = _child(monkeypatch, tmp_path, "slow_phase", sleep_s=6)
+    monkeypatch.setenv("PD_STUB_PHASE", "_swap")
+    run_id = sup.fake_preparing_run(path, scope="dirty", through=now.date())
+    handle = child_runner.spawn(service.WORKER_MODULE, ["--run", str(run_id)])
+    try:
+        sup.wait_until(lambda: not marker.exists())  # computed; asleep just before its swap
+        monkeypatch.setattr(service, "_terminate_pid", lambda pid: None)
+        monkeypatch.setattr(service, "ORPHAN_LOCK_WAIT_S", 0.2)
+        conn = open_db(path)
+        try:
+            plan = service.on_boot(conn, trigger_check=TriggerCheck())
+            conn.commit()
+        finally:
+            conn.close()
+        assert plan.interrupted == (run_id,)
+        assert handle.wait(60) is not None  # the orphan woke, tried to swap, and ended
+    finally:
+        handle.terminate_and_wait(10)
+    state = sup.state(path)
+    assert state.generation == generation, "an orphan published over boot's cleanup"
+    assert state.run_id is None and state.dirty_from == BACK_DATED
+    assert sup.report(path, run_id).summary.status == "interrupted"
+    assert not proc_lock.is_held(proc_lock.settlement_lock_path())
+
