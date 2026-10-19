@@ -49,7 +49,9 @@ _NO_SCROLLER_NEEDED: dict[tuple[str, str], str] = {
 #: somebody has to decide which bucket it belongs in.
 # 16 since 2026-10-09 (options W5): the dashboard's 選擇權 section — 未平倉 and 已實現, both
 # built by web/options.js inside a .table-wrap.
-_EXPECTED_JS_SITES = 16
+# 17 since 2026-10-19 (PERF spec §14.2): web/settlement.js's ONE paged-table helper — the
+# panel's change trail, per-day history diff and run history — inside a .table-wrap.
+_EXPECTED_JS_SITES = 17
 # 32 since 2026-09-30: 資料中心 › 帳本操作稽核 (#la-body), inside a .table-wrap like its neighbours.
 _EXPECTED_HTML_TABLES = 32
 

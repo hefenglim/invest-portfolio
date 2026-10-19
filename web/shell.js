@@ -223,6 +223,33 @@
   /* small hook so other pages (e.g. settings.html's 版本發佈資訊 button) can lazy-ensure
      whatsnew.js through the same version-stamped loader before calling window.pdWhatsNew. */
   window.pdEnsureWhatsNew = pdEnsureWhatsNew;
+
+  /* The settlement chip, panel and prompt (PERF spec §14, plan P10): settlement.js has no
+     HTML tag on any page — every page with a topbar gets it from here, so it stamps itself
+     like whatsnew.js. Unlike whatsnew it does not wait for /api/health: the chip should be
+     up with the first paint, so it reuses the ?v= of THIS file's own tag (the stamper wrote
+     it, and both files ship in one build). Under PD_SETTLE=off the status reads
+     `state: "off"` and settlement.js shows nothing at all. */
+  const _ownStamp = (function () {
+    try {
+      const src = (document.currentScript && document.currentScript.src) || '';
+      const m = /[?&]v=([^&#]+)/.exec(src);
+      return m ? m[1] : '';
+    } catch (e) { return ''; }
+  })();
+  let _stPromise = null;
+  function pdEnsureSettlement() {
+    if (window.pdSettlement) return Promise.resolve(true);
+    if (!_stPromise) {
+      const v = _ownStamp || _appVersion;
+      _stPromise = pdEnsureApi()
+        .then(() => pdLoadScript('settlement.js' + (v ? '?v=' + v : '')))
+        .then(() => !!window.pdSettlement)
+        .catch(() => false);
+    }
+    return _stPromise;
+  }
+  window.pdEnsureSettlement = pdEnsureSettlement;
   let pdDrawerPromise = null;
   function pdEnsureDrawer() {
     if (window.openSymbolDrawer) return Promise.resolve();
@@ -567,36 +594,20 @@
             prog.fail('報價更新失敗', (e && e.message) || '請稍後再試');
           });
       }));
-      /* The ledgers named below are the ones `build_book` actually replays — opening,
-         transactions, dividends and corporate actions (`LedgerBundle`). This copy named
-         換匯 instead, and 換匯 is not in the bundle at all: the dialog promised a check
-         it never performed, on the one ledger the user would most want checked after
-         entering a rate by hand. It also omitted 公司行動, which IS replayed.
-         Deliberately not "fixed" by widening the endpoint: `forex/pools.py` and
-         `portfolio/cash.py` cannot raise, so replaying them would be a verification that
-         can never fail — and a verification that cannot fail is a progress bar.
-         M10-04 (owner ruling 2026-09-06): no confirm dialog and no 「較耗時」. The replay is
-         read-only and takes 17–30 ms end to end (measured: 24,000 rows 0.77 s, 50,000 rows
-         1.86 s — under a second at any scale this app assumes); the wait the user feels is
-         the page reload that follows (/api/dashboard, 1.5–2.6 s), so the copy names that.
-         The name stays 重算. */
-      menu.appendChild(mkOpt('重算（重建統計）', '重放期初庫存、交易、股利與公司行動帳本驗證統計（瞬間完成；隨後重新整理頁面）', () => {
-        const prog = window.toastProgress('重算…', '重放帳本只需一瞬間；驗證通過後重新整理頁面約需 2 秒');
-        pdEnsureApi()
-          .then((ok) => {
-            if (!ok) throw new Error('API 層載入失敗');
-            return window.pdApi.post('/api/actions/recompute');
-          })
-          .then(() => {
-            prog.done('重算完成', '帳本重放驗證通過（帳本本身未修改；換匯與資金收支不經此路徑驗證），正在重新整理…');
-            setTimeout(() => {
-              if (window.pdBeforeReload) window.pdBeforeReload();   // L25: keep the view state
-              window.location.reload();
-            }, 900);
-          })
-          .catch((e) => {
-            prog.fail('重算失敗', (e && e.message) || '請稍後再試');
-          });
+      /* PERF spec §14.4: 重新結算 replaces 重算. The item starts a FULL settlement run
+         (settlement.js owns it): phase 2 lists every 待釐清 record of the dashboard's tolerant
+         replay — a finding is a warning toast and a panel line, and stops nothing — and the
+         charts refresh when the swap is announced, so there is no page reload. The
+         ledgers it replays are the ones `build_book` replays (opening, transactions,
+         dividends, corporate actions); the run also re-values every day, so it is no
+         longer instant and runs in the background (no confirm: the run never touches a
+         ledger, and the panel can cancel it).
+         POST /api/actions/recompute keeps its other callers; this menu no longer calls it. */
+      menu.appendChild(mkOpt('重新結算（驗證並重建歷史）', '重播全部帳本、列出待釐清項目，並重建歷史走勢與月度成績（背景執行，可繼續操作）', () => {
+        pdEnsureSettlement().then((ok) => {
+          if (ok && window.pdSettlement) { window.pdSettlement.rebuild(); return; }
+          window.toast('重新結算無法啟動', 'fail', '結算元件載入失敗，請重新整理頁面後再試');
+        });
       }));
       btn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
       document.addEventListener('click', (e) => { if (!menu.hidden && !wrap.contains(e.target)) menu.hidden = true; });
@@ -656,6 +667,8 @@
     uwrap.appendChild(umenu);
     tb.appendChild(uwrap);
     pdInitMobileNav(tb);  // R7: hamburger first-child, CSS-hidden on desktop
+    /* P10: the settlement chip goes in right after .header-spacer, on every page. */
+    if (page !== 'login') pdEnsureSettlement();
   }
 
   /* ---- global symbol search (Cmd+K) ---- */
@@ -861,10 +874,14 @@
     };
   };
 
-  /* ---- confirm dialog ---- */
+  /* ---- confirm dialog ----
+     opts: { title, body, confirmLabel, danger, onConfirm, cancelLabel?, onCancel?, cls? }.
+     `cancelLabel` / `onCancel` (PERF spec §14.3): the settlement prompt's 「稍後」 is a real
+     answer, not a dismissal of the question — it is called on 稍後, ✕ and a backdrop click
+     alike, exactly once. `cls` adds a class to the modal (its own layout rules). */
   window.confirmDialog = function (opts) {
     const backdrop = el('div', 'modal-backdrop');
-    const modal = el('div', 'modal');
+    const modal = el('div', 'modal' + (opts.cls ? ' ' + opts.cls : ''));
     const head = el('div', 'modal-head');
     head.appendChild(el('h3', 'modal-title', opts.title || '確認'));
     const close = el('button', 'modal-close', '✕'); close.type = 'button';
@@ -874,18 +891,30 @@
     body.appendChild(el('div', null, opts.body || ''));
     modal.appendChild(body);
     const foot = el('div', 'modal-foot');
-    const cancel = el('button', 'btn', '取消'); cancel.type = 'button';
+    const cancel = el('button', 'btn', opts.cancelLabel || '取消'); cancel.type = 'button';
     const ok = el('button', 'btn ' + (opts.danger ? 'btn-danger' : 'btn-primary'),
       opts.confirmLabel || '確認');
     ok.type = 'button';
     foot.appendChild(cancel); foot.appendChild(ok);
     modal.appendChild(foot);
     backdrop.appendChild(modal);
+    let answered = false;
     const dismiss = () => backdrop.remove();
-    close.addEventListener('click', dismiss);
-    cancel.addEventListener('click', dismiss);
-    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) dismiss(); });
-    ok.addEventListener('click', () => { dismiss(); if (opts.onConfirm) opts.onConfirm(); });
+    const decline = () => {
+      dismiss();
+      if (answered) return;
+      answered = true;
+      if (opts.onCancel) opts.onCancel();
+    };
+    close.addEventListener('click', decline);
+    cancel.addEventListener('click', decline);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) decline(); });
+    ok.addEventListener('click', () => {
+      dismiss();
+      if (answered) return;
+      answered = true;
+      if (opts.onConfirm) opts.onConfirm();
+    });
     document.body.appendChild(backdrop);
   };
 

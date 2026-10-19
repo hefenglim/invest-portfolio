@@ -324,6 +324,10 @@
   function applyMode(mode, refetch) {
     currentMode = mode;
     const isTwr = mode === 'twr';
+    /* PERF §14.5: the panel's 更新前版本 banner adds 「期間報酬可能失真」 in 績效比較 mode only —
+       a stylesheet rule keyed on this attribute shows that half (settlement.js fills it). */
+    const panel = document.querySelector('.trend-panel');
+    if (panel) panel.dataset.mode = isTwr ? 'twr' : 'value';
     document.getElementById('trend-chart').hidden = isTwr;
     document.getElementById('value-ranges').hidden = isTwr;
     document.getElementById('twr-chart').hidden = !isTwr;
@@ -523,6 +527,29 @@
     if (window.pdEchartsReady) await window.pdEchartsReady();
     initAll();
   }
+
+  /* PERF spec §14.4: a settlement swap republished the history, so the trend, the net-worth
+     line and the 績效比較 overlay are rebuilt in place — no page reload. The KPI band is
+     always live and is not touched. A failed refetch keeps the charts as they are. */
+  async function refreshOnSwap() {
+    if (!D) return;   // nothing was ever built on this page
+    let fresh;
+    try {
+      fresh = await window.pdApi.get('/api/dashboard', null, { background: true });
+    } catch (e) {
+      return;
+    }
+    D = fresh;
+    window.pdDashboard = Promise.resolve(fresh);   // later readers (rebalance, alerts) see it
+    if (!window.echarts) return;
+    charts.forEach((c) => c.dispose());
+    charts.length = 0;
+    trendChart = null;
+    if (twrChart) { twrChart.dispose(); twrChart = null; }
+    twrData = null;   // the overlay reads the history too: initTrendMode refetches it
+    initAll();
+  }
+  document.addEventListener('pd-settlement-swap', refreshOnSwap);
 
   /* Resize + theme handlers are registered synchronously; they operate on whatever
      charts exist at event time (none until boot resolves — both are harmless no-ops). */
