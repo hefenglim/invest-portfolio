@@ -1087,43 +1087,233 @@
     }
   }
 
-  /* ============ I2. 月度成績 (R6 item 8) ============ */
+  /* ============ I2. 月度成績 (R6 item 8; PERF spec §11.4, §14.6) ============
+     Past periods are the settled closes (month-end / year-end), the current one is live;
+     every figure is since inception as at the period's END, which is why the columns read
+     累計 — a year row is never that year's own return (當期報酬（TWR） is). Two sources:
+       · 月 — GET /api/snapshots?limit=12 (its old row fields + the additive kind,
+         provisional, stale, notes, xirr_reason, period_twr, period_twr_reason, restated);
+       · 年 — GET /api/settlement/periods?kind=Y (PeriodClose rows: the figures in `kpi`).
+     Both are normalised to ONE row view below — field picking, no arithmetic: every number
+     is the server's string and is only formatted. Every reason a figure is blank or marked
+     is the server's (xirr_reason, period_twr_reason, notes, restatements); this file only
+     names the note KINDS. */
+  const snapState = { kind: 'M', seq: 0 };
+  let snapWired = false;   // the toggle and the swap listener are bound ONCE (DEF-034)
+  const SNAP_COPY = {
+    M: {
+      head: '月份',
+      sub: '過去月份為月底結算值：帳本、價格或匯率更正，或計算規則更新並重新結算後會跟著更新；本月為即時值',
+      empty: '尚無月度成績 — 帳本有了紀錄後，本月即時值會出現在這裡，過去月份於月底結算後列出。',
+      failed: '月度成績載入失敗，請稍後重新整理。',
+      pending: '目前帳本有待釐清的部位：釐清後，過去月份的數字可能隨之更新。',
+    },
+    Y: {
+      head: '年份',
+      sub: '過去年份為年底結算值：帳本、價格或匯率更正，或計算規則更新並重新結算後會跟著更新；本年為即時值',
+      empty: '尚無年度成績 — 帳本有了紀錄後，本年即時值會出現在這裡，過去年份於年底結算後列出。',
+      failed: '年度成績載入失敗，請稍後重新整理。',
+      pending: '目前帳本有待釐清的部位：釐清後，過去年份的數字可能隨之更新。',
+    },
+  };
+  const PENDING_KIND_ZH = {
+    oversold: '賣超', unapplied_action: '公司行動未套用',
+    refused_dividend: '股利未入帳', refused_close: '平倉未入帳',
+  };
+  const snapList = (a) => (Array.isArray(a) && a.length ? a : null);
+  const snapDated = (sym, d) => sym + (d ? '（' + d + '）' : '');
+  /* The ⚠ tooltip: one line per kind of reason in the close's `notes` (§11.2). */
+  function snapNoteLines(notes) {
+    const out = [];
+    if (!notes || typeof notes !== 'object') return out;
+    let l;
+    if ((l = snapList(notes.missing_prices))) out.push('缺價格：' + l.join('、'));
+    if ((l = snapList(notes.stale_prices))) {
+      out.push('價格非當日：' + l.map((p) => snapDated(p.symbol, p.price_date)).join('、'));
+    }
+    if ((l = snapList(notes.unconfirmed_closes))) {
+      out.push('收盤價未經確認：' + l.map((p) => snapDated(p.symbol, p.price_date)).join('、'));
+    }
+    if ((l = snapList(notes.missing_fx))) out.push('缺匯率：' + l.join('、'));
+    if ((l = snapList(notes.stale_fx))) {
+      out.push('匯率非當日：' + l.map((p) => snapDated(p.pair, p.rate_date)).join('、'));
+    }
+    if ((l = snapList(notes.pending_positions))) {
+      out.push('待釐清：' + l.map((p) => acctZh(p.account_id) + '・' + p.symbol
+        + (PENDING_KIND_ZH[p.kind] ? '（' + PENDING_KIND_ZH[p.kind] + '）' : '')).join('、'));
+    }
+    if (notes.options_value_excluded) out.push('選擇權市值未計入走勢');
+    if ((l = snapList(notes.options_past_expiry))) out.push('已過到期日的選擇權：' + l.join('、'));
+    if ((l = snapList(notes.dividends_receivable))) {
+      out.push('已除息、股利未入帳：' + l.map((d) => acctZh(d.account_id) + '・' + d.symbol
+        + '（' + d.ex_date + ' 除息，' + d.pay_date + ' 發放）').join('、'));
+    }
+    if (!out.length && notes.incomplete) out.push('部分數字不完整');
+    return out;
+  }
+  /* A restated close (§14.6): 已重述 for a correction, the quieter 上線重述 for the one-time
+     cutover. `restated` may be a flag, a list of Restatement rows, or {cutover, rows|text}
+     — whichever the route carries, the tooltip shows each field's previous value, when and
+     why, from the server's own fields. */
+  function snapRestated(row) {
+    const v = row.restated;
+    if (!v) return null;
+    const obj = v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    const rows = Array.isArray(v) ? v
+      : (obj && Array.isArray(obj.rows) ? obj.rows
+        : (Array.isArray(row.restatements) ? row.restatements : []));
+    const cutover = obj && 'cutover' in obj ? !!obj.cutover
+      : (rows.length ? rows.every((x) => x && x.cutover) : false);
+    const fmtUnit = (val, unit) => (unit === 'ratio' ? f.signedPct(val) : f.money(val, unit));
+    const why = (x) => {
+      const r = window.pdSettlement && window.pdSettlement.reasonText
+        ? window.pdSettlement.reasonText(x.reason) : x.reason;
+      return [f.date(x.at), x.source, r].filter((s) => s && s !== f.NULL_GLYPH).join('，');
+    };
+    const lines = obj && (obj.text || obj.note) ? [obj.text || obj.note]
+      : rows.map((x) => (x.label || x.field) + '：' + fmtUnit(x.old_value, x.unit) + ' → '
+        + fmtUnit(x.new_value, x.unit) + (why(x) ? '（' + why(x) + '）' : ''));
+    return { cutover: cutover, lines: lines };
+  }
+  /* 暫定: the month-end close is not confirmed yet; the server's note when it sends one. */
+  function snapProvisionalText(row) {
+    const p = row.provisional;
+    if (typeof p === 'string' && p) return p;
+    if (p && typeof p === 'object' && (p.note || p.text)) return p.note || p.text;
+    return row.provisional_note || '月底收盤價尚未確定，結算後更新';
+  }
+  function snapView(kind, r) {
+    if (kind === 'Y') {
+      const k = r.kpi || {};
+      return {
+        label: r.period, ccy: k.reporting_ccy, total_value: k.total_market_value,
+        total_return: k.total_return, rate: k.total_return_rate, xirr: k.xirr,
+        xirr_reason: k.xirr_reason, twr: k.period_twr, twr_reason: k.period_twr_reason,
+        notes: k.notes, stale: !!r.stale, raw: r,
+      };
+    }
+    return {
+      label: r.month, ccy: r.reporting_ccy, total_value: r.total_value,
+      total_return: r.total_return, rate: r.total_return_rate, xirr: r.xirr,
+      xirr_reason: r.xirr_reason, twr: r.period_twr, twr_reason: r.period_twr_reason,
+      notes: r.notes, stale: !!r.stale, raw: r,
+    };
+  }
+  function snapMark(cls, text, title) {
+    const b = el('span', 'badge snap-mark ' + cls, text);
+    if (title) b.title = title;
+    return b;
+  }
+  function wireSnapshotsOnce() {
+    if (snapWired) return;
+    snapWired = true;
+    document.querySelectorAll('#snapshots-kind .range-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.kind === snapState.kind) return;
+        snapState.kind = btn.dataset.kind === 'Y' ? 'Y' : 'M';
+        document.querySelectorAll('#snapshots-kind .range-btn')
+          .forEach((b) => b.classList.toggle('active', b === btn));
+        renderSnapshots();
+      });
+    });
+    /* A swap republished the history: the past rows may have moved (PERF §14.4). */
+    document.addEventListener('pd-settlement-swap', () => renderSnapshots());
+  }
   async function renderSnapshots() {
     const tbody = $('#snapshots-body');
     if (!tbody) return;
+    wireSnapshotsOnce();
+    const kind = snapState.kind;
+    const copy = SNAP_COPY[kind];
+    const seq = ++snapState.seq;
+    const head = $('#snapshots-period-head');
+    if (head) head.textContent = copy.head;
+    const sub = $('#snapshots-sub');
+    if (sub) sub.textContent = copy.sub;
+    const note = $('#snapshots-note');
     let resp;
     try {
-      resp = await window.pdApi.get('/api/snapshots', { limit: 12 });
+      /* settlement.js (loaded by shell.js beside this fetch) owns the run-reason words a
+         restatement tooltip prints — wait for it alongside, never instead of, the rows. */
+      const ready = window.pdEnsureSettlement ? window.pdEnsureSettlement() : null;
+      resp = kind === 'Y'
+        ? await window.pdApi.get('/api/settlement/periods', { kind: 'Y', limit: 20 })
+        : await window.pdApi.get('/api/snapshots', { limit: 12 });
+      await ready;
     } catch (err) {
-      return;  // non-critical panel: stay empty on failure
+      if (seq !== snapState.seq) return;
+      tbody.replaceChildren();
+      const tr = el('tr');
+      const td = el('td', 'sign-nil', (err && err.message) || copy.failed);
+      td.colSpan = 6;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      if (note) note.hidden = true;
+      return;
     }
-    const rows = (resp && resp.rows) || [];
+    if (seq !== snapState.seq) return;   // a newer toggle owns the table
+    const list = Array.isArray(resp) ? resp : ((resp && resp.rows) || []);
+    const rows = list
+      .filter((r) => (kind === 'Y' ? true : (!r.kind || r.kind === 'M')))
+      .map((r) => snapView(kind, r));
     tbody.replaceChildren();
     if (!rows.length) {
       const tr = el('tr');
-      const td = el('td', 'sign-nil', '尚無快照 — 排程每晚 23:50 產生當月快照，月底值即定格。');
-      td.colSpan = 5;
+      const td = el('td', 'sign-nil', copy.empty);
+      td.colSpan = 6;
       tr.appendChild(td);
       tbody.appendChild(tr);
+      if (note) note.hidden = true;
       return;
     }
     rows.forEach((s) => {
-      const tr = el('tr');
-      tr.appendChild(el('td', 'col-text num', s.month));
-      const cell = (v, pct) => {
+      const tr = el('tr', s.stale ? 'snap-row-stale' : null);
+      const tdLabel = el('td', 'col-text num snap-period');
+      tdLabel.appendChild(el('span', null, s.label));
+      if (s.raw.provisional) {
+        tdLabel.appendChild(snapMark('snap-mark-provisional', '暫定', snapProvisionalText(s.raw)));
+      }
+      if (s.stale) {
+        tdLabel.appendChild(snapMark('snap-mark-stale', '更新前版本',
+          '這一列是重新結算前的版本，尚未包含之後的帳本或報價更正'));
+      }
+      const rs = snapRestated(s.raw);
+      if (rs) {
+        tdLabel.appendChild(snapMark(rs.cutover ? 'snap-mark-cutover' : 'snap-mark-restated',
+          rs.cutover ? '上線重述' : '已重述',
+          (rs.cutover ? '上線時以目前帳本重新結算的值取代舊快照' : '結算值已更正')
+            + (rs.lines.length ? '\n' + rs.lines.join('\n') : '')));
+      }
+      const lines = snapNoteLines(s.notes);
+      if (lines.length) tdLabel.appendChild(snapMark('snap-mark-note', '⚠', lines.join('\n')));
+      tr.appendChild(tdLabel);
+      const cell = (v, pct, reason) => {
         const td = el('td', 'num');
-        if (v == null) { td.textContent = f.NULL_GLYPH; td.classList.add('sign-nil'); }
-        else td.textContent = pct ? f.signedPct(v) : f.money(v, s.reporting_ccy);
+        if (v == null) {
+          td.textContent = f.NULL_GLYPH;
+          td.classList.add('sign-nil');
+          if (reason) td.title = reason;
+        } else td.textContent = pct ? f.signedPct(v) : f.money(v, s.ccy);
         return td;
       };
       tr.appendChild(cell(s.total_value, false));
       const ret = el('td', 'num ' + f.signClass(s.total_return));
-      ret.textContent = s.total_return == null ? f.NULL_GLYPH : f.signed(s.total_return, s.reporting_ccy);
+      ret.textContent = s.total_return == null ? f.NULL_GLYPH : f.signed(s.total_return, s.ccy);
       tr.appendChild(ret);
-      tr.appendChild(cell(s.total_return_rate, true));
-      tr.appendChild(cell(s.xirr, true));
+      tr.appendChild(cell(s.rate, true));
+      tr.appendChild(cell(s.xirr, true, s.xirr_reason));
+      tr.appendChild(cell(s.twr, true, s.twr_reason));
       tbody.appendChild(tr);
     });
+    /* One note under the table when TODAY's book carries a 待釐清 position (§11.4): the
+       newest row is the live one, and its notes are today's. */
+    const live = rows[0] && rows[0].notes;
+    if (note) {
+      const pending = !!(live && snapList(live.pending_positions));
+      note.textContent = pending ? copy.pending : '';
+      note.hidden = !pending;
+    }
+    enhanceTableScroll();   // the table can now land after boot's own measurement
   }
 
   /* ============ F. 換匯損益 ============ */

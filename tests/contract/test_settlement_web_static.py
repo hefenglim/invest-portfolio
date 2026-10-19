@@ -137,3 +137,13 @@ def test_every_chip_banner_and_pill_state_is_a_class_with_a_rule() -> None:
 def test_the_menu_and_the_panel_never_reload_the_page_for_a_run() -> None:
     start = re.search(r"\n  function startRun\(.*?\n  \}\n", _SETTLE, re.S)
     assert start and "location.reload" not in start.group(0)
+
+
+def test_every_monthly_mark_is_a_class_with_a_rule() -> None:
+    """DEF-077 for 月度成績 (§14.6): 暫定 / 更新前版本 / 已重述 / 上線重述 / ⚠ are classes."""
+    app = (_WEB / "app.js").read_text(encoding="utf-8")
+    used = set(re.findall(r"'(snap-mark-[a-z]+)'", app)) | {"snap-row-stale", "snap-note"}
+    assert {"snap-mark-stale", "snap-mark-restated", "snap-mark-cutover",
+            "snap-mark-provisional", "snap-mark-note"} <= used, used
+    missing = _missing_rules(used)
+    assert not missing, f"state classes with no stylesheet rule: {missing}"

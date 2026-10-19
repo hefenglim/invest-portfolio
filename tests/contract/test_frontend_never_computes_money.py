@@ -23,6 +23,9 @@ import re
 from decimal import Decimal  # noqa: F401  (referenced via the annotation string check)
 from pathlib import Path
 
+from pydantic import BaseModel
+
+from portfolio_dash.portfolio import settlement_models
 from portfolio_dash.portfolio.dashboard_models import (
     HoldingRow,
     KpiSummary,
@@ -38,14 +41,25 @@ from portfolio_dash.portfolio.dashboard_models import (
 _WEB = Path(__file__).resolve().parents[2] / "web"
 
 
+def _settlement_models() -> list[type[BaseModel]]:
+    """Every wire model of the settlement contract (PERF spec §15): the status, the progress
+    file, the run report and its rows (the per-day diff, restatements), and the period closes
+    (KPI block, activity, holdings, cash) that 月度成績 and the panel render. Derived from the
+    module, so a model added there is covered the day it lands."""
+    return [obj for obj in vars(settlement_models).values()
+            if isinstance(obj, type) and issubclass(obj, BaseModel)
+            and obj.__module__ == settlement_models.__name__]
+
+
 def _money_fields() -> set[str]:
-    """Every Decimal-typed field on the dashboard wire — the values JS must not do math on."""
+    """Every Decimal-typed field on the dashboard and settlement wires — the values JS must not
+    do math on."""
     names: set[str] = set()
     # The 選擇權 block (options spec §7.1, 2026-10-09): premiums, 口數, the obligation and the
     # option totals are server strings too — 口 ↔ 股當量 and every premium total included.
     for model in (HoldingRow, KpiSummary, OptionOpenRow, OptionObligationSubtotal,
                   OptionContractRealized, OptionRealizedRow, OptionMoney, OptionRealizedYear,
-                  OptionRealizedUnderlying):
+                  OptionRealizedUnderlying, *_settlement_models()):
         names |= {n for n, f in model.model_fields.items()
                   if "Decimal" in str(f.annotation)}
     return names
@@ -76,16 +90,40 @@ def _violations() -> list[str]:
       shape, and the defects this catches were all inline derivations at the render site.
       What it guarantees is that no money VALUE is derived where it is printed.
     """
+    out: list[str] = []
+    for name, _lineno, line in _hits():
+        if (name, line) in _KNOWN:
+            continue
+        out.append(f"web/{name}  {line[:90]}")
+    return out
+
+
+def _hits() -> list[tuple[str, int, str]]:
+    """Every scanned line that does arithmetic next to a money field: (file, line in the
+    comment-stripped text, the stripped line)."""
     fields = "|".join(sorted(_money_fields()))
     after = re.compile(rf"\.(?:{fields})\s*[*/-]\s*(?![/*])")   # h.foo / …  (not a comment)
     before = re.compile(rf"[*/-]\s*[A-Za-z_$][\w$]*\.(?:{fields})\b")
-    out: list[str] = []
+    out: list[tuple[str, int, str]] = []
     for path in sorted(_WEB.glob("*.js")):
         clean = _strip_noise(path.read_text(encoding="utf-8"))
         for lineno, line in enumerate(clean.splitlines(), start=1):
             if after.search(line) or before.search(line):
-                out.append(f"web/{path.name}:{lineno}  {line.strip()[:90]}")
+                out.append((path.name, lineno, line.strip()))
     return out
+
+
+#: KNOWN violations, kept visible rather than hidden — each one a finding with an owner, not a
+#: permission. (file, the stripped line) → why it is not fixed in place.
+_KNOWN: dict[tuple[str, str], str] = {
+    ("charts.js", "const spread = pt.total_value - pt.net_invested;"):
+        "PRE-EXISTING, found 2026-10-19 when the field list gained the settlement models: the "
+        "trend tooltip's 累計總損益（含匯兌） is total_value − net_invested in JS floats. "
+        "TrendPoint was never in the list, so the guard could not see it. A server field would "
+        "change the dashboard payload, which PERF invariant 1 freezes byte for byte against "
+        "v0.1.31 this release; dropping the line removes a figure the owner reads. Reported "
+        "to the main session for an owner ruling (PERF plan §6.3 package F report).",
+}
 
 
 def test_no_js_arithmetic_on_a_money_field() -> None:
@@ -97,6 +135,13 @@ def test_no_js_arithmetic_on_a_money_field() -> None:
     )
 
 
+def test_every_known_violation_still_exists() -> None:
+    """A known entry must not outlive its line: fixing it fails here until the entry goes."""
+    seen = {(name, line) for name, _lineno, line in _hits()}
+    gone = sorted(set(_KNOWN) - seen)
+    assert not gone, f"known violations that no longer exist — delete their entry: {gone}"
+
+
 def test_the_field_list_is_real_and_the_pattern_bites() -> None:
     """Detection power. A regex guard over a derived list has two ways to pass vacuously —
     an empty list, or a pattern that never matches — so pin both."""
@@ -104,6 +149,10 @@ def test_the_field_list_is_real_and_the_pattern_bites() -> None:
     assert {"unrealized_pnl", "adjusted_cost_total", "weight", "xirr"} <= fields, fields
     assert {"contracts", "share_equivalents", "premium_total", "obligation",
             "premium_in", "premium_out"} <= fields, fields
+    # PERF spec §15: a period close's KPI block, the per-day diff and a restatement.
+    assert {"total_market_value", "period_twr", "net_worth", "before", "after",
+            "old_value", "new_value", "balance"} <= fields, fields
+    assert len(_settlement_models()) >= 20, _settlement_models()
     assert len(fields) >= 20, len(fields)
 
     names = "|".join(sorted(fields))

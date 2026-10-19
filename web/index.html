@@ -224,23 +224,32 @@
     <div id="dvc-body"></div>
   </section>
 
-  <!-- I2. 月度成績（R6 item 8） -->
-  <section class="panel" data-screen-label="月度成績">
+  <!-- I2. 月度成績（R6 item 8; PERF spec §11.4 / §14.6）. Past periods are the settled
+       month-end / year-end closes, the current one is live; every figure is since inception
+       as at the period's end, so a year row is never read as that year's own return. -->
+  <section class="panel" id="snapshots-panel" data-screen-label="月度成績">
     <div class="panel-head">
       <h2 class="panel-title">月度成績</h2>
-      <span class="panel-sub">每晚快照當月 KPI，月底定格 — 查表即得，不重算歷史</span>
+      <span class="panel-sub" id="snapshots-sub">過去月份為月底結算值：帳本、價格或匯率更正，或計算規則更新並重新結算後會跟著更新；本月為即時值</span>
+      <span class="spacer"></span>
+      <div class="range-group" id="snapshots-kind" role="tablist" aria-label="月度成績期間">
+        <button class="range-btn active" type="button" data-kind="M">月</button>
+        <button class="range-btn" type="button" data-kind="Y">年</button>
+      </div>
     </div>
+    <div class="st-banner" data-settle-banner="snapshots" hidden="hidden"></div>
     <div class="table-wrap">
       <table class="data">
         <thead>
           <tr>
-            <th class="col-text">月份</th><th>總市值</th><th>總報酬</th>
-            <th>報酬率</th><th>XIRR</th>
+            <th class="col-text" id="snapshots-period-head">月份</th><th>總市值</th>
+            <th>累計總報酬</th><th>累計報酬率</th><th>累計 XIRR</th><th>當期報酬（TWR）</th>
           </tr>
         </thead>
         <tbody id="snapshots-body"></tbody>
       </table>
     </div>
+    <div class="snap-note" id="snapshots-note" hidden="hidden"></div>
   </section>
 
   <!-- J. 資料新鮮度 -->

@@ -2766,3 +2766,27 @@ select.ai-edit { padding-right: 2px; }
   .sd-drawer.st-drawer { width: 100vw; max-width: 100vw; border-left: none; }
   .st-kv { grid-template-columns: 1fr; gap: 0; }
 }
+
+/* ---------- 月度成績 marks (PERF spec §11.4 / §14.6) ----------
+   Per-row 暫定 / 更新前版本 / 已重述 / 上線重述 / ⚠ and the 待釐清 note — each state a
+   class with a rule here (DEF-077); app.js only switches classes. */
+.snap-period { white-space: nowrap; }
+.snap-mark {
+  margin-left: 6px; font-size: 10px; line-height: 15px; padding: 0 5px; cursor: help;
+  font-family: var(--font-ui);
+}
+.snap-mark-provisional,
+.snap-mark-stale,
+.snap-mark-note {
+  color: var(--amber);
+  border-color: rgba(217, 161, 63, 0.4);
+  background: var(--amber-soft);
+}
+.snap-mark-restated {
+  color: var(--accent);
+  border-color: rgba(88, 166, 221, 0.4);
+  background: var(--accent-soft);
+}
+.snap-mark-cutover { color: var(--text-3); }
+.snap-row-stale td { color: var(--text-2); }
+.snap-note { padding: 6px 2px 0; font-size: 11px; color: var(--amber); }

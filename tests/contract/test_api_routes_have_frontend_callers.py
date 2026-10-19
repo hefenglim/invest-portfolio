@@ -61,6 +61,19 @@ _NO_CALLER_ALLOWED: dict[tuple[str, str], str] = {
         "disables a task through PUT enabled=false instead",
     ("DELETE", "/api/insight-tasks/{insight_type_id}/schedule"):
         "twin of the insight-types route above",
+    ("GET", "/api/settlement/periods/{kind}/{period}"):
+        "one period close with its holdings and cash (PERF spec §15); its caller is the stress "
+        "audit's month-end reconciliation (scripts/stress_audit) — a drill-down page is a spec "
+        "§3 non-goal, so 月度成績 reads the list route only",
+}
+
+#: Allowlist entries whose route a LATER package of the same release adds (PERF plan §7.1:
+#: package G mounts /api/settlement/periods* in wave 3; this file's entry lands in wave 2 with
+#: the frontend that does NOT call it). Until the route exists the stale-entry check below
+#: cannot see it, so it skips these; once the route exists the entry is an ordinary one and
+#: this set should be emptied (W4).
+_LANDING_LATER: set[tuple[str, str]] = {
+    ("GET", "/api/settlement/periods/{kind}/{period}"),
 }
 
 _VERB = {"get": "GET", "post": "POST", "put": "PUT", "del": "DELETE", "download": None}
@@ -230,7 +243,8 @@ def test_allowlisted_routes_are_still_uncalled() -> None:
     """The presence half: an entry must not outlive the gap it records."""
     routes = _api_routes()
     reached = _reached(routes, *_calls_and_literals(_sources(_WEB)))
-    unknown = sorted(set(_NO_CALLER_ALLOWED) - routes)
+    assert _LANDING_LATER <= set(_NO_CALLER_ALLOWED), "a landing-later route needs its reason"
+    unknown = sorted(set(_NO_CALLER_ALLOWED) - routes - _LANDING_LATER)
     assert not unknown, f"_NO_CALLER_ALLOWED names routes that no longer exist: {unknown}"
     stale = sorted(set(_NO_CALLER_ALLOWED) & reached)
     assert not stale, f"these routes gained a caller — delete their allowlist entry: {stale}"
