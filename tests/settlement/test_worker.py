@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -105,8 +106,40 @@ def store_rows(conn: sqlite3.Connection, start: date, end: date) -> dict[str, di
 _KPI_FIELDS = ("total_return", "total_return_rate", "xirr", "xirr_window_days")
 
 
-def assert_close_is_truncated_world(label: str, kpi: Any, ref: dict[str, Any], d: date) -> None:
-    """A stored close's KPI block and notes ≡ v0.1.31's truncated-world dashboard at *d*."""
+def rate_oracle(conn: sqlite3.Connection, base: str, quote: str, day: date
+                ) -> tuple[Decimal, date] | None:
+    """*base* → *quote* on or before *day*, straight from ``fx_rates``: the direct pair, else
+    ``1 /`` the inverse pair — an independent transcription of the app's rule."""
+    if base == quote:
+        return Decimal("1"), day
+    for b, q, invert in ((base, quote, False), (quote, base, True)):
+        row = conn.execute("SELECT rate, as_of_date FROM fx_rates WHERE base = ? AND quote = ? "
+                           "AND as_of_date <= ? ORDER BY as_of_date DESC LIMIT 1",
+                           (b, q, day.isoformat())).fetchone()
+        if row is not None:
+            rate = Decimal(row[0])
+            return (Decimal("1") / rate if invert else rate), date.fromisoformat(row[1])
+    return None
+
+
+def kpi_pairs(ref: dict[str, Any]) -> set[str]:
+    """The pairs the KPI block needs at D, from the reference itself: every currency of the
+    returns and of a held position (stocks and contracts) to the reporting currency."""
+    rep_ccy = ref["reporting_currency"]
+    ccys: set[str] = set()
+    if ref.get("returns"):
+        ccys |= set(ref["returns"]["by_currency"])
+    ccys |= {h["quote_ccy"] for h in ref["holdings"]}
+    options = ref.get("options") or {}
+    ccys |= set((options.get("market_value") or {}).get("by_currency") or {})
+    return {f"{c}/{rep_ccy}" for c in ccys if c != rep_ccy}
+
+
+def assert_close_is_truncated_world(label: str, kpi: Any, ref: dict[str, Any], d: date, *,
+                                    conn: sqlite3.Connection | None = None,
+                                    holdings: Sequence[Any] | None = None) -> None:
+    """A stored close's KPI block, notes and positions ≡ v0.1.31's truncated-world dashboard
+    at *d*; with *conn*, every rate it used ≡ the stored ``fx_rates`` row, by value."""
     k = ref["kpis"]
     assert to_wire(kpi.total_market_value) == k["total_market_value"], label
     for f in _KPI_FIELDS:
@@ -122,10 +155,18 @@ def assert_close_is_truncated_world(label: str, kpi: Any, ref: dict[str, Any], d
         (p["symbol"], p["as_of"]) for p in fresh["prices"] if p["stale"] and p["as_of"]], label
     ref_fx = {f"{e['base']}/{e['quote']}": e for e in fresh["fx"]}
     used = {u.pair: u for u in kpi.fx_used}
-    assert set(used) <= set(ref_fx), label
+    needed = kpi_pairs(ref)
+    # exactly the pairs the KPIs need: used or missing, nothing else
+    assert set(used) | set(kpi.notes.missing_fx) == needed, label
     for pair, u in used.items():
         assert u.as_of.isoformat() == ref_fx[pair]["as_of"], f"{label} {pair}"
-    assert set(kpi.notes.missing_fx) <= set(fresh["missing_fx"]), label
+        if conn is not None:
+            base, quote = pair.split("/")
+            oracle = rate_oracle(conn, base, quote, d)
+            assert oracle is not None and u.rate == oracle[0], f"{label} {pair} rate"
+    # missing: equal to the reference's, restricted to the pairs the KPIs read (the rest are
+    # the 換匯損益 summary's, which a close leaves out — spec §11.2)
+    assert kpi.notes.missing_fx == [p for p in fresh["missing_fx"] if p in needed], label
     assert [s.pair for s in kpi.notes.stale_fx] == [
         p for p, e in sorted(ref_fx.items()) if e["stale"] and e["as_of"] and p in used], label
     points = [p for p in ref["trend"]["points"] if p["date"] == d.isoformat()]
@@ -135,9 +176,44 @@ def assert_close_is_truncated_world(label: str, kpi: Any, ref: dict[str, Any], d
         assert to_wire(kpi.net_invested) == p["net_invested"], label
         assert to_wire(kpi.net_worth) == p["net_worth"], label
         assert kpi.notes.incomplete == p["incomplete"], label
+        assert kpi.notes.trend_unavailable is None, label
     else:
         assert kpi.trend_total_value is None and kpi.net_invested is None, label
-        assert kpi.notes.incomplete, label
+        assert kpi.net_worth is None and kpi.period_twr is None, label
+        assert kpi.notes.trend_unavailable, label
+        # an absent trend is not an incomplete KPI: the KPIs' own completeness
+        kpi_incomplete = (k["total_market_value"] is None or k["total_return"] is None
+                          or bool(fresh["missing_prices"]) or bool(kpi.notes.missing_fx)
+                          or bool(kpi.notes.pending_positions))
+        assert kpi.notes.incomplete == kpi_incomplete, label
+    if holdings is not None:
+        assert_positions_are_the_dashboards(label, holdings, ref)
+
+
+def assert_positions_are_the_dashboards(label: str, holdings: Sequence[Any],
+                                        ref: dict[str, Any]) -> None:
+    """The close's positions ≡ the truncated world's holdings rows (stocks) and 選擇權 open rows
+    (contracts): shares, both cost totals, the price and its date, value and unrealized."""
+    stocks = {(h.account_id, h.symbol): h for h in holdings if h.asset_type == "stock"}
+    rows = {(r["account_id"], r["symbol"]): r for r in ref["holdings"]}
+    assert set(stocks) == set(rows), label
+    for key, r in rows.items():
+        h = stocks[key]
+        got = {"shares": to_wire(h.shares), "original_cost_total": to_wire(h.original_cost_total),
+               "adjusted_cost_total": to_wire(h.adjusted_cost_total),
+               "market_price": to_wire(h.price), "price_as_of": to_wire(h.price_as_of),
+               "market_value": to_wire(h.market_value), "unrealized_pnl": to_wire(h.unrealized)}
+        assert got == {f: r[f] for f in got}, f"{label} {key}"
+    contracts = {(h.account_id, h.symbol): h for h in holdings if h.asset_type == "option"}
+    opened = {(r["account_id"], r["symbol"]): r
+              for r in ((ref.get("options") or {}).get("open") or [])}
+    assert set(contracts) == set(opened), label
+    for key, r in opened.items():
+        h = contracts[key]
+        got = {"share_equivalents": to_wire(h.shares), "last_price": to_wire(h.price),
+               "last_price_date": to_wire(h.price_as_of),
+               "market_value": to_wire(h.market_value), "unrealized": to_wire(h.unrealized)}
+        assert got == {f: r[f] for f in got}, f"{label} {key}"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -177,7 +253,9 @@ def test_a_full_run_settles_the_v0131_series_and_closes(corpus_db: CorpusFactory
             ref = reference(name, f"month_end/{d:%Y-%m}.json")
             close = st.read_period(conn, state.generation, "M", f"{d:%Y-%m}")
             assert close is not None, f"{name} {d}: no close"
-            assert_close_is_truncated_world(f"{name} {d}", close.kpi, ref, d)
+            assert_close_is_truncated_world(
+                f"{name} {d}", close.kpi, ref, d, conn=conn,
+                holdings=st.read_period_holdings(conn, state.generation, "M", f"{d:%Y-%m}"))
             points = [p for p in ref["trend"]["points"] if p["date"] == d.isoformat()]
             if points:
                 assert wire_day(by_day[d]) == points[0], f"{name} {d}"
