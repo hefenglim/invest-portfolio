@@ -258,7 +258,8 @@ def test_a_selfcheck_difference_names_what_differed(
                    trigger_text=trigger("selfcheck", "2026-06-07T04:30:00+08:00",
                                         started_by=None))
     stub = SettleStub(status("selfcheck_diff", last_run=last))
-    line = "自檢：與第 41 版逐列比對，發現 3 處差異，最早於 2026-03-31（settled_period）"
+    # the worker's own sentence (zh table words, settlement_models.SETTLE_TABLE_ZH)
+    line = "自檢：與第 41 版逐列比對，發現 3 處差異，最早於 2026-03-31（月結與年結）"
     stub.reports[431] = report(431, summary=last, summary_lines=[line], selfcheck={
         "compared_through": "2026-06-06", "differences": 3, "first_day": "2026-03-31",
         "first_table": "settled_period"})
@@ -268,6 +269,7 @@ def test_a_selfcheck_difference_names_what_differed(
         body = fresh_page.locator(".st-drawer .st-body")
         expect(body).to_contain_text("每週自檢發現差異")
         expect(body.locator(".st-summary-lines")).to_contain_text(line)
+        expect(body).not_to_contain_text("settled_")
         sc = body.locator(".st-sec[data-sec='rep-selfcheck']")
         expect(sc).to_contain_text("比對至")
         expect(sc).to_contain_text("2026-06-06")
