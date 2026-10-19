@@ -270,6 +270,7 @@ def compute_alerts_full(
     key = result_cache.key_for(conn, name="alerts", now=now, reporting=reporting,
                                extra=(gap_key,))
     if data is not None and not result_cache.same_state(key, data_key):
+        result_cache.note_uncached("alerts")
         return evaluate(data)
 
     def compute() -> list[Alert]:

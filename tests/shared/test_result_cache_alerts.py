@@ -219,3 +219,56 @@ def test_the_alert_inputs_are_read_inside_one_read_transaction(db: Path) -> None
     assert any("llm_usage" in s for s in inner), "the quota ran outside"
     outside = [s for s in reads if s not in inner and "PRAGMA" not in s.upper()]
     assert not outside, f"alert reads outside the read transaction: {outside[:3]}"
+
+
+def test_the_dashboard_key_is_the_key_its_value_was_served_under(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``build_dashboard_keyed`` returns the key its value was SERVED under, never one
+    re-taken afterwards (fold verification N8): with a commit landing right after the serve,
+    a re-taken key would match the alerts key, file the pre-commit dashboard's alerts under
+    the post-commit state, and the next ``GET /api/alerts`` would serve them."""
+    real = result_cache.cached_keyed
+
+    def served_then_commit(*a: object, **kw: object) -> object:
+        out = real(*a, **kw)  # type: ignore[arg-type]
+        _refresh_quote(db, "AAPL", Market.US, "125")
+        return out
+
+    monkeypatch.setattr(result_cache, "cached_keyed", served_then_commit)
+    route = connect_path(db)
+    try:
+        data, data_key = build_dashboard_keyed(route, now=NOW, reporting=TWD)
+    finally:
+        route.close()
+    monkeypatch.setattr(result_cache, "cached_keyed", real)
+    conn = connect_path(db)
+    try:
+        alert_inputs.compute_alerts_full(conn, now=NOW, reporting=TWD, calib_gap=None,
+                                         data=data, data_key=data_key)
+        served = alert_inputs.compute_alerts_full(conn, now=NOW, reporting=TWD, calib_gap=None)
+    finally:
+        conn.close()
+    result_cache.reset()
+    fresh = connect_path(db)
+    try:
+        truth = alert_inputs.compute_alerts_full(fresh, now=NOW, reporting=TWD, calib_gap=None)
+    finally:
+        fresh.close()
+    assert _stale_alerts(served) == _stale_alerts(truth)
+    assert "AAPL" not in (_stale_alerts(truth) - {None})
+
+
+def test_an_alerts_evaluation_for_one_caller_is_counted_uncached(db: Path) -> None:
+    """The mismatched-state path (alerts from the caller's own build, never stored) shows in
+    ``result_cache.stats()``, so a hit rate measured later is not overstated."""
+    conn = connect_path(db)
+    try:
+        data, data_key = build_dashboard_keyed(conn, now=NOW, reporting=TWD)
+        _refresh_quote(db, "AAPL", Market.US, "125")
+        before = result_cache.stats().get("alerts", result_cache.Stats()).uncached
+        alert_inputs.compute_alerts_full(conn, now=NOW, reporting=TWD, calib_gap=None,
+                                         data=data, data_key=data_key)
+    finally:
+        conn.close()
+    assert result_cache.stats()["alerts"].uncached == before + 1

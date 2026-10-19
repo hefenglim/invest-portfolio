@@ -70,3 +70,13 @@ def test_a_bad_flag_stops_the_boot(boot_db: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("PD_STATIC_IMMUTABLE", "yes")
     with pytest.raises(ValueError, match="PD_STATIC_IMMUTABLE"), TestClient(create_app()):
         pass
+
+
+def test_a_clean_stop_leaves_the_database_in_one_file(boot_db: Path) -> None:
+    """Shutdown closes the result cache's read-only version connections and checkpoints, so
+    no `-wal` / `-shm` outlives a clean stop (a file-copy restore would replay a stale WAL)."""
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.get("/api/dashboard").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200  # a cache hit: the version
+    assert not boot_db.with_name(boot_db.name + "-wal").exists()  # connection was open

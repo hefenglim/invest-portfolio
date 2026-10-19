@@ -262,6 +262,13 @@ def _count(name: str, field: str) -> None:
     setattr(stats, field, getattr(stats, field) + 1)
 
 
+def note_uncached(name: str) -> None:
+    """Count one answer of *name* that a caller computed for itself, outside the cache (e.g.
+    alerts evaluated from a build of another state), so :func:`stats` stays complete."""
+    with _lock:
+        _count(name, "uncached")
+
+
 def _lookup(key: CacheKey) -> object:
     with _lock:
         entry = _entries.get(key.name)

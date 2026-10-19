@@ -116,7 +116,7 @@ from portfolio_dash.scheduler.jobs import (
     register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
-from portfolio_dash.shared import flags
+from portfolio_dash.shared import flags, result_cache
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import install_actor, session
@@ -267,6 +267,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if scheduler is not None:
             scheduler.shutdown(wait=False)
+        # The result cache holds a READ-ONLY connection per database for the life of the
+        # process, and a read-only connection cannot checkpoint: left open, the last close no
+        # longer folds the WAL back and deletes it. Close them, then checkpoint, so a clean
+        # stop leaves the database in one file (a backup restored by file copy must never meet
+        # a stale `-wal`; fold verification 2026-10-19).
+        result_cache.reset()
+        with session() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 def create_app() -> FastAPI:
