@@ -104,6 +104,7 @@ def test_the_real_run_produced_every_shape_the_comparison_needs(real: dict[str, 
     assert real["status_preparing"]["run"] is not None
     assert real["status_clean"]["last_run"] is not None
     assert real["status_pending"]["seq"] is not None
+    assert real["diff"]["rows"], "the back-dated trade changed no settled day"
 
 
 def test_the_status_stubs_have_the_route_keys(real: dict[str, Any]) -> None:
@@ -132,7 +133,8 @@ def test_the_change_trail_stubs_have_the_route_keys(real: dict[str, Any]) -> Non
                               tables=[stubs.table("transactions", 1, "2026-02-02",
                                                   "2026-02-02")])
     assert not _keys(pend, real["changes_pending"])
-    assert not _keys({"rows": [], "total_count": 0}, real["diff"])
+    row = stubs.diff_row(rid, "2026-02-02", "total_value", "changed", before="1", after="2")
+    assert not _keys({"rows": [row], "total_count": 1}, real["diff"])
 
 
 def test_the_trigger_stub_is_what_the_route_serves(real: dict[str, Any]) -> None:

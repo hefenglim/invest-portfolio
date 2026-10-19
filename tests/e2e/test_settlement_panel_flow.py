@@ -23,6 +23,7 @@ from tests.e2e.settlement_stubs import (
     change,
     changes_page,
     counter,
+    diff_row,
     progress,
     report,
     status,
@@ -141,7 +142,9 @@ def test_a_slow_live_run_shows_every_section_in_the_servers_words(
         expect(trail).to_contain_text("2025-06-18 → 2025-06-16")
         expect(trail).to_contain_text("你")            # E's actor_text for the guest viewer
         expect(trail).to_contain_text("排程")
-        expect(trail).to_contain_text("曾於 #411 嘗試")
+        # the RECORD's own attempt words (E's attempted_text), not only the counter row's
+        expect(trail.locator("tr:not(.st-row-lead)").filter(has_text="曾於 #411 嘗試")
+               ).to_have_count(1)
         expect(trail).not_to_contain_text("#412")
         expect(trail.locator("tr.st-row-lead")).to_contain_text("0050")
         expect(trail.locator("tr.st-row-lead")).to_contain_text("14 筆")
@@ -270,6 +273,43 @@ def test_a_selfcheck_difference_names_what_differed(
         expect(sc).to_contain_text("2026-06-06")
         expect(sc).to_contain_text("3 處")
         expect(sc).to_contain_text("2026-03-31（月結與年結）")
+
+
+@pytest.mark.e2e
+def test_a_reports_daily_changes_show_money_and_the_missing_price_flag(
+    live_server: str, fresh_page: Page
+) -> None:
+    """Fold verification F N3: the report's per-day history rows — a figure before → after,
+    and the 缺價標記 row, which compares ONLY the day's `incomplete` flag (the flags also carry
+    cash_incomplete / options_open, never printed)."""
+    last = summary(432, had_changes=True)
+    stub = SettleStub(status("clean", last_run=last))
+    stub.runs = [last]
+    stub.reports[432] = report(432, summary=last, history={
+        "counts": {"total_value": 1, "incomplete": 1}, "flag_flips": 1,
+        "first_changed_day": "2026-03-02", "last_changed_day": "2026-03-03"})
+    stub.diffs[432] = [
+        diff_row(432, "2026-03-02", "total_value", "changed", before="1000000",
+                 after="1012345"),
+        diff_row(432, "2026-03-03", "incomplete", "flag_flip",
+                 flags_before={"incomplete": False, "cash_incomplete": True},
+                 flags_after={"incomplete": True, "cash_incomplete": True}),
+    ]
+    with stubbed(fresh_page, stub):
+        _open(fresh_page, live_server)
+        _chip(fresh_page).click()
+        fresh_page.locator(".st-sec[data-sec='history'] tbody tr").first.click()
+        expect(fresh_page.locator(".st-card-title")).to_have_text("結算 #432")
+        rows = fresh_page.locator(".st-sec[data-sec='rep-history'] tbody tr")
+        expect(rows).to_have_count(2)
+        expect(rows.nth(0)).to_contain_text("2026-03-02")
+        expect(rows.nth(0)).to_contain_text("1,000,000")
+        expect(rows.nth(0)).to_contain_text("1,012,345")
+        expect(rows.nth(1)).to_contain_text("缺價標記")
+        expect(rows.nth(1)).to_contain_text("完整")
+        expect(rows.nth(1)).to_contain_text("缺價")
+        expect(fresh_page.locator(".st-sec[data-sec='rep-history']")).not_to_contain_text(
+            "cash_incomplete")
 
 
 @pytest.mark.e2e

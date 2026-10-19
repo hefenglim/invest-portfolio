@@ -37,6 +37,7 @@ from portfolio_dash.portfolio.settlement_models import (
     ChangeCounter,
     ChangeRecord,
     ChangeTableCount,
+    DiffRow,
     PeriodClose,
     Restatement,
     RunProgress,
@@ -93,6 +94,11 @@ def restatement(i: int, **kw: Any) -> dict[str, Any]:
     }
     base.update(kw)
     return _dump(Restatement(**base))
+
+
+def diff_row(run_id: int, day: str, field: str, kind: str, **kw: Any) -> dict[str, Any]:
+    """One ``GET /api/settlement/runs/{id}/diff`` row (``settle_run_diff``)."""
+    return _dump(DiffRow(run_id=run_id, day=day, field=field, kind=kind, **kw))
 
 
 def report(run_id: int, **kw: Any) -> dict[str, Any]:
@@ -223,6 +229,7 @@ class SettleStub:
         self.reports: dict[int, dict[str, Any]] = {}
         self.runs: list[dict[str, Any]] = []
         self.changes: dict[str, dict[str, Any]] = {}   # state -> changes_page(...)
+        self.diffs: dict[int, list[dict[str, Any]]] = {}   # run id -> diff_row(...) rows
         self.periods: list[dict[str, Any]] | None = []
         self.posts: list[tuple[str, Any]] = []
         self.gets: list[str] = []
@@ -253,7 +260,9 @@ class SettleStub:
                     "code": "not_found",
                     "message": f"找不到重新結算紀錄 #{m.group(1)}（可能已超過保留期限）"}}, 404)
             if m.group(2):
-                return self._json(route, {"rows": [], "total_count": 0})
+                rows = self.diffs.get(int(m.group(1)), [])
+                off, lim = int(q.get("offset", 0)), int(q.get("limit", 50))
+                return self._json(route, {"rows": rows[off:off + lim], "total_count": len(rows)})
             return self._json(route, self.reports[int(m.group(1))])
         if path.endswith("/settlement/changes"):
             page = self.changes.get(q.get("state", "pending")) or changes_page([])
