@@ -109,7 +109,11 @@ def test_monthly_rows_carry_their_marks_and_the_toggle_reads_the_year_closes(
                period_twr=None, period_twr_reason="待結算：期間跨越更新前版本",
                notes={"missing_prices": ["2603"], "dividends_receivable": [
                    {"account_id": "tw_broker", "symbol": "2884", "ex_date": "2026-01-20",
-                    "pay_date": "2026-02-15", "ccy": "TWD", "net": "1800"}]}),
+                    "pay_date": "2026-02-15", "ccy": "TWD", "net": "1800"},
+                   {"account_id": "tw_broker", "symbol": "2603", "ex_date": "2026-01-21",
+                    "pay_date": "2026-02-16", "ccy": "TWD", "net": "500", "booked": False,
+                    "unbooked_note": "未入帳（待釐清）",
+                    "unbooked_reason": "此帳戶在發放日前沒有 2603 的部位"}]}),
     ])
     with stubbed(fresh_page, stub, [(_SNAPSHOTS, snaps.handle)]):
         _dashboard(fresh_page, live_server)
@@ -135,6 +139,10 @@ def test_monthly_rows_carry_their_marks_and_the_toggle_reads_the_year_closes(
         warn = rows.nth(5).locator(".snap-mark-note")
         assert "缺價格：2603" in (warn.get_attribute("title") or "")
         assert "已除息、股利未入帳" in (warn.get_attribute("title") or "")
+        # X1: a refused payout is listed marked, with the replay's own reason
+        assert ("2603（2026-01-21 除息，2026-02-16 發放；未入帳（待釐清）："
+                "此帳戶在發放日前沒有 2603 的部位）") in (warn.get_attribute("title") or "")
+        assert "2884（2026-01-20 除息，2026-02-15 發放）" in (warn.get_attribute("title") or "")
         cells = rows.nth(5).locator("td")
         assert cells.nth(4).get_attribute("title") == "期間不足 90 天，XIRR 不計"
         assert cells.nth(5).get_attribute("title") == "待結算：期間跨越更新前版本"

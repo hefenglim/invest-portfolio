@@ -1147,8 +1147,12 @@
     if (notes.options_value_excluded) out.push('選擇權市值未計入走勢');
     if ((l = snapList(notes.options_past_expiry))) out.push('已過到期日的選擇權：' + l.join('、'));
     if ((l = snapList(notes.dividends_receivable))) {
+      /* a payout the replay refuses is listed MARKED (X1), with the server's own reason */
       out.push('已除息、股利未入帳：' + l.map((d) => acctZh(d.account_id) + '・' + d.symbol
-        + '（' + d.ex_date + ' 除息，' + d.pay_date + ' 發放）').join('、'));
+        + '（' + d.ex_date + ' 除息，' + d.pay_date + ' 發放'
+        + (d.booked === false ? '；' + (d.unbooked_note || '未入帳（待釐清）')
+          + (d.unbooked_reason ? '：' + d.unbooked_reason : '') : '')
+        + '）').join('、'));
     }
     if (!out.length && notes.incomplete) out.push('部分數字不完整');
     return out;
