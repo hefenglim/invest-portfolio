@@ -1327,7 +1327,9 @@ def main():
                 f"exp= {f['expected']} got= {f['actual']}")
         print(line.encode(sys.stdout.encoding or "utf-8", "replace")
                   .decode(sys.stdout.encoding or "utf-8", "replace"))
-    if aborted is not None:
+    # A gate that reads the exit code, never the ``fail=`` line, must see a failing run as
+    # failed (fold verification I, 2026-10-20: every mutation run exited 0).
+    if aborted is not None or ev.n_fail:
         sys.exit(1)
 
 
