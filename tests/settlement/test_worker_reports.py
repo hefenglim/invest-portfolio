@@ -72,10 +72,13 @@ def test_a_published_report_has_every_section(demo: CorpusDB) -> None:
     assert r.summary.finished_at is not None and r.summary.duration_s is not None
     assert r.range.from_ is not None and r.range.to == yesterday(demo)
     first_day = _first_day(demo)
-    # the range starts at the ledger's first row (a deposit before the first trade); the
-    # days it values are the series' own
-    assert r.range.kind == "full" and r.range.from_ <= first_day
-    assert r.range.days == (r.range.to - first_day).days + 1
+    # ONE convention: the range is the calendar span from the ledger's first row (a deposit
+    # before the first trade) and ``days`` counts its calendar days; ``valued_days`` the trend
+    # days valued in it
+    assert r.range.kind == "full" and r.range.from_ == date(2026, 1, 2) < first_day
+    assert r.range.days == (r.range.to - r.range.from_).days + 1
+    assert r.range.valued_days == (r.range.to - first_day).days + 1
+    assert r.summary.days == r.range.days and r.summary.range_from == r.range.from_
     assert r.versions.generation_before == 0 and r.versions.generation_after == 1
     assert r.versions.calc_version == st.calc_version(demo.reporting)
     assert r.versions.reporting_ccy == demo.reporting
@@ -83,7 +86,7 @@ def test_a_published_report_has_every_section(demo: CorpusDB) -> None:
     assert [s.key for s in r.steps][:7] == [
         "load", "check", "replay", "valuate", "close", "bench", "swap"]
     assert all(s.status == "done" and s.elapsed_s is not None and s.detail for s in r.steps[:7])
-    assert r.history is not None and r.history.new_days == r.range.days
+    assert r.history is not None and r.history.new_days == r.range.valued_days
     assert r.state is not None and r.state.stale_cleared and r.state.pending_positions == []
     assert r.failure is None
     assert r.changes.records_url == "/api/settlement/changes?state=run:1"

@@ -67,11 +67,14 @@ def _fresh(db: CorpusDB, tmp_path: Path) -> dict[str, dict[str, Any]]:
     assert start_run(copy, 900) == "published"
     conn = open_db(copy.path)
     try:
-        first = st.store_state(conn, reporting=db.reporting).first_day
-        assert first is not None
-        return store_rows(conn, first, yesterday(db))
+        return store_rows(conn, EARLIEST, yesterday(db))
     finally:
         conn.close()
+
+
+#: Every settle row is compared, the closes before the series included (they start at the
+#: month of the ledger's first row, which may precede the first trade).
+EARLIEST = date(1900, 1, 1)
 
 
 def _published(db: CorpusDB) -> dict[str, dict[str, Any]]:
@@ -79,8 +82,7 @@ def _published(db: CorpusDB) -> dict[str, dict[str, Any]]:
     try:
         state = st.store_state(conn, reporting=db.reporting)
         assert state.usable, state
-        assert state.first_day is not None
-        return store_rows(conn, state.first_day, yesterday(db))
+        return store_rows(conn, EARLIEST, yesterday(db))
     finally:
         conn.close()
 
@@ -555,3 +557,47 @@ def test_a_refused_claim_says_why_in_a_zh_sentence(demo: CorpusDB) -> None:
     assert report.failure.reason_text == "另一次重新結算（#99）仍在進行，本次未執行"
     assert report.failure.error_class == "ClaimRefused"
     assert _state(demo).run_id == 99  # the other run's state is not touched
+
+
+# ---------------------------------------------------------------------------------------------
+# a generation built by the earlier rule (no closes before the series) is widened, not refused
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_generation_without_its_pre_trend_closes_is_widened_and_says_why(
+        corpus_db: CorpusFactory, tmp_path: Path) -> None:
+    """The re-verification's scenario K (oldrule): rich plus 2024 rows before its first trade
+    (2025-10-01). The published generation loses its closes before the series — what a store
+    built by the earlier rule holds — and a back-dated buy makes a dirty run. The run widens to
+    the ledger's first row, says why, and publishes the very rows a fresh run does."""
+    db = corpus_db("rich")
+    _x(db, "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy, "
+           "to_amount) VALUES ('schwab', '2024-04-01', 'TWD', '31000', 'USD', '1000')")
+    _x(db, "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy, "
+           "to_amount) VALUES ('schwab', '2024-05-02', 'USD', '500', 'TWD', '16000')")
+    _x(db, "INSERT INTO cash_movements (account_id, date, kind, ccy, amount, note) "
+           "VALUES ('tw_broker', '2024-03-03', 'DEPOSIT', 'TWD', '777777', 'probe')")
+    prepare(db)
+    assert start_run(db, 1) == "published"
+    conn = open_db(db.path)
+    try:
+        g = generation(conn)
+        for table in ("settled_period_holding", "settled_period_cash"):
+            conn.execute(f"DELETE FROM {table} WHERE generation = ? AND (kind, period) IN ("
+                         "SELECT kind, period FROM settled_period WHERE generation = ? AND "
+                         "end_day < '2025-10-01')", (g, g))
+        removed = conn.execute("DELETE FROM settled_period WHERE generation = ? AND "
+                               "end_day < '2025-10-01'", (g,)).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    assert removed == 20
+    _backdated_buy(db, date(2026, 2, 3))
+    assert _state(db).dirty_from == date(2026, 2, 3)
+    assert start_run(db, 2, scope="dirty", reason="prompt") == "published"
+    report = _report(db, 2)
+    assert report.range.from_ == date(2024, 3, 3)
+    assert report.range.days == (report.range.to - report.range.from_).days + 1
+    assert ("前一版缺少 2024-03-03 起的月結與年結（由較早的規則建立）：本次自該日起一併重新結算"
+            in report.summary_lines), report.summary_lines
+    assert _published(db) == _fresh(db, tmp_path)  # the pre-trend closes included

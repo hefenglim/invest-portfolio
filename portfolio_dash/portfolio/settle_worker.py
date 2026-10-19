@@ -931,9 +931,7 @@ class _Run:
             return None
         if claim.scope in ("full", "selfcheck") or claim.generation == 0:
             if close_first is not None and close_first < start:
-                # the range starts at the first row; the days it values are still the
-                # series' own (the claim's count)
-                self._widen(claim, close_first, None, days=claim.days)
+                self._widen(claim, close_first, None)
                 return close_first
             return start
         widened = start
@@ -947,6 +945,8 @@ class _Run:
         if close_first is not None and close_first < widened and not self._holds_closes(
                 claim.generation, close_first, widened):
             widened = close_first
+            line = (f"前一版缺少 {close_first.isoformat()} 起的月結與年結（由較早的規則建立）："
+                    "本次自該日起一併重新結算")
         if widened < start:
             self._widen(claim, widened, line)
         return widened
@@ -958,10 +958,10 @@ class _Run:
                                                            end=before - _ONE_DAY)}
         return expected <= held
 
-    def _widen(self, claim: st.Claim, start: date, line: str | None, *,
-               days: int | None = None) -> None:
-        if days is None:
-            days = max((claim.run_through - start).days + 1, 0)
+    def _widen(self, claim: st.Claim, start: date, line: str | None) -> None:
+        """Move the run's range to start at *start*: ``days`` is the calendar span (the
+        report's one convention, :class:`RunRange`)."""
+        days = max((claim.run_through - start).days + 1, 0)
         kept = (len(st.read_days(self.conn, claim.generation, end=start - _ONE_DAY))
                 if claim.generation > 0 else 0)
         st.update_run(self.conn, self.run_id, range_from=start, days=days)
@@ -985,6 +985,9 @@ class _Run:
             st.copy_before(self.conn, claim.generation, new_gen, plan.run_from)
         start = plan.value_start
         days_total = 0 if start is None or start > through else (through - start).days + 1
+        rng = t.progress.range.model_copy(update={"valued_days": days_total})
+        t.progress = t.progress.model_copy(update={"range": rng})
+        t.report = t.report.model_copy(update={"range": rng})
         t.start("valuate", total=days_total, unit="天")
         first = loaded.first_day
         if start is None or start > through or first is None:
@@ -1168,6 +1171,8 @@ class _Run:
             if end < first:  # a close before the series: no trend point, no 當期報酬
                 kpi = pc.with_trend(kpi, point=None, twr=None, twr_reason=pc.TWR_NOT_STARTED_ZH,
                                     trend_reason=pc.TREND_NOT_STARTED_ZH)
+                if kpi.xirr is None:  # the close's own words (the engine's reason is unchanged)
+                    kpi = kpi.model_copy(update={"xirr_reason": pc.XIRR_NO_POSITION_ZH})
             else:
                 twr, why = pc.period_twr(index, points, start_end=start_end, end=end)
                 kpi = pc.with_trend(kpi, point=series.points.get(end), twr=twr,

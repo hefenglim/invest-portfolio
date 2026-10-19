@@ -474,6 +474,12 @@ def test_a_first_row_in_an_earlier_year_has_its_own_year_close(corpus_db: Corpus
                         key=lambda c: c.end_day)
         assert _flow_lines(years[year].activity) == _sum_months(months), year
     assert y2024.kpi.notes.trend_unavailable == pc.TREND_NOT_STARTED_ZH
+    # no position yet: the close says so, not the engine's 「缺少現價…」
+    for close in closes:
+        if close.end_day < date(2025, 10, 1):
+            assert close.kpi.xirr is None and close.kpi.xirr_reason == pc.XIRR_NO_POSITION_ZH
+        else:
+            assert close.kpi.xirr_reason != pc.XIRR_NO_POSITION_ZH
     conn = open_db(db.path)
     try:
         g = generation(conn)

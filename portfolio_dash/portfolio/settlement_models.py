@@ -221,9 +221,17 @@ class RunRequest(_Model):
 
 
 class RunRange(_Model):
+    """The run's range: ``from`` – ``to`` and ``days``, the CALENDAR span (every day from
+    ``from`` through ``to``; a full run starts at the ledger's first row, which may precede the
+    series). ``valued_days`` (W2-D, optional) counts the trend days the run valued — the
+    series' own days inside the span (none before its first trade)."""
+
     from_: date | None = Field(default=None, alias="from")
     to: date | None = None
     days: int | None = None
+    #: (W2-D, optional) Trend days valued in the span (calendar ``days`` minus the days
+    #: before the series starts).
+    valued_days: int | None = None
     #: Days copied unchanged from the previous generation (before the start day).
     kept_before: int | None = None
     kind: Literal["dirty", "full"] | None = None

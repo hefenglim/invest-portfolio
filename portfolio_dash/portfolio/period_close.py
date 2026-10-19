@@ -382,6 +382,9 @@ TWR_START_UNAVAILABLE_ZH = "期初沒有走勢資料，當期報酬暫不計算"
 #: comes later): it has its cash and activity, and no trend point yet.
 TREND_NOT_STARTED_ZH = "走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料"
 TWR_NOT_STARTED_ZH = "走勢尚未開始，當期報酬暫不計算"
+#: The XIRR reason of a close before the first trade: no position yet (the engine's generic
+#: reason names a missing price, which a month with no position does not have).
+XIRR_NO_POSITION_ZH = "尚無持倉，XIRR 不計"
 
 
 @dataclass(frozen=True)
@@ -722,6 +725,7 @@ __all__ = [
     "TREND_UNAVAILABLE_ZH",
     "TWR_END_INCOMPLETE_ZH",
     "TWR_NOT_STARTED_ZH",
+    "XIRR_NO_POSITION_ZH",
     "TWR_NO_ANCHOR_ZH",
     "TWR_START_INCOMPLETE_ZH",
     "TWR_START_UNAVAILABLE_ZH",
