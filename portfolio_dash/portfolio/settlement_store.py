@@ -2477,8 +2477,170 @@ def read_period_cash(conn: sqlite3.Connection, generation: int, kind: str,
     ]
 
 
+
+# =============================================================================================
+# The worker's reads (W2-D, additions): what a run reports about its own claim and its past
+# =============================================================================================
+
+
+@dataclass(frozen=True)
+class ClaimedAttempts:
+    """This run's claimed changes that an earlier run had claimed and not published."""
+
+    #: The earlier runs, sorted (「曾於 #411 嘗試」).
+    run_ids: list[int]
+    #: How many of the claimed records and counters they are.
+    changes: int
+
+
+def claimed_attempts(conn: sqlite3.Connection, run_id: int) -> ClaimedAttempts:
+    """The earlier runs that claimed one of this run's claimed changes and did not publish it
+    (「曾於 #411 嘗試」), and how many such changes there are."""
+    ids: set[int] = set()
+    changes = 0
+    for table in ("settle_change_log", "settle_change_agg"):
+        for row in conn.execute(
+                f"SELECT attempted_run_ids FROM {table} WHERE claimed_run_id = ? "
+                "AND attempted_run_ids != ''", (run_id,)):
+            earlier = set(_attempts(row[0])) - {run_id}
+            if earlier:
+                ids.update(earlier)
+                changes += 1
+    return ClaimedAttempts(run_ids=sorted(ids), changes=changes)
+
+
+@dataclass(frozen=True)
+class ClaimedChange:
+    """The earliest change a run claimed: its table, record key and affected day."""
+
+    table: str
+    row_key: str
+    day: date
+
+
+def earliest_claimed_change(conn: sqlite3.Connection, run_id: int) -> ClaimedChange | None:
+    """The claimed change with the earliest affected day — a ledger record, or a price / FX
+    counter by its key — the "source" a restatement names (§14.6)."""
+    best: ClaimedChange | None = None
+    row = conn.execute(
+        f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d FROM settle_change_log "
+        "WHERE claimed_run_id = ? AND d IS NOT NULL ORDER BY d, id LIMIT 1",
+        (run_id,)).fetchone()
+    if row is not None:
+        best = ClaimedChange(table=str(row[0]), row_key=str(row[1]),
+                             day=date.fromisoformat(str(row[2])))
+    agg = conn.execute(
+        "SELECT table_name, key, earliest FROM settle_change_agg WHERE claimed_run_id = ? "
+        "ORDER BY earliest, id LIMIT 1", (run_id,)).fetchone()
+    if agg is not None:
+        day = date.fromisoformat(str(agg[2]))
+        if best is None or day < best.day:
+            best = ClaimedChange(table=str(agg[0]), row_key=str(agg[1]), day=day)
+    return best
+
+
+def discard_run_results(conn: sqlite3.Connection, run_id: int) -> int:
+    """Delete the diff and restatement rows a run wrote before its swap when it ends without
+    publishing (failed, superseded): they describe a generation nobody was shown. Only for a
+    run that did not publish — a published run's restatements are never deleted (§14.6).
+    Returns the rows removed."""
+    with _atomic(conn):
+        status = conn.execute("SELECT status FROM settle_run WHERE run_id = ?",
+                              (run_id,)).fetchone()
+        if status is not None and str(status[0]) in ("published", "partial"):
+            raise ValueError(f"run {run_id} published: its results stay")
+        removed = conn.execute("DELETE FROM settle_run_diff WHERE run_id = ?",
+                               (run_id,)).rowcount
+        removed += conn.execute("DELETE FROM settle_restatement WHERE run_id = ?",
+                                (run_id,)).rowcount
+    return removed
+
+
+def last_successful_run(conn: sqlite3.Connection, *, before: int) -> RunReport | None:
+    """The newest report before run *before* that published (``published`` / ``partial``) —
+    the basis of a run's ETA (§9.5)."""
+    row = conn.execute(
+        "SELECT run_id FROM settle_run WHERE run_id < ? AND status IN ('published', 'partial') "
+        "ORDER BY run_id DESC LIMIT 1", (before,)).fetchone()
+    return None if row is None else get_run(conn, int(row[0]))
+
+
+@dataclass(frozen=True)
+class SnapshotRow:
+    """One ``portfolio_snapshots`` row (the retired 23:50 freeze), as stored."""
+
+    month: str
+    reporting_ccy: str
+    total_value: Decimal | None
+    total_return: Decimal | None
+    total_return_rate: Decimal | None
+    xirr: Decimal | None
+    by_currency: dict[str, Decimal]
+
+
+def cutover_snapshots(conn: sqlite3.Connection, reporting: Currency) -> dict[str, SnapshotRow]:
+    """The month-end snapshots the go-live restates once (§11.4, §14.6 ``cutover``): every
+    ``portfolio_snapshots`` row in the configured reporting currency, by month.
+
+    Reads the borrowed ``portfolio_snapshots`` table (``api/snapshots.py`` owns it) by direct
+    SQL; a database without it reads as no rows, never ``OperationalError``. A row in another
+    currency is not compared (the same rule as every restatement)."""
+    if not _table_exists(conn, "portfolio_snapshots"):
+        return {}
+    out: dict[str, SnapshotRow] = {}
+    for r in conn.execute(
+            "SELECT month, reporting_ccy, total_value, total_return, total_return_rate, xirr, "
+            "by_currency FROM portfolio_snapshots WHERE reporting_ccy = ? ORDER BY month",
+            (reporting.value,)):
+        by_ccy = json.loads(r[6] or "{}")
+        out[str(r[0])] = SnapshotRow(
+            month=str(r[0]), reporting_ccy=str(r[1]), total_value=_dec(r[2]),
+            total_return=_dec(r[3]), total_return_rate=_dec(r[4]), xirr=_dec(r[5]),
+            by_currency={str(k): from_db(str(v)) for k, v in by_ccy.items()})
+    return out
+
+
+def generation_rows(conn: sqlite3.Connection, generation: int, *, start: date,
+                    end: date) -> dict[str, dict[str, Any]]:
+    """Every stored row of *generation* in ``[start, end]`` by table, keyed for a row-by-row
+    comparison (the weekly self-check, §9.1): day rows by day; closes, positions and cash by
+    their key (closes by end day). Values are the stored TEXT, so a comparison is byte for
+    byte."""
+    lo, hi = start.isoformat(), end.isoformat()
+    out: dict[str, dict[str, Any]] = {t: {} for t in (
+        "settled_day", "settled_period", "settled_period_holding", "settled_period_cash")}
+    for r in conn.execute(
+            f"SELECT {_DAY_COLS} FROM settled_day WHERE generation = ? AND day BETWEEN ? AND ? "
+            "ORDER BY day", (generation, lo, hi)):
+        out["settled_day"][str(r[0])] = tuple(r)
+    for r in conn.execute(
+            f"SELECT {_PERIOD_COLS} FROM settled_period WHERE generation = ? "
+            "AND end_day BETWEEN ? AND ? ORDER BY end_day, kind", (generation, lo, hi)):
+        out["settled_period"][f"{r[2]}|{r[0]}|{r[1]}"] = (
+            json.loads(r[3]), json.loads(r[4]))
+    for table, cols in (("settled_period_holding", _HOLDING_COLS),
+                        ("settled_period_cash", _CASH_COLS)):
+        selected = ", ".join(f"h.{c.strip()}" for c in cols.split(","))
+        for r in conn.execute(
+                f"SELECT p.end_day, {selected} FROM {table} h JOIN settled_period p "
+                "ON p.generation = h.generation AND p.kind = h.kind AND p.period = h.period "
+                "WHERE h.generation = ? AND p.end_day BETWEEN ? AND ?", (generation, lo, hi)):
+            key = "|".join(str(v) for v in (r[0], r[1], r[2], r[3], r[4]))
+            out[table][key] = tuple(r[1:])
+    return out
+
+
 __all__ = [
     "CALC_PACKAGES",
+    "ClaimedAttempts",
+    "ClaimedChange",
+    "SnapshotRow",
+    "claimed_attempts",
+    "cutover_snapshots",
+    "discard_run_results",
+    "earliest_claimed_change",
+    "generation_rows",
+    "last_successful_run",
     "CODE_DIGEST",
     "DIVIDEND_EFFECTIVE_DAY_SQL",
     "END_STATUSES",

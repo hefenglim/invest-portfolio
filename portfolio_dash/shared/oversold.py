@@ -11,6 +11,13 @@ layer resolves it to the ``pdNames`` spelling.
 
 L0 (``shared/``): it takes the row structurally (:class:`OversoldRow`), so ``strategy/`` and
 ``api/`` can both call it without ``shared/`` importing ``portfolio/``.
+
+**The non-blocking twins** (PERF spec 2026-10-18 §9.3 phase 2): a settlement run lists every
+待釐清 record of the dashboard's TOLERANT replay and goes on — a strict refusal 「無法重算」 would
+claim the run stopped at the first one. Its findings are worded 「以待釐清處理：…」 and live here,
+beside the strict sentence, one owner per sentence: :func:`oversold_pending_message` for a 賣超,
+and :func:`pending_finding_text` for every other kind, which prefixes the replay's OWN reason
+sentence (the one the strict path raises), so the two paths explain a record in the same words.
 """
 
 from datetime import date
@@ -53,3 +60,30 @@ def oversold_position_issues(row: OversoldRow, detail: str) -> list[dict[str, ob
         "symbol": row.symbol,
         "trade_date": row.trade_date.isoformat(),
     }]
+
+
+#: The prefix of every non-blocking finding (the settlement's phase 2, the run report).
+PENDING_PREFIX = "以待釐清處理："
+
+
+def oversold_pending_message(row: OversoldRow) -> str:
+    """The non-blocking twin of :func:`oversold_position_message`:
+    「以待釐清處理：帳本中有賣超部位（{account:…}／<sym>，<date>）— 該部位的成本基礎已捨棄、
+    沒有已實現損益，估值與 XIRR 暫不計算；結算照常完成，請修正該筆交易」."""
+    return (f"{PENDING_PREFIX}帳本中有賣超部位（{account_ref(row.account_id)}／{row.symbol}，"
+            f"{row.trade_date.isoformat()}）— 該部位的成本基礎已捨棄、沒有已實現損益，"
+            "估值與 XIRR 暫不計算；結算照常完成，請修正該筆交易")
+
+
+def pending_finding_text(reason: str) -> str:
+    """A non-blocking finding over the replay's own zh *reason* sentence (an unapplied action,
+    a refused dividend or close, an unregistered symbol): 「以待釐清處理：<reason>」. The reason
+    keeps its own remedy; the prefix says the run went on."""
+    return f"{PENDING_PREFIX}{reason}"
+
+
+def unregistered_symbol_reason(symbol: str, first_day: date) -> str:
+    """Why an unregistered symbol's rows are left out (the dashboard's degradation, 1b):
+    「<sym> 尚未登錄標的（最早一筆 <date>），相關的交易、股利與期初庫存不計入；登錄後即會計入」."""
+    return (f"{symbol} 尚未登錄標的（最早一筆 {first_day.isoformat()}），"
+            "相關的交易、股利與期初庫存不計入；登錄後即會計入")

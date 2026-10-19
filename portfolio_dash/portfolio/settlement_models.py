@@ -253,6 +253,9 @@ class RunChanges(_Model):
     records_url: str | None = None
     #: On a run that did not publish: 「本次未生效，已退回待結算」.
     handed_back: bool = False
+    #: (W2-D, optional) Earlier runs that claimed some of these changes and did not publish
+    #: them — the records are marked 「曾於 #411 嘗試」.
+    attempted_by: list[int] = Field(default_factory=list)
 
 
 class Finding(_Model):
@@ -416,6 +419,17 @@ class RunFailure(_Model):
     consequence: str | None = None
 
 
+class SelfcheckResult(_Model):
+    """(W2-D, optional) A self-check's row-by-row comparison with the published generation
+    (§9.1 ``settlement_selfcheck``): how many stored rows differ, and the first one."""
+
+    compared_through: date | None = None
+    differences: int = 0
+    first_day: date | None = None
+    #: The settle table of the first difference (``settled_day``, ``settled_period``, …).
+    first_table: str | None = None
+
+
 class RunReport(_Model):
     """The full report of one run (§9.6), stored as ``settle_run.report``."""
 
@@ -433,6 +447,12 @@ class RunReport(_Model):
     failure: RunFailure | None = None
     #: Q-P1 (a): a failed automatic run inside quiet hours keeps its push until they end.
     notify_pending: bool = False
+    #: (W2-D, optional) The summary's server-owned zh lines beyond the status and the trigger
+    #: (§9.6 Summary / Result): 「延續 #N 的變更於 D 起的影響」, 「其中 N 筆變更曾於 #M 嘗試」,
+    #: 「本次未生效，已退回待結算」, 「帳本尚無資料，無需結算」, 「新結算 N 天」 / 「移除 N 天」 …
+    summary_lines: list[str] = Field(default_factory=list)
+    #: (W2-D, optional) A self-check run's comparison (``None`` on every other run).
+    selfcheck: SelfcheckResult | None = None
 
 
 class ChangeRecord(_Model):
@@ -794,6 +814,7 @@ __all__ = [
     "RunReport",
     "RunRequest",
     "RunSummary",
+    "SelfcheckResult",
     "SettlementStatus",
     "actor_text",
     "is_run_reason",
