@@ -291,18 +291,40 @@ def test_a_chained_run_asked_to_stop_inside_the_held_days_publishes_them_all(
     assert st.pending_changes(conn).total_count == 0
 
 
-def test_a_dirty_run_asked_to_stop_before_the_settled_day_settles_through_it(
-        conn: sqlite3.Connection) -> None:
+@pytest.mark.parametrize(("scope", "run_from"), [
+    ("dirty", date(2026, 6, 8)), ("nightly", date(2026, 6, 8)), ("full", FIRST),
+])
+def test_a_claiming_run_asked_to_stop_before_the_settled_day_settles_through_it(
+        conn: sqlite3.Connection, scope: RunScope, run_from: date) -> None:
     _first_generation(conn)
     _buy(conn, date(2026, 6, 8))  # a correction inside the settled range
-    c = _start(conn, 2, through=date(2026, 6, 5))  # e.g. final_through moved back
-    assert (c.run_from, c.run_through, c.through_clamped, c.days) == (
-        date(2026, 6, 8), THROUGH, True, 3)
+    c = _start(conn, 2, scope=scope, through=date(2026, 6, 5))  # final_through moved back
+    assert (c.scope, c.run_from, c.run_through, c.through_clamped) == (
+        scope, run_from, THROUGH, True)
+    assert c.days == (THROUGH - run_from).days + 1
     _compute(conn, c, "200", through=c.run_through)
     result = _publish(conn, 2, through=c.run_through)
     assert (result.status, result.settled_through, result.settled_records) == (
         "published", THROUGH, 1)
     assert _values(conn, 2)[date(2026, 6, 8)] == "200"
+
+
+def test_a_selfcheck_keeps_its_own_range(conn: sqlite3.Connection) -> None:
+    _first_generation(conn)
+    c = _start(conn, 2, scope="selfcheck", through=date(2026, 6, 5))
+    assert (c.run_through, c.through_clamped) == (date(2026, 6, 5), False)
+
+
+def test_the_swap_refuses_a_through_past_the_claimed_one(conn: sqlite3.Connection) -> None:
+    _first_generation(conn)
+    _buy(conn, date(2026, 6, 8))
+    c = _start(conn, 2)
+    later = THROUGH + timedelta(days=3)
+    _compute(conn, c, "200", through=later)  # rows past the claimed range
+    with pytest.raises(st.SwapRefused) as refused:
+        _publish(conn, 2, through=later)
+    assert refused.value.reason == "through_mismatch"
+    assert st.store_state(conn, reporting=TWD).generation == 1
 
 
 def test_a_claim_that_needs_no_clamp_says_so(conn: sqlite3.Connection) -> None:

@@ -268,6 +268,104 @@ def test_a_replace_that_moves_a_row_later_marks_its_old_day(store: sqlite3.Conne
     assert _dirt(store)[0] == old_day, f"{table}: the removed row's {old_day} was not marked"
 
 
+_ID_TABLES = sorted(t for t in _DAY_COLUMN if t != "opening_inventory")
+
+
+def _replace_day(conn: sqlite3.Connection, table: str, rowid: int, day: str) -> None:
+    """``INSERT OR REPLACE`` the row *rowid* of *table* with its day column set to *day*."""
+    columns = [str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")]
+    picked = ", ".join("?" if c == _DAY_COLUMN[table] else c for c in columns)
+    conn.execute(f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) SELECT {picked} "
+                 f"FROM {table} WHERE rowid = ?", (day, rowid))
+    conn.commit()
+
+
+def _log_rows(conn: sqlite3.Connection) -> list[tuple[object, ...]]:
+    return [tuple(r) for r in conn.execute(
+        "SELECT table_name, op, row_key, old_account_id, new_account_id, old_symbol, "
+        "new_symbol, old_day, new_day FROM settle_change_log ORDER BY id")]
+
+
+@pytest.mark.parametrize("table", _ID_TABLES)
+def test_a_replace_that_moves_a_settled_row_past_the_bound_reads_as_its_delete(
+        store: sqlite3.Connection, table: str) -> None:
+    """The new day is past the bound, so the AFTER INSERT records nothing: the REPLACE trigger
+    marks the removed day AND writes the removed row as a ``delete`` with one ``seq``."""
+    row = store.execute(f"SELECT rowid, {_DAY_COLUMN[table]} FROM {table} WHERE "
+                        f"{_ROW[table]} ORDER BY rowid LIMIT 1").fetchone()
+    old_day = str(row[1])
+    _, seq = _dirt(store)
+    _replace_day(store, table, row[0], "2026-07-01")  # past the bound (settled 06-11)
+    assert _dirt(store) == (old_day, seq + 1)
+    [line] = _log_rows(store)
+    assert (line[0], line[1], line[2]) == (table, "delete", str(row[0]))
+    assert (line[4], line[6], line[7], line[8]) == (None, None, old_day, None)
+    assert line[3] is not None  # the removed row's account
+    page = st.pending_changes(store)
+    assert page.total_count == 1 and page.records[0].op == "delete"
+    assert page.records[0].seq == seq + 1
+
+
+@pytest.mark.parametrize("table", _ID_TABLES)
+def test_a_replace_inside_the_bound_is_recorded_once_by_its_insert(
+        store: sqlite3.Connection, table: str) -> None:
+    row = store.execute(f"SELECT rowid, {_DAY_COLUMN[table]} FROM {table} WHERE "
+                        f"{_ROW[table]} ORDER BY rowid LIMIT 1").fetchone()
+    _, seq = _dirt(store)
+    _replace_day(store, table, row[0], "2026-06-01")
+    assert _dirt(store) == (str(row[1]), seq + 1)
+    assert [line[1] for line in _log_rows(store)] == ["insert"]
+
+
+def test_a_replace_keeps_an_earlier_dirt(store: sqlite3.Connection) -> None:
+    store.execute("UPDATE settle_dirty SET dirty_from = '2026-01-02' WHERE id = 1")
+    store.commit()
+    tid = store.execute("SELECT id FROM transactions WHERE symbol = 'AAPL'").fetchone()[0]
+    _replace_day(store, "transactions", tid, "2026-06-01")  # removed 01-10, new 06-01
+    assert _dirt(store)[0] == "2026-01-02"
+    tid = store.execute("SELECT id FROM transactions WHERE symbol = '2330'").fetchone()[0]
+    _replace_day(store, "transactions", tid, "2026-07-01")  # past the bound
+    assert _dirt(store)[0] == "2026-01-02", "a REPLACE never raises dirty_from"
+
+
+def test_a_replace_of_a_row_past_the_bound_records_nothing(store: sqlite3.Connection) -> None:
+    store.execute("INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, "
+                  "tax, trade_date) VALUES ('tw_broker', '2330', 'BUY', '1', '1', '0', '0', "
+                  "'2026-06-20')")
+    store.commit()  # dated after the settled day: the live tail's
+    tid = store.execute("SELECT MAX(id) FROM transactions").fetchone()[0]
+    _, seq = _dirt(store)
+    _replace_day(store, "transactions", tid, "2026-06-25")
+    assert _dirt(store) == (None, seq) and _log_rows(store) == []
+
+
+def test_a_replace_changing_only_a_stock_dividends_ex_date_marks_the_removed_day(
+        store: sqlite3.Connection) -> None:
+    store.execute("INSERT INTO dividends (account_id, symbol, date, type, gross, withholding, "
+                  "net, reinvest_shares, ex_date) VALUES ('tw_broker', '2330', '2026-04-20', "
+                  "'STOCK', '0', '0', '0', '5', '2026-03-15')")
+    store.commit()
+    _clean(store)
+    did = store.execute("SELECT MAX(id) FROM dividends").fetchone()[0]
+    store.execute("INSERT OR REPLACE INTO dividends (id, account_id, symbol, date, type, gross, "
+                  "withholding, net, reinvest_shares, ex_date) SELECT id, account_id, symbol, "
+                  "date, type, gross, withholding, net, reinvest_shares, '2026-04-10' FROM "
+                  "dividends WHERE id = ?", (did,))
+    store.commit()
+    assert _dirt(store)[0] == "2026-03-15", "the removed row counted from its ex-date"
+
+
+@pytest.mark.parametrize("build_date", ["2026-05-01", "2026-07-01"])
+def test_a_changed_upsert_opening_is_recorded_exactly_once(store: sqlite3.Connection,
+                                                           build_date: str) -> None:
+    _, seq = _dirt(store)
+    upsert_opening(store, account_id="tw_broker", symbol="2330", shares=Decimal("10"),
+                   original_cost_total=Decimal("5000"),
+                   build_date=date.fromisoformat(build_date))
+    assert _dirt(store) == ("2026-02-01", seq + 1)
+    assert [line[1] for line in _log_rows(store)] == ["update"]
+
+
 def test_the_reviewers_two_replace_moves(store: sqlite3.Connection) -> None:
     store.execute("INSERT INTO opening_inventory (account_id, symbol, shares, original_cost_total, "
                   "build_date) VALUES ('tw_broker', 'AAPL', '5', '500', '2026-02-01')")
@@ -345,6 +443,24 @@ def test_a_drop_column_migration_on_a_trigger_table_does_not_abort_boot(
     check = st.install_or_verify(store, calc_version_changed=False)
     assert f"{st.TRIGGER_PREFIX}transactions_upd" in check.created and check.marked_dirty
     assert st.verify_triggers(store) and _dirt(store)[0] == FIRST
+
+
+def test_a_drop_column_read_by_another_tables_trigger_drops_that_trigger_too(
+        store: sqlite3.Connection) -> None:
+    """``dividends.ex_date`` is read by the instruments / accounts triggers (an instrument's and
+    the ledger's first day): those go too; a trigger that never reads ``dividends`` stays."""
+    readers = {str(r[0]) for r in store.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name <> 'dividends' "
+        "AND instr(sql, 'dividends') > 0")}
+    assert {f"{st.TRIGGER_PREFIX}instruments_ins", f"{st.TRIGGER_PREFIX}accounts_upd"} <= readers
+    keep = {f"{st.TRIGGER_PREFIX}transactions_upd", f"{st.TRIGGER_PREFIX}fx_rates_ins",
+            f"{st.TRIGGER_PREFIX}cash_movements_del"}
+    schema._drop_column_if_present(store, "dividends", "ex_date")
+    assert "ex_date" not in {str(r[1]) for r in store.execute("PRAGMA table_info(dividends)")}
+    left = {str(r[0]) for r in store.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger'")}
+    assert not readers & left
+    assert keep <= left, "a trigger that does not read the table must survive"
 
 
 def test_a_recreated_trigger_marks_from_the_earlier_of_the_generation_and_the_ledger(

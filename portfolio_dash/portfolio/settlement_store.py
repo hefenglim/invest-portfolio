@@ -31,6 +31,15 @@ end clear it, boot sees a non-NULL one); the DDL comment beside ``built_at`` tha
 that produced this generation" describes ``built_at``. The run that produced a generation is the
 ``settle_run`` row whose ``generation_after`` it is.
 
+Limits of the trigger set (the weekly self-check, spec §9.1 ``settlement_selfcheck``, is the
+backstop for each — it recomputes in full and names the first day that differs):
+
+- A ``REPLACE`` that names the hidden ``rowid`` explicitly can remove one key's row to insert
+  ANOTHER key's (``instruments``, ``opening_inventory``, ``prices``). No DELETE trigger fires for
+  the removed row, and :data:`REPLACE_TABLES`' premise — the removed row has the new row's key,
+  so its day is the new row's — does not hold for it. The application never writes ``rowid``;
+  only a hand-written script could.
+
 Transactions: every function that writes does so in ONE short transaction of its own
 (``BEGIN IMMEDIATE`` … ``COMMIT``); called while the connection already holds an open
 transaction, it nests as a SAVEPOINT and the caller commits. The chunked writers
@@ -579,7 +588,8 @@ INPUT_COLUMNS: dict[str, tuple[str, ...]] = {
 #: symbol's first ledger day; the ledger's first day), so the AFTER INSERT of the new row
 #: already marks the removed row's day. A BEFORE INSERT there would also misfire on
 #: ``upsert_instrument``: an option contract's upsert proposes the model default
-#: ``asset_type = 'stock'``, which its ``DO UPDATE`` deliberately does not write.
+#: ``asset_type = 'stock'``, which its ``DO UPDATE`` deliberately does not write. (A REPLACE
+#: that names ``rowid`` breaks the premise — see the module docstring's limits.)
 REPLACE_TABLES: tuple[str, ...] = tuple(spec.table for spec in _SPECS if spec.replace_key)
 
 
@@ -622,7 +632,7 @@ def _dirty_stmt(day: str) -> str:
             f"dirty_from THEN {day} ELSE dirty_from END, seq = seq + 1 WHERE id = 1")
 
 
-def _detail(spec: _Spec, op: str) -> str:
+def _detail(spec: _Spec, op: str, *, old_row: str = "OLD", new_row: str = "NEW") -> str:
     if not spec.detail:
         return "NULL"
 
@@ -632,16 +642,23 @@ def _detail(spec: _Spec, op: str) -> str:
 
     parts: list[str] = []
     if op in ("update", "delete"):
-        parts.append(f"'old', {obj('OLD')}")
+        parts.append(f"'old', {obj(old_row)}")
     if op in ("insert", "update"):
-        parts.append(f"'new', {obj('NEW')}")
+        parts.append(f"'new', {obj(new_row)}")
     return f"json_object({', '.join(parts)})"
 
 
-def _log_stmt(spec: _Spec, op: str, columns: Sequence[str]) -> str:
+_LOG_INSERT = ("INSERT INTO settle_change_log (seq, table_name, op, row_key, old_account_id, "
+               "new_account_id, old_symbol, new_symbol, detail, old_day, new_day, "
+               "import_batch_id, written_at)")
+
+
+def _log_values(spec: _Spec, op: str, columns: Sequence[str], *, old_row: str = "OLD",
+                new_row: str = "NEW") -> str:
+    """The trail row's values for *op*, the row versions named *old_row* / *new_row*."""
     old = op in ("update", "delete")
     new = op in ("insert", "update")
-    key_row = "OLD" if op == "delete" else "NEW"
+    key_row = old_row if op == "delete" else new_row
 
     def pick(template: str | None, row: str, present: bool) -> str:
         return _r(template, row) if template is not None and present else "NULL"
@@ -652,16 +669,18 @@ def _log_stmt(spec: _Spec, op: str, columns: Sequence[str]) -> str:
         _sql_literal(spec.table),
         _sql_literal(op),
         _r(spec.row_key, key_row),
-        pick(spec.account, "OLD", old), pick(spec.account, "NEW", new),
-        pick(spec.symbol, "OLD", old), pick(spec.symbol, "NEW", new),
-        _detail(spec, op),
-        pick(spec.day, "OLD", old), pick(spec.day, "NEW", new),
+        pick(spec.account, old_row, old), pick(spec.account, new_row, new),
+        pick(spec.symbol, old_row, old), pick(spec.symbol, new_row, new),
+        _detail(spec, op, old_row=old_row, new_row=new_row),
+        pick(spec.day, old_row, old), pick(spec.day, new_row, new),
         batch,
         _NOW_UTC,
     ]
-    return ("INSERT INTO settle_change_log (seq, table_name, op, row_key, old_account_id, "
-            "new_account_id, old_symbol, new_symbol, detail, old_day, new_day, "
-            f"import_batch_id, written_at) VALUES ({', '.join(values)})")
+    return ", ".join(values)
+
+
+def _log_stmt(spec: _Spec, op: str, columns: Sequence[str]) -> str:
+    return f"{_LOG_INSERT} VALUES ({_log_values(spec, op, columns)})"
 
 
 def _agg_values(spec: _Spec, key: str, earliest: str, latest: str) -> str:
@@ -732,20 +751,37 @@ def _spec_triggers(spec: _Spec, columns: Sequence[str],
 
     # --- REPLACE: a conflicting row a REPLACE removes fires no DELETE trigger
     # (``recursive_triggers`` is off), so the removed row's day is marked BEFORE the insert —
-    # only when a row with the key exists and a watched column differs. An upsert that takes
-    # ``DO UPDATE`` fires BEFORE INSERT too: an unchanged one (``upsert_opening`` with the
-    # stored values) stays silent; a changed one marks a day its AFTER UPDATE marks anyway.
-    # No trail row and no ``seq``: the AFTER INSERT (or AFTER UPDATE) records the change.
+    # only when a row with the key exists, a watched column differs, and the REMOVED row's day
+    # is inside the bound.
+    #
+    # The id-keyed ledgers (the application never upserts them): when the NEW row's day lies
+    # past the bound, its AFTER INSERT records nothing, so this trigger also adds 1 to ``seq``
+    # and writes the removed row as a ``delete`` trail row — the REPLACE then reads as the
+    # delete + insert it is. When the new day is inside the bound, the AFTER INSERT records the
+    # change and this trigger only marks the removed day.
+    #
+    # ``opening_inventory`` marks only: ``upsert_opening`` takes ``DO UPDATE``, which fires
+    # BEFORE INSERT too and is recorded by the AFTER UPDATE — a trail row here would record it
+    # twice (an unchanged upsert stays silent; a changed one marks a day its UPDATE marks).
     if spec.replace_key and all(c in columns for c in spec.replace_key):
         key = " AND ".join(f"o.{c} = NEW.{c}" for c in spec.replace_key)
         differs = " OR ".join(f"o.{c} IS NOT NEW.{c}" for c in _watched(spec, columns))
         removed = f"(SELECT {_r(spec.day, 'o')} FROM {spec.table} AS o WHERE {key})"
+        logs = spec.replace_key == ("id",)
+        past = f"{new_day} > {_BOUND}"
+        seq = f", seq = seq + CASE WHEN {past} THEN 1 ELSE 0 END" if logs else ""
+        rep_body = [f"UPDATE settle_dirty SET dirty_from = CASE WHEN dirty_from IS NULL OR "
+                    f"{removed} < dirty_from THEN {removed} ELSE dirty_from END{seq} "
+                    f"WHERE id = 1"]
+        if logs:
+            rep_body.append(
+                f"{_LOG_INSERT} SELECT {_log_values(spec, 'delete', columns, old_row='o')} "
+                f"FROM {spec.table} AS o WHERE {key} AND {past}")
         out[f"{base}_rep"] = _trigger_sql(
             f"{base}_rep", f"BEFORE INSERT ON {spec.table}",
             f"EXISTS (SELECT 1 FROM {spec.table} AS o WHERE {key} AND ({differs}) "
             f"AND {_r(spec.day, 'o')} <= {_BOUND})",
-            [f"UPDATE settle_dirty SET dirty_from = CASE WHEN dirty_from IS NULL OR "
-             f"{removed} < dirty_from THEN {removed} ELSE dirty_from END WHERE id = 1"],
+            rep_body,
         )
 
     # --- the import-batch annotation: an import stamps its batch AFTER the insert
