@@ -21,7 +21,18 @@
   }
 
   var POLL_MS = 2000;        // poll /latest every ~2s after a manual run…
-  var POLL_MAX_MS = 90000;   // …up to ~90s before giving up (generation is a background job)
+  var POLL_MAX_MS = 90000;   // …up to ~90s when the run's state cannot be read (see below)
+
+  /* PERF spec §16: the digest is a scheduled job, and a scheduled job now runs in a worker
+     process, ONE heavy process at a time — a manual run can wait minutes behind a
+     re-settlement or an AI run, and a cold worker takes seconds to start. A fixed 90 s clock
+     then reported 「產生逾時」 over a run that was merely queued. So the card follows the RUN
+     (GET /api/scheduler/status, the 排程中心's own read): while it is queued the card shows
+     the server's sentence (its `progress`), while it runs 產生中…, and it keeps polling; it
+     stops only when the run is gone or finished without a digest — and then says why with
+     the run's own message. The clock is kept only for a status that cannot be read. */
+  var DIGEST_JOB = { daily: 'digest_daily', weekly: 'digest_weekly' };
+  var IDLE_TICKS_MAX = 2;    // a finished run's digest may land one tick after its row
 
   /* ---- M3: a digest is only as current as the job that generates it ----
      Measured on the demo (2026-09-16): the 今日摘要 card was generated 2026-07-22 and the
@@ -104,11 +115,11 @@
     btn.disabled = true;
     btn.textContent = '產生中…';
     api.post('/api/digest/run', { kind: kind })
-      .then(function () { _pollLatest(kind, host, renderFn); })
+      .then(function () { _pollLatest(kind, host, renderFn, btn); })
       .catch(function (e) {
         if (e && e.status === 409) {                       // already running → still poll
           if (window.toast) window.toast('已在產生中', 'ok');
-          _pollLatest(kind, host, renderFn);
+          _pollLatest(kind, host, renderFn, btn);
           return;
         }
         if (window.toast) window.toast((e && e.message) || '產生失敗', 'fail', e && e.code);
@@ -117,21 +128,74 @@
       });
   }
 
-  function _pollLatest(kind, host, renderFn) {
-    var deadline = Date.now() + POLL_MAX_MS;
+  /* The run's live state for the job behind *kind*: {running, queued, progress, last_run},
+     null when the job has no entry, or a rejected promise when the status cannot be read. */
+  function _runState(kind) {
+    return api.get('/api/scheduler/status', null, { background: true })
+      .then(function (resp) {
+        var jobs = (resp && resp.jobs) || {};
+        return jobs[DIGEST_JOB[kind]] || null;
+      });
+  }
+
+  /* Paint the run's state on the card: 已排入 + the server's queued sentence under it, or
+     產生中…. The sentence is the server's (`progress` on a queued entry), never one built here. */
+  function _paintRunState(host, btn, st) {
+    var note = host.querySelector('.digest-run-note');
+    if (st && st.queued) {
+      btn.textContent = '已排入';
+      if (st.progress) {
+        if (!note) {
+          note = el('div', 'digest-sub digest-run-note');
+          (btn.parentNode || host).appendChild(note);
+        }
+        note.textContent = st.progress;
+      }
+      return;
+    }
+    btn.textContent = '產生中…';
+    if (note) note.remove();
+  }
+
+  function _pollLatest(kind, host, renderFn, btn) {
+    var deadline = Date.now() + POLL_MAX_MS;   // only while the run's state is unreadable
+    var idle = 0;
+    function again() { setTimeout(tick, POLL_MS); }
+    function unreadable() {
+      if (Date.now() >= deadline) { _pollTimeout(host, renderFn); return; }
+      again();
+    }
     function tick() {
-      api.get('/api/digest/latest', { kind: kind })
+      api.get('/api/digest/latest', { kind: kind }, { background: true })
         .then(function (d) {
           if (d && d.payload) { renderFn(host, d); return; }   // fresh digest → render in place
-          if (Date.now() >= deadline) { _pollTimeout(host, renderFn); return; }
-          setTimeout(tick, POLL_MS);
+          return _runState(kind).then(function (st) {
+            if (st && (st.queued || st.running)) {             // waiting or working: follow it
+              idle = 0;
+              deadline = Date.now() + POLL_MAX_MS;
+              _paintRunState(host, btn, st);
+              again();
+              return;
+            }
+            idle += 1;
+            if (idle < IDLE_TICKS_MAX) { again(); return; }
+            _pollFinished(host, renderFn, st && st.last_run);  // gone, or done without a digest
+          }, unreadable);
         })
-        .catch(function () {
-          if (Date.now() >= deadline) { _pollTimeout(host, renderFn); return; }
-          setTimeout(tick, POLL_MS);
-        });
+        .catch(unreadable);
     }
-    setTimeout(tick, POLL_MS);
+    again();
+  }
+
+  /* The run ended and no digest came of it: say why in the run's own words when it failed,
+     otherwise that nothing was produced. */
+  function _pollFinished(host, renderFn, lastRun) {
+    var failed = lastRun && lastRun.status && lastRun.status !== 'ok';
+    if (window.toast) {
+      window.toast(failed && lastRun.message ? lastRun.message : '摘要未產生，請稍後重試',
+                   'fail');
+    }
+    renderFn(host, null);   // re-render the empty state (restores a fresh 立即產生 button)
   }
 
   function _pollTimeout(host, renderFn) {
