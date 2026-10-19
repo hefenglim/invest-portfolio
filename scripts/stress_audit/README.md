@@ -165,7 +165,8 @@ symbol, dated `ASOF`, so every earlier day was unpriced by construction, every p
 `incomplete`, and `trend.total_value` was skipped precisely where the defect lives.
 
 `_ensure_daily_prices` now seeds a close for every fixture symbol on **every day** from the
-first ledger event through `ASOF`. At a KNOWN price, `total_value` pins the share count: the
+first ledger event through `ASOF` (since 2026-10-20 from a FIXED start, `PRICE_SERIES_START`, so
+the rows written are always exactly `fixture_closes` — §9). At a KNOWN price, `total_value` pins the share count: the
 app and the oracle read the same close, so any disagreement that survives is a quantity. Two
 properties keep the fixture honest rather than merely green:
 
@@ -342,136 +343,154 @@ baseline (+1 op: one refused probe became two writes; the extra assertions are t
 row and its flows, compared at every later checkpoint). With the UI read-back
 (`run_all.py --phase 1`) on the merged branch tip the same day: `ops=164 pass=19948 fail=0`.
 
-### 9. The settlement store and the month-end closes (PERF, spec 2026-10-18 §11.2 / §18, 2026-10-19)
+### 9. The settlement store and the month-end closes (PERF, spec 2026-10-18 §11.2–§11.4 / §18, 2026-10-19/20)
 
 **What the spec asks of this harness** (§18 "Stress audit"): phase 1 `fail=0` with the store
 on — "the harness runs a settlement after its writes and also asserts the stale state before
 it" — and (§18 "Period closes") "the stress-audit oracle gains month-end values and its phase 1
 compares them".
 
-**The oracle (`oracle.py` layer 5, transcribed from spec §11.2 — never from `kpis_as_of`,
-`period_close.py` or `price_basis.py`).** `period_end(facts, D, closes, fx_rows, reporting)` is
-the KPI block "as at D", since inception:
+**The oracle (`oracle.py` layer 5, transcribed from spec §11.2–§11.3 — never from `kpis_as_of`,
+`period_close.py`, `price_basis.py` or `twr.py`).** `period_end(facts, D, closes, fx_rows,
+reporting)` is the KPI block "as at D", since inception:
 
 | §11.2 row | oracle |
 | --- | --- |
 | book | `replay(facts_valued_as_of(facts, D))` — every row from its own date |
-| price of a held stock | `price_at`: the latest STORED close with `as_of_date ≤ D`, re-expressed for the splits in `(priced_on, D]` — the read DIVIDES (`× ratio_from / ratio_to`, one action at a time), one per market event (a split recorded in two accounts is one event) |
+| price of a held stock | `price_at`: the latest close with `as_of_date ≤ D`, re-expressed for the splits in `(priced_on, D]` — the read DIVIDES (`× ratio_from / ratio_to`, one action at a time), one per market event: a split recorded in two accounts is ONE event, keyed on its date and REDUCED ratio (`4:2` ≡ `2:1`) |
 | a held stock with no such price | out of 總市值 and of the unrealized part, its cost still in the rate's denominator, XIRR withheld, named in `missing_prices` |
+| a held 賣超 / unapplied action / 待釐清 contract | its value is DROPPED from 總市值 and the unrealized part; every other figure is computed (domain-ledger.md: "only a 賣超 or an unapplied action drops a value") |
 | option contract | its last ordinary trade on or before D (`option_prices`, R2) |
-| FX | `fx_rate_at`: the latest rate on or before D, direct, else the inverse; with the stored row's date |
+| FX | `fx_rate_at`: the latest rate on or before D, direct, else the inverse; with the row's date |
 | `total_market_value` | Σ price × SIGNED shares (stocks and options), converted at D |
-| `by_currency_value` | the native STOCK market value per quote currency (OPT-D5: the currency view is stock-only) |
-| `total_return` (A) | Σ_ccy (realized + unrealized), then converted (manual §7.1) |
-| `total_return_rate` | A ÷ Σ_ccy `gross_invested` converted (manual §7.1, blended). `gross_invested` is NEW in the replay: an opening and a buy's LONG part add to it; a buy covering a declared short adds nothing (domain-ledger.md: short capital is excluded); nothing ever takes it out |
-| `xirr`, window | flows counting by D, terminal at D on SIGNED shares (a declared stock short is a liability), `as_of = D`; withheld for a held 賣超 / unapplied action / orphan dividend / refused close / missing price / missing rate, and below 30 days (manual §7.2.1) |
-| notes | `missing_prices`, `stale_prices` (`(D − price date) > 4 days`), `missing_fx`, `stale_fx`, `pending_positions` (賣超 incl. a flat one, unapplied action, refused dividend, refused close), `options_value_excluded` (an option open at some close of `(previous end, D]`), `options_past_expiry`, `dividends_receivable` (non-STOCK rows with `ex_date ≤ D < pay date`) |
+| `by_currency_value` | the native STOCK market value per quote currency (OPT-D5); the combined view is not formed — empty — when a rate is missing (manual §7.3) |
+| `total_return` (A), rate | A = Σ_ccy (realized + unrealized), then converted; rate = A ÷ Σ_ccy `gross_invested` converted (manual §7.1). `gross_invested`: an opening and a buy's LONG part add; a buy covering a declared short adds nothing; nothing takes it out |
+| `xirr`, window | flows counting by D at their own dates' FX, terminal at D on SIGNED shares (a declared stock short is a liability), `as_of = D`. Withheld — the reason naming the rows — while the book has EVER recorded a 賣超 by D (CR-11: a 賣超 netted back to zero included), an unapplied action (D38), an orphan dividend (CR-02) or a refused close (§4.4); then for a flow with no rate (no series, no window), a held price or rate missing, a window under 30 days (manual §7.2.1) |
+| notes | `missing_prices`, `stale_prices` (`(D − price date) > 4 days`), `missing_fx`, `stale_fx`, `pending_positions` (賣超 incl. a flat one, unapplied action, refused dividend, refused close), `options_value_excluded`, `options_past_expiry`, `dividends_receivable` (non-STOCK, `ex_date ≤ D < pay date`), and, with no trend point on D, `incomplete` = the KPI block's own completeness |
+| `period_twr` | `I(D) / I(previous end) − 1` on the oracle's own chain-linked index (`twr_index`, the FU-D27 convention the spec points at: `r = (V − F − V_base) / V_base`, `F` the net-invested change since the last trustworthy day, 100 on the first complete day with V > 0, incomplete days carried); the first period — and any that begins before the anchor — from 100; `None` with its reason when D has no point, the index has no anchor, or either end is incomplete; 待結算 across a stale join |
+| activity (§11.3) | `period_activity`: realized (trade / dividend after close, by asset type and currency, vs adjusted AND original cost), booked dividends by type × account × currency, refused payouts, fees and tax, every cash-movement kind, FX conversions, realized FX, openings — each native and at each ROW's own-date rate |
 
-The prices and rates are read back from the `prices` / `fx_rates` tables (`common.load_closes`
-/ `load_fx_rows`) exactly as the ledger is — inputs, not results. The trend family now reads its
-closes the same way (`oracle.price_at`), so a symbol whose series has a hole or starts late is a
-fact of the prices table, not of the `PRICES` dict.
+**The inputs are the fixture's own, never the app's derived columns** (review MAJOR 1,
+2026-10-20). The oracle prices with `phase1.fixture_closes` — every PRICES symbol on every day
+from `PRICE_SERIES_START` (2025-11-03) to ASOF as traded on that day (`price_as_traded` over
+the current actions: exactly what `_ensure_daily_prices` writes) plus every seeded month-end
+series — and `fixture_fx_rows` (the trade-date and spot schedule `seed_all` writes). The app
+DERIVES the stored `close` (`cap_4dp(close_raw × split_basis)`), so an oracle reading it agrees
+with a wrong cap or basis by construction: the reviewer's M6 mutation (the cap at 2 dp instead
+of 4) passed `fail=0` that way. `prices.stored_close` / `fx.stored_rate` now compare the STORED
+columns with the fixture, one assertion per symbol naming the first wrong days. The trend
+family reads its closes from the same fixture series.
 
-**The flow at every checkpoint** (`phase1.reconcile` → `settle`):
+**The flow at every checkpoint** (`phase1.reconcile` → `settle`), `CHECKPOINT.today` read ONCE:
 
-1. the fixture's price writes (`_ensure_daily_prices`) — they are writes, so they are changes
-   the settlement must take;
+1. the fixture's price writes — changes the settlement must take;
 2. BEFORE the run, from `GET /api/settlement/status` alone (`settle.*`): before the first
    generation nothing is stale and no day is live-from; afterwards every write since the last run
    marked the store dirty, `dirty_from` is NOT LATER than the earliest day the written rows can
-   change (`_change_bound`, from the stored rows before and after — the prefix property's safety
-   half; over-firing is allowed), `live_from = min(S + 1, max(dirty_from, W))`, the stale range is
-   `[dirty_from, live_from − 1]` when non-empty, the prompt is due exactly when `dirty_from < W`
-   and the chip reads 待結算;
-3. with the read path (package G): the stale days of the dashboard trend ARE the previous
-   generation's values (the oracle over the inputs the last settlement saw), the live days the new
-   ones, and every month close ending in the range is flagged `stale` with the previous
-   generation's KPIs and no receivable (`stale.*`);
-4. `POST /api/settlement/run {scope: "dirty"}` → 202 → poll the status until no run is active and
-   the run's report has ended → `published`, the store clean, `live_from = settled_through + 1`,
-   `settled_through ≥ final_through`;
-5. every family as before, on a settled store, plus:
-   * `month.asof.*` — `period_end` at D = TODAY against the LIVE KPI block. §11.2 makes the live
-     KPIs and a close ONE function with two price sources, and on or before today the latest
-     stored row is the row: this proves the transcription on every build, and reaches figures the
-     live family never compared (the rate, `by_currency_value`, the window, the KPI block while a
-     declared stock short is open);
-   * `store_period.*` — the PUBLISHED generation's `settled_period` / `_holding` / `_cash` rows,
-     read straight from SQLite, against the oracle at each month end: package D's computation
-     pinned on its own, with or without a route (holdings and cash at D included);
-   * `period.*`, `period_detail.*`, `snapshot(s).*` (package G) — the served
-     `/api/settlement/periods?kind=M|Y`, `/periods/M/{period}` (its one caller is this audit) and
-     `/api/snapshots`: past months `source = store`, not stale, not 暫定, `as_of = D`, each equal
-     to the oracle at D; the current month and year live.
+   change (the prefix property's safety half), `live_from = min(S + 1, max(dirty_from, W))`, the
+   stale range is `[dirty_from, live_from − 1]`, the prompt is due exactly when `dirty_from < W`,
+   the chip reads 待結算. If Taipei midnight passed since the checkpoint began, the W-dependent
+   assertions are skipped (op `settle.midnight_straddle`), never judged against two days;
+3. with the read path (package G), `stale.*`: what a reader is SERVED from the previous
+   generation (`_served_prefix`, spec §10 step 4: the stored days run contiguously from the
+   series' own first day and stop at the status's `live_from`, at the previous generation's first
+   PLACEHOLDER day (W2-D) and at a first day the generation never held — a series that now starts
+   earlier is served live from its first day). Those days carry the previous generation's values,
+   every later day today's; a close served from the store and ending in the served stale range
+   says `stale: true` with the previous KPIs and no receivable; a close not served from the store
+   is `live` with today's; every period whose span meets that range or the served `live_from`
+   reads its TWR as 待結算;
+4. `POST /api/settlement/run {scope: "dirty"}` → 202 → poll until no run is active and the run's
+   report has ended (600 s; a run that does not end ABORTS the phase with ONE failing assertion,
+   `settle.run_finished_in_time`, exit code 1) → `published`, the store clean,
+   `live_from = settled_through + 1`, `settled_through ≥ final_through`;
+5. every family as before, plus `prices.stored_close`, `fx.stored_rate`, and:
+   * `month.asof.*` — `period_end` at D = TODAY against the LIVE KPI block;
+   * `store_period.*` — the published `settled_period` / `_holding` / `_cash` rows, read straight
+     from SQLite: KPIs, notes, TWR, activity, holdings and cash at D, the Y rows of closed years;
+   * `period.*`, `period_detail.*`, `snapshot(s).*` (package G) — the served closes, the detail
+     route (its one caller is this audit) and 月度成績, each equal to the oracle at its own D, TWR
+     and activity included;
+   * `period.year_equals_december` / `period.year_sum_of_months` (and `store_period.*` twins) — a
+     CLOSED year's KPIs ≡ its December row's; every flow line of a year ≡ Σ its months (balances are
+     not summed);
+   * `tax.*` — the tax package of every year, sheet by sheet: `realized_gains_<year>.csv` (adjusted
+     AND original column, row count) ≡ the oracle's realized trade lines, `dividends_<year>.csv` ≡
+     booked CASH / NET / DRIP gross / withholding / net, `fx_realized_<year>.csv` ≡ realized FX — or
+     422 when the strict replay refuses the ledger (a refused dividend or close, an unapplied action,
+     a 賣超: there is no package to tie to, §11.3).
 
 **Scenario ops** (`run_phase1.py`):
 
 | op | what it pins |
 | --- | --- |
 | `run_backdated_edit` (after `checkpoint1`) | one buy moved two days EARLIER on a clean store: `dirty_from` = `stale_from` = the new date exactly, `stale_to = W − 1`, `live_from = W`, the prompt from that day; then the run |
-| `run_month_end` `MPX` | held across 2026-02-28 with no close before 03-02: missing price, XIRR withheld, cost in the denominator (`month_end.anchor.missing_price*`) |
-| `run_month_end` `SPA` / `SPB` | fixed, as-traded, economically flat weekday series; a 2-for-1 dated Mon 06-01 (the first trading day after month end) and one dated Sun 05-31 (ON a weekend D: the read divides Friday's close). Entering them leaves the May close unchanged (`month_end.split_leaves_close_unchanged`) and the literals 1000 @100 / 1000 @40 (`month_end.anchor.split`); before they are entered, 1000 @100 / 500 @80 |
-| `run_month_end` `STL` | closes with a hole before two month ends: 6 days old at 04-30 (stale) and EXACTLY 4 days old at 05-31 (not stale — "more than 4 days"), the boundary no daily-seeded symbol reaches |
+| `run_prior_year` | rows in Nov–Dec 2025 (TWD only — no FX row before 2026), arriving back-dated on a settled store: a CLOSED year — Y 2025 ≡ December 2025, Σ months ≡ year, the 2025 tax package ties out (`prior_year.anchor.tax_2025`: one realized row, one dividend row, YRA); the series start moving EARLIER is the "first day the generation never held" case of the served prefix |
+| `run_month_end` `MPX` | held across 2026-02-28 with no close before 03-02: missing price, XIRR withheld, cost in the denominator |
+| `run_month_end` `SPA` / `SPB` | a 2-for-1 dated Mon 06-01 (the first trading day after month end) and one dated Sun 05-31 (ON a weekend D: the read divides Friday's close). Entering them leaves the May close unchanged (`month_end.split_leaves_close_unchanged`) and the literals 1000 @100.72 / 500 @80.72 before, 1000 @100.72 / 1000 @40.36 after |
+| `run_month_end` `SPD` | a 2-for-1 dated Tue 2026-03-31, a TRADING-DAY month end with its own post-split close: 200 @30.0725 at D |
+| `run_month_end` `SPE` | held in schwab AND moomoo_my, its 2-for-1 dated Sat 2026-02-28 recorded twice — 2:1 and UNREDUCED 4:2: Friday's 40.265 read ONCE as 20.1325 (200 / 100 shares) |
+| `run_month_end` `STL` | closes 6 days old at 04-30 (stale) and EXACTLY 4 days old at 05-31 (not stale — "more than 4 days") |
 | `run_month_end` 2330 CASH | ex-date 04-28, paid 05-15: the April close's `dividends_receivable` |
-| `run_live_window` | a buy dated the 15th of the SERVER's last month, then corrected (10 → 12 shares): after each, with NO run, the change is inside the live window (dirty from that day, nothing stale, no prompt, `live_from` = that day) and last month's close and 月度成績 row already equal the oracle over the changed ledger, `source = live` (§11.4 "a correction dated last month changes last month's row at once") |
+| `run_flat_oversell` `OVF` | a 賣超 netted back to EXACTLY zero (CR-11): no holdings row, but the book records it — XIRR withheld naming the position (live and every close from it), every trend day from the oversell incomplete — until the acknowledged sell is deleted |
+| `run_live_window` | a buy dated the 15th of the SERVER's last month, then corrected (10 → 12 shares): after each, with NO run, the change is inside the live window and last month's close and 月度成績 row already equal the oracle over the changed ledger, `source = live` |
+| `run_missing_fx` (temporary, before `final`) | a Malaysian buy dated 2025-12-15, before the first MYR/TWD row: December 2025 has 總市值 / 總報酬 / rate blank and `MYR/TWD` in `missing_fx`; every trend point from that day on is unavailable; then the row is deleted |
 
-**Detection power, measured (2026-10-19, `run_phase1.py --wave2-only`, three ORACLE breaks at
-once, then restored).** Clean: `ops=217 pass=60006 fail=0`. Broken: `pass=59802 fail=204`.
+Every month-end series DRIFTS 0.005 a calendar day (`SERIES_DRIFT`), exact at 4 dp: a close read
+off the wrong day moves a money figure, and a cap below 4 dp shows.
 
-| break (oracle) | caught by |
-| --- | --- |
-| the read no longer re-expresses a close carried across a split | `store_period.position.price` / `market_value` / `unrealized` (SPB, May: 80 vs 40), `store_period.total_market_value` / `total_return` / `xirr` / `trend_total_value` / `net_worth`, `trend.total_value` / `trend.net_worth` on 2026-05-31 — 11–12 checkpoints each |
-| a cover's shares counted in the rate's denominator | `month.asof.total_return_rate` (12), `store_period.total_return_rate` (56) |
-| staleness at 3 days instead of "more than 4" | `store_period.notes.stale_prices` (13: STL at 05-31) |
+**Detection power, measured.**
 
-The third row did NOT fail before `STL` existed: every other close is either seeded daily or
-weeks old, so the boundary was unobservable. That is the measurement that added the symbol.
+| mutation | before | after |
+| --- | --- | --- |
+| M6 (review): `pricing/store.py` `_PRICE_DP = 2` instead of 4 — APP, temporary, restored | `fail=0` (the oracle read the stored close) | **`fail=5560`**: `prices.stored_close` (120, every checkpoint: `YRA 2025-11-04: stored 120.01 != 120.0050`), `trend.total_value` / `net_worth` (1,041 each), `stale.trend.*`, `store_period.position.price` / `market_value` / `unrealized`, `period_detail.*`, `period(.store).total_market_value` / `total_return` / `rate` / `xirr` / `period_twr` / `trend_total_value`, `snapshot.*` (2026-10-20, run on the merged tip `834440a` + this change) |
+| ORACLE breaks (2026-10-19, wave-2 tip): no split re-expression · a cover counted in gross · stale at 3 days | — | caught by `store_period.position.price` and `trend.total_value` on 2026-05-31; by the rate checks; by `stale_prices` at 2026-05-31 (STL) — the third only once STL existed |
 
-**Disclosed limitations and open questions.**
+**Disclosed readings, limitations and open questions.**
 
-* **`xirr_window_days` while XIRR is withheld for a 待釐清 ledger — owner question.** Manual
-  §7.2.1 says the window is "reported in any case, the rate None included". The app (live
-  dashboard and closes alike) reports NONE when XIRR is withheld for a 賣超, an unapplied action,
-  a refused close or an orphan dividend, or when a rate is missing: it builds no flow series then.
-  Measured here 2026-10-19 (`month.asof.xirr_window_days` at `checkpoint2`, `corp_refused`,
-  `options_refused_close`, `refused_orphan`: expected 282, got null). This is v0.1.31 behaviour
-  and v0.1.32 must stay byte-identical, so the harness asserts the window only where the reading
-  is unambiguous (computed, under 30 days, a missing price, no sign change) until the owner rules.
-* **Not reconciled yet:** `period_twr` (needs an independent TWR index), the period ACTIVITY
-  lines of §11.3 (realized, dividends, fees, cash movements, FX, openings — and the tax-package
-  tie-out), `restated`, the trail / diff pages of a run.
-* **Not reachable on this instance:** the scheduler is off, so `final_through` is always
-  yesterday — no close is ever 暫定 and `notes.unconfirmed_closes` is always empty (asserted
-  empty, never exercised non-empty). No year has ended in the scenario (2026 only), so the only
-  `Y` row is the current, live year — "the year row ≡ the December row" is not exercised.
-* **PERF-F2 and the price-basis split edge (owner ruling 2026-10-19: fixed after v0.1.32,
-  which stays byte-identical to v0.1.31).** Neither shape occurs in this scenario (every XIRR-kind
-  cash movement is in a currency a held instrument is quoted in; every fixture close is stamped
-  `fetched_at` = its own date). If a later op adds one and the oracle disagrees with the app, it
-  is that known, owner-accepted defect — recorded here, never "fixed" in the oracle.
-* **One existing check moved to `check_rel`:** `kpi.realized_total`. The TWD realized total sums
-  rows carrying 28-digit quotients, and the month-end block's three extra TWD realized rows moved
-  it to a magnitude where the two addition orders land 1 ULP apart (…396 vs …397) while every row
-  compares exactly in `realized.*`. Association, not money.
+* **`xirr_window_days` while XIRR is withheld for a 待釐清 ledger — owner question (unchanged).**
+  Manual §7.2.1 says the window is "reported in any case". The app reports NONE when XIRR is
+  withheld for a 賣超, an unapplied action, a refused close or an orphan dividend, or when a flow
+  has no rate (no series is built). v0.1.31 behaviour, so the harness asserts the window only where
+  the reading is unambiguous (computed, under 30 days, a missing price, no sign change).
+* **Trend availability is per day for a close, all-or-nothing for the live trend.** A flow with no
+  rate makes the LIVE series unavailable as a whole (v0.1.31); a close says `trend_unavailable`
+  only from the first day such a flow counts ("the series is unavailable ON D", W2-D), and the
+  days before keep their points and TWR. Transcribed as such; it is visible only on the temporary
+  `missing_fx` checkpoint.
+* **The served prefix** (`_served_prefix`) is the spec's §10 step 4 with W2-D's placeholder rule
+  and the read path's "never a day the generation does not hold" — while those days are served
+  live, the STATUS still reports the store's stale range (E's rule), and `settle.stale_range`
+  asserts exactly that.
+* **Not reconciled yet:** `restated`, the run's diff pages and trail; `period_twr`'s reason is
+  matched by words (走勢 or 匯率 / 尚無 / 期末 / 期初 / 待結算), not by sentence.
+* **Not reachable on this instance:** the scheduler is off, so no close is ever 暫定 and
+  `notes.unconfirmed_closes` is always empty (asserted empty).
+* **PERF-F2 and the price-basis split edge** (owner ruling 2026-10-19: fixed after v0.1.32) do not
+  occur in this scenario. If an op adds one and the oracle disagrees, it is that owner-accepted
+  defect — recorded, never "fixed" in the oracle.
+* `kpi.realized_total` is `check_rel` (1 ULP addition-order difference on 28-digit rows).
 
-Baseline after this change (`run_phase1.py --wave2-only`, API only, 2026-10-19): **`ops=217
-pass=60006 fail=0`** (was `ops=164 pass=19941 fail=0`). **`ops` moved +53**: 17 settlement runs
-and 16 pre-run status records (one per checkpoint after the first), 4 `month.not_judged` records,
-and 16 scenario ops (the back-dated edit; the month-end block's deposit, four buys, four sells,
-dividend, close series and two splits; the live-window entry and its correction). The pass count
-moved by much more because the store family compares every month close at every checkpoint. The
-gate's own baseline is the first full run with package G merged (W4).
+Baseline (2026-10-20, merged tip `834440a` + this change, `run_phase1.py` API only, 6m56s):
+**`ops=257 pass=152086 fail=0`**; with `--ui` `pass=152093 fail=0` in 7m07s (the reviewer's run
+of the previous harness on the same tip:
+`ops=221 pass=101900 fail=0`; before the store: `ops=164 pass=19941 fail=0`). `ops` moved +36
+from the previous harness: 3 more checkpoints (prior year, flat oversell, missing FX), their
+settlement runs and pre-run records, the served-prefix records, and the new scenario ops. The
+gate's baseline is the first full `run_all.py --phase 1` at W4.
 
 ## Must-pass assertion families
 
 A run is only green when **all** of these hold (exact Decimal unless noted):
 
 - **Settlement and month-end closes** (README §9) — `settle.*` (the status before the run, the
-  run, the clean state after it), `backdated_edit.*`, `live_window.*`, `month_end.*`,
-  `month.asof.*` (the month-end oracle at today ≡ the live KPI block), `store_period.*` (the
-  published closes, holdings and cash at D), and with package G `stale.*`, `period.*`,
-  `period_detail.*`, `snapshot(s).*`. The rate is `check_rel` (a quotient of two 28-digit sums),
-  XIRR `check_close`; everything else exact.
+  run, the clean state after it), `prices.stored_close` / `fx.stored_rate` (the stored columns ≡
+  what the fixture wrote), `backdated_edit.*`, `prior_year.*`, `flat_oversell.*`,
+  `live_window.*`, `missing_fx.*`, `month_end.*`, `month.asof.*` (the month-end oracle at today ≡
+  the live KPI block), `store_period.*` (the published closes — KPIs, notes, TWR, activity,
+  holdings and cash at D, closed years), `tax.*` (the sheet-by-sheet tie-out), and with package G
+  `stale.*`, `period.*`, `period_detail.*`, `snapshot(s).*`. `check_rel` for the rate, the TWR, a
+  realized or reporting sum (association only), XIRR `check_close`; everything else exact.
 
 - **Per-stock cost basis** — for every `(account, symbol)` holding: `shares` (SIGNED —
   an open declared short is negative), `original_cost_total`, `adjusted_cost_total`,

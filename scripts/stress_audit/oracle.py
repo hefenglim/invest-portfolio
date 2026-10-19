@@ -67,12 +67,14 @@ MONTH-END VALUES — TRANSCRIBED FROM ``docs/spec/2026-10-18-settlement-store.md
 Layer 5 (:func:`period_end`) is the KPI block of a period close "as at D": the ledger valued as
 at D, the latest stored close on or before D re-expressed for the splits since (the read
 divides), FX on or before D, 總市值 / 總報酬 (A) / the blended rate / XIRR since inception, and
-every ``notes`` fact. Its inputs include the stored ``prices`` and ``fx_rates`` rows, read back
-by the harness like the ledger; nothing in it comes from ``kpis_as_of`` or ``period_close.py``.
+every ``notes`` fact, plus the TWR index and the period activity (§11.2 / §11.3). Its price and
+FX inputs are the closes and rates the FIXTURE wrote — never the stored columns, which the app
+derives — and nothing in it comes from ``kpis_as_of``, ``period_close.py`` or ``twr.py``.
 """
 
 from __future__ import annotations
 
+import bisect
 import re
 from collections import defaultdict
 from collections.abc import Collection
@@ -80,6 +82,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import IntEnum
+from fractions import Fraction
 
 D = Decimal
 ZERO = D("0")
@@ -873,11 +876,9 @@ def price_as_traded(facts: Facts, symbol: str, day: date, *,
     round in the middle.
     """
     out = quote
-    for act in sorted((a for a in facts.actions
-                       if a.kind == SPLIT and a.from_symbol == symbol
-                       and day < a.d <= quoted_on),
-                      key=lambda a: (a.d, a.id)):
-        out = out * act.ratio_to / act.ratio_from
+    for act in _splits_of(facts.actions, symbol):
+        if day < act.d <= quoted_on:
+            out = out * act.ratio_to / act.ratio_from
     return out.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
@@ -1501,7 +1502,8 @@ def replay_through(facts: Facts, day: date) -> OracleResult:
     return replay(facts_through(facts, day))
 
 
-def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Decimal:
+def net_invested_through(facts: Facts, day: date, reporting: str, fx_on, *,
+                         refused: Collection[int] | None = None) -> Decimal:
     """Reporting-currency money put into SECURITIES through *day* (the trend's B leg).
 
     The app publishes this per day as ``trend.points[].net_invested``, and it is the
@@ -1536,7 +1538,8 @@ def net_invested_through(facts: Facts, day: date, reporting: str, fx_on) -> Deci
     # K2 (owner ruling 2026-10-05): a payout the replay refused is no flow. This module's OWN
     # replay decides which; a refusal is fixed by the events before the payout, so the whole
     # ledger's replay answers for every day.
-    refused = replay(facts).refused_dividend_ids
+    if refused is None:
+        refused = replay(facts).refused_dividend_ids
 
     def add(d: date, ccy: str, native: Decimal) -> None:
         nonlocal total
@@ -2081,9 +2084,11 @@ def integrity_findings(
 # reads "latest stored", which on or before today is the same row) — which is how the harness
 # proves this transcription before a single period route exists.
 #
-# The INPUTS are stored facts read back by the harness exactly like the ledger: the ``prices``
-# rows (instrument, as_of_date, close) and the ``fx_rates`` rows. The ARITHMETIC is this
-# module's.
+# The price and FX INPUTS are what the harness's fixture WROTE (``phase1.fixture_closes`` /
+# ``fixture_fx_rows``), never the stored ``close`` / ``rate`` columns: the app derives those at
+# its write seam (``cap_4dp(close_raw × split_basis)``), so an oracle reading them agrees with a
+# wrong cap or basis by construction. The harness compares the stored columns against the
+# fixture separately (``prices.stored_close``). The ARITHMETIC is this module's.
 
 #: Parameter (``pricing/store.py`` ``_DEFAULT_MAX_AGE``, documented there): a price or rate is
 #: STALE when ``(D − its date).days > 4`` — the live 4-day maximum age, applied before D.
@@ -2124,15 +2129,17 @@ def first_ledger_day(facts: Facts) -> date | None:
     return min(days) if days else None
 
 
+#: Sorts after every Decimal a series can hold, so ``bisect_right`` lands after a same-day row.
+_MAX_DECIMAL = Decimal("Infinity")
+
+
 def _on_or_before(series: list[tuple[date, Decimal]] | None,
                   day: date) -> tuple[date, Decimal] | None:
     """The latest ``(date, value)`` of an ascending *series* dated on or before *day*."""
-    best: tuple[date, Decimal] | None = None
-    for d, v in series or ():
-        if d > day:
-            break
-        best = (d, v)
-    return best
+    if not series:
+        return None
+    i = bisect.bisect_right(series, (day, _MAX_DECIMAL))
+    return series[i - 1] if i else None
 
 
 def _splits_of(actions: list[CorpFact], symbol: str) -> list[CorpFact]:
@@ -2140,13 +2147,15 @@ def _splits_of(actions: list[CorpFact], symbol: str) -> list[CorpFact]:
 
     The action ledger is per ACCOUNT, but a split is ONE market event on the symbol: the same
     split recorded in two accounts must re-express a price once, not twice. Keyed on (date,
-    ratio) — two different splits on one day are two events.
+    REDUCED ratio): ``4:2`` in one account and ``2:1`` in another are the same 2-for-1 (both
+    terms are positive integers, D14, so the reduction is an exact ``Fraction``); two different
+    splits on one day are two events.
     """
-    seen: set[tuple[date, Decimal, Decimal]] = set()
+    seen: set[tuple[date, Fraction]] = set()
     out: list[CorpFact] = []
     for a in sorted((a for a in actions if a.kind == SPLIT and a.from_symbol == symbol),
                     key=lambda a: (a.d, a.id)):
-        key = (a.d, a.ratio_to, a.ratio_from)
+        key = (a.d, Fraction(int(a.ratio_to), int(a.ratio_from)))
         if key not in seen:
             seen.add(key)
             out.append(a)
@@ -2217,6 +2226,23 @@ def xirr_first_flow(facts: Facts, res: OracleResult) -> date | None:
     return min(days) if days else None
 
 
+def xirr_flows_have_rates(facts: Facts, res: OracleResult, reporting: str,
+                          fx_rows: FxRows) -> bool:
+    """Whether every dated XIRR flow (every row but the terminal value) has a rate on or
+    before its own date — the flows of :func:`xirr_cashflows`, without the prices."""
+    def has(d: date, ccy: str) -> bool:
+        return ccy == reporting or fx_rate_at(fx_rows, ccy, reporting, d) is not None
+
+    insts = facts.instruments
+    return (all(has(o.build_date, insts[o.symbol].quote_ccy) for o in facts.openings)
+            and all(has(t.trade_date, insts[t.symbol].quote_ccy) for t in facts.txs)
+            and all(has(dv.d, insts[dv.symbol].quote_ccy) for dv in facts.divs
+                    if dv.type in CASH_DIVIDEND_TYPES
+                    and dv.id not in res.refused_dividend_ids)
+            and all(has(m.d, m.ccy) for m in facts.cash
+                    if m.kind.upper() in XIRR_CASH_KINDS))
+
+
 @dataclass
 class PeriodEnd:
     """The oracle's KPI block of a close as at ``day`` (spec §11.2) — since inception."""
@@ -2233,19 +2259,19 @@ class PeriodEnd:
     #: ccy -> (rate to the reporting currency on or before D, the stored row's date)
     rates: dict[str, tuple[Decimal, date]]
     missing_fx: list[str]
-    #: held positions with no honest value: 賣超, an unapplied action, a refused close (§4.4)
+    #: held positions with no honest value — a 賣超, an unapplied action, a refused close
+    #: (§4.4): their value is DROPPED from every aggregate, the rest still computed
     unvalued: list[tuple[str, str]]
-    #: why the money KPIs are NOT judged at D (``None`` = judged): a held 賣超 / unapplied
-    #: action, whose value the rules leave undefined rather than wrong
-    gate: str | None
     total_market_value: Decimal | None
     by_currency_value: dict[str, Decimal]
     total_return: Decimal | None
     total_return_rate: Decimal | None
     xirr: Decimal | None
     xirr_window_days: int | None
-    #: ``None`` when an XIRR value is expected; else why it is withheld / not judged
+    #: ``None`` when an XIRR value is expected; else why it is withheld
     xirr_withheld: str | None
+    #: the rows the withholding reason must name: ``(account, symbol, date | None)``
+    xirr_named: list[tuple[str, str, date | None]]
     pending: set[tuple[str, str, str]]
     options_past_expiry: list[str]
     #: (account, symbol, ex_date, pay_date, net) — non-STOCK rows with ex_date ≤ D < pay date
@@ -2260,6 +2286,10 @@ def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
     * a held stock's price — :func:`price_at`; with none, it is left out of 總市值 and of the
       unrealized part of 總報酬 while its cost stays in the rate's denominator, and XIRR is
       withheld (all-or-nothing) — and named in ``missing_prices``;
+    * a held position with no honest value (domain-ledger.md: "only a 賣超 or an unapplied
+      action drops a value"; options §4.4: "on a 待釐清 contract no price, value or
+      obligation") — its value is DROPPED from 總市值 and from the unrealized part, and every
+      other figure is still computed;
     * an option — its last ordinary trade on or before D (:func:`option_prices`, R2);
     * FX — :func:`fx_rate_at` for every currency a figure converts;
     * ``total_market_value`` — Σ price × SIGNED shares (stocks and options), converted;
@@ -2267,7 +2297,12 @@ def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
       currency view is a stock-only list);
     * ``total_return`` (A) — Σ_ccy (realized + unrealized) converted at D's FX (manual §7.1);
       ``total_return_rate`` — A ÷ Σ_ccy gross_invested converted (manual §7.1, blended);
-    * ``xirr`` — flows counting by D at their own dates' FX, terminal at D, ``as_of = D``.
+    * ``xirr`` — flows counting by D at their own dates' FX, terminal at D, ``as_of = D``;
+      withheld — the reason naming its rows — when the ledger was EVER driven into a 賣超 by D
+      (CR-11: the book records a 賣超 netted back to zero too, and its basis is gone for good),
+      when an action could not be applied (D38: portfolio-wide), for an orphan dividend
+      (CR-02) or a refused close (§4.4); and when a held price or a rate is missing, or the
+      window is under 30 days (manual §7.2.1).
 
     Without a rate for a needed currency 總市值, 總報酬 and the rate are blank (``None``).
     """
@@ -2290,19 +2325,11 @@ def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
             elif (day - got[1]).days > STALE_AFTER_DAYS:
                 stale[sym] = got[1]
         if h.oversold or h.unbookable_action or h.unbookable_close:
-            # domain-ledger.md: "only a 賣超 or an unapplied action drops a value"; options
-            # §4.4: "on a 待釐清 contract no price, value or obligation".
             unvalued.append((acct, sym))
             continue
         px = opt_px.get(sym) if is_option(sym) else reads.get(sym)
         if px is not None:
             prices[sym] = px
-
-    gate: str | None = None
-    if any(held[k].oversold for k in unvalued):
-        gate = "oversold"
-    elif any(held[k].unbookable_action for k in unvalued):
-        gate = "unapplied_action"
 
     valued = {k: h for k, h in held.items() if k not in unvalued and h.symbol in prices}
     needed = (set(res.realized_by_ccy) | set(res.gross_invested)
@@ -2329,7 +2356,11 @@ def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
         unreal[h.quote_ccy] += (p - h.adjusted_avg) * h.shares
         if not is_option(sym):
             by_ccy[h.quote_ccy] += p * h.shares
-    if not missing_fx:
+    if missing_fx:
+        # The currency view is the COMBINED view (manual §7.3: native values beside their
+        # reporting twins and the reporting total) — without a rate it is not formed at all.
+        by_ccy.clear()
+    else:
         mv = ZERO
         for (_acct, sym), h in valued.items():
             mv += conv(prices[sym][0] * h.shares, h.quote_ccy)
@@ -2347,14 +2378,24 @@ def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
     window = None if first is None else (day - first).days
     xirr: Decimal | None = None
     withheld: str | None
-    if gate is not None:
-        withheld = f"gate:{gate}"
-    elif res.orphan_dividends:
-        withheld = "orphan_dividend"
-    elif res.refused_closes:
-        withheld = "refused_close"
+    named: list[tuple[str, str, date | None]] = []
+    if res.oversold_keys:
+        withheld = "oversold"
+        named = [(a, s, None) for a, s in sorted(res.oversold_keys)]
     elif res.action_refusals:
         withheld = "unapplied_action"
+        named = [(a.account_id, a.from_symbol, a.d) for a in f.actions
+                 if a.id in res.refused_action_ids]
+    elif res.orphan_dividends:
+        withheld = "orphan_dividend"
+        named = [(a, s, d) for a, s, d in res.orphan_dividends]
+    elif res.refused_closes:
+        withheld = "refused_close"
+        named = [(rc.account_id, rc.symbol, rc.d) for rc in res.refused_closes]
+    elif not xirr_flows_have_rates(f, res, reporting, fx_rows):
+        # A flow converts at its OWN date's rate: without one there is no series — and so no
+        # window either — whatever else is missing.
+        withheld = "missing_rate"
     elif missing:
         withheld = "missing_price"
     elif missing_fx:
@@ -2397,7 +2438,222 @@ def period_end(facts: Facts, day: date, closes: Closes, fx_rows: FxRows,
 
     return PeriodEnd(
         day=day, facts=f, res=res, prices=prices, price_reads=reads, missing_prices=missing,
-        stale_prices=stale, rates=rates, missing_fx=missing_fx, unvalued=unvalued, gate=gate,
+        stale_prices=stale, rates=rates, missing_fx=missing_fx, unvalued=unvalued,
         total_market_value=mv, by_currency_value=dict(by_ccy), total_return=tr,
         total_return_rate=rate, xirr=xirr, xirr_window_days=window, xirr_withheld=withheld,
-        pending=pending, options_past_expiry=sorted(past_expiry), receivable=receivable)
+        xirr_named=named, pending=pending, options_past_expiry=sorted(past_expiry),
+        receivable=receivable)
+
+
+# ---- the TWR index and a period's TWR (spec §11.2 ``period_twr``) ---------------------
+# Transcribed from the convention the spec points at — the full-series index
+# ``/api/performance/twr`` uses (FU-D27, AI-D35: "chain-linked daily TWR, flow-adjusted —
+# money put in or taken out is never return") — never from ``portfolio/twr.py``'s code:
+#
+#   F_t = NI_t − NI_base                (the flow since the last trustworthy day)
+#   r_t = (V_t − F_t − V_base) / V_base  (measured on that day's capital)
+#   I_t = I_base × (1 + r_t),   I = 100 on the first COMPLETE day with V > 0 (the anchor)
+#
+# An incomplete day carries the index and is never a base; while the base value is 0 the
+# index carries and the chain restarts on the next positive day with no jump.
+TWR_ANCHOR = Decimal("100")
+
+
+def twr_index(points: list[tuple[date, Decimal | None, Decimal, bool]]
+              ) -> tuple[dict[date, Decimal], date | None]:
+    """``{day: I}`` over ``(day, total_value, net_invested, incomplete)`` ascending, and the
+    anchor day (``None`` when no day is complete with a positive value). A complete day must
+    carry its ``total_value``; an incomplete one may not."""
+    index: dict[date, Decimal] = {}
+    anchor: date | None = None
+    running: Decimal | None = None
+    base_v: Decimal | None = None
+    base_ni: Decimal | None = None
+    for day, v, ni, incomplete in points:
+        if running is None:
+            if not incomplete and v is not None and v > ZERO:
+                running, anchor = TWR_ANCHOR, day
+                base_v, base_ni = v, ni
+                index[day] = running
+            continue
+        if incomplete or v is None:
+            index[day] = running
+            continue
+        if base_v is None or base_v <= ZERO:
+            index[day] = running
+            if v > ZERO:
+                base_v, base_ni = v, ni
+            continue
+        assert base_ni is not None
+        r = (v - (ni - base_ni) - base_v) / base_v
+        running = running * (ONE + r)
+        index[day] = running
+        base_v, base_ni = v, ni
+    return index, anchor
+
+
+def period_twr(index: dict[date, Decimal], anchor: date | None,
+               incomplete: dict[date, bool], *, start_end: date | None,
+               end: date) -> tuple[Decimal | None, str | None]:
+    """Spec §11.2: ``I(D) / I(previous period end) − 1``; the first period — and any period
+    that begins before the anchor — from the anchor (100). ``None`` with the reason when D has
+    no trend point (``"unavailable"``), the index has no anchor by D (``"no_anchor"``), D is
+    incomplete (``"end_incomplete"``), or the previous end has no point
+    (``"start_unavailable"``) or is incomplete (``"start_incomplete"``). *incomplete* holds
+    every day the trend has a point for."""
+    if end not in incomplete:
+        return None, "unavailable"
+    if anchor is None or end < anchor:
+        return None, "no_anchor"
+    if incomplete[end]:
+        return None, "end_incomplete"
+    if start_end is None or start_end < anchor:
+        base = TWR_ANCHOR
+    elif start_end not in incomplete:
+        return None, "start_unavailable"
+    elif incomplete[start_end]:
+        return None, "start_incomplete"
+    else:
+        base = index[start_end]
+    return index[end] / base - ONE, None
+
+
+# ---- period activity (spec §11.3) ------------------------------------------------------
+@dataclass
+class Activity:
+    """The period's activity lines, keyed so the app's grouping can be folded onto them.
+
+    Every amount is ``(native, reporting)``, the reporting value the sum of each ROW at its
+    OWN date's rate (the trend's flow conversion, §11.3) — ``None`` when a row has no rate.
+    """
+
+    #: (kind "trade" | "dividend_after_close", asset_type, ccy) -> rows, realized, capital gain
+    realized: dict[tuple[str, str, str], dict[str, object]]
+    #: (type, account, ccy) -> rows, gross, withholding, net, reinvested, stock shares
+    dividends: dict[tuple[str, str, str], dict[str, object]]
+    #: ccy -> rows, net (refused payouts, 未入帳)
+    not_booked: dict[str, dict[str, object]]
+    #: (account, ccy) -> fees, tax
+    fees: dict[tuple[str, str], dict[str, object]]
+    #: (account, kind, ccy) -> rows, amount
+    cash: dict[tuple[str, str, str], dict[str, object]]
+    #: (account, from_ccy, to_ccy) -> rows, from, to
+    fx: dict[tuple[str, str, str], dict[str, object]]
+    #: (account, home ccy) -> realized FX
+    fx_realized: dict[tuple[str, str], dict[str, object]]
+    #: (account, symbol) -> shares, original cost
+    openings: dict[tuple[str, str], dict[str, object]]
+
+
+def period_activity(facts: Facts, start: date, end: date, fx_rows: FxRows,
+                    reporting: str) -> Activity:
+    """Spec §11.3, every line by the tax package's definition where it has one: rows inside
+    ``[start, end]`` by the SAME dates the ledger cut uses (a trade its trade date, a dividend
+    its effective date, …). The lines are not additive and no total is formed."""
+    f = facts_valued_as_of(facts, end)
+    res = replay(f)
+
+    def rep(amount: Decimal, ccy: str, on: date) -> Decimal | None:
+        got = fx_rate_at(fx_rows, ccy, reporting, on)
+        return None if got is None else amount * got[0]
+
+    def add(bucket: dict, key: tuple, field_: str, native: Decimal, ccy: str,
+            on: date) -> None:
+        line = bucket.setdefault(key, {})
+        n, r = line.get(field_, (ZERO, ZERO))
+        rv = rep(native, ccy, on)
+        line[field_] = (n + native, None if r is None or rv is None else r + rv)
+
+    def count(bucket: dict, key: tuple) -> None:
+        line = bucket.setdefault(key, {})
+        line["rows"] = int(line.get("rows", 0)) + 1
+
+    def inside(d: date) -> bool:
+        return start <= d <= end
+
+    realized: dict = {}
+    for rr in res.realized_rows:
+        if not inside(rr.sell_date):
+            continue
+        kind = "dividend_after_close" if rr.kind == "dividend" else "trade"
+        key = (kind, "option" if is_option(rr.symbol) else "stock", rr.quote_ccy)
+        count(realized, key)
+        add(realized, key, "realized", rr.realized, rr.quote_ccy, rr.sell_date)
+        if kind == "trade":
+            add(realized, key, "capital_gain", rr.proceeds_net - rr.original_cost_removed,
+                rr.quote_ccy, rr.sell_date)
+
+    dividends: dict = {}
+    not_booked: dict = {}
+    for dv in f.divs:
+        if not inside(dv.effective):
+            continue
+        ccy = f.instruments[dv.symbol].quote_ccy
+        if dv.id in res.refused_dividend_ids:
+            count(not_booked, (ccy,))
+            add(not_booked, (ccy,), "net", dv.net, ccy, dv.d)
+            continue
+        key = (dv.type.upper(), dv.account_id, ccy)
+        count(dividends, key)
+        if dv.type.upper() == "STOCK":
+            line = dividends[key]
+            line["stock_shares"] = line.get("stock_shares", ZERO) + (dv.reinvest_shares or ZERO)
+            continue
+        add(dividends, key, "gross", dv.gross, ccy, dv.d)
+        add(dividends, key, "withholding", dv.withholding, ccy, dv.d)
+        add(dividends, key, "net", dv.net, ccy, dv.d)
+        if dv.type.upper() == "DRIP":
+            line = dividends[key]
+            line["reinvested_shares"] = (line.get("reinvested_shares", ZERO)
+                                         + (dv.reinvest_shares or ZERO))
+
+    fees: dict = {}
+    for t in f.txs:
+        if not inside(t.trade_date):
+            continue
+        ccy = f.instruments[t.symbol].quote_ccy
+        add(fees, (t.account_id, ccy), "fees", t.fee, ccy, t.trade_date)
+        add(fees, (t.account_id, ccy), "tax", t.tax, ccy, t.trade_date)
+
+    cash: dict = {}
+    for m in f.cash:
+        if not inside(m.d):
+            continue
+        key = (m.account_id, m.kind.upper(), m.ccy)
+        count(cash, key)
+        add(cash, key, "amount", m.amount, m.ccy, m.d)
+
+    fx: dict = {}
+    for c in f.fxs:
+        if not inside(c.d):
+            continue
+        key = (c.account_id, c.from_ccy, c.to_ccy)
+        count(fx, key)
+        add(fx, key, "from", c.from_amt, c.from_ccy, c.d)
+        add(fx, key, "to", c.to_amt, c.to_ccy, c.d)
+
+    fx_realized: dict = {}
+    for aid, (_rule, settle, funding) in ACCOUNTS.items():
+        if settle == funding:
+            continue
+        home, foreign = funding, settle
+        convs = [c for c in f.fxs if c.account_id == aid]
+        moves = [m for m in f.cash if m.account_id == aid and m.ccy == foreign]
+        for c in convs:
+            if not (inside(c.d) and c.from_ccy == foreign and c.to_ccy == home):
+                continue
+            avg = _fx_avg_as_of(convs, moves, home, foreign, c.d)
+            if avg is None:
+                continue
+            add(fx_realized, (aid, home), "realized", c.to_amt - c.from_amt * avg, home, c.d)
+
+    openings: dict = {}
+    for o in f.openings:
+        if not inside(o.build_date):
+            continue
+        ccy = f.instruments[o.symbol].quote_ccy
+        line = openings.setdefault((o.account_id, o.symbol), {})
+        line["shares"] = line.get("shares", ZERO) + o.shares
+        add(openings, (o.account_id, o.symbol), "original_cost_total", o.orig_total, ccy,
+            o.build_date)
+    return Activity(realized, dividends, not_booked, fees, cash, fx, fx_realized, openings)
