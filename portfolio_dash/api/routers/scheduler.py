@@ -32,6 +32,7 @@ from portfolio_dash.scheduler.jobs import (
     insight_task_of,
     job_kind,
     latest_run_unfinished,
+    queued_progress,
     run_job_func,
     running_job_ids,
     running_progress,
@@ -469,6 +470,7 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -
     }
     running = running_job_ids()
     progress_by_job = running_progress()
+    queued_notes = queued_progress()
     jobs: dict[str, Any] = {}
     active = False
     for jid in job_ids:
@@ -482,7 +484,8 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -
         jobs[jid] = {
             "running": is_running,
             "queued": is_queued,
-            "progress": progress_by_job.get(jid) if is_running else None,
+            "progress": (progress_by_job.get(jid) if is_running
+                         else queued_notes.get(jid) if is_queued else None),
             "last_run": _status_last_run(done) if done is not None else None,
         }
     return {"jobs": jobs, "active": active}

@@ -188,17 +188,6 @@ def test_a_queued_run_shows_the_servers_sentence_under_its_chip(
     assert not console_errors and not page_errors, (console_errors, page_errors)
 
 
-def _job_workers_wired() -> bool:
-    """The lifespan binds the job worker (``api/composition.bind_runtime``) and the status
-    route serves the queued sentence (``jobs.queued_progress``) — both land at the wave-3
-    merge (plan §7.4); until then a server runs every job in-process."""
-    app = (_REPO / "portfolio_dash/api/app.py").read_text(encoding="utf-8")
-    router = (_REPO / "portfolio_dash/api/routers/scheduler.py").read_text(encoding="utf-8")
-    return "bind_runtime()" in app and "queued_progress" in router
-
-
-@pytest.mark.skipif(not _job_workers_wired(),
-                    reason="the lifespan binds the job worker at the wave-3 merge (plan §7.4)")
 def test_a_run_behind_the_heavy_gate_reads_queued_then_succeeds_in_a_worker(
     flow_server: FlowServerFactory, fresh_page: Page, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

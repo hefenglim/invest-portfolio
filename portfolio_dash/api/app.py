@@ -11,26 +11,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Request, Response
 
 from portfolio_dash.api import action_log, settlement_service
-from portfolio_dash.api.alert_inputs import scan_alert_compute
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
+from portfolio_dash.api.composition import bind_runtime
 from portfolio_dash.api.deps import get_conn
-from portfolio_dash.api.digest_service import run_digest
 from portfolio_dash.api.dividend_inbox import ensure_tables as ensure_dividend_inbox_tables
-from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
-from portfolio_dash.api.fundamentals_service import run_fundamentals_av
 from portfolio_dash.api.gzip import GZipMiddleware
-from portfolio_dash.api.insight_service import (
-    evaluate_due as insight_evaluate_due,
-)
-from portfolio_dash.api.insight_service import (
-    generate_calibrations_for_all as insight_generate_calibrations,
-)
-from portfolio_dash.api.insight_service import (
-    held_symbols_for_alerts as insight_held_symbols_for_alerts,
-)
-from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
-from portfolio_dash.api.news_service import run_news_daily
 from portfolio_dash.api.option_expiry import ensure_tables as ensure_option_expiry_tables
 from portfolio_dash.api.read_only import is_read_only
 from portfolio_dash.api.rebates import ensure_tables as ensure_rebate_tables
@@ -73,9 +59,7 @@ from portfolio_dash.api.routers import (
     whatsnew,
 )
 from portfolio_dash.api.settlement_service import on_boot as settlement_on_boot
-from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
 from portfolio_dash.api.snapshots import ensure_table as ensure_snapshots_table
-from portfolio_dash.api.snapshots import snapshot_job
 from portfolio_dash.api.static_cache import StaticCacheFiles
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
@@ -100,22 +84,9 @@ from portfolio_dash.portfolio.settlement_store import create_tables as create_se
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
+    close_abandoned_runs,
     ensure_scheduler_seeded,
     migrate_job_runs_results,
-    register_after_job_hook,
-    register_alert_compute_runner,
-    register_alert_held_fn,
-    register_calibration_runner,
-    register_digest_runner,
-    register_dividend_scan_runner,
-    register_evaluation_runner,
-    register_fundamentals_runner,
-    register_held_symbols_fn,
-    register_insight_runner,
-    register_news_runner,
-    register_settlement_runner,
-    register_signal_scan_runner,
-    register_snapshot_runner,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
 from portfolio_dash.shared import flags, result_cache
@@ -217,6 +188,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # read would find the store unverified.
         create_settle_tables(conn)
         migrate_job_runs_results(conn)
+        close_abandoned_runs(conn, now=app_now())  # job rows left by a gone process
         install_actor(conn, ACTOR_BOOT)
         trigger_check = settlement_store.install_or_verify(
             conn,
@@ -230,39 +202,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The news library lives in its own file (news/store.py); its first open creates and
     # migrates it, so open it once here rather than inside the first GET /api/news.
     get_news_connection().close()
-    # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
-    # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
-    register_insight_runner(insight_run_for_id)
-    # DEF-041: the on_alert 持倉提點 card is dispatched only for HELD symbols; "held" is the
-    # computed book's answer, which scheduler/ cannot replay — bound here, next to the runner.
-    register_alert_held_fn(insight_held_symbols_for_alerts)
-    # Wire the Loop-2/3 evolution runners (price-/master-bearing reads live in the api seam).
-    register_evaluation_runner(insight_evaluate_due)
-    register_calibration_runner(insight_generate_calibrations)
-    # 待確認匯入 daily scan (R5): full scan (events + pending count) via the api seam.
-    register_dividend_scan_runner(dividend_scan_job)
-    # 月度快照 (R6 item 8): nightly current-month KPI upsert via the api seam.
-    register_snapshot_runner(snapshot_job)
-    # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
-    register_news_runner(run_news_daily)
-    # Digests (P3 batch 3): daily close summary + weekly action list (assemble + store + push).
-    register_digest_runner(run_digest)
-    # Rule-signal scan (P2 batch 2): held-symbol signal evaluation + transition events.
-    register_signal_scan_runner(signal_scan_runner)
-    # Alert-compute (P3 batch 2): the FULL rule set (market-risk rules need pricing/consensus
-    # reads that live in the api seam) — the scheduler's alert_scan runs through this.
-    register_alert_compute_runner(scan_alert_compute)
-    # Fundamentals AV leg (W3, AI-D16): the Saturday job covers HELD symbols only; the
-    # held set is computed here (scheduler/ + pricing/ cannot replay the book).
-    register_fundamentals_runner(run_fundamentals_av)
-    # Quote-job partial threshold (M10-02): "did a HELD instrument fail?" — the held set is
-    # computed here for the same reason as the line above. Unregistered, the verdict counts
-    # every lost instrument (over-reports, never hides).
-    register_held_symbols_fn(actions.held_symbols)
-    # The settlement (PERF spec 2026-10-18 §9.1, §15): the nightly / weekly jobs run through
-    # the service, and every other job's end may chain a run (the after-job hook).
-    register_settlement_runner(settlement_service.scheduled_run)
-    register_after_job_hook(settlement_service.after_job_hook)
+    # Every scheduler seam (the twelve runners + the settlement's two + the job worker),
+    # bound in ONE place shared with the job worker child (PERF spec §16).
+    bind_runtime()
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
