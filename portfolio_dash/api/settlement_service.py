@@ -898,13 +898,28 @@ def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
                 store.update_run(conn, previous_run_id, resumed=True)
         inline = flags.settle_mode() == "inline"
         _S.active = _Active(run_id=run_id, scope=scope, reason=reason, inline=inline)
+        spawn_failed: Exception | None = None
         if not inline:
-            handle = child_runner.spawn(
-                WORKER_MODULE, ["--run", str(run_id)], heavy=True,
-                on_exit=lambda result: _child_exited(run_id, result))
-            if _S.active is not None and _S.active.run_id == run_id:
-                _S.active.handle = handle
-            return Started(run_id=run_id)
+            try:
+                handle = child_runner.spawn(
+                    WORKER_MODULE, ["--run", str(run_id)], heavy=True,
+                    on_exit=lambda result: _child_exited(run_id, result))
+            except Exception as exc:  # noqa: BLE001 — ended below, never left active
+                spawn_failed = exc
+            else:
+                if _S.active is not None and _S.active.run_id == run_id:
+                    _S.active.handle = handle
+                return Started(run_id=run_id)
+    if spawn_failed is not None:
+        # The child never started (e.g. no thread or process under memory pressure): end the
+        # still-``preparing`` run 失敗 through the waiter's own path, outside the lock, so the
+        # service is never left believing a run is active (wave-3 review H, the gate fix's
+        # service half).
+        logger.warning("settlement run %s: the worker could not be started", run_id,
+                       exc_info=spawn_failed)
+        ended = _after_exit(run_id, _Exit(clean=False,
+                                          error_class=type(spawn_failed).__name__))
+        return Started(run_id=run_id, ended=ended)
     # Inline (P5): synchronous, in the caller's thread, outside the lock.
     escaped: BaseException | None = None
     try:

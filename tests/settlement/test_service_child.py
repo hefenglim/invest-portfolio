@@ -135,3 +135,26 @@ def test_boot_stops_an_orphan_child_by_its_own_pid_and_resumes_it(
     report = sup.report(path, run_id)
     assert report.summary.status == "interrupted"
     assert plan.start is not None and plan.start.scope == "full"  # generation 0: a full run
+
+
+def test_a_worker_that_cannot_be_spawned_ends_failed_and_frees_the_service(
+    path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``child_runner.spawn`` raising (no thread / process under memory pressure) must never
+    leave the service believing a run is active: the run ends 失敗 with the class, and the
+    next start is accepted (wave-3 review H)."""
+    def no_spawn(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as m:
+        m.setattr(child_runner, "spawn", no_spawn)
+        started = service.start_run(scope="full", reason="button")
+    assert started.ended is not None and started.ended.status == "failed"
+    assert service.active_run_id() is None
+    row = sup.job_row(path, started.run_id)
+    assert (row["status"], row["reason"]) == ("error", "failed:RuntimeError")
+    _plan(tmp_path, "publish")
+    again = service.start_run(scope="full", reason="button")
+    sup.wait_until(_done)
+    assert sup.report(path, again.run_id).summary.status == "published"
+
