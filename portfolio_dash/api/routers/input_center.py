@@ -234,7 +234,9 @@ def _recognise_contract(conn: sqlite3.Connection, text: str) -> dict[str, Any]:
     """Owner ruling 2026-10-10: is *text* — whatever was typed or pasted into the manual form's
     代號 box — an option contract? An OCC symbol in any case, padded or not, or a broker
     statement's contract string (``XYZ 12/18/2026 50.00 P``) → the canonical OCC symbol, its
-    display name and the two terms the form's 轉倉 reuses; anything else → ``{"symbol": None}``.
+    display name, the two terms the form's 轉倉 reuses, and the contract's ``expiry`` / ``strike``
+    (PERF spec §12.2: the corporate-action form's 選擇權調整 composes its successor from them
+    instead of reading the whole symbol drawer); anything else → ``{"symbol": None}``.
 
     Never a 4xx: the page asks this for every ticker its own list does not know, and an error
     status is a console error in the browser. The shape is parsed HERE (``shared/options.py``),
@@ -251,7 +253,8 @@ def _recognise_contract(conn: sqlite3.Connection, text: str) -> dict[str, Any]:
     if registered is not None and registered.market is not Market.US:
         return {"symbol": None}
     return {"symbol": symbol, "name": contract_name(symbol),
-            "underlying": terms.underlying, "right": terms.right}
+            "underlying": terms.underlying, "right": terms.right,
+            "expiry": terms.expiry.isoformat(), "strike": decimal_str(terms.strike)}
 
 
 @router.get("/input/option-symbol")

@@ -26,7 +26,7 @@ from portfolio_dash.shared.models.assets import Instrument
 PUT = "XYZ261218P00050000"
 URL = "/api/input/option-symbol"
 _CONTRACT = {"symbol": PUT, "name": "XYZ 2026-12-18 50 Put", "underlying": "XYZ",
-             "right": "P"}
+             "right": "P", "expiry": "2026-12-18", "strike": "50"}
 
 
 @pytest.mark.parametrize("text", [
