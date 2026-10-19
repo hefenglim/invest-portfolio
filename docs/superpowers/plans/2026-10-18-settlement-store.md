@@ -1282,6 +1282,89 @@ FIXED-WITH-NOTES, notes closed). What the reviews caught and the fixes changed:
 - Process: give each parallel reviewer its own scratch folder (two collided); run one pytest
   process per agent on this 8 GB machine.
 
+**Wave 2 (2026-10-19), merged.** D (worker, period closes, ledger findings; `a11c150`, `0a65098`,
+`7529afe`), E (service, API, jobs; `d1dc965`, `329faf1`), F (frontend; `edd6368`..`7bf1746`). Merge
+wiring `6a03d26`: the lifespan binds the settlement runner and the after-job hook, hands the live
+scheduler to the service, and starts the boot run only after the boot session committed (`on_boot`
+plans, `start_after_boot` starts); `shutdown()` runs first on stop. Cross tests `36671c8`
+(`tests/settlement/test_wave2_cross.py`, the service with the REAL worker, inline and in a child):
+a publish; status ≡ progress file ≡ report mid-run and at the end; a kill with the web process alive
+(中斷, resumed once); a kill with no web process (boot ends and resumes it); a child dying before its
+claim (失敗); 準備中 at start-up; a real phase failure reaching `job_runs.reason = failed:<class>`.
+Resumed generations equal a fresh run on every common day. The worker runs as `python -m`, so a
+`PD_TEST_STUBS` module patches `sys.modules["__main__"]` too (`tests/settlement/worker_stubs.py`).
+
+Reviews: D NOT-READY, E READY-WITH-FIXES, F NOT-READY. Fixes by each package's own agent, then
+independent fold verification, twice for D and E. What they caught and what changed:
+- D:
+  - PERF-F2 placeholder days were never invalidated when a later row made the trend available
+    (chained ≠ fresh on 49 days). A run now re-values from the first stored placeholder day P when
+    the cause changed (its own U ≠ P), and only then: an always-unavailable ledger settles one day
+    a night (the first fix had made every nightly a re-run from U, up to a full run).
+  - Placeholders are "no value" in the run's diff (never → 0, never a new day);
+    `notes.trend_unavailable`, `notes.missing_cash_fx`.
+  - Closes start at the month of the ledger's first row in any table, so every period's activity
+    lies inside its own calendar period and each Y close ties out with that year's tax sheets
+    (`swap(closes_from=)`). A month before the first trade reads zero holdings, its cash, no trend
+    point, XIRR 「尚無持倉，XIRR 不計」. An old-rule generation is widened, and the report says why.
+  - Unconfirmed closes are matched by price date (`period_close.unconfirmed_at`: a Saturday month
+    end carries Friday's partial quote run) and carried while the price date holds.
+  - Independent oracles for the closes' holdings (month-end references), cash and activity
+    (direct ledger sums), `fx_used` rates and the benchmark state. Two surviving mutations now fail.
+  - `RunFailure.error_class`: the real worker ends a failed run itself and exits 0.
+  - The report's range is the calendar span; `RunRange.valued_days` counts the trend days, and the
+    job detail names both when they differ.
+  - One set of settle-table words, `SETTLE_TABLE_ZH`, for the worker, the service and the panel.
+- E:
+  - The 自檢發現差異 state follows the latest self-check.
+  - A schedule change never rewrites history: `schedule_config.updated_at` / `stamped_schedule` /
+    `previous_schedule`, each span judged by the schedule then in effect. This is exact for the last
+    change; older spans fall back to what ran.
+  - A waiter that cannot finish never wedges the service (`_finalise_with_retry`, `_clear_stale`,
+    and `_close_job_rows` for a job row left `running`).
+  - A cancel drops only its own follow-up.
+  - A held push (Q-P1 (a)) is mooted only by a later run that did the failed run's work: a failed
+    self-check only by a completed self-check, any other only by a published covering run. The first
+    fix ("any later publish") had dropped every quiet-hours self-check failure behind the 06:40
+    nightly. Its one-shot job survives a late wake, and pushes stay exactly-once across restarts.
+  - `on_boot` never raises (one SAVEPOINT).
+  - The after-job hook counts only the job's own changes.
+  - Unconfirmed closes come from every quote run since go-live (`job_runs` is never pruned).
+  - An inline boot run outside tests runs on a daemon thread.
+  - No chip state for a failed self-check: the push and the run history carry it.
+- F:
+  - The prompt keys on `SettlementStatus.seq` (`06e151b`).
+  - Price/FX counters, `status.queued`, the self-check result and `summary_lines` are rendered.
+  - Trail rows use the server's words.
+  - A GET started during a write never serves its body after the write answers.
+  - Read-only POSTs announce no mutation (`READ_ONLY_POSTS` mirrored, equality-tested).
+  - Option terms come in one request (`_recognise_contract` returns `expiry` / `strike`).
+  - The chip and panel flows run on the real backend (`tests/e2e/test_settlement_real_flow.py`,
+    `flow_server(settle=True)`). The remaining stubs are built from E's real shapes and compared by
+    `tests/contract/test_settlement_stub_shapes.py`, diff rows included.
+- Merge (main session):
+  - The ruling-11, X1 and OPT-D10 guards list the settlement's readers, each checked at its call
+    site (booked dividends only; positions tagged `asset_type`).
+  - `mypy --strict` is clean over the whole tree.
+
+Gates at the merge (`5e59d2f`):
+- the non-e2e suite in 21 foreground chunks (727 files), all green;
+- the settlement e2e (3 real-backend flows, 12 panel and history, 3 transport), plus the existing
+  flows F flagged (inbox badge, option paste, option corporate actions, DEF-034: 25), all green;
+- `mypy --strict` (1,187 files) and ruff clean.
+
+Stress phase 1, the engine equality and the full e2e suite stay for W4.
+
+Carried to wave 3 and W4:
+- G: serve placeholder days live while the live series is available; the notes fields;
+  `/api/settlement/periods` and `/periods/{kind}/{period}` (empty F's `_LANDING_LATER`); restated
+  rows with a zh reason, old/new value and date (never `source`); `/api/snapshots` month-only.
+- H: the after-job hook in the web process when jobs move into children; `settings-scheduler.js`.
+- W4: whatsnew (the 重新結算失敗 subscription, the menu change, the retired snapshot_monthly copy),
+  the 月度成績 e2e onto G's routes, `architecture.md`, `scripts/perf` in mypy, and `prewarm_today`.
+  Also the trend tooltip's 累計總損益（含匯兌） is still computed in JS (since v0.1.31): an owner
+  ruling after the release.
+
 ## Appendix — code map (surveyed at `473fe5a`; re-check line numbers before editing)
 
 **Engine:**
