@@ -564,6 +564,10 @@ class SettlementStatus(_Model):
     slow: bool = False
     last_run: RunSummary | None = None
     last_change_run: RunSummary | None = None
+    #: The change trail's counter (``settle_dirty.seq``, +1 on every recorded change, never
+    #: reset): the frontend remembers the prompt's 稍後 per value, so a second change with the
+    #: same day and counts as an earlier one is still asked about (wave-2 review F #1).
+    seq: int | None = None
 
 
 # --- a period close (§11.2, §11.3) ------------------------------------------------------------

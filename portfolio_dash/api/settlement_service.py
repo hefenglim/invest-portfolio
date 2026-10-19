@@ -1544,6 +1544,7 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
         last_run=_render_summary(last, viewer) if last is not None else None,
         last_change_run=_render_summary(last_change, viewer) if last_change is not None
         else None,
+        seq=state.seq,
     )
 
 

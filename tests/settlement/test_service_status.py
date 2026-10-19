@@ -171,3 +171,26 @@ def test_another_viewer_sees_the_login_not_you(path: Path) -> None:
     theirs = _status(path, viewer="user:other")
     assert mine.last_run is not None and mine.last_run.trigger_text.startswith("你 於 ")
     assert theirs.last_run is not None and theirs.last_run.trigger_text.startswith("owner 於 ")
+
+
+def test_seq_tells_a_second_change_from_an_earlier_one_with_the_same_day_and_counts(
+    path: Path,
+) -> None:
+    """Review F #1: the prompt's 稍後 is remembered per ``seq``. Two back-dated changes on
+    one day, settled in between, read the same day and the same counts — only ``seq``
+    differs, and it must."""
+    service.start_run(scope="full", reason="button")
+    early = date(2026, 2, 2)
+    sup.back_dated_trade(path, early)
+    first = _status(path)
+    assert first.needs_prompt and first.seq is not None
+    service.start_run(scope="dirty", reason="prompt")
+    assert not _status(path).needs_prompt
+    sup.back_dated_trade(path, early)
+    second = _status(path)
+    assert second.needs_prompt and second.seq is not None
+    assert (second.dirty_from, second.pending.records_total) == (
+        first.dirty_from, first.pending.records_total)
+    assert second.seq > first.seq
+    assert json.loads(second.model_dump_json(by_alias=True))["seq"] == second.seq
+
