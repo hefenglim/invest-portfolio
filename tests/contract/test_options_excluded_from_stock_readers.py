@@ -104,6 +104,10 @@ _ALLOWLIST: dict[str, str] = {
     "portfolio/dashboard.py::kpis_as_of": (
         "the valuation's KPI half, extracted from _build_dashboard (PERF §11.2): it values "
         "every position and splits the options out itself (opt_syms / split_holdings)"),
+    "api/snapshots.py::period_detail": (
+        "serves one close's position rows (settled_period_holding, or period_close.holdings_at "
+        "for a close computed live): every position at D, stocks and contracts each tagged "
+        "asset_type (OPT-D5 keeps them apart where listed); no stock-only figure is derived"),
     "portfolio/period_close.py::kpi_at": (
         "a close's notes: past_expiry_holdings looks FOR contracts past their expiry in the "
         "book (OPT-D2); the KPI half is kpis_as_of, which splits the options out itself"),
