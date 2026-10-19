@@ -1282,7 +1282,7 @@
     kv(host, '差異', count(sc.differences) + ' 處', 'st-changed');
     if (!nil(sc.first_day)) {
       kv(host, '最早差異', day(sc.first_day) + (nil(sc.first_table) ? ''
-        : '（' + (SETTLE_TABLE_ZH[sc.first_table] || sc.first_table) + '）'));
+        : '（' + (SETTLE_TABLE_ZH[sc.first_table] || '結算資料') + '）'));
     }
   }
   function phaseLabel(rep, key) {
