@@ -14,6 +14,7 @@ does) with a stubbed ``fetch`` and fake timers:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -131,6 +132,30 @@ const tick = () => new Promise(function (r) { setImmediate(r); });
   await tick(); await tick();
   try { await h(); out.held = 'resolved'; } catch (e) { out.held = e.code; }
 
+  // review F #6: a GET started WHILE a write is in flight must not serve a read issued
+  // after the write answered (its body may predate the commit)
+  events.length = 0; fetches = [];
+  const w2 = api.post('/api/ledgers/transactions', { v: 1 });
+  const during = api.get('/api/ledgers/transactions');
+  answer(0, 200, '{"ok":true}');
+  await w2; await tick();
+  const afterSave = api.get('/api/ledgers/transactions');
+  out.race_get_fetches = fetches.filter(function (f) { return f.method === 'GET'; }).length;
+  answer(1, 200, '{"rows":["BEFORE THE WRITE"]}');
+  if (fetches[2]) answer(2, 200, '{"rows":["AFTER THE WRITE"]}');
+  out.race_after_save = await afterSave;
+  await during;
+
+  // review F #11: a read-only POST neither announces pd-mutated nor closes the shares
+  events.length = 0; fetches = [];
+  const g4 = api.get('/api/q');
+  const ro = api.post('/api/whatif', { symbol: 'X' });
+  const g5 = api.get('/api/q');
+  out.read_only_fetches = fetches.map(function (f) { return f.method + ' ' + f.url; });
+  answer(0, 200, '{}'); answer(1, 200, '{}');
+  await g4; await ro; await g5;
+  out.read_only_mutated = mutated().length;
+
   process.stdout.write(JSON.stringify(out));
 })();
 """
@@ -193,3 +218,31 @@ def test_a_request_pending_for_15_s_says_so_and_is_not_aborted(
 
 def test_held_parks_an_early_failure_until_it_is_awaited(transport: dict[str, object]) -> None:
     assert transport["held"] == "internal_error"
+
+
+def test_a_read_issued_after_a_write_never_joins_a_get_from_during_it(
+    transport: dict[str, object],
+) -> None:
+    """Review F #6: the write's answer closes the shares again, so the page's re-read after a
+    save is a fresh fetch, never the body of a GET that left while the write was in flight."""
+    assert transport["race_get_fetches"] == 2
+    assert transport["race_after_save"] == {"rows": ["AFTER THE WRITE"]}
+
+
+def test_a_read_only_post_announces_nothing_and_keeps_the_shares(
+    transport: dict[str, object],
+) -> None:
+    """Review F #11: /api/whatif writes nothing — the GET around it still shares one fetch,
+    and the settlement prompt is not re-read after every 試算."""
+    assert transport["read_only_fetches"] == ["GET /api/q", "POST /api/whatif"]
+    assert transport["read_only_mutated"] == 0
+
+
+def test_the_js_read_only_list_is_the_python_set() -> None:
+    from portfolio_dash.api.read_only import READ_ONLY_POSTS
+
+    src = (_WEB / "api.js").read_text(encoding="utf-8")
+    m = re.search(r"const READ_ONLY_POSTS = \[([^\]]*)\];", src)
+    assert m, "READ_ONLY_POSTS not found in web/api.js"
+    js = set(re.findall(r"'([^']+)'", m.group(1)))
+    assert {("POST", p) for p in js} == set(READ_ONLY_POSTS)

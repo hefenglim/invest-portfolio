@@ -305,11 +305,30 @@
     return _track(_sharedRaw(url, _jsonInit('GET', undefined, opts), opts).then(_handle), opts);
   }
 
+  /* The read-only POSTs (api/read_only.py::READ_ONLY_POSTS, PERF plan P2): they send a body
+     only because their input does not fit a query string, and write nothing — so they
+     neither close the GET shares nor announce `pd-mutated` (the settlement prompt would
+     re-read the status after every 試算). Pinned equal to the Python set by
+     tests/contract/test_perf_web_transport.py. */
+  const READ_ONLY_POSTS = ['/api/whatif', '/api/rebalance/preview', '/api/prompts/preview'];
+  function _readOnly(method, p) {
+    return method === 'POST'
+      && READ_ONLY_POSTS.indexOf(p.split('?')[0].replace(/\/+$/, '')) >= 0;
+  }
+
   function _write(method, path, body, opts) {
-    _inflight.clear();   // a GET issued from here on must not join an answer from before
     const p = _normPath(path);
-    return _track(_raw(p, _jsonInit(method, body, opts)).then(_handle).then(function (v) {
-      _mutated(method, p);
+    const ro = _readOnly(method, p);
+    if (!ro) _inflight.clear();   // a GET issued from here on must not join an answer from before
+    /* …and again once the write has answered: a GET started WHILE the write was in flight
+       seeded a new share whose body may predate the commit, and a read issued after this
+       answer (a page's refresh after its save, the prompt's status read) must not join it. */
+    const settled = function () { if (!ro) _inflight.clear(); };
+    return _track(_raw(p, _jsonInit(method, body, opts)).then(
+      function (raw) { settled(); return _handle(raw); },
+      function (e) { settled(); throw e; }
+    ).then(function (v) {
+      if (!ro) _mutated(method, p);
       return v;
     }), opts);
   }
