@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
 
-from portfolio_dash.api import action_log
+from portfolio_dash.api import action_log, settlement_service
 from portfolio_dash.api.alert_inputs import scan_alert_compute
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
 from portfolio_dash.api.deps import get_conn
@@ -102,6 +102,7 @@ from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
     ensure_scheduler_seeded,
     migrate_job_runs_results,
+    register_after_job_hook,
     register_alert_compute_runner,
     register_alert_held_fn,
     register_calibration_runner,
@@ -112,6 +113,7 @@ from portfolio_dash.scheduler.jobs import (
     register_held_symbols_fn,
     register_insight_runner,
     register_news_runner,
+    register_settlement_runner,
     register_signal_scan_runner,
     register_snapshot_runner,
 )
@@ -221,7 +223,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             calc_version_changed=not settlement_store.store_state(
                 conn, reporting=get_settings().reporting_currency).calc_ok,
         )
-        settlement_on_boot(conn, trigger_check=trigger_check)
+        settlement_plan = settlement_on_boot(conn, trigger_check=trigger_check)
         settlement_store.record_schema_version(conn)
     # What the boot's trigger check found (read by tests and diagnostics; never by a route).
     app.state.settle_trigger_check = trigger_check
@@ -257,14 +259,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # computed here for the same reason as the line above. Unregistered, the verdict counts
     # every lost instrument (over-reports, never hides).
     register_held_symbols_fn(actions.held_symbols)
+    # The settlement (PERF spec 2026-10-18 §9.1, §15): the nightly / weekly jobs run through
+    # the service, and every other job's end may chain a run (the after-job hook).
+    register_settlement_runner(settlement_service.scheduled_run)
+    register_after_job_hook(settlement_service.after_job_hook)
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
         scheduler.start()
     app.state.scheduler = scheduler
+    # A push held through quiet hours is sent by a one-shot job on the live scheduler.
+    settlement_service.bind_scheduler(scheduler)
+    # The boot run starts only now, after the boot session COMMITTED: the child reads its
+    # request from its own connection (inline mode runs it here, synchronously).
+    settlement_service.start_after_boot(settlement_plan)
     try:
         yield
     finally:
+        settlement_service.shutdown()
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         # The result cache holds a READ-ONLY connection per database for the life of the

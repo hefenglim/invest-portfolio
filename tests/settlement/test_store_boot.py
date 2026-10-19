@@ -83,9 +83,11 @@ def _publish_one(path: Path) -> st.StoreState:
             for d in days])
         st.write_periods(conn, new, [st.SettledPeriod(
             kind=k, period=p, end_day=e, kpi=PeriodKpi(reporting_ccy=TWD))
-            for k, p, e in st.period_ends(c.run_from, THROUGH)])
+            for k, p, e in st.period_ends(c.run_from, c.run_through)])
+        # `claim` clamps the range up to what is already settled — the boot's own run since
+        # the wave-2 merge — and `swap` publishes exactly the claimed range.
         st.swap(conn, run_id, calc_version=st.calc_version(TWD), bench_state=None,
-                through=THROUGH, first_day=c.run_from, reporting=TWD)
+                through=c.run_through, first_day=c.run_from, reporting=TWD)
         return st.store_state(conn, reporting=TWD)
     finally:
         conn.close()
