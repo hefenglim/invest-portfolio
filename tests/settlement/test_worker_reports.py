@@ -48,6 +48,16 @@ def _x(db: CorpusDB, sql: str, params: tuple[Any, ...] = ()) -> int:
         conn.close()
 
 
+def _first_day(db: CorpusDB) -> date:
+    conn = open_db(db.path)
+    try:
+        first = st.store_state(conn, reporting=db.reporting).first_day
+        assert first is not None
+        return first
+    finally:
+        conn.close()
+
+
 @pytest.fixture
 def demo(corpus_db: CorpusFactory) -> CorpusDB:
     db = corpus_db("demo")
@@ -61,7 +71,11 @@ def test_a_published_report_has_every_section(demo: CorpusDB) -> None:
     assert r.summary.status == "published" and r.summary.status_text == "完成"
     assert r.summary.finished_at is not None and r.summary.duration_s is not None
     assert r.range.from_ is not None and r.range.to == yesterday(demo)
-    assert r.range.kind == "full" and r.range.days == (r.range.to - r.range.from_).days + 1
+    first_day = _first_day(demo)
+    # the range starts at the ledger's first row (a deposit before the first trade); the
+    # days it values are the series' own
+    assert r.range.kind == "full" and r.range.from_ <= first_day
+    assert r.range.days == (r.range.to - first_day).days + 1
     assert r.versions.generation_before == 0 and r.versions.generation_after == 1
     assert r.versions.calc_version == st.calc_version(demo.reporting)
     assert r.versions.reporting_ccy == demo.reporting

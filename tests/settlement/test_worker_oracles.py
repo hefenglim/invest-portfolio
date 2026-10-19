@@ -128,29 +128,13 @@ def test_cash_at_every_close_is_the_ledger_sum(corpus_db: CorpusFactory, name: s
         conn.close()
 
 
-def _first_row(conn: sqlite3.Connection) -> date:
-    row = conn.execute(
-        "SELECT MIN(d) FROM (SELECT MIN(trade_date) AS d FROM transactions"
-        " UNION ALL SELECT MIN(build_date) FROM opening_inventory"
-        " UNION ALL SELECT MIN(CASE WHEN type = 'STOCK' AND ex_date IS NOT NULL THEN ex_date"
-        " ELSE date END) FROM dividends"
-        " UNION ALL SELECT MIN(date) FROM cash_movements"
-        " UNION ALL SELECT MIN(date) FROM fx_conversions"
-        " UNION ALL SELECT MIN(date) FROM corporate_actions)").fetchone()
-    return date.fromisoformat(row[0])
-
-
 def _bounds(conn: sqlite3.Connection, g: int, close: st.SettledPeriod) -> tuple[date, date]:
-    """The close's activity window: its calendar period, the FIRST month and year from the
-    ledger's first row."""
-    first = st.store_state(conn, reporting=close.kpi.reporting_ccy).first_day
-    assert first is not None
+    """The close's activity window: its own calendar period (the closes start at the month of
+    the ledger's first row, so no row lies before the first one)."""
+    del conn, g
     end = close.end_day
     start = date(end.year, end.month, 1) if close.kind == "M" else date(end.year, 1, 1)
-    first_period = ((end.year, end.month) == (first.year, first.month) if close.kind == "M"
-                    else end.year == first.year)
-    del g
-    return (min(start, _first_row(conn)) if first_period else start), end
+    return start, end
 
 
 def _money(conn: sqlite3.Connection, rep: str, rows: list[tuple[str, Decimal, str]]

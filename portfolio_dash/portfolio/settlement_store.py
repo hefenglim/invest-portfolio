@@ -2228,9 +2228,11 @@ class SwapResult:
 
 
 def _check_complete(conn: sqlite3.Connection, generation: int, first: date,
-                    through: date) -> str | None:
-    """``None`` when *generation* holds exactly one day row per day and one close per month
-    and year end in ``[first, through]``, else what is wrong."""
+                    through: date, *, closes_from: date | None = None) -> str | None:
+    """``None`` when *generation* holds exactly one day row per day in ``[first, through]`` and
+    one close per month and year end in ``[closes_from or first, through]``, else what is
+    wrong. (W2-D) The closes may start before the series: at the month of the ledger's first
+    row, so a month funded before its first trade has its close."""
     expected_days = (through - first).days + 1 if through >= first else 0
     row = conn.execute(
         "SELECT COUNT(*), MIN(day), MAX(day) FROM settled_day WHERE generation = ?",
@@ -2240,7 +2242,8 @@ def _check_complete(conn: sqlite3.Connection, generation: int, first: date,
                                              or row[2] != through.isoformat())):
         return (f"{count} day rows {row[1]}..{row[2]}, expected {expected_days} "
                 f"{first}..{through}")
-    expected = {(k, p, e.isoformat()) for k, p, e in period_ends(first, through)}
+    expected = {(k, p, e.isoformat()) for k, p, e in period_ends(
+        first if closes_from is None else min(first, closes_from), through)}
     actual = {(str(r[0]), str(r[1]), str(r[2])) for r in conn.execute(
         "SELECT kind, period, end_day FROM settled_period WHERE generation = ?", (generation,))}
     if actual != expected:
@@ -2272,7 +2275,8 @@ def _last_common_day(conn: sqlite3.Connection, old: int, new: int,
 
 def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
          bench_state: str | Mapping[str, Any] | None, through: date, first_day: date | None,
-         reporting: Currency, built_at: datetime | None = None) -> SwapResult:
+         reporting: Currency, built_at: datetime | None = None,
+         closes_from: date | None = None) -> SwapResult:
     """Publish a run's generation ``G + 1`` in ONE transaction (§9.4 "Publishing").
 
     Guarded by ``settle_meta.run_id`` (an orphan child can never publish over boot's cleanup).
@@ -2295,6 +2299,8 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
     the start-time *calc_version* and *reporting* are written, ``G`` is deleted and the
     reports are pruned. ``settle_dirty`` is never written. *first_day* ``None`` means the
     ledger has no row: generation 0 stays 0, otherwise an empty generation is published.
+    *closes_from* (W2-D, optional): the closes start there instead of at *first_day* — the
+    ledger's first row, when it precedes the series.
     """
     bench = (None if bench_state is None else
              bench_state if isinstance(bench_state, str) else _json(dict(bench_state)))
@@ -2354,7 +2360,7 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
                        period_cond="end_day > ? AND end_day <= ?",
                        params=(published.isoformat(), prev_held.isoformat()))
         if first_day is not None:
-            problem = _check_complete(conn, new, first_day, held)
+            problem = _check_complete(conn, new, first_day, held, closes_from=closes_from)
             if problem is not None:
                 raise SwapRefused("incomplete", problem)
         last_common = None if old == 0 else _last_common_day(conn, old, new, published)

@@ -63,21 +63,28 @@ PLACEHOLDER (``SettledDay.placeholder``: ``total_value = net_invested = 0``, ``i
 ``net_worth`` and ``cash_total`` NULL, ``cash_incomplete``) and the closes from U on carry no
 trend figure and no 當期報酬 (``notes.trend_unavailable``). A placeholder carries no figure:
 
-- **it never outlives the condition that made it** — a run that would start after the first
-  placeholder of the published generation starts at it instead (the change that makes the
+- **it never outlives the condition that made it** — every run computes its own U first. When
+  the published generation's first placeholder day P lies before the run's start and U is not
+  P (the series is available again, or unavailable from another day), the run starts at
+  ``min(P, U)`` instead and values every placeholder day again (the change that makes the
   series available may be dated after U: PERF-F2's pair-set edge, a later row in a new quote
-  currency, marks the store dirty only from its own date), and so values every placeholder day
-  again; the claim's range is widened accordingly (``settle_run.range_from``);
+  currency, marks the store dirty only from its own date); the claim's range is widened
+  accordingly (``settle_run.range_from``). With U = P the placeholders stand: a nightly run
+  on a ledger unavailable since U settles its one new day, never a re-run from U;
 - **it is never a figure in a report**: a day with a value on one side and a placeholder on
-  the other is ``value_to_none`` / ``none_to_value``, a placeholder on both is no change, and a
-  placeholder day is never counted as 「新結算」 / 「移除」;
+  the other is ``value_to_none`` / ``none_to_value``, a placeholder on both is no change, a
+  placeholder day is never counted as a valued 「新結算」 / 「移除」 day, and a run that adds
+  placeholder days says 「新結算 N 天（沒有走勢資料）」;
 - the read path serves a placeholder day live whenever the live series is available
   (``settlement_store.first_placeholder_day``).
 
-A run's first period (the first month and the first year it closes) starts at the ledger's
-first row, not at its calendar start: a deposit or a reconversion before the trend's first
-month is in that period's activity, so every year is the sum of its months and ties out with
-its own cash and with the tax package.
+**The closes start at the month of the ledger's first row** — any ledger: a deposit or a
+conversion may precede the first trade, even by a year — not at the trend's first month, and
+every close covers exactly its own calendar period. A month before the series has its cash, its
+activity and its KPIs (no holdings), and no trend point (``notes.trend_unavailable``: the series
+has not started). So every year is the sum of its months, holds its own cash and ties out with
+that year's tax package; the swap checks the closes from there (``swap(closes_from=)``). A full
+run and the self-check start there too.
 """
 
 from __future__ import annotations
@@ -128,6 +135,7 @@ from portfolio_dash.portfolio.settlement_models import (
     CHANGE_TABLE_ZH,
     PHASE_LABELS,
     PHASES,
+    SETTLE_TABLE_ZH,
     DayValue,
     DiffRow,
     HistoryResult,
@@ -512,7 +520,7 @@ def _cash_fx(cache: FxSeriesCache, ccys: set[Currency], reporting: Currency,
 
 def _first_unconvertible_day(cut: LedgerBundle, movements: Sequence[StoredCashMovement],
                              fx: FxHistory, reporting: Currency, refused: Sequence[Any],
-                             first: date, through: date) -> date:
+                             first: date, through: date) -> date | None:
     """The first day ``U`` whose prefix ledger has a flow without an on-or-before rate — by
     ``build_reporting_flows`` itself (the one definition of a flow), bisected over the day
     range: the predicate only turns true as the cut grows."""
@@ -521,6 +529,9 @@ def _first_unconvertible_day(cut: LedgerBundle, movements: Sequence[StoredCashMo
             cut.valued_as_of(day), fx, reporting,
             cash_movements=valued_rows_as_of(movements, day), refused_dividends=refused) is None
 
+    if build_reporting_flows(cut, fx, reporting, cash_movements=movements,
+                             refused_dividends=refused) is not None:
+        return None  # every flow converts: the series is available
     lo, hi = first, through
     if bad(lo):
         return lo
@@ -687,6 +698,9 @@ class _Run:
         self.lines: list[str] = []
         self.read: sqlite3.Connection | None = None
         self.run_from: date | None = None
+        self.close_first: date | None = None
+        #: Placeholder days this run adds that the previous generation did not hold.
+        self.new_placeholders: list[date] = []
         #: The swap committed: from here on nothing ends the run as failed.
         self.swapped = False
 
@@ -709,8 +723,9 @@ class _Run:
             current = "check"
             review = self._check(loaded)
             current = "replay"
-            plan = self._plan(loaded)
+            plan = self._plan(loaded, review)
             self.run_from = plan.run_from
+            self.close_first = plan.close_first
             current = "valuate"
             series = self._valuate(loaded, review, plan)
             current = "close"
@@ -862,20 +877,31 @@ class _Run:
         return review
 
     # ------------------------------------------------------------------------------------
-    def _plan(self, loaded: _Loaded) -> _Plan:
+    def _plan(self, loaded: _Loaded, review: LedgerReview) -> _Plan:
         t = self.tracker
         t.start("replay")
         assert self.claim is not None
         claim = self.claim
         first = loaded.first_day
         through = claim.run_through
-        start = self._widen_to_placeholders(claim)
-        plan = _Plan(run_from=start)
+        plan = _Plan()
+        if first is not None and first <= through:
+            # this run's own U: the first day an unconvertible flow counts (None: available)
+            plan.unavailable_from = _first_unconvertible_day(
+                loaded.cut, loaded.movements, loaded.fx_history, self.reporting,
+                review.book.refused_dividends, first, through)
+            # the closes start at the month of the ledger's FIRST ROW (a month funded before
+            # its first trade has its close: its cash, its activity, no trend point)
+            plan.close_first = (first if loaded.first_row is None
+                                else min(first, loaded.first_row))
+        start = self._run_start(claim, plan)
+        plan.run_from = start
         if first is not None and start is not None:
             plan.value_start = max(start, first)
         if plan.value_start is not None and plan.value_start <= through and first is not None:
-            plan.periods = [(k, p, e) for k, p, e in st.period_ends(first, through)
-                            if e >= plan.value_start]
+            assert plan.close_first is not None and start is not None
+            plan.periods = [(k, p, e) for k, p, e in st.period_ends(plan.close_first, through)
+                            if e >= start]
             book_days = trend_book_days(loaded.cut, start=plan.value_start, end=through)
             plan.days = sorted(set(book_days) | {e for _k, _p, e in plan.periods})
         events = (len(loaded.cut.transactions) + len(loaded.cut.dividends)
@@ -885,29 +911,67 @@ class _Run:
                            "逐日估值時一次重播", done=events, total=events)
         return plan
 
-    def _widen_to_placeholders(self, claim: st.Claim) -> date | None:
-        """The run's first day: the claim's, or the published generation's first PLACEHOLDER
-        day when that is earlier (see the module docstring) — the run then values every
-        placeholder day again, and its range (``settle_run.range_from`` / ``days``, the
-        report's ``range``) says so."""
+    def _run_start(self, claim: st.Claim, plan: _Plan) -> date | None:
+        """The run's first day: the claim's, widened when the published generation cannot be
+        kept up to it (see the module docstring):
+
+        - a full run (and the self-check, and generation 0) starts at the ledger's first row
+          when that precedes the claim's day (the closes start there);
+        - the published generation's first PLACEHOLDER day P, when the condition that made it
+          CHANGED: this run's U is not P (U absent — the series is available — or another
+          day): from ``min(P, U)``. With U = P the placeholders stand and the run starts at
+          its claimed day (a nightly run on a ledger unavailable since U settles one day);
+        - the first close the rule expects, when the published generation lacks it (a store
+          built by an earlier rule).
+
+        The range (``settle_run.range_from`` / ``days``, the report's ``range``) says so."""
         start = claim.run_from
-        if start is None or claim.generation == 0 or claim.scope == "selfcheck":
+        close_first = plan.close_first
+        if start is None:
+            return None
+        if claim.scope in ("full", "selfcheck") or claim.generation == 0:
+            if close_first is not None and close_first < start:
+                # the range starts at the first row; the days it values are still the
+                # series' own (the claim's count)
+                self._widen(claim, close_first, None, days=claim.days)
+                return close_first
             return start
+        widened = start
+        line: str | None = None
         first_placeholder = st.first_placeholder_day(self.conn, claim.generation)
-        if first_placeholder is None or first_placeholder >= start:
-            return start
-        days = max((claim.run_through - first_placeholder).days + 1, 0)
-        kept = len(st.read_days(self.conn, claim.generation,
-                                end=first_placeholder - _ONE_DAY))
-        st.update_run(self.conn, self.run_id, range_from=first_placeholder, days=days)
+        u = plan.unavailable_from
+        if first_placeholder is not None and first_placeholder < start and u != first_placeholder:
+            widened = first_placeholder if u is None else min(first_placeholder, u)
+            line = (f"前一版自 {first_placeholder.isoformat()} 起沒有走勢資料，"
+                    "其原因已改變：本次自該日起一併重新估值")
+        if close_first is not None and close_first < widened and not self._holds_closes(
+                claim.generation, close_first, widened):
+            widened = close_first
+        if widened < start:
+            self._widen(claim, widened, line)
+        return widened
+
+    def _holds_closes(self, generation: int, first: date, before: date) -> bool:
+        """The generation holds every close the rule expects ending in ``[first, before)``."""
+        expected = {(k, p) for k, p, e in st.period_ends(first, before - _ONE_DAY)}
+        held = {(c.kind, c.period) for c in st.read_periods(self.conn, generation,
+                                                           end=before - _ONE_DAY)}
+        return expected <= held
+
+    def _widen(self, claim: st.Claim, start: date, line: str | None, *,
+               days: int | None = None) -> None:
+        if days is None:
+            days = max((claim.run_through - start).days + 1, 0)
+        kept = (len(st.read_days(self.conn, claim.generation, end=start - _ONE_DAY))
+                if claim.generation > 0 else 0)
+        st.update_run(self.conn, self.run_id, range_from=start, days=days)
         t = self.tracker
         rng = t.progress.range.model_copy(update={
-            "from_": first_placeholder, "days": days, "kept_before": kept})
+            "from_": start, "days": days, "kept_before": kept})
         t.progress = t.progress.model_copy(update={"range": rng})
         t.report = t.report.model_copy(update={"range": rng})
-        self.lines.append(f"前一版自 {first_placeholder.isoformat()} 起沒有走勢資料："
-                          "本次自該日起一併重新估值")
-        return first_placeholder
+        if line is not None:
+            self.lines.append(line)
 
     # ------------------------------------------------------------------------------------
     def _valuate(self, loaded: _Loaded, review: LedgerReview, plan: _Plan) -> _Series:
@@ -937,10 +1001,9 @@ class _Run:
                                       cash_movements=loaded.movements,
                                       refused_dividends=refused)
         series.flows = flows
-        if flows is None:
-            series.unavailable_from = _first_unconvertible_day(
-                loaded.cut, loaded.movements, loaded.fx_history, self.reporting, refused,
-                first, through)
+        series.unavailable_from = plan.unavailable_from
+        if (flows is None) != (plan.unavailable_from is not None):
+            raise _Failure("valuate", "逐日估值時匯率可用性判斷不一致（內部錯誤）")
         trend_end = through if series.unavailable_from is None else (
             series.unavailable_from - _ONE_DAY)
         trend_bundle = loaded.cut if series.unavailable_from is None else (
@@ -1074,7 +1137,6 @@ class _Run:
         rates = pc.own_date_rates(loaded.cache, self.reporting)
         first = loaded.first_day
         assert first is not None
-        first_row = loaded.first_row if loaded.first_row is not None else first
         closes: list[_Close] = []
         kpi_cache: dict[date, pc.CloseKpi] = {}
         cash_cache: dict[date, list[PeriodCash]] = {}
@@ -1103,17 +1165,17 @@ class _Run:
             kpi = ck.kpi.model_copy(update={"notes": ck.kpi.notes.model_copy(update={
                 "options_value_excluded": excluded,
                 "missing_cash_fx": pc.missing_cash_fx(cash, self.reporting)})})
-            twr, why = pc.period_twr(index, points, start_end=start_end, end=end)
-            kpi = pc.with_trend(kpi, point=series.points.get(end), twr=twr, twr_reason=why)
-            # A period starts on its first calendar day — the FIRST month and the FIRST year
-            # at the ledger's first row instead, so a row before the trend's first month is in
-            # their activity: every year is the sum of its months and ties out with its cash.
-            begin = pc.period_start(kind, end)
-            if (end.year, end.month if kind == "M" else 0) == (
-                    first.year, first.month if kind == "M" else 0):
-                begin = min(begin, first_row)
-            act = pc.activity(start=begin, end=end, book=book, ledger=ledger,
-                              reporting=self.reporting, rate_at=rates)
+            if end < first:  # a close before the series: no trend point, no 當期報酬
+                kpi = pc.with_trend(kpi, point=None, twr=None, twr_reason=pc.TWR_NOT_STARTED_ZH,
+                                    trend_reason=pc.TREND_NOT_STARTED_ZH)
+            else:
+                twr, why = pc.period_twr(index, points, start_end=start_end, end=end)
+                kpi = pc.with_trend(kpi, point=series.points.get(end), twr=twr,
+                                    twr_reason=why)
+            # every period is its own calendar period: the closes start at the month of the
+            # ledger's first row, so no row is ever outside the period it is listed in
+            act = pc.activity(start=pc.period_start(kind, end), end=end, book=book,
+                              ledger=ledger, reporting=self.reporting, rate_at=rates)
             closes.append(_Close(
                 period=st.SettledPeriod(kind=kind, period=period, end_day=end, kpi=kpi,
                                         activity=act),
@@ -1177,6 +1239,8 @@ class _Run:
                             if old_gen > 0 else {})
                 st.write_diff(self.conn, self.run_id, _diff_rows(self.run_id, old_days,
                                                                  new_days))
+                self.new_placeholders = sorted(
+                    d for d, v in new_days.items() if v.placeholder and d not in old_days)
                 note = "計算規則更新" if old_gen > 0 and not state.calc_ok else None
                 common = sorted(set(old_days) & set(new_days))
                 last_common = (None if not common else DayValue(
@@ -1201,6 +1265,7 @@ class _Run:
         try:
             result = st.swap(self.conn, self.run_id, calc_version=self.calc, bench_state=bench,
                              through=claim.run_through, first_day=loaded.first_day,
+                             closes_from=self.close_first,
                              reporting=self.reporting)
         except st.SwapRefused as exc:
             if exc.reason == "incomplete":
@@ -1222,8 +1287,15 @@ class _Run:
         assert stored is not None
         lines = list(self.lines)
         history = stored.history if result.status != "superseded" else None
-        if history is not None and history.new_days:
-            lines.append(f"新結算 {history.new_days} 天")
+        valued = history.new_days if history is not None else 0
+        blank = (0 if result.status == "superseded" else
+                 sum(1 for d in self.new_placeholders
+                     if result.settled_through is None or d <= result.settled_through))
+        if valued:
+            lines.append(f"新結算 {valued} 天")
+        if blank:
+            lines.append(f"新結算 {blank} 天（沒有走勢資料）" if not valued
+                         else f"另有 {blank} 天沒有走勢資料")
         if history is not None and history.dropped_days:
             lines.append(f"移除 {history.dropped_days} 天")
         if result.status == "partial" and result.handed_from is not None:
@@ -1377,8 +1449,9 @@ class _Run:
                     first = (day, table)
         if differences:
             assert first is not None
+            table = SETTLE_TABLE_ZH.get(first[1], "結算資料")
             self.lines.append(f"自檢：與第 {old_gen} 版逐列比對，發現 {differences} 處差異，"
-                              f"最早於 {first[0]}（{first[1]}）")
+                              f"最早於 {first[0]}（{table}）")
         else:
             self.lines.append(f"自檢：與第 {old_gen} 版逐列比對一致")
         return SelfcheckResult(
@@ -1434,8 +1507,12 @@ class _Run:
 class _Plan:
     """The days the run values and the periods it closes."""
 
-    #: The run's first day (the claim's, widened to the first placeholder).
+    #: The run's first day (the claim's, widened — :meth:`_Run._run_start`).
     run_from: date | None = None
+    #: This run's U: the first day an unconvertible flow counts (``None``: available).
+    unavailable_from: date | None = None
+    #: The first day the closes cover: the month of the ledger's first row.
+    close_first: date | None = None
     value_start: date | None = None
     days: list[date] = field(default_factory=list)
     periods: list[tuple[Literal["M", "Y"], str, date]] = field(default_factory=list)

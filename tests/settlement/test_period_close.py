@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from portfolio_dash.export.tax import build_tax_package_zip
+from portfolio_dash.portfolio import period_close as pc
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.settlement_models import PeriodActivity
 from portfolio_dash.shared.enums import Currency
@@ -387,11 +388,35 @@ def test_a_dividend_between_its_ex_date_and_its_payment_is_not_activity_yet(
 # ---------------------------------------------------------------------------------------------
 
 
-def test_rows_before_the_first_month_are_in_the_first_period(corpus_db: CorpusFactory) -> None:
+def _tax_sheets(db: CorpusDB, year: int) -> dict[str, list[dict[str, str]]]:
+    conn = open_db(db.path)
+    try:
+        art = build_tax_package_zip(conn, now=db.now, year=year, reporting=db.reporting)
+    finally:
+        conn.close()
+    with zipfile.ZipFile(io.BytesIO(art.content)) as zf:
+        return {info.filename: list(csv.DictReader(io.StringIO(
+            zf.read(info).decode("utf-8-sig")))) for info in zf.infolist()
+            if info.filename.endswith(".csv")}
+
+
+def _fx_sheet(db: CorpusDB, year: int) -> dict[tuple[str, str], Decimal]:
+    out: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+    for row in _tax_sheets(db, year)[f"fx_realized_{year}.csv"]:
+        out[(row["account_id"], row["home_ccy"])] += Decimal(row["realized"])
+    return dict(out)
+
+
+def _fx_lines(close: st.SettledPeriod) -> dict[tuple[str, str], Decimal]:
+    return {(x.account_id, x.realized.ccy.value): x.realized.native
+            for x in close.activity.fx_realized}
+
+
+def test_rows_before_the_first_trade_have_their_own_months(corpus_db: CorpusFactory) -> None:
     """``rich``'s trend starts 2025-10-01. A TWD deposit on 2025-03-03 and a TWD → USD → TWD
-    round trip in April / May (a realized-FX row before the first trade) are in the first
-    month's and the first year's activity, so the year is still the sum of its months, its
-    deposits are the cash it holds, and it ties out with the tax package built for 2025."""
+    round trip in April / May (a realized-FX row before the first trade): the closes start at
+    the month of the ledger's first row, so each row is in its own month, the year is still the
+    sum of its months, and it ties out with the tax package built for 2025."""
     db = corpus_db("rich")
     _x(db, "INSERT INTO cash_movements (account_id, date, kind, ccy, amount, note) "
            "VALUES ('tw_broker', '2025-03-03', 'DEPOSIT', 'TWD', '777777', 'probe')")
@@ -401,34 +426,63 @@ def test_rows_before_the_first_month_are_in_the_first_period(corpus_db: CorpusFa
            "to_amount) VALUES ('schwab', '2025-05-02', 'USD', '500', 'TWD', '16000')")
     closes = _settled(db)
     year = next(c for c in closes if c.kind == "Y" and c.period == "2025")
-    months = [c for c in closes if c.kind == "M" and c.end_day.year == 2025]
-    assert months[0].period == "2025-10"
-    assert _flow_lines(year.activity) == _sum_months(months)
-    deposits = {(m.account_id, m.amount.ccy.value): m for m in months[0].activity.cash_movements
-                if m.kind == "DEPOSIT"}
-    assert deposits[("tw_broker", "TWD")].amount.native >= Decimal("777777")
-    fx = {(x.account_id, x.realized.ccy.value): x.realized.native
-          for x in year.activity.fx_realized}
-    assert fx[("schwab", "TWD")] == Decimal("16000") - Decimal("500") * Decimal("31")
-    # the tax package built for 2025 ties out sheet by sheet
-    conn = open_db(db.path)
-    try:
-        art = build_tax_package_zip(conn, now=db.now, year=2025, reporting=db.reporting)
-    finally:
-        conn.close()
-    with zipfile.ZipFile(io.BytesIO(art.content)) as zf:
-        sheets = {info.filename: zf.read(info).decode("utf-8-sig") for info in zf.infolist()}
-    fx_sheet: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
-    for row in csv.DictReader(io.StringIO(sheets["fx_realized_2025.csv"])):
-        fx_sheet[(row["account_id"], row["home_ccy"])] += Decimal(row["realized"])
-    assert fx == dict(fx_sheet)
+    months = {c.period: c for c in closes if c.kind == "M" and c.end_day.year == 2025}
+    assert min(months) == "2025-03"
+    assert _flow_lines(year.activity) == _sum_months(sorted(months.values(),
+                                                            key=lambda c: c.end_day))
+    march = months["2025-03"]
+    assert [(m.account_id, m.amount.native) for m in march.activity.cash_movements] == [
+        ("tw_broker", Decimal("777777"))]
+    assert march.kpi.trend_total_value is None and march.kpi.period_twr is None
+    assert march.kpi.notes.trend_unavailable == pc.TREND_NOT_STARTED_ZH
+    assert march.kpi.period_twr_reason == pc.TWR_NOT_STARTED_ZH
+    assert _fx_lines(months["2025-05"]) == {("schwab", "TWD"): Decimal("500")}
+    assert _fx_lines(year) == _fx_sheet(db, 2025) == {("schwab", "TWD"): Decimal("500")}
     realized: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
-    for row in csv.DictReader(io.StringIO(sheets["realized_gains_2025.csv"])):
+    for row in _tax_sheets(db, 2025)["realized_gains_2025.csv"]:
         realized[(row["quote_ccy"], row.get("asset_type") or "stock")] += Decimal(
             row["realized_adjusted"])
     mine = {(k[3].value, k[2]): v for k, v in _flow_lines(year.activity).items()
             if k[0] == "realized" and k[1] == "trade" and k[4] == "n"}
     assert mine == dict(realized)
+
+
+def test_a_first_row_in_an_earlier_year_has_its_own_year_close(corpus_db: CorpusFactory
+                                                              ) -> None:
+    """The fold verification's scenario G: rich plus a 2024 deposit and a 2024 TWD → USD → TWD
+    round trip — an account funded the year before its first trade. The 2024 year close holds
+    the 500 of realized FX and the deposit, the 2025 one holds neither, and each ties out with
+    its own year's ``fx_realized_<year>.csv``."""
+    db = corpus_db("rich")
+    _x(db, "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy, "
+           "to_amount) VALUES ('schwab', '2024-04-01', 'TWD', '31000', 'USD', '1000')")
+    _x(db, "INSERT INTO fx_conversions (account_id, date, from_ccy, from_amount, to_ccy, "
+           "to_amount) VALUES ('schwab', '2024-05-02', 'USD', '500', 'TWD', '16000')")
+    _x(db, "INSERT INTO cash_movements (account_id, date, kind, ccy, amount, note) "
+           "VALUES ('tw_broker', '2024-03-03', 'DEPOSIT', 'TWD', '777777', 'probe')")
+    closes = _settled(db)
+    years = {c.period: c for c in closes if c.kind == "Y"}
+    assert set(years) == {"2024", "2025"}
+    y2024, y2025 = years["2024"], years["2025"]
+    assert _fx_lines(y2024) == _fx_sheet(db, 2024) == {("schwab", "TWD"): Decimal("500")}
+    assert _fx_lines(y2025) == _fx_sheet(db, 2025) == {}
+    assert [(m.account_id, m.amount.native) for m in y2024.activity.cash_movements
+            if m.kind == "DEPOSIT"] == [("tw_broker", Decimal("777777"))]
+    assert all(m.amount.native != Decimal("777777") for m in y2025.activity.cash_movements)
+    for year in ("2024", "2025"):
+        months = sorted((c for c in closes if c.kind == "M" and c.period.startswith(year)),
+                        key=lambda c: c.end_day)
+        assert _flow_lines(years[year].activity) == _sum_months(months), year
+    assert y2024.kpi.notes.trend_unavailable == pc.TREND_NOT_STARTED_ZH
+    conn = open_db(db.path)
+    try:
+        g = generation(conn)
+        cash = {(c.account_id, c.ccy.value): c.balance
+                for c in st.read_period_cash(conn, g, "Y", "2024")}
+        assert cash[("tw_broker", "TWD")] == Decimal("777777")
+        assert st.store_state(conn, reporting=db.reporting).first_day == date(2025, 10, 1)
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------------------------

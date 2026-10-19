@@ -378,6 +378,10 @@ TWR_NO_ANCHOR_ZH = "尚無可計算的時間加權報酬（尚未有估值完整
 TWR_END_INCOMPLETE_ZH = "期末估值不完整（缺價格或待釐清），當期報酬暫不計算"
 TWR_START_INCOMPLETE_ZH = "期初估值不完整（缺價格或待釐清），當期報酬暫不計算"
 TWR_START_UNAVAILABLE_ZH = "期初沒有走勢資料，當期報酬暫不計算"
+#: A close before the series (the ledger's first rows are cash or conversions, its first trade
+#: comes later): it has its cash and activity, and no trend point yet.
+TREND_NOT_STARTED_ZH = "走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料"
+TWR_NOT_STARTED_ZH = "走勢尚未開始，當期報酬暫不計算"
 
 
 @dataclass(frozen=True)
@@ -427,16 +431,18 @@ def kpi_incomplete(kpi: PeriodKpi) -> bool:
 
 
 def with_trend(kpi: PeriodKpi, *, point: TrendPoint | None, twr: Decimal | None,
-               twr_reason: str | None) -> PeriodKpi:
+               twr_reason: str | None, trend_reason: str | None = None) -> PeriodKpi:
     """The KPI block with the settled day D's trend figures and the period's TWR.
 
     ``notes.incomplete`` is the settled day's own flag. A day with NO trend point (the series
     is unavailable there, :data:`TREND_UNAVAILABLE_ZH`) carries no trend figure and says so in
     ``notes.trend_unavailable``; its ``incomplete`` then states the KPIs' own completeness
-    (:func:`kpi_incomplete`) — a missing trend is not a missing price."""
+    (:func:`kpi_incomplete`) — a missing trend is not a missing price. *trend_reason*
+    replaces the sentence (:data:`TREND_NOT_STARTED_ZH` before the series starts)."""
     notes = kpi.notes.model_copy(update={
         "incomplete": kpi_incomplete(kpi) if point is None else point.incomplete,
-        "trend_unavailable": TREND_UNAVAILABLE_ZH if point is None else None})
+        "trend_unavailable": (trend_reason or TREND_UNAVAILABLE_ZH) if point is None
+        else None})
     return kpi.model_copy(update={
         "trend_total_value": None if point is None else point.total_value,
         "net_invested": None if point is None else point.net_invested,
@@ -712,8 +718,10 @@ def period_start(kind: str, end: date) -> date:
 
 __all__ = [
     "CAPITAL_KINDS",
+    "TREND_NOT_STARTED_ZH",
     "TREND_UNAVAILABLE_ZH",
     "TWR_END_INCOMPLETE_ZH",
+    "TWR_NOT_STARTED_ZH",
     "TWR_NO_ANCHOR_ZH",
     "TWR_START_INCOMPLETE_ZH",
     "TWR_START_UNAVAILABLE_ZH",

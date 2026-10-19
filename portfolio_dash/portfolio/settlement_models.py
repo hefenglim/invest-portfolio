@@ -153,6 +153,15 @@ CHANGE_TABLE_ZH: dict[str, str] = {
     "account_market_rules": "帳戶市場規則",
 }
 
+#: (W2-D) The settle tables a self-check compares, in the owner's words — the ONE mapping
+#: (the run report's summary lines and ``job_runs.detail``, DEF-073: no table id in user text).
+SETTLE_TABLE_ZH: dict[str, str] = {
+    "settled_day": "逐日結算",
+    "settled_period": "月結與年結",
+    "settled_period_holding": "期末持倉",
+    "settled_period_cash": "期末現金",
+}
+
 # Actors (P14): who made a change. NULL is anything the application did not open.
 ACTOR_GUEST = "user:guest"
 ACTOR_BOOT = "system:boot"
@@ -810,6 +819,7 @@ __all__ = [
     "RUN_REASONS",
     "RUN_REASON_ZH",
     "SELFCHECK_DIFF_REASON",
+    "SETTLE_TABLE_ZH",
     "CanonDecimal",
     "ChangeCounter",
     "ChangeRecord",

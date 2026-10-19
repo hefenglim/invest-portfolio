@@ -296,7 +296,9 @@ def test_a_partial_first_generation_and_its_chained_run(corpus_db: CorpusFactory
     first = _report(db, 1)
     assert first.history is not None
     # the lines are the PUBLISHED result's: the trimmed history, never the computed range
-    assert first.history.new_days == (date(2026, 6, 1) - first.range.from_).days + 1
+    first_day = _state(db).first_day
+    assert first_day is not None
+    assert first.history.new_days == (date(2026, 6, 1) - first_day).days + 1
     assert f"新結算 {first.history.new_days} 天" in first.summary_lines
     assert start_run(db, 2, scope="dirty", reason="chained", previous=1) == "published"
     assert _published(db) == _fresh(db, tmp_path)
@@ -384,6 +386,10 @@ def test_a_selfcheck_names_the_first_differing_day_and_table(demo: CorpusDB) -> 
     assert report.selfcheck.differences == 2
     assert report.selfcheck.first_day == date(2026, 4, 7)
     assert report.selfcheck.first_table == "settled_day"
+    # the line the panel renders verbatim speaks zh only (DEF-073)
+    assert ("自檢：與第 1 版逐列比對，發現 2 處差異，最早於 2026-04-07（逐日結算）"
+            in report.summary_lines), report.summary_lines
+    assert not any("settled_" in line for line in report.summary_lines)
     assert report.summary.selfcheck_diff
     assert job_status_for(report.summary.status, selfcheck_diff=True) == "partial"
     # the recompute replaced the tampered rows (it publishes through the ordinary swap)

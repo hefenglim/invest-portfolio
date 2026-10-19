@@ -15,13 +15,13 @@ and MAJOR 2).
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from portfolio_dash.portfolio import settlement_store as st
 from tests.reference.corpora import open_db
 from tests.settlement.conftest import CorpusFactory
-from tests.settlement.test_worker import generation, prepare, start_run
+from tests.settlement.test_worker import generation, prepare, start_run, yesterday
 from tests.settlement.test_worker_runs import _fresh, _published, _report, _x
 
 
@@ -102,4 +102,33 @@ def test_a_placeholder_is_never_a_figure_in_the_report(corpus_db: CorpusFactory)
     assert report.history is not None
     assert report.history.new_days == 0 and report.history.dropped_days == 0
     assert report.history.value_to_none > 0
-    assert not any(line.startswith("新結算") for line in report.summary_lines)
+    # a day settled without a figure is said so, never counted as a valued day
+    assert "新結算 22 天（沒有走勢資料）" in report.summary_lines, report.summary_lines
+    assert all("沒有走勢資料" in line for line in report.summary_lines
+               if line.startswith("新結算"))
+
+
+def test_a_ledger_unavailable_since_u_settles_one_day_a_night(corpus_db: CorpusFactory) -> None:
+    """The fold verification's finding A: on ``unquoted_ccy_cash`` the series stays unavailable
+    from its MYR rebate (2026-03-16). A placeholder stands while its cause does (this run's U
+    equals the stored first placeholder), so each nightly run settles exactly its new day —
+    never a re-run from U."""
+    db = corpus_db("unquoted_ccy_cash")
+    prepare(db)
+    y = yesterday(db)
+    assert start_run(db, 1, through=y - timedelta(days=3)) == "published"
+    for n, back in ((2, 2), (3, 1)):
+        day = y - timedelta(days=back)
+        assert start_run(db, n, scope="nightly", reason="nightly", through=day) == "published"
+        report = _report(db, n)
+        assert (report.range.from_, report.range.to, report.range.days) == (day, day, 1)
+        assert any(line.startswith("新結算 1 天") for line in report.summary_lines), \
+            report.summary_lines
+        assert not any("重新估值" in line for line in report.summary_lines)
+        step = next(s for s in report.steps if s.key == "valuate")
+        assert step.done == 1
+    conn = open_db(db.path)
+    try:
+        assert st.first_placeholder_day(conn, generation(conn)) == date(2026, 3, 16)
+    finally:
+        conn.close()
