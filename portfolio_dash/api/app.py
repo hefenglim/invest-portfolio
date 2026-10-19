@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
 
-from portfolio_dash.api import action_log, settlement_service
+from portfolio_dash.api import action_log, alert_inputs, settlement_service
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
 from portfolio_dash.api.composition import bind_runtime
 from portfolio_dash.api.deps import get_conn
@@ -107,6 +107,8 @@ from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_
 from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+#: Seconds after the last write window closes before today's result is pre-warmed (plan W4).
+WRITE_PREWARM_DELAY_S = 3.0
 
 
 @asynccontextmanager
@@ -295,6 +297,10 @@ def create_app() -> FastAPI:
             return await call_next(request)
         finally:
             end_write()
+            # PERF spec §12.1: pre-warm today's dashboard and alerts once the LAST write of a
+            # burst has closed (debounced; off unless PD_PREWARM=1), so the page the owner
+            # opens after 儲存 is a cache hit rather than a fresh build.
+            result_cache.schedule_prewarm(alert_inputs.prewarm_today, WRITE_PREWARM_DELAY_S)
 
     app.include_router(auth.router, prefix="/api")
     app.include_router(users.router, prefix="/api")
