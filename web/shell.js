@@ -970,8 +970,16 @@
   } catch (e) { /* cache is best-effort */ }
   function pdInitPrefs() {
     if (page === 'login') return;
-    pdEnsureApi()
-      .then((ok) => (ok ? window.pdApi.get('/api/ui-prefs', null, BG) : null))
+    /* PERF spec §13 "Duplicates — settings prefs 3×": this is the page's ONE boot read of the
+       prefs; 系統設定's 每頁筆數 and 自動 AI 辨識 panels await `window.pdUiPrefs` instead of
+       asking again. Sharing a concurrent GET (api.js) was not enough: the read can answer
+       before those later scripts have even run. Started synchronously when api.js is on
+       the page (every page loads it first), so the promise exists before they look. */
+    const read = window.pdApi
+      ? window.pdApi.get('/api/ui-prefs', null, BG)
+      : pdEnsureApi().then((ok) => (ok ? window.pdApi.get('/api/ui-prefs', null, BG) : null));
+    window.pdUiPrefs = read;
+    read
       .then((p) => {
         if (p && typeof p.page_size === 'number') {
           window.pdPrefs.page_size = p.page_size;

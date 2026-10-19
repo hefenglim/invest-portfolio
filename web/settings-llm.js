@@ -646,7 +646,8 @@
       t.classList.toggle('on', !!on);
       t.setAttribute('aria-checked', on ? 'true' : 'false');
     };
-    api.get('/api/ui-prefs').then((p) => {
+    /* PERF §13: the shell's boot read of the prefs (window.pdUiPrefs) is this read too. */
+    (window.pdUiPrefs || api.get('/api/ui-prefs')).then((p) => {
       if (p && typeof p.auto_ai_resolve === 'boolean') paint(p.auto_ai_resolve);
     }).catch(() => { /* leave the default painted */ });
     t.addEventListener('click', async () => {
