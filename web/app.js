@@ -1106,6 +1106,7 @@
       sub: '過去月份為月底結算值：帳本、價格或匯率更正，或計算規則更新並重新結算後會跟著更新；本月為即時值',
       empty: '尚無月度成績 — 帳本有了紀錄後，本月即時值會出現在這裡，過去月份於月底結算後列出。',
       failed: '月度成績載入失敗，請稍後重新整理。',
+      missing: '尚無月度成績。',
       pending: '目前帳本有待釐清的部位：釐清後，過去月份的數字可能隨之更新。',
     },
     Y: {
@@ -1113,6 +1114,7 @@
       sub: '過去年份為年底結算值：帳本、價格或匯率更正，或計算規則更新並重新結算後會跟著更新；本年為即時值',
       empty: '尚無年度成績 — 帳本有了紀錄後，本年即時值會出現在這裡，過去年份於年底結算後列出。',
       failed: '年度成績載入失敗，請稍後重新整理。',
+      missing: '年度成績尚未提供：年結資料由重新結算產生後即可查看。',
       pending: '目前帳本有待釐清的部位：釐清後，過去年份的數字可能隨之更新。',
     },
   };
@@ -1168,7 +1170,9 @@
     const why = (x) => {
       const r = window.pdSettlement && window.pdSettlement.reasonText
         ? window.pdSettlement.reasonText(x.reason) : x.reason;
-      return [f.date(x.at), x.source, r].filter((s) => s && s !== f.NULL_GLYPH).join('，');
+      /* `source` is a machine reference (`transactions:123`, `portfolio_snapshots`): never
+         printed — the zh `reason` is the why */
+      return [f.date(x.at), r].filter((s) => s && s !== f.NULL_GLYPH).join('，');
     };
     const lines = obj && (obj.text || obj.note) ? [obj.text || obj.note]
       : rows.map((x) => (x.label || x.field) + '：' + fmtUnit(x.old_value, x.unit) + ' → '
@@ -1244,7 +1248,10 @@
       if (seq !== snapState.seq) return;
       tbody.replaceChildren();
       const tr = el('tr');
-      const td = el('td', 'sign-nil', (err && err.message) || copy.failed);
+      /* a 404 is "this server has no such read" (the year closes before they ship), not a
+         failure: an empty state in words, never the generic 「找不到指定的資料或頁面」 */
+      const td = el('td', 'sign-nil', err && err.status === 404 ? copy.missing
+        : ((err && err.message) || copy.failed));
       td.colSpan = 6;
       tr.appendChild(td);
       tbody.appendChild(tr);

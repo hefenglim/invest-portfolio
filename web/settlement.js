@@ -124,10 +124,26 @@
     }
     return actor;
   }
-  /* A trigger sentence carries `{started_by}` (§9.5): the viewer reads 「你」 for their own run. */
+  /* The viewer as an actor value (P14): 'user:<login>', or 'user:guest' in guest mode. */
+  function viewerActor() {
+    const a = window.pdAuth;
+    if (a && a.isGuest && a.isGuest()) return 'user:guest';
+    const login = viewer();
+    return login ? 'user:' + login : null;
+  }
+  /* settlement_service.who_text — who did something, for THIS viewer: 「你」 for the viewer
+     (guest mode included), 「系統」 for no actor, else the actor's words. Only for the two
+     fields the server leaves raw (`cancelled_by`); every row and trigger arrives worded. */
+  function whoText(actor) {
+    if (nil(actor)) return '系統';
+    if (actor === viewerActor()) return '你';
+    return actorText(actor);
+  }
+  /* A trigger sentence the server has rendered for the viewer (E renders `{started_by}` on
+     every route); the token is resolved here only if one ever arrives unrendered. */
   function trigger(text, startedBy) {
     if (nil(text)) return '';
-    return String(text).split('{started_by}').join(actorText(startedBy));
+    return String(text).split('{started_by}').join(whoText(startedBy));
   }
   function reasonText(code) {
     if (nil(code)) return '';
@@ -601,17 +617,30 @@
         const rows = Array.isArray(resp) ? resp : ((resp && resp.rows) || []);
         st.rows = rows;
         st.total = resp && !nil(resp.total_count) ? resp.total_count : rows.length;
+        /* `lead`: rows shown above the paged ones on the first page only, outside the paging
+           (the change trail's price / FX counters — one per symbol or pair, never many). */
+        const lead = spec.lead && st.offset === 0 ? spec.lead(resp) : [];
         tbody.replaceChildren();
-        if (!rows.length) {
+        if (!rows.length && !lead.length) {
           const tr = el('tr');
-          const td = el('td', 'sign-nil', spec.empty);
+          const td = el('td', 'sign-nil',
+            typeof spec.empty === 'function' ? spec.empty() : spec.empty);
           td.colSpan = spec.columns.length;
           tr.appendChild(td);
           tbody.appendChild(tr);
         }
+        lead.forEach((r) => {
+          const tr = el('tr', 'st-row-lead');
+          spec.leadRow(r, resp).forEach((cell) => {
+            const td = el('td', cell.cls || null);
+            td.textContent = nil(cell.text) ? NIL : cell.text;
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
         rows.forEach((r, i) => {
           const tr = el('tr', spec.rowCls ? spec.rowCls(r) : null);
-          spec.row(r).forEach((cell) => {
+          spec.row(r, resp).forEach((cell) => {
             const td = el('td', cell.cls || null);
             if (cell.node) td.appendChild(cell.node); else td.textContent = nil(cell.text) ? NIL : cell.text;
             if (cell.title) td.title = cell.title;
@@ -628,9 +657,9 @@
           tbody.appendChild(tr);
         });
         const to = st.offset + rows.length;
-        info.textContent = st.total
+        info.textContent = (st.total
           ? count(st.offset + (rows.length ? 1 : 0)) + '–' + count(to) + '／共 ' + count(st.total) + ' 筆'
-          : '共 0 筆';
+          : '共 0 筆') + (spec.infoExtra ? spec.infoExtra(resp) : '');
         prev.disabled = st.offset <= 0;
         next.disabled = to >= st.total;
         pager.hidden = st.total <= spec.pageSize && st.offset === 0;
@@ -667,37 +696,53 @@
     if (!fa || !fb || fa === fb) return fa || fb;
     return fa + ' → ' + fb;
   };
-  function attempted(ids) {
-    return (ids || []).map((id) => '曾於 #' + id + ' 嘗試').join('、');
-  }
-  function changeRow(r) {
-    if (nil(r.row_key) && !nil(r.key)) {   // a ChangeCounter: prices per symbol, FX per pair
-      return [
-        { text: CHANGE_TABLE_ZH[r.table] || r.table, cls: 'col-text' },
-        { text: '寫入', cls: 'col-text' },
-        { text: r.key, cls: 'col-text num' },
-        { text: NIL, cls: 'col-text' }, { text: NIL, cls: 'col-text' },
-        { text: range2(r.earliest, r.latest), cls: 'col-text num' },
-        { text: NIL, cls: 'col-text' }, { text: NIL, cls: 'col-text' },
-        { text: NIL, cls: 'col-text' },
-        { text: [count(r.changes) + ' 筆', attempted(r.attempted_run_ids)]
-          .filter(Boolean).join('；'), cls: 'col-text' },
-      ];
-    }
+  /* A ledger record of /api/settlement/changes `rows`: every word is the server's
+     (table_label, op_text, account_text with {account:…} tokens api.js has resolved,
+     actor_text, attempted_text, handed_back + the page's handed_back_text) — the mirrors
+     above are only the fallback for a row that lacks one. */
+  function changeRow(r, resp) {
+    const note = [];
+    if (r.attempted_text) note.push(r.attempted_text);
+    if (r.handed_back) note.push((resp && resp.handed_back_text) || '本次未生效，已退回待結算');
     return [
-      { text: CHANGE_TABLE_ZH[r.table] || r.table, cls: 'col-text' },
-      { text: CHANGE_OP_ZH[r.op] || r.op, cls: 'col-text' },
+      { text: r.table_label || CHANGE_TABLE_ZH[r.table] || r.table, cls: 'col-text' },
+      { text: r.op_text || CHANGE_OP_ZH[r.op] || r.op, cls: 'col-text' },
       { text: r.row_key, cls: 'col-text num' },
-      { text: oldNew(r.old_account_id, r.new_account_id, acct), cls: 'col-text' },
+      { text: !nil(r.account_text) ? r.account_text
+        : oldNew(r.old_account_id, r.new_account_id, acct), cls: 'col-text' },
       { text: oldNew(r.old_symbol, r.new_symbol, String), cls: 'col-text num' },
       { text: oldNew(r.old_day, r.new_day, day), cls: 'col-text num' },
       { text: nil(r.import_batch_id) ? NIL : String(r.import_batch_id), cls: 'col-text num' },
-      { text: actorText(r.actor), cls: 'col-text' },
+      { text: r.actor_text || actorText(r.actor), cls: 'col-text' },
       { text: stamp(r.written_at), cls: 'col-text num' },
-      { text: attempted(r.attempted_run_ids) || NIL, cls: 'col-text' },
+      { text: note.length ? note.join('；') : NIL, cls: 'col-text' },
     ];
   }
+  /* A price / FX counter of the page's `counters` (one per symbol or pair): the table's label
+     from the page's own `tables`, the key, how many writes and the days they touched. The
+     server sends no sentence for its earlier attempts, so the run being read is left out of
+     them here exactly as `_record_row` leaves it out of a record's. */
+  function counterRow(c, resp, runId) {
+    const labels = {};
+    ((resp && resp.tables) || []).forEach((t) => { labels[t.table] = t.label; });
+    const others = (c.attempted_run_ids || []).filter((id) => id !== runId);
+    const note = [count(c.changes) + ' 筆'];
+    if (others.length) note.push('曾於 ' + others.map((id) => '#' + id).join('、') + ' 嘗試');
+    return [
+      { text: labels[c.table] || CHANGE_TABLE_ZH[c.table] || c.table, cls: 'col-text' },
+      { text: '寫入', cls: 'col-text' },
+      { text: c.key, cls: 'col-text num' },
+      { text: NIL, cls: 'col-text' }, { text: NIL, cls: 'col-text' },
+      { text: range2(c.earliest, c.latest), cls: 'col-text num' },
+      { text: NIL, cls: 'col-text' }, { text: NIL, cls: 'col-text' },
+      { text: NIL, cls: 'col-text' },
+      { text: note.join('；'), cls: 'col-text' },
+    ];
+  }
+  /* The change trail (§9.6): the ledger records (`rows`, paged 50, never truncated) and the
+     price / FX counters (`counters`, above them on the first page). */
   function changeTrail(host, state, empty) {
+    const runId = state.indexOf('run:') === 0 ? Number(state.slice(4)) : null;
     return pagedTable(host, {
       columns: CHANGE_COLUMNS,
       pageSize: CHANGES_PAGE,
@@ -705,6 +750,12 @@
       read: (limit, offset) => api.get('/api/settlement/changes',
         { state: state, limit: limit, offset: offset }, BG),
       row: changeRow,
+      lead: (resp) => (resp && resp.counters) || [],
+      leadRow: (c, resp) => counterRow(c, resp, runId),
+      infoExtra: (resp) => {
+        const n = ((resp && resp.counters) || []).length;
+        return n ? '；價格／匯率 ' + count(n) + ' 項' : '';
+      },
     });
   }
   function changeTables(host, tables, emptyText) {
@@ -781,6 +832,13 @@
     }
   }
 
+  /* What the run has claimed so far, as one comparable string (the trail reloads on a move). */
+  function changesKey(run) {
+    const c = run.changes || {};
+    return [run.status, c.records_total].concat((c.tables || [])
+      .map((t) => t.table + '=' + t.changes)).join('|');
+  }
+
   /* ---- the LIVE view: every field of the progress file (§14.2 sections 1–9) ---- */
   function buildLive(s) {
     const run = s.run;
@@ -809,9 +867,12 @@
     const why = section('live-changes', '為何結算：這次結算的變更');
     live.whyTables = el('div');
     why.body.appendChild(live.whyTables);
-    live.queuedBack = el('div');
-    why.body.appendChild(live.queuedBack);
-    changeTrail(why.body, 'run:' + run.run_id, '這次結算沒有領取任何變更（例行延伸結算）');
+    /* The records are the ones this run CLAIMED: none yet while it is 準備中, so the trail
+       reloads whenever the progress's change summary moves (updateLive). */
+    live.trailKey = changesKey(run);
+    live.trail = changeTrail(why.body, 'run:' + run.run_id, () => (
+      live.claimed ? '這次結算沒有領取任何變更（例行延伸結算）' : '準備中：尚未領取變更'));
+    live.claimed = run.status !== 'preparing';
     b.appendChild(why.node);
 
     const steps = section('live-steps', '步驟');
@@ -866,7 +927,14 @@
     live.priority.hidden = !run.priority;
 
     live.whyTables.replaceChildren();
-    changeTables(live.whyTables, run.changes && run.changes.tables, '這次結算沒有領取任何變更');
+    changeTables(live.whyTables, run.changes && run.changes.tables,
+      run.status === 'preparing' ? '準備中：尚未領取變更' : '這次結算沒有領取任何變更');
+    const key = changesKey(run);
+    live.claimed = run.status !== 'preparing';
+    if (key !== live.trailKey) {
+      live.trailKey = key;
+      live.trail.reload();
+    }
 
     live.steps.replaceChildren();
     stepsList(live.steps, run.phases);
@@ -887,11 +955,14 @@
         + (nil(p.total) ? '' : '（' + count(p.total) + (p.unit ? ' ' + p.unit : '') + '）'))));
       live.todo.appendChild(ul);
     }
-    (run.queued || []).forEach((q) => {
-      line(live.todo, '完成後接著處理：' + day(q.from) + ' 起的變更（' + count(q.changes) + ' 筆）'
-        + (q.reason ? '・' + q.reason : ''));
-    });
-    if (!pend.length && !(run.queued || []).length) line(live.todo, '沒有其他待處理項目', 'st-muted');
+    /* 「完成後接著處理」: the changes committed while this run computes — the STATUS's
+       `queued` ({tables, records_total}, spec §15); the worker writes none into its file. */
+    const queued = s.queued && (s.queued.tables || []).length ? s.queued : null;
+    if (queued) {
+      line(live.todo, '完成後接著處理：' + queued.tables.map((t) => tableLine(t, true)).join('、')
+        + '（結算期間新增的變更）');
+    }
+    if (!pend.length && !queued) line(live.todo, '沒有其他待處理項目', 'st-muted');
 
     live.validation.replaceChildren();
     findingsList(live.validation, run.validation);
@@ -1113,7 +1184,15 @@
     st.appendChild(statusPill(sm));
     kv(sum.body, '結果', st);
     kv(sum.body, '觸發', trigger(sm.trigger_text, sm.started_by) || reasonText(sm.reason));
-    if (!nil(sm.cancelled_by)) kv(sum.body, '取消者', actorText(sm.cancelled_by));
+    if (!nil(sm.cancelled_by)) kv(sum.body, '取消者', whoText(sm.cancelled_by));
+    /* the summary's other server-owned lines (§9.6): 「延續 #N 的變更…」, 「其中 N 筆變更曾於
+       #M 嘗試」, 「本次未生效，已退回待結算」, the self-check's verdict … */
+    const lines = rep.summary_lines || [];
+    if (lines.length) {
+      const ul = el('ul', 'st-list st-summary-lines');
+      lines.forEach((t) => ul.appendChild(el('li', null, t)));
+      sum.body.appendChild(ul);
+    }
     kv(sum.body, '開始', stamp(sm.started_at));
     kv(sum.body, '結束', stamp(sm.finished_at));
     kv(sum.body, '耗時', secs(sm.duration_s)
@@ -1135,11 +1214,15 @@
     host.appendChild(ver.node);
 
     const ch = section(key('changes'), '結算的變更');
-    if (rep.changes && rep.changes.handed_back) {
-      line(ch.body, '本次未生效，已退回待結算', 'st-state-pending');
+    const handed = '本次未生效，已退回待結算';
+    if (rep.changes && rep.changes.handed_back && lines.indexOf(handed) < 0) {
+      line(ch.body, handed, 'st-state-pending');
     }
-    changeTables(ch.body, rep.changes && rep.changes.tables, '這次結算沒有變更（例行延伸結算）');
-    if (rep.changes && rep.changes.records_total) {
+    const tables = (rep.changes && rep.changes.tables) || [];
+    changeTables(ch.body, tables, '這次結算沒有變更（例行延伸結算）');
+    /* the trail when the run settled ANY change — ledger records or price / FX counters (a
+       price-only run has records_total 0 and one counter per symbol) */
+    if ((rep.changes && rep.changes.records_total) || tables.length) {
       changeTrail(ch.body, 'run:' + runId, '沒有變更紀錄');
     }
     host.appendChild(ch.node);
@@ -1160,6 +1243,15 @@
     closesResult(closes.body, rep);
     host.appendChild(closes.node);
 
+    /* A self-check (§9.1): its row-by-row comparison. Differences in the period closes never
+       reach settle_run_diff, so this is the one place the panel can say what differed. */
+    if (rep.selfcheck) {
+      const sc = section(key('selfcheck'), '結果：自檢', rep.selfcheck.differences
+        ? 'st-sec-fail' : null);
+      selfcheckResult(sc.body, rep.selfcheck);
+      host.appendChild(sc.node);
+    }
+
     if (rep.state) {
       const sr = section(key('state'), '結果：狀態');
       stateResult(sr.body, rep.state);
@@ -1170,9 +1262,26 @@
       const f = rep.failure;
       if (!nil(f.phase)) kv(fl.body, '停在', phaseLabel(rep, f.phase));
       kv(fl.body, '原因', f.reason_text);
-      if (!nil(f.cancelled_by)) kv(fl.body, '取消者', actorText(f.cancelled_by));
+      if (!nil(f.cancelled_by)) kv(fl.body, '取消者', whoText(f.cancelled_by));
       if (!nil(f.consequence)) kv(fl.body, '結果', f.consequence);
       host.appendChild(fl.node);
+    }
+  }
+  /* The settle tables a self-check compares (settle_worker._selfcheck), in the panel's words. */
+  const SETTLE_TABLE_ZH = {
+    settled_day: '逐日走勢', settled_period: '月結與年結',
+    settled_period_holding: '期末持倉', settled_period_cash: '期末現金',
+  };
+  function selfcheckResult(host, sc) {
+    if (!nil(sc.compared_through)) kv(host, '比對至', day(sc.compared_through));
+    if (!sc.differences) {
+      kv(host, '比對結果', '與目前的結算版本逐列一致');
+      return;
+    }
+    kv(host, '差異', count(sc.differences) + ' 處', 'st-changed');
+    if (!nil(sc.first_day)) {
+      kv(host, '最早差異', day(sc.first_day) + (nil(sc.first_table) ? ''
+        : '（' + (SETTLE_TABLE_ZH[sc.first_table] || sc.first_table) + '）'));
     }
   }
   function phaseLabel(rep, key) {
@@ -1210,8 +1319,9 @@
       read: (limit, offset) => api.get('/api/settlement/runs/' + encodeURIComponent(runId) + '/diff',
         { limit: limit, offset: offset }, BG),
       row: (r) => {
-        const flagged = (flags) => Object.keys(flags || {}).filter((k) => flags[k])
-          .map((k) => (k === 'incomplete' ? '缺價' : k)).join('、') || '完整';
+        /* the `incomplete` field's row compares the day's 缺價 flag (flags also carry
+           cash_incomplete / options_open, which are not this field's) */
+        const flagged = (flags) => (flags && flags.incomplete ? '缺價' : '完整');
         const val = (v, flags) => (r.field === 'incomplete' ? flagged(flags) : money(v, ccy));
         return [
           { text: day(r.day), cls: 'col-text num' },
@@ -1230,10 +1340,13 @@
       const fmtUnit = (v, unit) => (unit === 'ratio'
         ? (fm() ? fm().signedPct(v) : String(v)) : money(v, unit));
       const ul = el('ul', 'st-list');
+      /* why: the restatement's own zh `reason` (「2025-06-16 交易更正後重新結算」, 「上線重述：…」);
+         `source` is a machine reference (`transactions:123`, `portfolio_snapshots`) and is
+         never printed */
       rows.forEach((x) => {
         ul.appendChild(el('li', null, x.period + '　' + (x.label || x.field) + '：'
           + fmtUnit(x.old_value, x.unit) + ' → ' + fmtUnit(x.new_value, x.unit)
-          + (x.cutover ? '（上線重述）' : '')));
+          + (x.reason ? '（' + x.reason + '）' : (x.cutover ? '（上線重述）' : ''))));
       });
       host.appendChild(ul);
       return;

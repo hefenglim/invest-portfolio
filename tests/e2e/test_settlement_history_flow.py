@@ -3,9 +3,10 @@ history panels do with the settlement — the 更新前版本 banner, 月度成�
 (the marks, the 月／年 toggle, the empty state, the 待釐清 note) and the in-place refresh when
 a swap is announced.
 
-Stubbed like ``test_settlement_panel_flow.py`` (whose stub and contract-model builders this
-file reuses): ``/api/settlement/*`` and ``/api/snapshots`` on ``fresh_page`` only, removed at
-the end. The plan moves the 月度成績 flows onto the real backend at W4 (they need package G).
+Stubbed in E's real shapes (``tests/e2e/settlement_stubs.py``, pinned to the routes by
+``tests/contract/test_settlement_stub_shapes.py``): ``/api/settlement/*`` and ``/api/snapshots``
+on ``fresh_page`` only, removed at the end. The plan moves the 月度成績 flows onto the real
+backend at W4 (the year closes and the snapshot fields are package G's).
 """
 
 from __future__ import annotations
@@ -17,8 +18,14 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from portfolio_dash.portfolio.settlement_models import PeriodClose
-from tests.e2e.test_settlement_panel_flow import SettleStub, progress, status, stubbed
+from tests.e2e.settlement_stubs import (
+    SettleStub,
+    period,
+    progress,
+    restatement,
+    status,
+    stubbed,
+)
 
 _SNAPSHOTS = "**/api/snapshots*"
 
@@ -32,18 +39,6 @@ def _month(month: str, **kw: Any) -> dict[str, Any]:
     }
     row.update(kw)
     return row
-
-
-def _year(period: str, **kw: Any) -> dict[str, Any]:
-    kpi: dict[str, Any] = {"reporting_ccy": "TWD", "total_market_value": "2000000",
-                           "total_return": "300000", "total_return_rate": "0.15", "xirr": None,
-                           "xirr_reason": "期間不足一年，XIRR 不計",
-                           "period_twr": "0.08"}
-    kpi.update(kw.pop("kpi", {}))
-    base: dict[str, Any] = {"kind": "Y", "period": period, "end_day": period + "-12-31",
-                            "kpi": kpi, "activity": {}, "source": "store"}
-    base.update(kw)
-    return PeriodClose(**base).model_dump(mode="json", by_alias=True)
 
 
 class SnapStub:
@@ -100,18 +95,16 @@ def test_monthly_rows_carry_their_marks_and_the_toggle_reads_the_year_closes(
     live_server: str, fresh_page: Page
 ) -> None:
     stub = SettleStub(status("clean"))
-    stub.periods = [_year("2026", source="live"), _year("2025", restated=True)]
+    stub.periods = [period("2026", source="live"), period("2025", restated=True)]
     snaps = SnapStub([
         _month("2026-06", notes={"pending_positions": [
             {"account_id": "tw_broker", "symbol": "2330", "kind": "oversold"}]}),
         _month("2026-05", provisional=True),
         _month("2026-04", stale=True),
-        _month("2026-03", restated={"cutover": False, "rows": [{
-            "id": 1, "kind": "M", "period": "2026-03", "field": "total_market_value",
-            "label": "總市值", "unit": "TWD", "old_value": "1200000", "new_value": "1234567.89",
-            "run_id": 412, "reason": "prompt", "source": "2025-06-16 交易更正",
-            "at": "2026-06-11T10:33:00+08:00"}]}),
-        _month("2026-02", restated={"cutover": True, "rows": []}),
+        _month("2026-03", restated={"cutover": False, "rows": [restatement(1)]}),
+        _month("2026-02", restated={"cutover": True, "rows": [restatement(
+            2, period="2026-02", cutover=True, source="portfolio_snapshots",
+            reason="上線重述：月底定格值改為月底結算值")]}),
         _month("2026-01", xirr=None, xirr_reason="期間不足 90 天，XIRR 不計",
                period_twr=None, period_twr_reason="待結算：期間跨越更新前版本",
                notes={"missing_prices": ["2603"], "dividends_receivable": [
@@ -133,9 +126,12 @@ def test_monthly_rows_carry_their_marks_and_the_toggle_reads_the_year_closes(
         restated = rows.nth(3).locator(".snap-mark-restated")
         expect(restated).to_have_text("已重述")
         title = restated.get_attribute("title") or ""
-        assert "總市值" in title and "→" in title and "2025-06-16 交易更正" in title, title
-        assert "確認提示後啟動" in title, title          # the run reason, in words
-        expect(rows.nth(4).locator(".snap-mark-cutover")).to_have_text("上線重述")
+        assert "總市值" in title and "→" in title, title
+        assert "2025-06-16 交易更正後重新結算" in title, title     # the zh reason
+        assert "transactions:" not in title, title                  # never the raw source
+        cut = rows.nth(4).locator(".snap-mark-cutover")
+        expect(cut).to_have_text("上線重述")
+        assert "portfolio_snapshots" not in (cut.get_attribute("title") or "")
         warn = rows.nth(5).locator(".snap-mark-note")
         assert "缺價格：2603" in (warn.get_attribute("title") or "")
         assert "已除息、股利未入帳" in (warn.get_attribute("title") or "")
@@ -172,6 +168,12 @@ def test_an_empty_monthly_panel_no_longer_promises_a_2350_snapshot(
         expect(body).to_contain_text("尚無月度成績")
         expect(body).not_to_contain_text("23:50")
         expect(fresh_page.locator("#snapshots-note")).to_be_hidden()
+        # 年 before package G mounts /api/settlement/periods: a 404 reads as an empty state in
+        # words, never the generic 「找不到指定的資料或頁面」 (review F #10)
+        stub.periods = None
+        fresh_page.locator("#snapshots-kind .range-btn[data-kind='Y']").click()
+        expect(body).to_contain_text("年度成績尚未提供")
+        expect(body).not_to_contain_text("找不到指定的資料或頁面")
 
 
 @pytest.mark.e2e

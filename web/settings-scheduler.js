@@ -107,6 +107,9 @@
        the settled month-end closes, kept current by the nightly re-settlement. Its old
        job_runs rows stay in the history and keep a name that says what happened to it. */
     snapshot_monthly: '月度 KPI 快照（已停用，由每晚重新結算取代）',
+    /* every settlement RUN writes its job_runs row as `settlement` (jobs.SETTLEMENT_JOB_ID),
+       whichever trigger started it — the prompt, the button, boot or the two jobs below */
+    settlement: '重新結算',
     settlement_nightly: '每晚重新結算（月結與年結）',
     settlement_selfcheck: '每週結算自檢（全量重算比對）',
     finmind_chips_daily: '台股籌碼（法人＋融資券）',
@@ -201,6 +204,7 @@
     news_daily: 'news.html',
     digest_daily: 'index.html#digest-daily-panel',
     digest_weekly: 'index.html#digest-weekly-panel',
+    settlement: 'index.html#snapshots-panel',
     settlement_nightly: 'index.html#snapshots-panel',
     settlement_selfcheck: 'index.html#snapshots-panel',
   };

@@ -3,7 +3,8 @@ a real browser — every page boots with the settlement chip and no console erro
 chains ask in parallel, and the duplicate reads are gone.
 
 The settlement API is stubbed (``fresh_page`` only) exactly as in
-``test_settlement_panel_flow.py``; everything else is the session ``live_server``.
+``tests/e2e/settlement_stubs.py`` (E's real shapes); everything else is the session
+``live_server``.
 
 "In parallel" is measured, not inferred: the browser's own Resource Timing says when each
 request LEFT and when each answer ARRIVED, so "B was asked before A's answer came back" is a
@@ -17,7 +18,7 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page, expect
 
-from tests.e2e.test_settlement_panel_flow import SettleStub, status, stubbed
+from tests.e2e.settlement_stubs import SettleStub, status, stubbed
 
 _PAGES = [
     ("/index.html", ".kpi-card"),

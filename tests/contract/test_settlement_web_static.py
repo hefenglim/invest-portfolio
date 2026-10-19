@@ -147,3 +147,52 @@ def test_every_monthly_mark_is_a_class_with_a_rule() -> None:
             "snap-mark-provisional", "snap-mark-note"} <= used, used
     missing = _missing_rules(used)
     assert not missing, f"state classes with no stylesheet rule: {missing}"
+
+
+def test_a_trail_row_reads_the_servers_words() -> None:
+    """Review F #7: a record's table, operation, account, actor and attempts are E's
+    (`_record_row`); the
+    two raw actor fields left (`cancelled_by`) read like E's `who_text`, guest mode included."""
+    body = re.search(r"function changeRow\(r, resp\) \{(.*?)\n  \}\n", _SETTLE, re.S)
+    assert body
+    for field in ("r.table_label", "r.op_text", "r.account_text", "r.actor_text",
+                  "r.attempted_text", "r.handed_back", "resp.handed_back_text"):
+        assert field in body.group(1), field
+    from portfolio_dash.api.settlement_service import who_text
+
+    assert who_text(None, None) == "系統"
+    assert who_text(sm.ACTOR_GUEST, sm.ACTOR_GUEST) == "你"
+    assert "if (nil(actor)) return '系統';" in _SETTLE
+    assert "if (a && a.isGuest && a.isGuest()) return 'user:guest';" in _SETTLE
+
+
+def test_the_trail_shows_the_counters_and_the_run_shows_the_status_queue() -> None:
+    """Review F #2 / #3: price / FX `counters` ride with the records; 「完成後接著處理」 is the
+    STATUS's `queued` (the worker writes none into its progress file)."""
+    assert "lead: (resp) => (resp && resp.counters) || []" in _SETTLE
+    assert "(rep.changes && rep.changes.records_total) || tables.length" in _SETTLE
+    assert "s.queued && (s.queued.tables || []).length" in _SETTLE
+    assert "run.queued" not in _SETTLE
+
+
+def test_the_scheduler_page_names_every_settlement_job() -> None:
+    """Review F #8: every settlement run's job_runs row is `settlement` — never the raw id."""
+    from portfolio_dash.scheduler import jobs
+
+    src = (_WEB / "settings-scheduler.js").read_text(encoding="utf-8")
+    m = re.search(r"const JOB_ZH = \{(.*?)\};", src, re.S)
+    assert m
+    named = set(re.findall(r"^\s*(\w+): '", m.group(1), re.M))
+    wanted = {jobs.SETTLEMENT_JOB_ID} | set(jobs.WEB_PROCESS_JOB_IDS) | set(jobs.RETIRED_JOB_IDS)
+    assert wanted <= named, sorted(wanted - named)
+
+
+def test_the_corporate_action_form_reads_option_terms_in_one_request() -> None:
+    """Review F #9: the recognition answer carries expiry and strike, so the 選擇權調整 source is
+    one /api/input/option-symbol read — the symbol drawer is never asked."""
+    src = (_WEB / "corp-action-form.js").read_text(encoding="utf-8")
+    body = re.search(r"async function loadAdjSource\(\) \{(.*?)\n    \}\n", src, re.S)
+    assert body, "loadAdjSource not found"
+    assert "/api/input/option-symbol" in body.group(1)
+    assert "/detail" not in body.group(1)
+    assert "expiry: r.expiry" in body.group(1)
