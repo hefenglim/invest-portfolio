@@ -103,7 +103,12 @@
     history_daily: '日線歷史回補（近 7 天滾動）',
     dividends_daily: '股利／除息事件掃描',
     dividend_inbox_scan: '配息偵測（餵入待確認匯入）',
-    snapshot_monthly: '月度 KPI 快照（每晚覆寫當月）',
+    /* PERF spec §11.4 / plan P11: snapshot_monthly left the registry — 月度成績 now reads
+       the settled month-end closes, kept current by the nightly re-settlement. Its old
+       job_runs rows stay in the history and keep a name that says what happened to it. */
+    snapshot_monthly: '月度 KPI 快照（已停用，由每晚重新結算取代）',
+    settlement_nightly: '每晚重新結算（月結與年結）',
+    settlement_selfcheck: '每週結算自檢（全量重算比對）',
     finmind_chips_daily: '台股籌碼（法人＋融資券）',
     finmind_valuation_daily: '台股估值（PER／PBR／殖利率）',
     finmind_fundamentals_monthly: '台股月營收＋財報（每月）',
@@ -170,8 +175,10 @@
      dashboard (latest quotes surface); history/backup -> 資料中心; dividend sweeps ->
      待確認匯入; the external-snapshot ingests -> 資料來源 health tab; alert scan -> 預警
      規則 tab; AI loops + insight tasks -> insights.html; news -> news.html; digests ->
-     their index cards (anchored panel ids). snapshot_monthly / signal_scan have no
-     natural user-facing page today -> deliberately absent (no 前往 button). */
+     their index cards (anchored panel ids). signal_scan has no natural user-facing page
+     today -> deliberately absent (no 前往 button); neither has the retired snapshot_monthly.
+     The two settlement jobs land on the dashboard, where 月度成績 and the trend show what a
+     run settled (the run's own report is one click away on the topbar's 結算 chip). */
   const JOB_HREF = {
     quotes_tw: 'index.html',
     quotes_us: 'index.html',
@@ -194,6 +201,8 @@
     news_daily: 'news.html',
     digest_daily: 'index.html#digest-daily-panel',
     digest_weekly: 'index.html#digest-weekly-panel',
+    settlement_nightly: 'index.html#snapshots-panel',
+    settlement_selfcheck: 'index.html#snapshots-panel',
   };
   function jobHref(id) {
     if (JOB_HREF[id]) return JOB_HREF[id];
@@ -393,9 +402,12 @@
 
   /* One status fetch. Returns whether ANY job is active; degrades quietly on error (the
      grace timeout winds polling down rather than looping on a dead endpoint). */
-  async function refreshStatus() {
+  async function refreshStatus(early) {
     try {
-      const resp = await api.get('/api/scheduler/status');
+      /* PERF §13 (a): a status poll is not the page's content — it stays out of the top
+         progress bar (`early`: boot's own fetch, started in parallel with the jobs). */
+      const resp = await (early ? early()
+        : api.get('/api/scheduler/status', null, { background: true }));
       applyStatus((resp && resp.jobs) || {});
       return !!(resp && resp.active);
     } catch (_e) {
@@ -646,11 +658,16 @@
     jobs.forEach((j) => bar.appendChild(mk(j.id, jobLabel(j.id, j.desc))));
   }
 
-  async function refreshRuns() {
+  function fetchRuns() {
     const params = { limit: runState.limit, offset: runState.offset };
     if (runState.job !== 'all') params.job_id = runState.job;
+    return api.get('/api/scheduler/runs', params);
+  }
+
+  /* `early` (boot only): a fetch already started by `api.held(fetchRuns())`. */
+  async function refreshRuns(early) {
     try {
-      const resp = await api.get('/api/scheduler/runs', params);
+      const resp = await (early ? early() : fetchRuns());
       runs = (resp && resp.rows) || [];
       rememberLabels(runs, 'job_id');
       if (runsPager) {
@@ -739,6 +756,13 @@
      failure leave the page empty + surface ONE toast (never an unhandled rejection —
      the e2e smoke asserts ZERO console errors). 401 is handled inside api.js. ===== */
   async function boot() {
+    /* PERF spec §13 "parallel chains": the jobs, the first runs page, the system log and the
+       live status were four requests in a row; none of them needs another's answer to be
+       ASKED, so they leave together. Rendering keeps its order: the jobs table first, then
+       the history, then the status overlay on the rows the jobs render built. */
+    const runsP = api.held(fetchRuns());
+    const statusP = api.held(api.get('/api/scheduler/status'));
+    refreshSyslog();  // section C, independent fetch (graceful on failure)
     const jobsResp = await api.get('/api/scheduler/jobs').catch((err) => {
       _toast('排程載入失敗', 'fail', (err && err.message) || undefined);
       return null;
@@ -749,11 +773,10 @@
     renderSchedBanner();
     renderJobs();
     initHistFilter();
-    await refreshRuns();
-    refreshSyslog();  // section C, independent fetch (graceful on failure)
+    await refreshRuns(runsP);
     // FU-D36: seed live status once (catches a cron / prior-trigger run already in flight);
     // start polling ONLY if something is active, so an idle page polls zero times.
-    if (await refreshStatus()) startPolling();
+    if (await refreshStatus(statusP)) startPolling();
   }
 
   /* Lightweight refresh of JUST the jobs table (cron / enabled / next-fire) — run when a

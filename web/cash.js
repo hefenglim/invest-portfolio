@@ -198,10 +198,15 @@
     });
   }
 
-  async function loadFxLedger() {
+  function fetchFxLedger() {
+    return api.get('/api/ledgers/fx', { limit: cfxLed.limit, offset: cfxLed.offset });
+  }
+
+  /* `early`: a fetch boot already started (`api.held(fetchFxLedger())`), PERF §13. */
+  async function loadFxLedger(early) {
     let resp;
     try {
-      resp = await api.get('/api/ledgers/fx', { limit: cfxLed.limit, offset: cfxLed.offset });
+      resp = await (early ? early() : fetchFxLedger());
     } catch (err) {
       cfxLed.rows = []; cfxLed.total = 0;
       renderFxLedger();
@@ -1441,10 +1446,20 @@
     });
   }
 
-  async function boot() {
+  function fetchCash() {
+    return api.get('/api/cash', { limit: cmState.limit, offset: cmState.offset });
+  }
+
+  /* PERF spec §13 "parallel chains": the pools (/api/cash), the open statement and the
+     換匯中心 ledger (/api/ledgers/fx) were three requests in a row, and the page's first one
+     (/api/input/context) a fourth; none needs another's answer to be ASKED. `early` carries
+     the two fetches init() started beside the context read; a later boot() (after a write,
+     on a tab switch) starts its own, still side by side. Rendering keeps its order. */
+  async function boot(early) {
+    const fxP = (early && early.fx) || api.held(fetchFxLedger());
     let resp;
     try {
-      resp = await api.get('/api/cash', { limit: cmState.limit, offset: cmState.offset });
+      resp = await (early && early.cash ? early.cash() : fetchCash());
     } catch (err) {
       D = { balances: [], movements: [], negative_pools: [] };
       cmState.total = 0;
@@ -1465,9 +1480,11 @@
     renderCards();
     renderMovements();
     if (cmPager) cmPager.update({ offset: cmState.offset, totalCount: cmState.total });
-    if (stmt.account) await loadStatement();  // keep the open statement fresh
-    else renderStatementPre();  // FU-D25: guidance instead of a blank statement table
-    await loadFxLedger();  // FU-D40: keep the 換匯中心 ledger in step with every refresh
+    if (!stmt.account) renderStatementPre();  // FU-D25: guidance instead of a blank table
+    await Promise.all([
+      stmt.account ? loadStatement() : null,  // keep the open statement fresh
+      loadFxLedger(fxP),  // FU-D40: keep the 換匯中心 ledger in step with every refresh
+    ]);
     booted = true;
     updFxBalance();  // FU-D34: refresh the 換匯中心 可用餘額 ceiling from the fresh balances
     updCmBalance();  // FU-D43a: refresh the 出金 帳戶現金 ceiling too
@@ -1500,6 +1517,7 @@
   window.addEventListener('pd-cash-tab', onCashTab);
 
   (async function init() {
+    const early = { cash: api.held(fetchCash()), fx: api.held(fetchFxLedger()) };
     try {
       const ctx = await api.get('/api/input/context');
       accounts = (ctx && ctx.accounts) || [];
@@ -1508,6 +1526,6 @@
     }
     initForms();
     initStmtExports();
-    await boot();
+    await boot(early);
   })();
 })();

@@ -1718,6 +1718,10 @@
   }
 
   async function boot() {
+    /* PERF spec §13 "parallel chains": 各帳戶現金 and 月度成績 read their own endpoints and
+       never touch D, so they no longer wait for the (slowest) dashboard payload. */
+    renderCashMini();
+    renderSnapshots();
     try {
       D = await (window.pdDashboard || (window.pdDashboard = window.pdApi.get('/api/dashboard')));
     } catch (err) {
@@ -1740,8 +1744,6 @@
     renderHoldings();
     renderCurrencyView();
     renderFx();
-    renderCashMini();
-    renderSnapshots();
     renderRealized();
     renderInsights();
     renderFreshness();

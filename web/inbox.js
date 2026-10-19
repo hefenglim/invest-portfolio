@@ -312,10 +312,14 @@
     } catch (err) {
       rows = [];
       render();
+      if (window.pdReportInboxCount) window.pdReportInboxCount('dividends', null);
       if (window.toast) window.toast('待確認匯入載入失敗', 'fail', (err && err.message) || undefined);
       return null;
     }
     rows = (resp && resp.rows) || [];
+    /* PERF §13: the sidebar badge reads this list's count instead of running the same
+       detection again through /api/dividend-inbox/count (the count IS this list's length). */
+    if (window.pdReportInboxCount) window.pdReportInboxCount('dividends', rows.length);
     render();
     renderStrip();
     loadSkipped();

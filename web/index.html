@@ -10,7 +10,9 @@
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
 <link rel="stylesheet" href="styles.css?v=0.1.31"></link>
 <link rel="stylesheet" href="detail.css?v=0.1.31"></link>
-<script src="echarts.min.js?v=0.1.31"></script>
+<!-- defer (PERF spec §13): ~1 MB no longer blocks the first paint; charts.js and
+     dividends-card.js await window.pdEchartsReady() before their first init. -->
+<script src="echarts.min.js?v=0.1.31" defer="defer"></script>
 </head>
 <body data-page="dashboard" data-title="儀表板" data-chips="1" data-refresh="1">
 <div class="shell">

@@ -518,6 +518,9 @@
       });
       return;  // app.js's boot surfaces the load-failure UI; charts stay empty.
     }
+    /* PERF §13: ECharts is `defer`red — it runs after this file, so the payload can win the
+       race. Wait for the library (or its failure, which initAll's degraded path explains). */
+    if (window.pdEchartsReady) await window.pdEchartsReady();
     initAll();
   }
 

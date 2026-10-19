@@ -11,7 +11,8 @@
 <link rel="stylesheet" href="styles.css?v=0.1.31"></link>
 <link rel="stylesheet" href="settings.css?v=0.1.31"></link>
 <link rel="stylesheet" href="input.css?v=0.1.31"></link>
-<script src="echarts.min.js?v=0.1.31"></script>
+<!-- defer (PERF spec §13): the chart code awaits window.pdEchartsReady() before its first init. -->
+<script src="echarts.min.js?v=0.1.31" defer="defer"></script>
 <style>
   /* settings tab bar */
   .set-tabbar {

@@ -19,6 +19,9 @@
   ];
   const LS_KEY = 'pd_sidebar_collapsed';
   const page = document.body.dataset.page || '';
+  /* PERF spec §13 (a): the shell's own reads (session, version, prefs, the inbox badge) are
+     not the page's content, so they stay out of the top progress bar. */
+  const BG = { background: true };
 
   /* Favicon: point every shell-bearing page at favicon.svg so the browser uses it
      instead of requesting the default /favicon.ico (which 404s app-wide). Synchronous
@@ -105,7 +108,7 @@
   function pdInitSession() {
     if (page === 'login') return;
     pdEnsureApi()
-      .then((ok) => (ok ? window.pdApi.get('/api/auth/session') : null))
+      .then((ok) => (ok ? window.pdApi.get('/api/auth/session', null, BG) : null))
       .then((sess) => {
         if (sess && typeof sess === 'object') {
           _backendSession = {
@@ -162,14 +165,46 @@
       document.head.appendChild(s);
     });
   }
+  /* Ensure a LOCAL stylesheet is on the page. Resolves once it has loaded (or failed — a
+     missing sheet degrades the look, never the function), immediately when already there. */
   function pdLoadCss(href) {
     const has = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-      .some((l) => l.href && l.href.indexOf(href) >= 0);
-    if (has) return;
-    const l = document.createElement('link');
-    l.rel = 'stylesheet'; l.href = href;
-    document.head.appendChild(l);
+      .some((l) => l.href && l.href.indexOf(href.split('?')[0]) >= 0);
+    if (has) return Promise.resolve();
+    return new Promise((resolve) => {
+      const l = document.createElement('link');
+      l.rel = 'stylesheet'; l.href = href;
+      l.onload = () => resolve();
+      l.onerror = () => resolve();
+      document.head.appendChild(l);
+    });
   }
+  window.pdLoadCss = pdLoadCss;
+
+  /* PERF spec §13: the three pages that need ECharts at boot load it with `defer`, so the
+     ~1 MB library no longer blocks the first paint. A deferred script runs AFTER every
+     ordinary script on the page, so chart code must not assume `window.echarts` exists when
+     its data arrives: it awaits this instead. Resolves when the library is there, when its
+     tag has loaded or failed (a failed load leaves `window.echarts` unset — each chart's own
+     degraded path then names the problem), at DOMContentLoaded (which waits for deferred
+     scripts) and at `load`, whichever comes first; at once on a page with no tag. */
+  let _echartsReady = null;
+  function pdEchartsReady() {
+    if (window.echarts) return Promise.resolve();
+    if (_echartsReady) return _echartsReady;
+    _echartsReady = new Promise((resolve) => {
+      if (document.readyState === 'complete') { resolve(); return; }
+      const tag = Array.from(document.scripts).find((s) =>
+        s.src && s.src.split('/').pop().split('?')[0] === 'echarts.min.js');
+      if (!tag) { resolve(); return; }
+      tag.addEventListener('load', () => resolve());
+      tag.addEventListener('error', () => resolve());
+      document.addEventListener('DOMContentLoaded', () => resolve());
+      window.addEventListener('load', () => resolve());
+    });
+    return _echartsReady;
+  }
+  window.pdEchartsReady = pdEchartsReady;
   /* 「新功能」panel (WP-WN): whatsnew.js has no HTML <script> tag, so the ?v= stamper
      never sees it — stamp it here with the backend version (set by pdInitVersion) so a
      deploy flushes its cache. Loaded on first ✦ click OR by pdInitVersion at boot. */
@@ -205,7 +240,11 @@
        for a drawer most sessions never open would be a permanent regression traded for a
        rare outage. */
     const q = _appVersion ? ('?v=' + _appVersion) : '';
+    /* pdEchartsReady first: on a page whose <head> tag is `defer`red (PERF §13) the tag
+       exists before the library has run, and pdLoadScript would take the tag's presence for
+       a loaded library. */
     pdDrawerPromise = pdEnsureApi()
+      .then(() => pdEchartsReady())
       .then(() => (window.echarts ? null : pdLoadScript('echarts.min.js' + q)))
       .then(() => (window.fmt ? null : pdLoadScript('format.js')))
       .then(() => pdLoadScript('detail.js'));
@@ -691,9 +730,17 @@
   const netBar = el('div', 'net-progress');
   netBar.hidden = true;
   document.body.appendChild(netBar);
+  /* PERF spec §13 (c) / PERF-D6: a page request still pending after 15 s says so in the top
+     bar — 「仍在計算中…」 — and nothing is aborted. api.js raises `slow`; background
+     requests (status polls, the bell, pre-fetches) never count. */
+  const netSlow = el('div', 'net-slow', '仍在計算中…');
+  netSlow.hidden = true;
+  netSlow.setAttribute('role', 'status');
+  document.body.appendChild(netSlow);
   let netShowTimer = null;
   document.addEventListener('pd-net', (e) => {
     const pending = (e.detail && e.detail.pending) || 0;
+    netSlow.hidden = !(pending > 0 && e.detail && e.detail.slow);
     if (pending > 0) {
       if (netBar.hidden && !netShowTimer) {
         netShowTimer = setTimeout(() => { netBar.hidden = false; netShowTimer = null; }, 150);
@@ -855,7 +902,7 @@
      Non-critical: degrades silently if the health call fails. */
   function pdInitVersion() {
     pdEnsureApi()
-      .then((ok) => (ok ? window.pdApi.get('/api/health') : null))
+      .then((ok) => (ok ? window.pdApi.get('/api/health', null, BG) : null))
       .then((h) => {
         if (!h || !h.version) return;
         const commit = h.commit && h.commit !== 'unknown' ? h.commit : '';
@@ -895,7 +942,7 @@
   function pdInitPrefs() {
     if (page === 'login') return;
     pdEnsureApi()
-      .then((ok) => (ok ? window.pdApi.get('/api/ui-prefs') : null))
+      .then((ok) => (ok ? window.pdApi.get('/api/ui-prefs', null, BG) : null))
       .then((p) => {
         if (p && typeof p.page_size === 'number') {
           window.pdPrefs.page_size = p.page_size;
@@ -938,15 +985,28 @@
      can refresh the badge WITHOUT a full page reload (F2b/F8 — the badge was previously
      computed once at load and went stale). Returns the promise for callers that want to await
      it. Non-critical: silent on failure, so it never blocks or errors a caller's flow. */
+  /* PERF spec §13 "Duplicates — inbox badge vs list": on the 收件匣 page itself the three
+     panels already fetch the very lists the three /count routes count (each count is the
+     length of the same detection), so the badge ran every detector a second time. There
+     each panel REPORTS the count of the list it just loaded (`pdReportInboxCount(kind, n)`,
+     `null` when its load failed) and the badge is painted from those; a kind that reported
+     no count is fetched. Every other page fetches the three counts as before. */
+  const INBOX_KINDS = [
+    ['dividends', '/api/dividend-inbox/count'],
+    ['rebates', '/api/rebates/count'],
+    /* options spec §7.2: 「待確認到期」 — 0 on a ledger with no option */
+    ['expiry', '/api/option-expiry/count'],
+  ];
+  const _inboxReported = {};     // kind -> number | null (the inbox page's own lists)
+  const onInboxPage = page === 'divinbox';
   function pdRefreshInboxBadge() {
     if (page === 'login') return Promise.resolve();
     return pdEnsureApi()
-      .then((ok) => (ok ? Promise.all([
-        window.pdApi.get('/api/dividend-inbox/count').catch(() => null),
-        window.pdApi.get('/api/rebates/count').catch(() => null),
-        /* options spec §7.2: 「待確認到期」 — 0 on a ledger with no option */
-        window.pdApi.get('/api/option-expiry/count').catch(() => null),
-      ]) : null))
+      .then((ok) => (ok ? Promise.all(INBOX_KINDS.map((k) => {
+        const known = onInboxPage ? _inboxReported[k[0]] : undefined;
+        if (typeof known === 'number') return { count: known };
+        return window.pdApi.get(k[1], null, BG).catch(() => null);
+      })) : null))
       .then((results) => {
         if (!results) return;
         pdPaintInboxBadge(
@@ -957,5 +1017,15 @@
       .catch(() => { /* silent: the badge is a hint, not a gate */ });
   }
   window.pdRefreshInboxBadge = pdRefreshInboxBadge;
-  pdRefreshInboxBadge();
+  let _inboxPaintTimer = null;
+  window.pdReportInboxCount = function (kind, n) {
+    _inboxReported[kind] = typeof n === 'number' ? n : null;
+    if (!onInboxPage) return;
+    /* Paint once every panel has reported; a panel's reload after an action reports again
+       and repaints from the latest count of all three. */
+    if (!INBOX_KINDS.every((k) => k[0] in _inboxReported)) return;
+    if (_inboxPaintTimer) clearTimeout(_inboxPaintTimer);
+    _inboxPaintTimer = setTimeout(() => { _inboxPaintTimer = null; pdRefreshInboxBadge(); }, 0);
+  };
+  if (!onInboxPage) pdRefreshInboxBadge();
 })();

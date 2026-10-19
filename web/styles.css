@@ -2618,3 +2618,14 @@ select.ai-edit { padding-right: 2px; }
   .opt-open-table tr.opt-detail-row { margin: -6px 0 8px; }
   .opt-open-table tr.opt-detail-row[hidden] { display: none; }
 }
+
+/* ---------- 仍在計算中… (PERF spec §13 c, PERF-D6) ----------
+   Under the top progress bar: a page request still pending after 15 s (web/api.js
+   raises `slow`, shell.js shows this). Background requests never count. */
+.net-slow {
+  position: fixed; top: 4px; left: 50%; transform: translateX(-50%); z-index: 300;
+  padding: 2px 10px; border-radius: var(--radius-sm);
+  font-size: 11px; color: var(--accent);
+  background: var(--panel-2); border: 1px solid rgba(88, 166, 221, 0.4);
+  pointer-events: none;
+}

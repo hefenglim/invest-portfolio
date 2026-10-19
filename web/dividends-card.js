@@ -147,7 +147,18 @@
 
   /* ---- (b) 歷年實收股利 grouped bar; lazy — only invoked when by_year has data ---- */
   function initChart(D, hostEl, curYear) {
-    if (!window.echarts) return;
+    if (!window.echarts) {
+      /* PERF §13: index.html loads ECharts with `defer`, so the dividends payload can land
+         before the library has run — draw once it has (a failed load stays chartless). */
+      if (window.pdEchartsReady && !hostEl.dataset.pdAwaitEcharts) {
+        hostEl.dataset.pdAwaitEcharts = '1';
+        window.pdEchartsReady().then(() => {
+          delete hostEl.dataset.pdAwaitEcharts;
+          if (window.echarts) initChart(D, hostEl, curYear);
+        });
+      }
+      return;
+    }
     curYearCache = curYear;
     const byYear = D.dividends.by_year;
     const years = byYear.map((y) => String(y.year));

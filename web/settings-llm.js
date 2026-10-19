@@ -518,9 +518,21 @@
       });
     }
   }
+  let llmChartAwait = false;
   function renderUsageChart() {
     const host = $('#llm-daily-chart');
-    if (!host || typeof echarts === 'undefined') return;
+    if (!host) return;
+    if (typeof echarts === 'undefined') {
+      /* PERF §13: settings.html loads ECharts with `defer` — draw once it has run. */
+      if (window.pdEchartsReady && !llmChartAwait) {
+        llmChartAwait = true;
+        window.pdEchartsReady().then(() => {
+          llmChartAwait = false;
+          if (typeof echarts !== 'undefined') renderUsageChart();
+        });
+      }
+      return;
+    }
     if (!llmChart) llmChart = echarts.init(host);
     const daily = D.usage.daily || { dates: [], series: [] };
     const axisStyle = { color: '#5e6b7c', fontSize: 9, fontFamily: "'IBM Plex Mono', monospace" };

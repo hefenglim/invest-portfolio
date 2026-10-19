@@ -690,16 +690,25 @@
       composeAdjDest();
     }
     fAdjSrc.addEventListener('change', () => { composeAdjDest(); schedule(); });
-    /* The source contract's terms — the drawer wire's `options.contract`, parsed from the
-       symbol on the server (OPT-D22). */
+    /* The source contract's terms, parsed from the symbol on the server (OPT-D22). PERF spec
+       §12.2: read from the compose endpoint's recognition form (`text=`), not from the whole
+       symbol drawer (/api/symbol/{s}/detail). The destination needs the source's EXPIRY,
+       which that answer does not carry yet: until it does, a recognised contract falls back
+       to the drawer wire's `options.contract` — a symbol that is not a contract no longer
+       reads the drawer at all. */
     async function loadAdjSource() {
       const sym = fromSymbol().toUpperCase();
       if (!sym || adj.srcFor === sym) return adj.src;
       adj.srcFor = sym;
       adj.src = null;
       try {
-        const d = await api().get('/api/symbol/' + encodeURIComponent(sym) + '/detail');
-        adj.src = (d && d.options && d.options.contract) || null;
+        const r = await api().get('/api/input/option-symbol', { text: sym });
+        if (r && r.symbol && r.expiry) {
+          adj.src = { underlying: r.underlying, expiry: r.expiry, right: r.right };
+        } else if (r && r.symbol) {
+          const d = await api().get('/api/symbol/' + encodeURIComponent(sym) + '/detail');
+          adj.src = (d && d.options && d.options.contract) || null;
+        }
       } catch (e) { adj.src = null; }
       if (adj.src) window.pdField.autoFill(fAdjUnd, adj.src.underlying);
       return adj.src;
