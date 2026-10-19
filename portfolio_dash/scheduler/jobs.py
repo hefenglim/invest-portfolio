@@ -10,6 +10,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -2133,6 +2134,22 @@ WORKER_DIED = "工作子程序異常結束"
 WORKER_NOT_STARTED = "工作子程序無法啟動"
 #: ``job_runs.detail`` of a run left ``running`` by a process that is gone (boot).
 ABANDONED_AT_BOOT = "系統重新啟動時此工作尚未完成"
+#: ``job_runs.detail`` of a run whose child could not even be spawned (``<class>`` is the
+#: exception's class name — ``RuntimeError: can't start new thread`` under memory pressure).
+SPAWN_FAILED = "無法啟動工作子程序（{error}）"
+#: ``job_runs.detail`` of a run stopped by :data:`JOB_TIME_LIMIT_S` (``{limit}`` 「30 分鐘」).
+JOB_TIMED_OUT = "工作執行逾時（超過 {limit}），已中止"
+
+#: A job child's wall-clock limit, counted from the moment its process starts (the wait for
+#: the heavy gate is not counted) — the ONE place to change it. Generous: the slowest jobs
+#: (a news run organising every held symbol, a deep fundamentals sweep) take minutes; one that
+#: hangs on a provider must not hold the shared heavy gate, with every other job and the
+#: owner's 重新結算 queued behind it, for longer than this (package H review, 2026-10-20).
+JOB_TIME_LIMIT_S = 30 * 60.0
+#: How often the waiting caller checks the limit, and how long a child it stops gets between
+#: terminate and kill.
+_LIMIT_POLL_S = 1.0
+_TIMEOUT_TERMINATE_S = 10.0
 
 #: How long a child waits for its own ``job-<run_id>.lock`` (nobody else ever takes it; a
 #: status probe holds it for an instant — never ``try_lock``, shared/proc_lock.py).
@@ -2226,6 +2243,9 @@ class _ChildRun:
     progress_path: Path
     lock_path: Path
     handle: child_runner.ChildHandle | None = None
+    #: Set by the waiting caller BEFORE it stops a child over :data:`JOB_TIME_LIMIT_S`, so
+    #: the waiter finalises the row with the reason, not as a crash.
+    timed_out: bool = False
 
     def started(self) -> bool:
         handle = self.handle
@@ -2246,6 +2266,16 @@ def queued_progress() -> dict[str, str]:
     says why it has not started."""
     with _INFLIGHT_LOCK:
         return {c.job_id: QUEUED_BEHIND_GATE for c in _CHILD_RUNS.values() if c.waiting()}
+
+
+def busy_sentence(job_id: str, subject: str) -> str:
+    """The 409 a run door answers while *job_id* has a run in flight: 「<subject> 已排入，
+    等待其他背景工作完成」 while that run waits for the heavy gate in this process, else
+    「<subject> 執行中」. A queued run is not running, and the owner who clicked 執行 should
+    not read that it is (package H review, 2026-10-20)."""
+    if job_id in queued_progress():
+        return f"{subject} 已排入，等待其他背景工作完成"
+    return f"{subject} 執行中"
 
 
 def child_dispatchable(conn: sqlite3.Connection, job_id: str) -> bool:
@@ -2296,7 +2326,16 @@ def _run_in_child(job_id: str, run_id: int, *, now: datetime,
 
     Waiting keeps every caller's contract: the cron fire returns after the run, as the
     in-process run does (APScheduler's one-instance rule still holds), and the manual run's
-    daemon thread ends with it."""
+    daemon thread ends with it. Never raises for the run's own failures — each one ends the
+    row with its reason:
+
+    - the child could not be spawned (``RuntimeError: can't start new thread``):
+      :data:`SPAWN_FAILED`, reason ``spawn_failed``. The row used to stay ``running``, so the
+      next 立即執行 answered 409 and every cron fire of an insight task recorded
+      ``already_running`` until a restart (package H review, 2026-10-20);
+    - it ran longer than :data:`JOB_TIME_LIMIT_S`: terminated, :data:`JOB_TIMED_OUT`,
+      reason ``timeout``;
+    - it died without finishing its row: :data:`WORKER_DIED` (:func:`_close_if_open`)."""
     module = _JOB_WORKER_MODULE
     if module is None:  # pragma: no cover - runs_in_child checked it
         raise RuntimeError("no job worker module registered")
@@ -2310,13 +2349,44 @@ def _run_in_child(job_id: str, run_id: int, *, now: datetime,
         handle = child_runner.spawn(
             module, _worker_args(job_id, run_id, now, trigger), heavy=True,
             on_exit=lambda result: _child_exited(entry, result, now=now))
-    except BaseException:
-        with _INFLIGHT_LOCK:
-            _CHILD_RUNS.pop(run_id, None)
-        raise
+    except Exception as exc:  # noqa: BLE001 — recorded on the row, never left running
+        logger.exception("job %s run %s: the worker could not be spawned", job_id, run_id)
+        try:
+            _close_open_row(entry.run_id, now=now, detail=SPAWN_FAILED.format(
+                error=type(exc).__name__), reason="spawn_failed")
+        finally:
+            _forget(entry)
+        return
     with _INFLIGHT_LOCK:
         entry.handle = handle
-    handle.wait()
+    _wait_with_limit(entry, handle)
+
+
+def _limit_text(seconds: float) -> str:
+    """「30 分鐘」 / 「45 秒」 — the limit in the sentence a stopped run's row carries."""
+    if seconds >= 60:
+        return f"{seconds / 60:g} 分鐘"
+    return f"{seconds:g} 秒"
+
+
+def _wait_with_limit(entry: _ChildRun, handle: child_runner.ChildHandle) -> None:
+    """Wait for the child, stopping it once it has RUN for :data:`JOB_TIME_LIMIT_S`.
+
+    The clock starts when the process starts, never while the run waits for the heavy gate
+    (a run queued behind a long re-settlement is not slow). The limit is read on every check,
+    so a test can lower it."""
+    started_at: float | None = None
+    while handle.wait(_LIMIT_POLL_S) is None:
+        if handle.state != "running":
+            continue
+        if started_at is None:
+            started_at = time.monotonic()
+        elif time.monotonic() - started_at > JOB_TIME_LIMIT_S:
+            logger.warning("job %s run %s: over its %s s limit; stopping the worker",
+                           entry.job_id, entry.run_id, JOB_TIME_LIMIT_S)
+            entry.timed_out = True  # read by the waiter, which runs inside the next call
+            handle.terminate_and_wait(_TIMEOUT_TERMINATE_S)
+            return
 
 
 #: Attempts at finalising a dead child's row while another writer holds the database.
@@ -2330,46 +2400,58 @@ def _child_exited(entry: _ChildRun, result: child_runner.ChildResult, *,
     not, then drop the run from the registry and delete its sidecar and lock file.
 
     The row is final BEFORE the registry forgets the run, so the 排程中心 never reads a
-    finished run as 已排入 on the way out (FU-D36's finalise-then-clear order)."""
+    finished run as 已排入 on the way out (FU-D36's finalise-then-clear order). This is the
+    one place a job lock file is deleted while its run is fresh: the child that held it is
+    gone (it was waited for), and a run id is never reused (``shared/proc_lock.py``)."""
     try:
-        for attempt in range(_CLOSE_ATTEMPTS):
-            try:
-                _close_if_open(entry, result, now=now)
-                break
-            except sqlite3.OperationalError as exc:
-                busy = "locked" in str(exc) or "busy" in str(exc)
-                if not busy or attempt == _CLOSE_ATTEMPTS - 1:
-                    raise
-                time.sleep(_CLOSE_BACKOFF_S * (attempt + 1))
+        _close_if_open(entry, result, now=now)
     except Exception:  # noqa: BLE001 — the waiter must never raise; boot closes the row
         logger.exception("job %s run %s: the row of an ended worker could not be finalised",
                          entry.job_id, entry.run_id)
     finally:
-        with _INFLIGHT_LOCK:
-            if _CHILD_RUNS.get(entry.run_id) is entry:
-                del _CHILD_RUNS[entry.run_id]
-        _remove_quietly(entry.progress_path)
-        _remove_quietly(entry.lock_path)
+        _forget(entry)
+
+
+def _forget(entry: _ChildRun) -> None:
+    with _INFLIGHT_LOCK:
+        if _CHILD_RUNS.get(entry.run_id) is entry:
+            del _CHILD_RUNS[entry.run_id]
+    _remove_quietly(entry.progress_path)
+    _remove_quietly(entry.lock_path)
 
 
 def _close_if_open(entry: _ChildRun, result: child_runner.ChildResult, *,
                    now: datetime) -> None:
-    with session() as conn:
-        row = conn.execute("SELECT finished_at FROM job_runs WHERE id = ?",
-                           (entry.run_id,)).fetchone()
-        if row is None or row["finished_at"] is not None:
-            return
-        if result.started:
-            logger.warning("job %s run %s: worker exited %s without finishing its row; "
-                           "stderr tail:\n%s", entry.job_id, entry.run_id, result.returncode,
-                           result.stderr_tail[-2000:])
-            _close_abandoned(conn, entry.run_id, detail=WORKER_DIED, reason="worker_died",
-                             now=now)
-        else:
-            logger.warning("job %s run %s: worker not started: %s", entry.job_id,
-                           entry.run_id, result.error)
-            _close_abandoned(conn, entry.run_id, detail=WORKER_NOT_STARTED,
-                             reason="worker_not_started", now=now)
+    if entry.timed_out:
+        detail, reason = JOB_TIMED_OUT.format(limit=_limit_text(JOB_TIME_LIMIT_S)), "timeout"
+    elif result.started:
+        detail, reason = WORKER_DIED, "worker_died"
+    else:
+        detail, reason = WORKER_NOT_STARTED, "worker_not_started"
+    if _close_open_row(entry.run_id, now=now, detail=detail, reason=reason):
+        logger.warning("job %s run %s: worker ended (%s, exit %s) without finishing its row; "
+                       "stderr tail:\n%s", entry.job_id, entry.run_id, reason,
+                       result.returncode, result.stderr_tail[-2000:] or result.error)
+
+
+def _close_open_row(run_id: int, *, now: datetime, detail: str, reason: str) -> bool:
+    """Finalise *run_id* as ``error`` on a session of its own when it is still open, retrying
+    while another writer holds the database. Returns whether it closed the row."""
+    for attempt in range(_CLOSE_ATTEMPTS):
+        try:
+            with session() as conn:
+                row = conn.execute("SELECT finished_at FROM job_runs WHERE id = ?",
+                                   (run_id,)).fetchone()
+                if row is None or row["finished_at"] is not None:
+                    return False
+                _close_abandoned(conn, run_id, detail=detail, reason=reason, now=now)
+                return True
+        except sqlite3.OperationalError as exc:
+            busy = "locked" in str(exc) or "busy" in str(exc)
+            if not busy or attempt == _CLOSE_ATTEMPTS - 1:
+                raise
+            time.sleep(_CLOSE_BACKOFF_S * (attempt + 1))
+    return False  # pragma: no cover - the loop returns or raises
 
 
 def _close_abandoned(conn: sqlite3.Connection, run_id: int, *, detail: str, reason: str,
@@ -2385,17 +2467,35 @@ def _close_abandoned(conn: sqlite3.Connection, run_id: int, *, detail: str, reas
 
 def close_abandoned_runs(conn: sqlite3.Connection, *, now: datetime) -> list[int]:
     """BOOT ONLY (on the boot session, before the scheduler starts): finalise every
-    unfinished ``job_runs`` row no live process owns, and delete the job lock and sidecar
-    files nobody holds. Returns the closed run ids.
+    unfinished ``job_runs`` row no live process owns. Returns the closed run ids.
 
     A row is owned while its ``job-<run_id>.lock`` is held — a worker child that outlived
-    the previous web process (POSIX ``start_new_session``) still finishes its own row. Any
-    other unfinished row was left by a process that is gone: a worker that never started (it
-    was queued in the dead process), an in-process run (a manual 立即執行 thread, the insight
-    task door), a settlement trigger job. ``settlement`` rows are the settlement service's
-    (its boot ends them with their reports) and are never touched here. The update joins the
-    caller's transaction (``commit=False``)."""
+    the previous web process still finishes its own row. Any other unfinished row was left by
+    a process that is gone: a worker that never started (it was queued in the dead process),
+    an in-process run (a manual 立即執行 thread, the insight task door), a settlement trigger
+    job. ``settlement`` rows are the settlement service's (its boot ends them with their
+    reports) and are never touched here. The update joins the caller's transaction
+    (``commit=False``).
+
+    **An orphan worker.** A child outlives its web process only where the process dies
+    without its process group: on POSIX the child runs in its own session
+    (``start_new_session``), so a dev server killed by hand or restarted by ``--reload``
+    leaves it running; prod's systemd unit (``KillMode=control-group``) kills it with the
+    service. Such an orphan finishes its own row, but it runs OUTSIDE the new process's heavy
+    gate — the data folder's ``heavy-child.lock`` was held by the dead parent's waiter and was
+    released with it, so the new process may start another heavy child beside the orphan —
+    and WITHOUT the after-job hook, which lived in the dead process: a back-dated change it
+    makes waits for the nightly re-settlement instead of starting one.
+
+    **Files.** A lock file of a run whose row is still open is never deleted here, held or
+    not: on POSIX a probe that finds it free cannot tell "nobody" from "a surviving child
+    that has opened the file and not yet locked it", and unlinking it under that child would
+    let a second process lock a new file of the same name. The parent that waited on a child
+    deletes its files (:func:`_child_exited`); a boot deletes only the lingering files of a
+    run whose row was ALREADY final before this boot (a run id is never reused,
+    ``shared/proc_lock.py``), and only while nobody holds the lock."""
     data = proc_lock.data_dir()
+    _remove_finished_run_files(conn, data)
     closed: list[int] = []
     rows = conn.execute(
         "SELECT id FROM job_runs WHERE finished_at IS NULL AND job_id != ? ORDER BY id",
@@ -2409,14 +2509,29 @@ def close_abandoned_runs(conn: sqlite3.Connection, *, now: datetime) -> list[int
         _close_abandoned(conn, run_id, detail=ABANDONED_AT_BOOT, reason="interrupted",
                          now=now, commit=False)
         closed.append(run_id)
-    for lock_file in sorted(data.glob("job-*.lock")):
-        if not proc_lock.is_held(lock_file):
-            _remove_quietly(lock_file)
-    for sidecar in sorted(data.glob("job-*.progress.json")):
-        stem = sidecar.name.removesuffix(".progress.json")
-        if not proc_lock.is_held(data / f"{stem}.lock"):
-            _remove_quietly(sidecar)
     return closed
+
+
+_RUN_FILE = re.compile(r"^job-(\d+)\.(?:lock|progress\.json)$")
+
+
+def _remove_finished_run_files(conn: sqlite3.Connection, data: Path) -> None:
+    """Delete ``job-<id>.lock`` / ``job-<id>.progress.json`` files of runs whose row is final
+    and whose lock nobody holds (see :func:`close_abandoned_runs`, "Files")."""
+    by_run: dict[int, list[Path]] = {}
+    for path in data.glob("job-*"):
+        m = _RUN_FILE.match(path.name)
+        if m is not None:
+            by_run.setdefault(int(m.group(1)), []).append(path)
+    for run_id, paths in sorted(by_run.items()):
+        row = conn.execute("SELECT finished_at FROM job_runs WHERE id = ?",
+                           (run_id,)).fetchone()
+        if row is None or row["finished_at"] is None:
+            continue
+        if proc_lock.is_held(proc_lock.job_lock_path(run_id, data)):
+            continue
+        for path in paths:
+            _remove_quietly(path)
 
 
 def run_in_worker(conn: sqlite3.Connection, job_id: str, run_id: int, *, now: datetime,

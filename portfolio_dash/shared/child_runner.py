@@ -190,23 +190,43 @@ class _HeavyGate:
         with self._cond:
             return len(self._queue)
 
+    def discard(self, handle: ChildHandle) -> None:
+        """Take *handle* out of the gate wherever it is — its ticket in the queue, or the
+        active turn — and wake the next one. A no-op for a handle the gate does not hold.
+
+        The one exit for a ticket whose waiter never ran (:meth:`ChildRunner.spawn` when the
+        thread could not start) or broke while waiting (:meth:`enter`): a ticket left at the
+        head of the FIFO would wedge every later heavy child — every job and every
+        settlement run — for the life of the process (package H review, 2026-10-20)."""
+        with self._cond:
+            if handle in self._queue:
+                self._queue.remove(handle)
+            if self._active is handle:
+                self._active = None
+            self._cond.notify_all()
+
     def enter(self, handle: ChildHandle) -> proc_lock.LockHandle | None:
         """Wait for *handle*'s turn, then for the cross-process lock.
 
         Returns the held lock, or ``None`` when the handle was cancelled while waiting (it
-        has then left the queue and the turn has passed on).
+        has then left the queue and the turn has passed on). Anything raised while waiting
+        for the turn takes the ticket out of the queue first (:meth:`discard`).
         """
-        with self._cond:
-            while True:
-                if handle.cancel_requested:
-                    self._queue.remove(handle)
-                    self._cond.notify_all()
-                    return None
-                if self._active is None and self._queue[0] is handle:
-                    self._queue.popleft()
-                    self._active = handle
-                    break
-                self._cond.wait()
+        try:
+            with self._cond:
+                while True:
+                    if handle.cancel_requested:
+                        self._queue.remove(handle)
+                        self._cond.notify_all()
+                        return None
+                    if self._active is None and self._queue[0] is handle:
+                        self._queue.popleft()
+                        self._active = handle
+                        break
+                    self._cond.wait()
+        except BaseException:
+            self.discard(handle)
+            raise
         # In-process turn taken; now the cross-process half. Polled, so a cancel still
         # lands while another process holds the data folder's heavy lock.
         path = self.lock_path()
@@ -443,7 +463,15 @@ class ChildRunner:
                              self._tail_bytes)
         if heavy:
             self.gate.enqueue(handle)       # the ticket is taken HERE, so FIFO = spawn order
-        handle._start()
+        try:
+            handle._start()
+        except BaseException:
+            # The waiter never ran (``RuntimeError: can't start new thread`` under memory
+            # pressure): nobody will ever take this ticket's turn, so it leaves the gate
+            # before the caller hears of the failure.
+            if heavy:
+                self.gate.discard(handle)
+            raise
         return handle
 
 

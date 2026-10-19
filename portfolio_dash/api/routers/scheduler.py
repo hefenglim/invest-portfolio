@@ -27,6 +27,7 @@ from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
     RETIRED_JOB_IDS,
+    busy_sentence,
     ensure_job_rows,
     insight_job_id,
     insight_task_of,
@@ -319,7 +320,9 @@ def insight_task_run_refusal(
     if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
         return JSONResponse(
             status_code=409,
-            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
+            # A run waiting for the heavy gate is said to be queued, not running (H review).
+            content=error_body("already_running", busy_sentence(
+                insight_job_id(insight_type_id), f"洞察組合 {insight_type_id}")),
         )
     return None
 
@@ -355,7 +358,7 @@ def run_job_now(
     elif latest_run_unfinished(conn, job_id):
         return JSONResponse(
             status_code=409,
-            content=error_body("already_running", f"{job_id} 執行中"),
+            content=error_body("already_running", busy_sentence(job_id, job_id)),
         )
     run_id = start_run(conn, job_id, now=now)
     thread = threading.Thread(

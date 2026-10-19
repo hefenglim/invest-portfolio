@@ -14,10 +14,16 @@ not a heartbeat, to tell a slow child from a dead one (spec §9.4 "Liveness is t
 - ``<data>/job-<run_id>.lock`` — held by a job child for its whole life, so boot can finalise
   an orphan ``running`` job row whose lock is free.
 
-A lock file holds no data and is never deleted: on Windows the lock is mandatory (another
-process cannot even read the locked byte) and an open file cannot be removed; on POSIX,
-deleting a lock file while someone holds it lets a second process lock a new file of the same
-name. Creating the parent folder is the caller's job; creating the file is the lock's.
+A lock file holds no data. The two ROLE locks (``settlement.lock``, ``heavy-child.lock``) are
+never deleted: on Windows the lock is mandatory (another process cannot even read the locked
+byte) and an open file cannot be removed; on POSIX, deleting a lock file while someone holds
+it — or has opened it and not yet locked it — lets a second process lock a new file of the
+same name. A ``job-<run_id>.lock`` is the exception, because its name never repeats
+(``job_runs.id`` is ``AUTOINCREMENT``, so a run id is never reused): the parent that waited
+on the job child deletes it once the child is gone, and a boot deletes a lingering one only
+when its run's row is already final and nobody holds it (``scheduler/jobs.py::
+close_abandoned_runs``). Creating the parent folder is the caller's job; creating the file is
+the lock's.
 
 **POSIX: ``fcntl.flock``, never ``lockf``.** A ``lockf`` / ``fcntl(F_SETLK)`` record lock belongs
 to the PROCESS, so closing *any* descriptor of the file anywhere in that process drops it —

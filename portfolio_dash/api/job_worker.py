@@ -19,7 +19,8 @@ process, in order:
 4. binds the runtime (``api/composition.bind_runtime``, the seams the app binds) and then
    CLEARS the after-job hook: the hook belongs to the web process, where the settlement
    service lives (plan P7), and the parent calls it once this process is gone;
-5. writes its progress to ``<data>/job-<run_id>.progress.json`` (``set_progress``), which
+5. appends its log records to ``app.log`` without ever rotating it (:func:`attach_append_log`)
+   and writes its progress to ``<data>/job-<run_id>.progress.json`` (``set_progress``), which
    the parent merges into the 排程中心's status;
 6. runs the job on its row (``scheduler.jobs.run_in_worker`` → the body of
    ``run_job_outcome``), so ``job_runs``, ``usage_tally`` and ``JobOutcome`` are the
@@ -35,12 +36,14 @@ import argparse
 import logging
 import os
 from collections.abc import Sequence
+from pathlib import Path
 
 from portfolio_dash.scheduler import jobs
 from portfolio_dash.shared import proc_lock
 from portfolio_dash.shared.child_runner import apply_test_stubs_from_env, lower_own_priority
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import install_actor, job_actor, session
-from portfolio_dash.shared.logging_config import configure_logging
+from portfolio_dash.shared.logging_config import JsonLinesFormatter
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +51,36 @@ log = logging.getLogger(__name__)
 EXIT_DONE = 0
 EXIT_NOT_FINAL = 1
 EXIT_LOCKED = 2
+
+#: The handler's name — distinct from the web process's rotating handler
+#: (``shared/logging_config.configure_logging``), which this process never attaches.
+APPEND_HANDLER_NAME = "portfolio_dash.jsonlines.job_worker"
+
+
+def attach_append_log(log_dir: Path | None = None) -> logging.Handler:
+    """Append this process's records to the web process's ``<data>/logs/app.log`` — the same
+    JSON lines the in-process run wrote there — through a plain ``FileHandler``: append
+    only, never a rollover.
+
+    Not ``configure_logging``: its ``RotatingFileHandler`` would make this a SECOND process
+    rotating one file, and two rotators rename each other's file away (package H review,
+    2026-10-20). Not stderr either: the runner keeps only the last 16 KiB of it and logs that
+    only when the child fails, so a run that succeeded would lose its INFO lines, which the
+    in-process run wrote to ``app.log``. Appending from two processes is safe for single JSON
+    lines; when the web process rotates while this child runs, the child's lines land in the
+    renamed file (POSIX) or the rename waits until the child has closed it (Windows), and the
+    child lives for one job.
+    """
+    target = log_dir if log_dir is not None else get_settings().db_path.parent / "logs"
+    target.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(target / "app.log", mode="a", encoding="utf-8")
+    handler.name = APPEND_HANDLER_NAME
+    handler.setFormatter(JsonLinesFormatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    if root.level > logging.INFO or root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
+    return handler
 
 
 def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -66,7 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     apply_test_stubs_from_env()
     lower_own_priority()
     os.environ["PD_JOB_MODE"] = "inline"
-    configure_logging()
+    attach_append_log()
     data = proc_lock.data_dir()
     try:
         held = proc_lock.lock(proc_lock.job_lock_path(args.run_id, data),
