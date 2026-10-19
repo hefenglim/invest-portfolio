@@ -6,7 +6,9 @@ by ``PD_STUB_WORKER`` —
 
 - ``die_before_claim``: the process exits (code 3) where the worker would claim;
 - ``slow_claim``: sleeps ``PD_STUB_SLEEP_S`` seconds before the claim (the 準備中 window);
-- ``slow_valuate``: sleeps before the valuation, after the claim (a run to kill mid-way).
+- ``slow_valuate``: sleeps before the valuation, after the claim (a run to kill mid-way);
+- ``slow_phase``: sleeps before the ``_Run`` method named by ``PD_STUB_PHASE`` (``_load``,
+  ``_check``, ``_plan``, ``_valuate``, ``_close``, ``_bench``, ``_swap``) — a kill in any phase.
 
 ``slow_*`` sleep only while the marker file named by ``PD_STUB_ONCE`` exists, and delete it
 first, so the run that follows (a resume, a chained run) is not slowed again. Everything else
@@ -59,9 +61,23 @@ def _valuate(self: Any, *args: Any, **kwargs: Any) -> Any:
     return _real_valuate(self, *args, **kwargs)
 
 
+_PHASE = os.environ.get("PD_STUB_PHASE", "")
+
+
+def _slowed(real: Any) -> Any:
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _MODE == "slow_phase" and _once():
+            time.sleep(_SLEEP_S)
+        return real(self, *args, **kwargs)
+
+    return wrapper
+
+
 # The child runs the worker as ``python -m``: its classes live in ``__main__``, a second copy
 # of the module next to the ``settle_worker`` imported above. Patch every copy present.
 for _module in {id(m): m for m in (settle_worker, sys.modules.get("__main__"))
                 if m is not None and hasattr(m, "_Run")}.values():
     _module._Run._claim = _claim
     _module._Run._valuate = _valuate
+    if _MODE == "slow_phase" and _PHASE:
+        setattr(_module._Run, _PHASE, _slowed(getattr(_module._Run, _PHASE)))
