@@ -1020,10 +1020,15 @@ def _abnormal_end(report: RunReport, exit_info: _Exit,
     return "interrupted", RunFailure(phase=phase, reason_text=f"結算程序異常結束{suffix}")
 
 
-def _range_text(summary: RunSummary) -> str:
+def _range_text(summary: RunSummary, valued_days: int | None = None) -> str:
+    """The run's calendar span; with the trend days it valued when they differ (a full run
+    starts at the ledger's first row, which can lie before the first trade)."""
     if summary.range_from is None or not summary.days:
         return "帳本尚無資料，無需結算"
-    return f"{summary.range_from.isoformat()} 起 {summary.days} 天"
+    text = f"{summary.range_from.isoformat()} 起 {summary.days} 天"
+    if valued_days is not None and valued_days != summary.days:
+        text += f"（結算 {valued_days} 個走勢日）"
+    return text
 
 
 #: The settle tables a self-check compares, in the owner's words (DEF-073: no table name in a
@@ -1045,7 +1050,7 @@ def run_detail(report: RunReport) -> str:
     「重新結算 2025-06-16 起 489 天，耗時 14 秒」."""
     s = report.summary
     took = _seconds_text(s.duration_s)
-    span = _range_text(s)
+    span = _range_text(s, report.range.valued_days)
     failure = report.failure
     if s.status == "published" and report.inputs.scope == "selfcheck":
         # keyed on the run's SCOPE: a resumed self-check (reason ``resume``) is one too

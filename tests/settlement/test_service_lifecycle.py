@@ -41,7 +41,7 @@ from tests.settlement import service_support as sup
 from tests.settlement import stub_settle_worker as stub
 from tests.settlement.conftest import CorpusFactory
 
-_DETAIL = re.compile(r"^重新結算 \d{4}-\d{2}-\d{2} 起 \d+ 天，耗時")
+_DETAIL = re.compile(r"^重新結算 \d{4}-\d{2}-\d{2} 起 \d+ 天(（結算 \d+ 個走勢日）)?，耗時")
 
 
 @pytest.fixture
@@ -537,3 +537,20 @@ def test_a_job_row_left_running_behind_an_ended_report_is_closed_by_the_next_sta
     assert sup.PUSHES == [failed]  # the automatic failure's push, once
     service.start_run(scope="full", reason="button")
     assert sup.PUSHES == [failed]
+
+
+def test_the_detail_names_the_valued_days_when_the_span_is_longer(path: Path) -> None:
+    """A full run's span starts at the ledger's first row (a deposit can precede the first
+    trade): the detail gives the calendar span and, when it differs, the trend days valued."""
+    started = service.start_run(scope="full", reason="button")
+    report = sup.report(path, started.run_id)
+    days = report.summary.days
+    assert days
+    longer = report.model_copy(update={
+        "range": report.range.model_copy(update={"valued_days": days - 1})})
+    assert f"起 {days} 天（結算 {days - 1} 個走勢日），耗時" in service.run_detail(longer)
+    same = report.model_copy(update={
+        "range": report.range.model_copy(update={"valued_days": days})})
+    assert "走勢日" not in service.run_detail(same)
+    assert english_words(service.run_detail(longer)) == []
+
