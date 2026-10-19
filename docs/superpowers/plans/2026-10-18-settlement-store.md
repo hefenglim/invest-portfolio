@@ -1365,6 +1365,68 @@ Carried to wave 3 and W4:
   Also the trend tooltip's 累計總損益（含匯兌） is still computed in JS (since v0.1.31): an owner
   ruling after the release.
 
+**Wave 3 (2026-10-20), merged.**
+- **The packages:**
+  - G: read path and period serving, `b2e25a4`.
+  - H: job workers, the composition root, medium routes; `4f75046`, `b31012f`.
+  - I: the stress-audit month-end oracle and the harness; `a621638`, `8869eef`.
+- **Merge wiring** (`64fcba4`):
+  - `api/app.py` binds every scheduler seam through `api/composition.bind_runtime()`, the same call the job-worker child makes;
+  - boot runs `close_abandoned_runs`;
+  - the 排程 status serves a queued run's sentence;
+  - the spend guard lists `_close_abandoned`;
+  - the child-mode scheduler flow runs.
+- **Reviews and verification.** All three reviews were READY-WITH-FIXES. Each package's own agent fixed its findings, the original reviewer fold-verified the fixes, and all three came back FIXED / READY.
+
+What the reviews caught and what changed:
+- **G:**
+  - **The bug:** the served `live_from` could land after the store's when the trend's first day moved on or after it, so a dirty past month was served from the previous generation, unmarked. It is now clamped (`min(first_day + len(days), stop)`).
+  - **New tests** pin the stored-days OR of `options_open` and the month-end `<` boundary.
+  - **Refused receivable payouts** are listed marked 未入帳（待釐清） (ruling X1); 月度成績's tooltip prints them.
+  - **暫定** names the period end's market.
+  - **A ledger write between the cached build and the read transaction** forces a rebuild.
+  - **The status chip may over-warn** (a false positive) where placeholders or a gap make the page serve live. This is documented: the clip needs the live `available`, which only a build has.
+  - **A past close computed live has no trend figure** on a PERF-F2-shaped ledger. This is deferred with PERF-F2.
+- **H:**
+  - **Spawn failures:** a failed spawn released neither the heavy gate (the ticket stayed at the head of the FIFO) nor its pre-inserted `job_runs` row. Both are fixed, and so is the settlement service's half (`defd03d`: a worker that cannot spawn ends its run 失敗 and frees `_S.active`).
+  - **Time limit:** a job child stops after 30 minutes (`JOB_TIME_LIMIT_S`, counted from the child's start); the settlement child has none.
+  - **Lock files:** boot no longer deletes an open run's lock file.
+  - **Logging:** the child appends to `app.log` without rotating. A Windows dev rollover during a job drops web records; this is documented.
+  - **Tests now cover:**
+    - a child run that spends;
+    - the side effects of each job and the trail actor;
+    - the medium routes' bodies, byte for byte against `16a70b5`'s code.
+  - **UI:**
+    - The digest card follows a queued run.
+    - A queued run's 409 says 已排入.
+  - **Medium routes:**
+
+    | Route | Statements before | After |
+    | --- | --- | --- |
+    | `/api/input/context` | 137 | 55 |
+    | `/api/instruments` | 133 | 124 |
+    | `/api/dividend-inbox` | 459 | 366 |
+- **I:**
+  - **Independence:** the oracle had read the app's derived `prices.close`, so a price-cap regression passed. It now prices from what the fixture wrote, and `prices.stored_close` / `fx.stored_rate` check the stored columns.
+  - **New oracles:** `period_twr` (the oracle's own chain-linked index), the §11.3 activity lines, Y ≡ December, Σ months ≡ year, and the tax tie-out.
+  - **Gating:** a flat 賣超 withholds XIRR; no period is left unjudged.
+  - **New scenarios:** missing FX at a month end, drifting month-end series, reduced-ratio split de-duplication, a closed prior year, and a weekday month-end split.
+  - **Run control:** `_wait_run` aborts after 600 s, and phase 1 exits 1 on any failure (`b2fb777`).
+  - **Results:** phase 1 reads ops=257 pass=152086 fail=0. Six app mutations were each caught (price cap, `gross_invested`, the TWR index, an activity line, a stale boundary, a month-end value).
+
+Gates at the merge (`f175f54`):
+- the non-e2e suite in 22 foreground chunks (732 files): green after one stale wiring pin moved to the composition root;
+- `mypy --strict` clean (1,195 files);
+- ruff clean.
+
+Owner items for W4:
+- **`xirr_window_days`** is null while XIRR is withheld. This is v0.1.31 behaviour, but it contradicts manual §7.2.1.
+- **Job spawn cost:** about 6–15 s per job on the VM. It adds to a manual 立即執行.
+- **The 30-minute job limit.**
+- **The first boot** closes historically stuck `job_runs` rows as error 「系統重新啟動時此工作尚未完成」.
+- **The digest card's run** now goes to a child.
+- **Not yet reconciled by the stress audit:** `restated`, the run diff pages, and the openings activity line.
+
 ## Appendix — code map (surveyed at `473fe5a`; re-check line numbers before editing)
 
 **Engine:**
