@@ -1389,7 +1389,7 @@ What the reviews caught and what changed:
   - **A past close computed live has no trend figure** on a PERF-F2-shaped ledger. This is deferred with PERF-F2.
 - **H:**
   - **Spawn failures:** a failed spawn released neither the heavy gate (the ticket stayed at the head of the FIFO) nor its pre-inserted `job_runs` row. Both are fixed, and so is the settlement service's half (`defd03d`: a worker that cannot spawn ends its run 失敗 and frees `_S.active`).
-  - **Time limit:** a job child stops after 30 minutes (`JOB_TIME_LIMIT_S`, counted from the child's start); the settlement child has none.
+  - **Time limit:** a job child stops after its limit (`JOB_TIME_LIMIT_S`, counted from the child's start; 60 minutes by the owner's ruling, H had 30); the settlement child has none.
   - **Lock files:** boot no longer deletes an open run's lock file.
   - **Logging:** the child appends to `app.log` without rotating. A Windows dev rollover during a job drops web records; this is documented.
   - **Tests now cover:**
@@ -1419,11 +1419,13 @@ Gates at the merge (`f175f54`):
 - `mypy --strict` clean (1,195 files);
 - ruff clean.
 
-Owner items for W4:
-- **`xirr_window_days`** is null while XIRR is withheld. This is v0.1.31 behaviour, but it contradicts manual §7.2.1.
-- **Job spawn cost:** about 6–15 s per job on the VM. It adds to a manual 立即執行.
-- **The 30-minute job limit.**
-- **The first boot** closes historically stuck `job_runs` rows as error 「系統重新啟動時此工作尚未完成」.
+Owner items for W4, **ruled 2026-10-20** (「XIRR 沒問題、時間成本沒問題，時間上限最多60分鐘，開機進行清理卡住排程」):
+- **`xirr_window_days`** stays null while XIRR is withheld (v0.1.31 behaviour kept); manual §7.2.1 is amended
+  to say so at W4.
+- **Job spawn cost** (about 6–15 s per job on the VM, adding to a manual 立即執行): accepted.
+- **The job time limit is 60 minutes** (`JOB_TIME_LIMIT_S`, changed from H's 30).
+- **The first boot** closes historically stuck `job_runs` rows as error 「系統重新啟動時此工作尚未完成」:
+  accepted (CHANGELOG line).
 - **The digest card's run** now goes to a child.
 - **Not yet reconciled by the stress audit:** `restated`, the run diff pages, and the openings activity line.
 

@@ -603,6 +603,8 @@ def test_the_job_details_of_a_lost_worker_speak_chinese() -> None:
                  jobs.busy_sentence("signal_scan", "洞察組合 3")):
         assert text and not english_words(text), text
     assert jobs._limit_text(1800) == "30 分鐘" and jobs._limit_text(3) == "3 秒"
+    # the owner's ruling, 2026-10-20: a job child runs at most 60 minutes
+    assert jobs.JOB_TIME_LIMIT_S == 3600 and jobs._limit_text(jobs.JOB_TIME_LIMIT_S) == "60 分鐘"
 
 
 # ------------------------------------------------------------------- package H review fixes

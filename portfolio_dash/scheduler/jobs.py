@@ -2137,7 +2137,7 @@ ABANDONED_AT_BOOT = "系統重新啟動時此工作尚未完成"
 #: ``job_runs.detail`` of a run whose child could not even be spawned (``<class>`` is the
 #: exception's class name — ``RuntimeError: can't start new thread`` under memory pressure).
 SPAWN_FAILED = "無法啟動工作子程序（{error}）"
-#: ``job_runs.detail`` of a run stopped by :data:`JOB_TIME_LIMIT_S` (``{limit}`` 「30 分鐘」).
+#: ``job_runs.detail`` of a run stopped by :data:`JOB_TIME_LIMIT_S` (``{limit}`` 「60 分鐘」).
 JOB_TIMED_OUT = "工作執行逾時（超過 {limit}），已中止"
 
 #: A job child's wall-clock limit, counted from the moment its process starts (the wait for
@@ -2145,7 +2145,8 @@ JOB_TIMED_OUT = "工作執行逾時（超過 {limit}），已中止"
 #: (a news run organising every held symbol, a deep fundamentals sweep) take minutes; one that
 #: hangs on a provider must not hold the shared heavy gate, with every other job and the
 #: owner's 重新結算 queued behind it, for longer than this (package H review, 2026-10-20).
-JOB_TIME_LIMIT_S = 30 * 60.0
+#: 60 minutes: the owner's ruling, 2026-10-20 (「時間上限最多 60 分鐘」).
+JOB_TIME_LIMIT_S = 60 * 60.0
 #: How often the waiting caller checks the limit, and how long a child it stops gets between
 #: terminate and kill.
 _LIMIT_POLL_S = 1.0
