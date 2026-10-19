@@ -8,12 +8,16 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import BaseScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from portfolio_dash.scheduler.jobs import ensure_scheduler_seeded, trigger_job
+from portfolio_dash.scheduler.jobs import RETIRED_JOB_IDS, ensure_scheduler_seeded, trigger_job
 from portfolio_dash.shared.db import session
 
 
 def build_scheduler() -> BackgroundScheduler:
-    """Build a scheduler with a cron trigger per enabled ``schedule_config`` row."""
+    """Build a scheduler with a cron trigger per enabled ``schedule_config`` row.
+
+    A retired job (``jobs.RETIRED_JOB_IDS``, plan P11) is skipped by its id — exactly those
+    ids, never "anything not in ``JOBS``", which would also drop the dynamic ``insight:<id>``
+    rows and stop every scheduled AI task."""
     scheduler = BackgroundScheduler()
     with session() as conn:
         ensure_scheduler_seeded(conn)
@@ -21,7 +25,7 @@ def build_scheduler() -> BackgroundScheduler:
             "SELECT job_id, enabled, cron, timezone FROM schedule_config"
         ).fetchall()
     for row in rows:
-        if not row["enabled"]:
+        if not row["enabled"] or row["job_id"] in RETIRED_JOB_IDS:
             continue
         trigger = CronTrigger.from_crontab(row["cron"], timezone=row["timezone"])
         scheduler.add_job(

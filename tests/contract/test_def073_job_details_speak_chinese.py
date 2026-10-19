@@ -99,7 +99,8 @@ def db(golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
     for name in ("_DIVIDEND_SCAN_RUNNER", "_NEWS_RUNNER", "_DIGEST_RUNNER", "_INSIGHT_RUNNER",
                  "_SNAPSHOT_RUNNER", "_SIGNAL_SCAN_RUNNER", "_FUNDAMENTALS_RUNNER",
                  "_EVALUATION_RUNNER", "_CALIBRATION_RUNNER", "_ALERT_COMPUTE_RUNNER",
-                 "_ALERT_HELD_FN", "_HELD_SYMBOLS_FN"):
+                 "_ALERT_HELD_FN", "_HELD_SYMBOLS_FN", "_SETTLEMENT_RUNNER",
+                 "_AFTER_JOB_HOOK"):
         monkeypatch.setattr(jobs, name, None)
     jobs._INFLIGHT_JOBS.clear()
     yield golden_db
@@ -146,6 +147,7 @@ def _stub_seams(monkeypatch: pytest.MonkeyPatch, *, failing: bool) -> None:
     monkeypatch.setattr(jobs, "_DIGEST_RUNNER", digest_service.run_digest)
     monkeypatch.setattr(jobs, "_DIVIDEND_SCAN_RUNNER", inbox.scan_job)
     monkeypatch.setattr(jobs, "_FUNDAMENTALS_RUNNER", lambda conn, *, now: sweep)
+    _stub_settlement(monkeypatch, failing=failing)
     news = {"organized": 0 if failing else 2, "headline_only": 1, "skipped_existing": 3,
             "refetched": 1, "stopped_budget": failing}
     monkeypatch.setattr(jobs, "_NEWS_RUNNER", lambda conn, *, now: news)
@@ -157,6 +159,38 @@ def _stub_seams(monkeypatch: pytest.MonkeyPatch, *, failing: bool) -> None:
             raise RuntimeError("push path exploded")
 
         monkeypatch.setattr(jobs.notify_dispatch, "dispatch_notifications", boom)
+
+
+def _stub_settlement(monkeypatch: pytest.MonkeyPatch, *, failing: bool) -> None:
+    """The settlement runner (plan §6.2), its REAL sentence-builders on synthetic runs: an
+    inline run that published (success) or failed in a phase (failure) — the run's own
+    ``run_detail`` sentence, wrapped by the trigger job's ``trigger_outcome``."""
+    from portfolio_dash.api import settlement_service as service
+    from portfolio_dash.portfolio.settlement_models import (
+        RunFailure,
+        RunReport,
+        RunRequest,
+        RunStatus,
+        RunSummary,
+    )
+
+    status: RunStatus = "failed" if failing else "published"
+    summary = RunSummary(run_id=12, status=status, status_text="", reason="nightly",
+                         trigger_text="t", started_at=NOW, duration_s=14.2,
+                         range_from=NOW.date() - timedelta(days=488), days=489)
+    report = RunReport(summary=summary,
+                       inputs=RunRequest(scope="nightly", reason="nightly", through=NOW.date()),
+                       failure=RunFailure(phase="valuate", reason_text="結算程序異常結束")
+                       if failing else None)
+
+    def runner(conn: Any, scope: str, *, now: Any) -> Any:
+        ended = service.RunEnd(run_id=12, status=status,
+                               job_status="error" if failing else "ok",
+                               detail=service.run_detail(report), reason=scope, scope="nightly")
+        return service.trigger_outcome(service._JOB_LABEL[scope],
+                                       service.AutoStart(run_id=12, ended=ended))
+
+    monkeypatch.setattr(jobs, "_SETTLEMENT_RUNNER", runner)
 
 
 _ALL_JOBS = [spec.id for spec in JOBS]
@@ -184,7 +218,7 @@ def test_the_no_runner_branch_speaks_chinese_too(db: sqlite3.Connection) -> None
     """A scheduler-only process (no runner registered) — 「no … runner registered」 before."""
     for job_id in ("digest_daily", "digest_weekly", "snapshot_monthly", "signal_scan",
                    "news_daily", "fundamentals_av_weekly", "evaluate_insights",
-                   "generate_calibrations"):
+                   "generate_calibrations", "settlement_nightly", "settlement_selfcheck"):
         _, outcome = run_job_outcome(db, job_id, now=NOW)
         assert not english_words(outcome.detail), (job_id, outcome.detail)
 

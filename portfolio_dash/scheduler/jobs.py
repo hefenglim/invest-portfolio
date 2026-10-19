@@ -861,7 +861,26 @@ def snapshot_monthly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
     return _outcome_of(runner(conn, now=now))
 
 
-# --- The settlement (PERF spec 2026-10-18 §9.1, §9.4) -------------------------
+# --- The settlement (PERF spec 2026-10-18 §9.1, plan P7 / P13) ----------------
+# ``scheduler/`` reaches the settlement ONLY through these two seams, bound by the app
+# (``api/settlement_service.py`` is L6; a direct import would point up the ladder and cycle
+# through ``start_job_run`` / ``finish_job_run``).
+#
+# - The settlement runner starts the two scheduled runs (``settlement_nightly``,
+#   ``settlement_selfcheck``). Signature: ``fn(conn, scope, *, now) -> str | JobOutcome``,
+#   *scope* ``"nightly"`` or ``"selfcheck"``. The run itself writes its OWN ``job_runs`` row
+#   (``job_id = 'settlement'``, :data:`SETTLEMENT_JOB_ID`); the trigger job's row says what
+#   it started.
+# - The after-job hook (spec §9.1: "after a scheduled job whose run raised ``seq`` with
+#   ``dirty_from`` < the live window start"): ``fn(job_id)`` is called just BEFORE a static
+#   job's func runs and returns the callable to call once the job's row is finalised (or
+#   ``None``). Two-phase so the hook can compare ``settle_dirty.seq`` across the run without
+#   ``scheduler/`` knowing the settle tables exist. Called only in the WEB process (plan P7):
+#   a job worker child that ran the job must hand the call back to its parent.
+SettlementRunner = Callable[..., "str | JobOutcome"]
+_SETTLEMENT_RUNNER: SettlementRunner | None = None
+AfterJobHook = Callable[[str], "Callable[[], None] | None"]
+_AFTER_JOB_HOOK: AfterJobHook | None = None
 
 #: ``job_runs.job_id`` of every settlement run's own row (spec §9.4). Not a schedulable job:
 #: it has no ``schedule_config`` row and is not in :data:`JOBS`.
@@ -869,6 +888,72 @@ SETTLEMENT_JOB_ID = "settlement"
 
 #: The market quote jobs whose verdicts decide ``final_through`` (spec §9.1).
 QUOTE_JOB_IDS: tuple[str, ...] = ("quotes_tw", "quotes_us", "quotes_my")
+
+#: Jobs that always run in the web process, never in a job worker child (plan P7): they only
+#: start a settle child, and a job child would hold the heavy gate while waiting for it.
+WEB_PROCESS_JOB_IDS: frozenset[str] = frozenset({"settlement_nightly", "settlement_selfcheck"})
+
+#: Jobs that are no longer scheduled or listed (plan P11). ``ensure_job_rows`` never deletes,
+#: so their ``schedule_config`` rows stay, their ``job_runs`` history stays readable, and
+#: ``build_scheduler`` / the 排程 listing skip EXACTLY these ids — skipping "anything not in
+#: JOBS" would also drop the dynamic ``insight:<id>`` rows and stop every scheduled AI task.
+#: ``snapshot_monthly`` stays in :data:`JOBS` (and its runner seam stays registered) until the
+#: settlement's month closes replace it at W4.
+RETIRED_JOB_IDS: frozenset[str] = frozenset({"snapshot_monthly"})
+
+
+def register_settlement_runner(fn: SettlementRunner | None) -> None:
+    """Register (or clear with None) the settlement runner (app wiring seam, plan P13)."""
+    global _SETTLEMENT_RUNNER
+    _SETTLEMENT_RUNNER = fn
+
+
+def register_after_job_hook(fn: AfterJobHook | None) -> None:
+    """Register (or clear with None) the after-job hook (app wiring seam, plan P13)."""
+    global _AFTER_JOB_HOOK
+    _AFTER_JOB_HOOK = fn
+
+
+def _begin_after_job(job_id: str) -> "Callable[[], None] | None":
+    """Ask the hook before a static job runs; never raises (a hook is an observer)."""
+    hook = _AFTER_JOB_HOOK
+    if hook is None or job_id in WEB_PROCESS_JOB_IDS:
+        return None
+    try:
+        return hook(job_id)
+    except Exception:  # noqa: BLE001 — the hook must never stop the job
+        logger.warning("after-job hook failed before %s", job_id, exc_info=True)
+        return None
+
+
+def _end_after_job(job_id: str, after: "Callable[[], None] | None") -> None:
+    if after is None:
+        return
+    try:
+        after()
+    except Exception:  # noqa: BLE001 — the hook must never fail the job's caller
+        logger.warning("after-job hook failed after %s", job_id, exc_info=True)
+
+
+def _settlement_job(scope: str, job_id: str, label: str, conn: sqlite3.Connection, *,
+                    now: datetime) -> JobOutcome:
+    runner = _SETTLEMENT_RUNNER
+    if runner is None:
+        return _no_runner("重新結算")
+    set_progress(job_id, f"啟動{label}")
+    return _outcome_of(runner(conn, scope, now=now))
+
+
+def settlement_nightly(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """06:40 Taipei: settle what is dirty and extend through ``final_through`` (spec §9.1).
+
+    Starts a ``nightly``-scope run through the registered runner, in the web process (P7)."""
+    return _settlement_job("nightly", "settlement_nightly", "每晚例行結算", conn, now=now)
+
+
+def settlement_selfcheck(conn: sqlite3.Connection, *, now: datetime) -> JobOutcome:
+    """Sunday 04:30 Taipei: a full recompute compared with the published generation (§9.1)."""
+    return _settlement_job("selfcheck", "settlement_selfcheck", "每週自檢", conn, now=now)
 
 
 # signal_scan runner seam (P2 batch 2): the scan reads pricing/portfolio + the rule engine
@@ -1568,7 +1653,16 @@ JOBS: list[JobSpec] = [
         "digest_weekly", digest_weekly, "0 17 * * sun", "Asia/Taipei", True,
         "Weekly action list (assemble + push)",
     ),
-
+    # The settlement (PERF spec 2026-10-18 §9.1): after the US quotes (16:30 New York =
+    # 04:30 / 05:30 Taipei) and before the morning's first page loads. Web process only (P7).
+    JobSpec(
+        "settlement_nightly", settlement_nightly, "40 6 * * *", "Asia/Taipei", True,
+        "Nightly re-settlement of history through final_through",
+    ),
+    JobSpec(
+        "settlement_selfcheck", settlement_selfcheck, "30 4 * * sun", "Asia/Taipei", True,
+        "Weekly settlement self-check (full recompute compared with the published version)",
+    ),
 ]
 
 DEFAULT_BOARD: dict[Market, str] = {Market.US: "", Market.MY: ".KL", Market.TW: "TWSE"}
@@ -2126,6 +2220,7 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
             # FU-D36: mark 執行中 once we own the row; the window before this (from
             # start_run inserting the row) is the honest 已排入 state. Clear only
             # after finish_job_run commits, so the poll never reads a done run as queued.
+            after = _begin_after_job(job_id)
             _mark_running(job_id)
             try:
                 with usage_tally() as usage:
@@ -2139,6 +2234,7 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
                 )
             finally:
                 _clear_running(job_id)
+                _end_after_job(job_id, after)
     except Exception:  # noqa: BLE001 — background worker must never raise out of the thread
         return
 
@@ -2342,7 +2438,18 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
             job_id,
         )
         return None
-    return run_job(conn, job_id, now=now)
+    if job_id in RETIRED_JOB_IDS:
+        # A stale trigger (a scheduler built before the job was retired, plan P11).
+        logger.info("dispatch_job: %s is retired; skipping", job_id)
+        return None
+    # The settlement's after-job hook (plan P13) sees the job's whole run: it compares the
+    # change trail's seq before and after, and starts an automatic run when the job changed
+    # history before the live window.
+    after = _begin_after_job(job_id)
+    try:
+        return run_job(conn, job_id, now=now)
+    finally:
+        _end_after_job(job_id, after)
 
 
 def trigger_job(job_id: str) -> None:

@@ -26,6 +26,7 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
+    RETIRED_JOB_IDS,
     ensure_job_rows,
     insight_job_id,
     insight_task_of,
@@ -222,7 +223,9 @@ def list_jobs(
     ).fetchall()
     tasks = _insight_tasks(conn)
     return {
-        "jobs": [_job_element(conn, r, scheduler, tasks) for r in rows],
+        # A retired job (plan P11) is not listed; its run history stays in /scheduler/runs.
+        "jobs": [_job_element(conn, r, scheduler, tasks) for r in rows
+                 if r["job_id"] not in RETIRED_JOB_IDS],
         "scheduler": scheduler_state(request),
     }
 
@@ -441,6 +444,7 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -
     job_ids = [
         r["job_id"]
         for r in conn.execute("SELECT job_id FROM schedule_config ORDER BY job_id")
+        if r["job_id"] not in RETIRED_JOB_IDS  # plan P11: the listing skips retired jobs
     ]
     # Latest row overall per job (finished or not) → detects an in-flight run (queued/running).
     latest_overall: dict[str, Any] = {
