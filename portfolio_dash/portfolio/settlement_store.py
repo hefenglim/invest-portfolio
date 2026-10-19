@@ -61,7 +61,8 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 import portfolio_dash
-from portfolio_dash.portfolio.returns import DividendIdentity, dividend_key
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.returns import DividendRefusals
 from portfolio_dash.portfolio.settlement_models import (
     ACTIVE_RUN_STATUSES,
     CHANGE_TABLE_ZH,
@@ -2712,6 +2713,25 @@ def settled_prefix(conn: sqlite3.Connection, state: StoreState, *, first_day: da
     - the first day the generation does not hold (a gap; the series start moved earlier than
       the generation's ``first_day``): never a day served from nowhere.
 
+    The served ``live_from`` is never LATER than that stop (review G #1): with no stored day
+    served — the series' first day on or after the store's ``live_from``, e.g. the ledger's
+    first trade re-dated later — it is the stop itself, not the series' first day. A period
+    close ending before the served ``live_from`` is read from the store
+    (``api/snapshots.py``), so a later one would serve the previous generation's close of a
+    dirty period, unmarked.
+
+    **The status chip can say more than this serves** (review G #4, a known false positive).
+    ``GET /api/settlement/status`` reports the store-level range — :func:`live_from` and
+    :func:`stale_range` — while a build serves live from EARLIER in two cases: the first
+    placeholder day when the live series is available, and the series' first day when the
+    generation does not hold it (a row back-dated before the series' first day). Then the
+    banner reads 「更新前版本 · 尚未包含 … 起的變更」 over days this build already values live.
+    Only the build can clip it: the placeholder rule turns on whether the LIVE series is
+    available (every flow converts — ``timeseries.build_reporting_flows`` over the whole
+    ledger), which the status poll does not evaluate. The banner is never a false NEGATIVE —
+    every day it does not mark is current — and the store is dirty in both cases, so the run
+    it prompts for is due anyway.
+
     An unusable store serves nothing: every day is live.
     """
     if not state.usable:
@@ -2728,7 +2748,7 @@ def settled_prefix(conn: sqlite3.Connection, state: StoreState, *, first_day: da
                 break
             days.append(d)
             expected += _ONE_DAY
-    served_live = first_day + timedelta(days=len(days))
+    served_live = min(first_day + timedelta(days=len(days)), stop)
     stale = stale_range(state, today)
     served_stale = None
     if stale is not None and stale[0] < served_live:
@@ -2756,16 +2776,20 @@ def twr_pending(start: date, end: date, *, live_from: date | None,
 
 
 def dividends_receivable(dividends: Iterable[Dividend], instruments: Mapping[str, Instrument],
-                         day: date, *, refused: Iterable[DividendIdentity] = ()
+                         day: date, *, refusals: DividendRefusals | None = None
                          ) -> list[ReceivableDividend]:
     """``notes.dividends_receivable`` of a close at *day* (§11.2), computed when the close is
     READ: every non-STOCK dividend with ``ex_date ≤ day < payment date`` — the price already
     dropped, the payout counts from its payment date. Shown, never counted. A 配股 counts from
     its ex-date, so it is already in *day*'s shares and never listed; a row without an ex-date
-    is never guessed onto the list; a row the replay refuses (*refused*, the replay's
-    ``Book.refused_dividends``) is 待釐清 — named in ``notes.pending_positions`` — not a
-    receivable. Ledger order."""
-    keys = {dividend_key(d) for d in refused}
+    is never guessed onto the list. Ledger order.
+
+    X1 (owner ruling 2026-10-05): a row the replay REFUSES (*refusals*, the one decision —
+    ``returns.DividendRefusals`` of the whole-ledger replay, as every listing reads it) is
+    LISTED, marked as every dividend listing marks it — ``booked`` false,
+    ``unbooked_note`` 「未入帳（待釐清）」 and ``unbooked_reason``, the replay's own sentence
+    (``api/wire.unbooked_wire``'s keys) — never dropped: between its ex-date and its payment
+    date it would otherwise appear nowhere. The list carries no total, so nothing sums it."""
     out: list[ReceivableDividend] = []
     for dv in dividends:
         if dv.type is DividendType.STOCK or dv.ex_date is None:
@@ -2773,11 +2797,14 @@ def dividends_receivable(dividends: Iterable[Dividend], instruments: Mapping[str
         if not dv.ex_date <= day < dv.date:
             continue
         inst = instruments.get(dv.symbol)
-        if inst is None or dividend_key(dv) in keys:
+        if inst is None:
             continue
-        out.append(ReceivableDividend(account_id=dv.account_id, symbol=dv.symbol,
-                                      ex_date=dv.ex_date, pay_date=dv.date,
-                                      ccy=inst.quote_ccy, net=dv.net))
+        why = None if refusals is None else refusals.why(dv)
+        out.append(ReceivableDividend(
+            account_id=dv.account_id, symbol=dv.symbol, ex_date=dv.ex_date, pay_date=dv.date,
+            ccy=inst.quote_ccy, net=dv.net, booked=why is None,
+            unbooked_note=None if why is None else UNBOOKED_DIVIDEND_NOTE,
+            unbooked_reason=None if why is None else why[1]))
     return out
 
 

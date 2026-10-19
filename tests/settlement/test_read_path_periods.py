@@ -29,11 +29,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from portfolio_dash.api import snapshots
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.data_ingestion.store import list_cash_movements, list_fx_conversions
 from portfolio_dash.data_ingestion.store import load_ledger_bundle as load_bundle
 from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
+from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
+from portfolio_dash.portfolio.dashboard import build_dashboard_keyed
+from portfolio_dash.portfolio.returns import DividendRefusals, dividend_key
 from portfolio_dash.portfolio.settlement_models import PeriodHolding, PeriodKpi
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import valued_rows_as_of
@@ -369,7 +373,16 @@ def test_dividends_receivable_is_read_at_d(settled: Settled) -> None:
     assert st.dividends_receivable([stock], bundle.instruments, dv.date - ONE) == []
     assert st.dividends_receivable([dv.model_copy(update={"ex_date": None})],
                                    bundle.instruments, dv.date - ONE) == []
-    assert st.dividends_receivable([on], bundle.instruments, dv.date - ONE, refused=[on]) == []
+    # X1: a payout the replay refuses is LISTED, marked, with the replay's sentence
+    refusals = DividendRefusals(refused=(on,),
+                                reasons={dividend_key(on): ("orphan", "沒有對應持倉的股利")})
+    (marked,) = st.dividends_receivable([on], bundle.instruments, dv.date - ONE,
+                                        refusals=refusals)
+    assert (marked.booked, marked.unbooked_note, marked.unbooked_reason) == (
+        False, UNBOOKED_DIVIDEND_NOTE, "沒有對應持倉的股利")
+    (plain,) = st.dividends_receivable([on], bundle.instruments, dv.date - ONE,
+                                       refusals=DividendRefusals())
+    assert (plain.booked, plain.unbooked_note, plain.unbooked_reason) == (True, None, None)
 
 
 def test_a_month_with_a_receivable_dividend_lists_it(app: FastAPI, settled: Settled) -> None:
@@ -395,26 +408,37 @@ def test_a_month_with_a_receivable_dividend_lists_it(app: FastAPI, settled: Sett
 # ---------------------------------------------------------------------------------------------
 
 
-def _quote_jobs(db: CorpusDB, *, partial_on: date, first: date, last: date) -> None:
-    """quotes_tw alone, at 14:00 Taipei every weekday of ``[first, last]``: ``ok``, but
-    ``partial`` (2330 failed) on *partial_on*."""
+_JOBS = {"quotes_tw": ("0 14 * * mon-fri", ZoneInfo("Asia/Taipei"), (14, 0), "2330"),
+         "quotes_us": ("30 16 * * mon-fri", ZoneInfo("America/New_York"), (16, 30), "AAPL"),
+         "quotes_my": ("30 17 * * mon-fri", ZoneInfo("Asia/Kuala_Lumpur"), (17, 30), "1155")}
+
+
+def _quote_jobs(db: CorpusDB, *, partial_on: date, first: date, last: date,
+                jobs: tuple[str, ...] = ("quotes_tw",),
+                partial: frozenset[tuple[str, date]] | None = None) -> None:
+    """The *jobs* (only these enabled), at their cron time every weekday of ``[first, last]``
+    in their own timezone: ``ok``, but ``partial`` (the market's held symbol failed) on
+    ``(quotes_tw, partial_on)`` or on every ``(job, day)`` of *partial*."""
+    misses = partial if partial is not None else frozenset({("quotes_tw", partial_on)})
     conn = open_db(db.path)
     try:
-        for job_id, cron, tz, on in (("quotes_tw", "0 14 * * mon-fri", "Asia/Taipei", 1),
-                                     ("quotes_us", "30 16 * * mon-fri", "America/New_York", 0),
-                                     ("quotes_my", "30 17 * * mon-fri", "Asia/Kuala_Lumpur", 0)):
+        for job_id, (cron, tz, _at, _sym) in _JOBS.items():
             conn.execute("INSERT OR REPLACE INTO schedule_config (job_id, enabled, cron, "
-                         "timezone) VALUES (?, ?, ?, ?)", (job_id, on, cron, tz))
+                         "timezone) VALUES (?, ?, ?, ?)",
+                         (job_id, int(job_id in jobs), cron, str(tz)))
         day = first
         while day <= last:
             if day.weekday() < 5:
-                at = datetime(day.year, day.month, day.day, 14, 0, 2, tzinfo=TPE)
-                status, held = ("partial", ["2330"]) if day == partial_on else ("ok", [])
-                conn.execute(
-                    "INSERT INTO job_runs (job_id, started_at, finished_at, status, detail, "
-                    "results) VALUES ('quotes_tw', ?, ?, ?, 'd', ?)",
-                    (at.isoformat(), (at + timedelta(minutes=1)).isoformat(), status,
-                     json.dumps({"held_failed": held})))
+                for job_id in jobs:
+                    _cron, tz, (hour, minute), sym = _JOBS[job_id]
+                    at = datetime(day.year, day.month, day.day, hour, minute, 2, tzinfo=tz)
+                    status, held = (("partial", [sym]) if (job_id, day) in misses
+                                    else ("ok", []))
+                    conn.execute(
+                        "INSERT INTO job_runs (job_id, started_at, finished_at, status, "
+                        "detail, results) VALUES (?, ?, ?, ?, 'd', ?)",
+                        (job_id, at.isoformat(), (at + timedelta(minutes=1)).isoformat(),
+                         status, json.dumps({"held_failed": held})))
             day += ONE
         conn.commit()
     finally:
@@ -457,6 +481,162 @@ def test_provisional_depends_on_the_prices_never_on_the_store(
     assert rows["2026-07"]["provisional"] == "月底收盤價尚未確定：台股報價工作未完成"
     assert rows["2026-06"]["provisional"] is None
     assert rows["2026-08"]["provisional"] is None   # the current month is live, never 暫定
+
+
+def test_the_provisional_note_names_the_end_days_market(
+        app: FastAPI, corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review G #6: 台股 partial on 07-30 and 美股 partial on 07-31 (its New York date) — July's
+    close is the US one, so its 暫定 names 美股, never the market of the FIRST blocked day."""
+    db = corpus_db("demo")
+    _quote_jobs(db, partial_on=date(2026, 7, 30), first=date(2026, 7, 1),
+                last=date(2026, 7, 31), jobs=("quotes_tw", "quotes_us"),
+                partial=frozenset({("quotes_tw", date(2026, 7, 30)),
+                                   ("quotes_us", date(2026, 7, 31))}))
+    monkeypatch.delenv("PD_DISABLE_SCHEDULER", raising=False)
+    monkeypatch.setenv("PD_SETTLE", "off")
+    monday = datetime(2026, 8, 3, 10, 0, tzinfo=TPE)
+    july = next(r for r in _get(app, db, "/api/snapshots", now=monday)["rows"]
+                if r["month"] == "2026-07")
+    assert july["provisional"] == "月底收盤價尚未確定：美股報價工作未完成"
+
+
+# ---------------------------------------------------------------------------------------------
+# Review G: the served live_from never lies after the store's; the boundary; refused payouts;
+# a write between the cached build and the read transaction
+# ---------------------------------------------------------------------------------------------
+
+
+def _one_trade(db: CorpusDB, on: date) -> int:
+    """Keep only the ledger's first 2330 trade, dated *on* (no dividend, no opening)."""
+    conn = open_db(db.path)
+    try:
+        keep = int(conn.execute("SELECT id FROM transactions WHERE symbol = '2330' "
+                                "ORDER BY trade_date, id LIMIT 1").fetchone()[0])
+        conn.execute("DELETE FROM transactions WHERE id <> ?", (keep,))
+        conn.execute("DELETE FROM dividends")
+        conn.execute("DELETE FROM opening_inventory")
+        conn.execute("UPDATE transactions SET trade_date = ? WHERE id = ?",
+                     (on.isoformat(), keep))
+        conn.commit()
+    finally:
+        conn.close()
+    return keep
+
+
+#: (corpus, the trade's settled date, its later date, the month that must be live) — the
+#: series' first day moves AFTER the store's live_from: inside the window, then with W
+#: between the two dates (the stale case).
+_REDATED = {
+    "golden": (date(2026, 5, 20), date(2026, 6, 5), "2026-05", ()),
+    "demo": (date(2026, 7, 15), date(2026, 8, 5), "2026-07", ()),
+    "demo-stale": (date(2026, 5, 15), date(2026, 8, 5), "2026-07", ("2026-05", "2026-06")),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REDATED))
+def test_a_first_trade_re_dated_later_never_serves_the_old_close(
+        app: FastAPI, corpus_db: CorpusFactory, case: str,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review G #1: the first trade re-dated later than the store's live_from left no stored
+    day to serve, and the served live_from became the NEW first day — so the closes between
+    the two were read from the previous generation, holding the old trade, unmarked."""
+    settled_on, moved_to, live_month, stale_months = _REDATED[case]
+    db = corpus_db(case.split("-")[0])
+    keep = _one_trade(db, settled_on)
+    prepare(db)
+    assert start_run(db, 1) == "published"
+    _x(db, "UPDATE transactions SET trade_date = ? WHERE id = ?", (moved_to.isoformat(), keep))
+    rows = {r["month"]: r for r in _get(app, db, "/api/snapshots")["rows"]}
+    periods = {r["period"]: r for r in _periods(app, db, "M")}
+    with monkeypatch.context() as m:
+        m.setenv("PD_SETTLE", "off")
+        truth = {r["month"]: r for r in _get(app, db, "/api/snapshots")["rows"]}
+    assert periods[live_month]["source"] == "live"
+    if stale_months:
+        # while history is stale, a period holding the first live day reads 待結算 (§11.2),
+        # whatever the TWR's own reason would be; the figures are the truth's
+        assert rows[live_month]["period_twr"] is None
+        assert rows[live_month]["period_twr_reason"] == st.TWR_PENDING_ZH
+        assert _without(rows[live_month], "period_twr_reason") == _without(
+            truth[live_month], "period_twr_reason"), live_month
+    else:
+        assert rows[live_month] == truth[live_month], live_month
+    assert rows[live_month]["stale"] is False
+    for month in stale_months:   # before W: the previous generation's — and SAID so
+        assert periods[month]["source"] == "store" and rows[month]["stale"] is True, month
+
+
+def test_a_correction_dated_on_a_month_end_changes_that_month_at_once(
+        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review G #3, the ``end < live_from`` boundary: a correction dated ON 07-31 makes
+    ``live_from`` 07-31, so July (ending that day) is live — never the stored close."""
+    db = settled("demo")
+    before = {r["month"]: r for r in _get(app, db, "/api/snapshots")["rows"]}
+    _x(db, "INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+           "trade_date) VALUES ('tw_broker', '2330', 'BUY', '1000', '600', '855', '0', "
+           "'2026-07-31')")
+    rows = {r["month"]: r for r in _get(app, db, "/api/snapshots")["rows"]}
+    with monkeypatch.context() as m:
+        m.setenv("PD_SETTLE", "off")
+        truth = {r["month"]: r for r in _get(app, db, "/api/snapshots")["rows"]}
+    assert rows["2026-07"]["total_value"] != before["2026-07"]["total_value"]
+    assert rows["2026-07"] == truth["2026-07"]
+    assert rows["2026-07"]["stale"] is False
+    assert next(r for r in _periods(app, db, "M") if r["period"] == "2026-07")[
+        "source"] == "live"
+    assert next(r for r in _periods(app, db, "M") if r["period"] == "2026-06")[
+        "source"] == "store"
+
+
+@pytest.mark.parametrize("settle", ["on", "off"])
+def test_a_refused_receivable_payout_is_listed_marked(
+        app: FastAPI, settled: Settled, settle: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review G #5 / X1: an AAPL payout in an account that never held AAPL (refused, no
+    position) between its ex-date and its payment date is LISTED at February's end, marked
+    「未入帳（待釐清）」 with the replay's own sentence — never dropped."""
+    db = settled("golden")
+    _x(db, "INSERT INTO dividends (account_id, symbol, date, ex_date, type, gross, "
+           "withholding, net) VALUES ('tw_broker', 'AAPL', '2026-03-05', '2026-02-20', "
+           "'CASH', '100', '0', '100')")
+    _x(db, "UPDATE dividends SET ex_date = '2026-02-20' WHERE symbol = '2330'")
+    monkeypatch.setenv("PD_SETTLE", settle)
+    feb = next(r for r in _get(app, db, "/api/snapshots")["rows"]
+               if r["month"] == "2026-02")
+    listed = {d["symbol"]: d for d in feb["notes"]["dividends_receivable"]}
+    assert set(listed) == {"2330", "AAPL"}
+    refused = listed["AAPL"]
+    assert refused["booked"] is False
+    assert refused["unbooked_note"] == UNBOOKED_DIVIDEND_NOTE
+    assert refused["unbooked_reason"] and "AAPL" in refused["unbooked_reason"]
+    assert listed["2330"]["booked"] is True and listed["2330"]["unbooked_reason"] is None
+
+
+def test_a_write_between_the_cached_build_and_the_read_transaction_rebuilds(
+        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review G #8: a ledger write committed after the (cached) build and before the closes'
+    read transaction. Under ``PD_SETTLE=off`` the store views are both ``None``; the
+    connection's ``data_version`` moved, so the build is redone inside the transaction and
+    the response is ONE state — today's trend point carries the trade the KPIs carry."""
+    db = settled("rich")
+    monkeypatch.setenv("PD_SETTLE", "off")
+    real = build_dashboard_keyed
+    injected: list[bool] = []
+
+    def build_then_write(*a: Any, **kw: Any) -> Any:
+        out = real(*a, **kw)
+        if not injected:
+            injected.append(True)
+            _x(db, "INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, "
+                   "tax, trade_date) VALUES ('tw_broker', '2330', 'BUY', '1000', '600', '855', "
+                   "'0', ?)", (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", build_then_write)
+    raced = _periods(app, db, "M")[0]
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", real)
+    truth = _periods(app, db, "M")[0]
+    assert injected and raced["period"] == truth["period"] == f"{db.now:%Y-%m}"
+    assert raced == truth
 
 
 # ---------------------------------------------------------------------------------------------

@@ -77,7 +77,7 @@ from portfolio_dash.pricing.store import FxSeriesCache
 from portfolio_dash.shared import flags, result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.models.ledger import Dividend, LedgerBundle
+from portfolio_dash.shared.models.ledger import LedgerBundle
 from portfolio_dash.shared.wire import decimal_str
 
 Kind = Literal["M", "Y"]
@@ -257,14 +257,35 @@ def _state_view(conn: sqlite3.Connection, reporting: Currency) -> tuple[Any, ...
             state.seq)
 
 
+def _data_version(conn: sqlite3.Connection) -> int | None:
+    """``PRAGMA data_version`` of *conn*: it moves whenever ANOTHER connection commits (any
+    request, job, child or script). ``None`` while *conn* is already in a transaction: then
+    the build and every read of this request share that one transaction."""
+    if conn.in_transaction:
+        return None
+    return int(conn.execute("PRAGMA data_version").fetchone()[0])
+
+
+def _snapshot_version(conn: sqlite3.Connection) -> int:
+    """``PRAGMA data_version`` as at this request's read snapshot: a read starts the snapshot
+    first, and the value then holds still for the rest of the transaction."""
+    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    return int(conn.execute("PRAGMA data_version").fetchone()[0])
+
+
 def _inputs(conn: sqlite3.Connection, data: DashboardData, *, now: datetime,
-            reporting: Currency) -> _Inputs:
+            reporting: Currency, before: int | None) -> _Inputs:
     """Read inside this request's ONE read snapshot. *data* is the (cached) build taken before
-    it; when the store this snapshot sees is not the one the build saw (a run published, a
-    change landed in between) the build is redone inside the snapshot — uncached, consistent.
-    The pool ledgers come through the cash API's one reviewed read (``load_cash_ledgers``,
-    ⑪); a live close's cash at D re-applies its own book's refusals (``cash_at``)."""
-    if _store_view(data.history_state) != _state_view(conn, reporting):
+    it, and *before* the connection's ``data_version`` read before that build. The build is
+    redone inside the snapshot — uncached, consistent — when it may describe another state
+    than the snapshot (review G #8): another connection committed since *before* (a ledger
+    write lands between the cached build and this transaction; under ``PD_SETTLE=off`` the
+    store views below are both ``None`` and cannot see it), or the store this snapshot sees
+    is not the one the build saw (a run published in between). The pool ledgers come through
+    the cash API's one reviewed read (``load_cash_ledgers``, ⑪); a live close's cash at D
+    re-applies its own book's refusals (``cash_at``)."""
+    moved = before is not None and _snapshot_version(conn) != before
+    if moved or _store_view(data.history_state) != _state_view(conn, reporting):
         data = build_dashboard(conn, now=now, reporting=reporting)
     today = now.date()
     raw = load_ledger_bundle(conn)
@@ -298,9 +319,10 @@ def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
     where :func:`_from_store` says, live otherwise, each with the read-time fields of
     §11.2 / §14.6."""
     today = now.date()
+    before = _data_version(conn)
     data, _key = build_dashboard_keyed(conn, now=now, reporting=reporting)
     with result_cache.read_snapshot(conn):
-        inputs = _inputs(conn, data, now=now, reporting=reporting)
+        inputs = _inputs(conn, data, now=now, reporting=reporting, before=before)
         history = inputs.history
         periods = select(inputs.first_row)
         served: dict[tuple[str, str], _Served] = {}
@@ -324,28 +346,28 @@ def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
                                   detail=detail):
                 served[(s.period.kind, s.period.period)] = s
         stale = _stale_range(history)
-        refused: list[Dividend] = (list(inputs.data.orphan_dividends)
-                                   + [u.dividend for u in inputs.data.unbookable_dividends])
         out: list[_Served] = []
         for p in periods:
             s = served[(p.kind, p.period)]
             s.restatements = st.restatements_for(conn, p.kind, p.period)
-            _read_time_fields(s, history=history, stale=stale, inputs=inputs,
-                              refused=refused, today=today)
+            _read_time_fields(s, history=history, stale=stale, inputs=inputs, today=today)
             out.append(s)
     return out, periods
 
 
 def _read_time_fields(s: _Served, *, history: HistoryState, stale: tuple[date, date] | None,
-                      inputs: _Inputs, refused: Sequence[Dividend], today: date) -> None:
-    """§11.2 / §11.4 / §14.6, decided when the close is read."""
+                      inputs: _Inputs, today: date) -> None:
+    """§11.2 / §11.4 / §14.6, decided when the close is read. A receivable payout the replay
+    refuses is listed marked (X1), by the whole-ledger replay's own decision — the
+    ``DividendRefusals`` the pool snapshot carries, as every dividend listing reads it."""
     p = s.period
     as_at = p.as_at(today)
     is_stale = (s.close.source == "store" and stale is not None
                 and stale[0] <= p.end <= stale[1])
     kpi = s.close.kpi
     receivable = None if is_stale else st.dividends_receivable(
-        inputs.registered.dividends, inputs.registered.instruments, as_at, refused=refused)
+        inputs.registered.dividends, inputs.registered.instruments, as_at,
+        refusals=inputs.ledgers.refusals)
     update: dict[str, Any] = {"notes": kpi.notes.model_copy(
         update={"dividends_receivable": receivable})}
     if st.twr_pending(p.start, as_at, live_from=history.live_from, stale=stale):
@@ -434,7 +456,12 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
                      data: DashboardData, points: dict[date, TrendPoint],
                      index: pc.TwrIndex) -> PeriodKpi:
     """The trend figures at D and the period's TWR, as the worker sets them, from the build's
-    composed trend (the stored days before ``live_from``, live after)."""
+    composed trend (the stored days before ``live_from``, live after).
+
+    While the LIVE series is unavailable (a flow without a rate, PERF-F2's shape) a close
+    computed here carries no trend figure and no 當期報酬, although the close the worker stores
+    for a day before the unconvertible flow has them: deferred with PERF-F2 (owner ruling
+    2026-10-19), which fixes the series itself after the release."""
     if first is None or as_at < first:
         kpi = pc.with_trend(kpi, point=None, twr=None, twr_reason=pc.TWR_NOT_STARTED_ZH,
                             trend_reason=pc.TREND_NOT_STARTED_ZH)
@@ -458,12 +485,27 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
 # =============================================================================================
 
 
-def _provisional_note(p: _Period, ft: FinalThrough) -> str | None:
-    """「月底收盤價尚未確定：美股報價工作未完成」 for a past period whose end day lies after
-    ``final_through``; ``None`` otherwise (and for the current period, which is live)."""
-    if p.current or p.end <= ft.through:
-        return None
-    markets = [_QUOTE_JOB_MARKET_ZH.get(j, j) for j in ft.blocked_jobs]
+def _end_day_jobs(conn: sqlite3.Connection, now: datetime, ft: FinalThrough,
+                  end: date) -> tuple[str, ...]:
+    """The quote jobs whose close the period ending on *end* is not yet confirmed by (review
+    G #6): those blocking the LATEST blocked day on or before *end* — the end day's own fire,
+    or for an end day without one (a weekend) the last fire before it. ``final_through`` names
+    only the jobs of the FIRST blocked day (``blocked_jobs``), which can be another market's
+    earlier day (台股 partial on 09-29 and 美股 on 09-30: September's close is the US one).
+    ``final_through(since=d)`` answers per day — its first blocked day on or after *d* — so
+    walking back from *end* to ``through`` finds the latest. ``ft.blocked_jobs`` when none."""
+    day = end
+    while day > ft.through:
+        probe = final_through(conn, now, since=day)
+        if probe.blocked_on == day:
+            return probe.blocked_jobs
+        day -= _ONE_DAY
+    return ft.blocked_jobs
+
+
+def _provisional_note(p: _Period, jobs: Sequence[str]) -> str:
+    """「月底收盤價尚未確定：美股報價工作未完成」 — *jobs* are :func:`_end_day_jobs`."""
+    markets = [_QUOTE_JOB_MARKET_ZH.get(j, j) for j in jobs]
     what = "年底" if p.kind == "Y" else "月底"
     if not markets:
         return f"{what}收盤價尚未確定：報價工作尚未完成"
@@ -472,9 +514,14 @@ def _provisional_note(p: _Period, ft: FinalThrough) -> str | None:
 
 def _labelled(served: Sequence[_Served], conn: sqlite3.Connection,
               now: datetime) -> list[_Served]:
+    """暫定 for a past period whose end day lies after ``final_through``; ``None`` otherwise
+    (and for the current period, which is live)."""
     ft = final_through(conn, now)
     for s in served:
-        s.close = s.close.model_copy(update={"provisional": _provisional_note(s.period, ft)})
+        p = s.period
+        note = (None if p.current or p.end <= ft.through
+                else _provisional_note(p, _end_day_jobs(conn, now, ft, p.end)))
+        s.close = s.close.model_copy(update={"provisional": note})
     return list(served)
 
 

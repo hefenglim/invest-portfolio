@@ -526,6 +526,28 @@ def test_placeholder_days_are_served_live_while_the_live_series_is_available(
     assert _body(app, db) == _live_body(app, db, monkeypatch)
 
 
+def test_an_option_open_only_on_stored_days_keeps_the_series_flag(
+        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review G #2: ``options_value_excluded`` is a series aggregate (spec §4) — the OR of
+    the stored days' ``options_open`` before ``live_from`` and the live days' flag. ``rich``
+    buys back its last open put TODAY: no live day holds an option, so only the stored days
+    carry the flag, and the payload (``options.trend_excludes_value``, its note) must still
+    be v0.1.31's — the full live build's."""
+    db = settled("rich")
+    _x(db, "INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+           "trade_date) VALUES ('schwab', 'XYZ261218P00025000', 'BUY', '100', '0.30', '0', "
+           "'0', ?)", (db.now.date().isoformat(),))
+    data = _build(db)
+    assert data.history_state.live_from == db.now.date()   # one live day, no option on it
+    assert data.trend.options_value_excluded
+    assert data.options is not None and data.options.trend_excludes_value
+    assert data.options.open == []                          # nothing open on the live day
+    body = _body(app, db)
+    assert body == _live_body(app, db, monkeypatch), _first_difference(
+        _live_body(app, db, monkeypatch), body)
+    assert json.loads(body)["options"]["trend_excludes_value"] is True
+
+
 def test_a_series_unavailable_live_serves_no_trend(app: FastAPI, settled: Settled) -> None:
     """While the live series is unavailable the trend is, exactly as v0.1.31 answers — the
     store's points before the placeholder are never served alone (PERF-F2 stays as it is)."""

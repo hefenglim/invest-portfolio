@@ -627,6 +627,11 @@ class ReceivableDividend(_Model):
     pay_date: date
     ccy: Currency
     net: CanonDecimal
+    #: (W3-G, optional) X1: a payout the replay refuses is listed MARKED — ``booked`` false,
+    #: 「未入帳（待釐清）」 and the replay's own sentence (``api/wire.unbooked_wire``'s keys).
+    booked: bool = True
+    unbooked_note: str | None = None
+    unbooked_reason: str | None = None
 
 
 class PeriodNotes(_Model):
