@@ -2270,6 +2270,19 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
   the caller's row and in-process state are ended, never left active.
 
 
+## A clean-up trap that `set -e` can abort is not a clean-up (2026-10-20, WP8 on the VM)
+
+- **What happened.** The WP8 before/after copied the prod pre-deploy backup twice into `/tmp`
+  (a tmpfs directory with mode 700), ran v0.1.31 and v0.1.32 against the copies, and relied on
+  `trap 'kill $VMSTAT 2>/dev/null; rm -rf /tmp/pd_wp8' EXIT` to delete them. The script ran
+  under `set -e`, and the script body had already killed `vmstat`. The trap's `kill` therefore
+  failed, `set -e` ended the trap, and the `rm` never ran. The two real-data copies stayed for
+  about a minute, until the next logged command noticed `copies left: /tmp/pd_wp8` and removed
+  them (VM log #385).
+- **Rule.** A clean-up handler starts with `set +e`, or ends every command with `|| true`. The
+  last command of a run that copies real data asserts the copies are gone (`ls -d … || echo
+  none`), and that line is read before anything else in the output.
+
 ## After v0.1.32: the code review, PERF-F2 and the split edge (2026-10-20..21)
 
 - **A date window on the app clock is a window on the wrong calendar (split edge).** The write
