@@ -2420,9 +2420,11 @@ def _seed_child_price(
     wall clock made a claim about the row that is not true, and the claim is load-bearing.
     ``pricing/`` reads ``fetched_at`` as the upper bound of the window ``(as_of, fetched_at]``
     — "which splits had the provider already folded into this delivered number?" — and
-    multiplies them back OUT (``data-and-pricing.md``, the as-traded invariant). With the row
-    dated the action day, ``as_of == fetched_at.date()``, so that window is EMPTY by
-    construction, on the write **and on every later**
+    multiplies them back OUT (``data-and-pricing.md``, the as-traded invariant). The bound is
+    ``fetched_at``'s date on the exchange's calendar (``pricing.store.split_window_through``,
+    owner ruling 2026-10-20), which for TW / US / MY is never later than the app clock's own
+    date. With the row dated the action day, the bound is at most ``as_of``, so that window is
+    EMPTY by construction, on the write **and on every later**
     ``pricing.reconcile.reconcile_prices`` pass: ``split_basis`` can only ever be the
     identity, and ``factor_of`` may safely stay at ``_no_factor``.
 

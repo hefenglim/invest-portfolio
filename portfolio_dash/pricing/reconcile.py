@@ -5,7 +5,8 @@ the *other* input moves — the corporate-action ledger. Both are the SAME resta
 
     close := close_raw × target        split_basis := target
 
-    target(row) := Π{ ratio(k) : k ∈ keys(row.instrument, row.as_of_date, row.fetched_at) }
+    target(row) := Π{ ratio(k) : k ∈ keys(row.instrument, row.as_of_date, T) }
+    T := split_window_through(row.fetched_at, row.market)
 
 recomputed from the stored raw provider value. **Never from the current close, and never
 by dividing the old basis back out** — D30 rejected that reconstruction with measured
@@ -16,6 +17,10 @@ from the raw column, idempotency, reversibility and order-independence hold **by
 construction** rather than by rounding luck, and ``prices`` rejoins the discipline the
 ledgers already obey: nothing authoritative is overwritten, every derived figure is
 recomputed on read (CLAUDE.md #7).
+
+``T`` is the fetch's date on the row's EXCHANGE calendar (owner ruling 2026-10-20), from
+the SAME helper the write seam calls. So a SPLIT entered after a fetch lands on exactly the
+bytes that fetch would have stored had the SPLIT already been in the ledger.
 
 Reversibility is not a nicety here. ``prices`` is the only place this feature writes
 outside the ledgers, so 重算 does not cover it — D38 invariant 3 requires that deleting a
@@ -35,6 +40,7 @@ test_layering.py`` greps every file under ``pricing/`` for both violations.
 
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -42,7 +48,9 @@ from portfolio_dash.pricing.store import (
     SplitFactorFn,
     express_close,
     express_optional,
+    split_window_through,
 )
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.money import from_db
 
 # ``close_raw`` is guaranteed present by ``pricing/schema.create_tables`` — the write seam
@@ -50,13 +58,16 @@ from portfolio_dash.shared.money import from_db
 # exactly right: at migration the action ledger is empty, so those rows' basis is 1) — and
 # ``fetched_at`` is ``NOT NULL`` in the DDL. The filter is therefore provably a no-op; it is
 # here so that a hand-edited row degrades to "left untouched" instead of raising and
-# stopping the restatement of every OTHER row in the same pass.
+# stopping the restatement of every OTHER row in the same pass. ``market`` (NOT NULL, always
+# a ``Market`` value from the write seam) gets the same treatment in the loop below.
 _ROWS_SQL = (
-    "SELECT as_of_date, fetched_at, close, close_raw, open, open_raw, high, high_raw, "
+    "SELECT as_of_date, market, fetched_at, close, close_raw, open, open_raw, high, high_raw, "
     "low, low_raw, split_basis FROM prices "
     "WHERE instrument=? AND close_raw IS NOT NULL AND fetched_at IS NOT NULL "
     "ORDER BY as_of_date"
 )
+
+_MARKETS: dict[str, Market] = {m.value: m for m in Market}
 
 #: The optional OHLC columns, paired with their raw (W8). ``close`` is handled separately
 #: because it is NOT NULL and carries the basis comparison.
@@ -70,6 +81,64 @@ def _raw_or_none(text: str | None) -> Decimal | None:
     absent case is handled HERE instead of loosening that guarantee for every caller.
     """
     return None if text is None else from_db(text)
+
+
+@dataclass(frozen=True)
+class Restatement:
+    """One stored row the reconcile would rewrite: its key and its stored vs wanted TEXT.
+
+    ``current`` / ``wanted`` are ``(close, open, high, low)``; ``open`` / ``high`` / ``low``
+    may be ``None`` (the provider omitted them). Public so a read-only check
+    (``scripts/check_split_window.py``) lists exactly the rows :func:`reconcile_prices` would
+    write, from the same computation, rather than a second copy of it.
+    """
+
+    symbol: str
+    as_of_date: str
+    market: str
+    fetched_at: str
+    current: tuple[str | None, ...]
+    current_basis: str
+    wanted: tuple[str | None, ...]
+    wanted_basis: str
+
+
+def pending_restatements(
+    conn: sqlite3.Connection, symbols: Iterable[str], *, factor_of: SplitFactorFn
+) -> list[Restatement]:
+    """Every stored row of *symbols* whose ``(close, OHLC, split_basis)`` differs from what
+    the CURRENT ledger says it should be. Reads only; :func:`reconcile_prices` writes them.
+
+    ``factor_of`` is required for the reason :func:`reconcile_prices` states.
+    """
+    out: list[Restatement] = []
+    for symbol in sorted(set(symbols)):
+        for r in conn.execute(_ROWS_SQL, (symbol,)).fetchall():
+            market = _MARKETS.get(r["market"])
+            if market is None:
+                continue  # a hand-edited row: left untouched (see _ROWS_SQL)
+            basis = factor_of(
+                symbol,
+                after=date.fromisoformat(r["as_of_date"]),
+                through=split_window_through(datetime.fromisoformat(r["fetched_at"]), market),
+            )
+            close, stored_basis = express_close(from_db(r["close_raw"]), basis)
+            # W8: every OHLC column is restated from its OWN raw under the SAME factor.
+            # Recomputed, never rescaled in place and never divided back out — so a SPLIT
+            # that is inserted and then deleted restores all four byte-identically, which
+            # matters because `prices` is the only place this feature writes outside the
+            # ledgers and 重算 does not cover it.
+            wanted = (close, *(
+                express_optional(_raw_or_none(r[f"{c}_raw"]), basis) for c in _OPTIONAL_OHLC
+            ))
+            current = (r["close"], *(r[c] for c in _OPTIONAL_OHLC))
+            if (wanted, stored_basis) != (current, r["split_basis"]):
+                out.append(Restatement(
+                    symbol=symbol, as_of_date=r["as_of_date"], market=r["market"],
+                    fetched_at=r["fetched_at"], current=current,
+                    current_basis=r["split_basis"], wanted=wanted, wanted_basis=stored_basis,
+                ))
+    return out
 
 
 def reconcile_prices(
@@ -93,33 +162,15 @@ def reconcile_prices(
     second pass recomputes the same product from the same unchanged raw value, so it is
     byte-identical whether or not it compares first. Comparing the OUTPUT rather than
     ``target == split_basis`` also repairs a row whose close has drifted from its own raw
-    value, which the basis comparison alone cannot see.
+    value, which the basis comparison alone cannot see. The rows are
+    :func:`pending_restatements`' — the same computation a read-only check lists.
     """
-    updates: list[tuple[str, str, str, str]] = []
-    for symbol in sorted(set(symbols)):
-        for r in conn.execute(_ROWS_SQL, (symbol,)).fetchall():
-            basis = factor_of(
-                symbol,
-                after=date.fromisoformat(r["as_of_date"]),
-                through=datetime.fromisoformat(r["fetched_at"]).date(),
-            )
-            close, stored_basis = express_close(from_db(r["close_raw"]), basis)
-            # W8: every OHLC column is restated from its OWN raw under the SAME factor.
-            # Recomputed, never rescaled in place and never divided back out — so a SPLIT
-            # that is inserted and then deleted restores all four byte-identically, which
-            # matters because `prices` is the only place this feature writes outside the
-            # ledgers and 重算 does not cover it.
-            wanted = [close] + [
-                express_optional(_raw_or_none(r[f"{c}_raw"]), basis) for c in _OPTIONAL_OHLC
-            ]
-            current = [r["close"]] + [r[c] for c in _OPTIONAL_OHLC]
-            if (wanted, stored_basis) != (current, r["split_basis"]):
-                updates.append((*wanted, stored_basis, symbol, r["as_of_date"]))
-    if updates:
+    changes = pending_restatements(conn, symbols, factor_of=factor_of)
+    if changes:
         conn.executemany(
             "UPDATE prices SET close=?, open=?, high=?, low=?, split_basis=? "
             "WHERE instrument=? AND as_of_date=?",
-            updates,
+            [(*c.wanted, c.wanted_basis, c.symbol, c.as_of_date) for c in changes],
         )
         conn.commit()
-    return len(updates)
+    return len(changes)

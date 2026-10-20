@@ -146,11 +146,6 @@ def test_the_next_days_restated_fetch_heals_the_row(prices: sqlite3.Connection) 
     assert _fetch(prices, restated, datetime(2026, 6, 17, 5, 30, tzinfo=TAIPEI)) == _AS_TRADED
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "price-basis split edge (spec §20 row 9; confirmed, not fixed — owner ruling pending): "
-    "a US fetch on the ex-date's Taipei date, before the New York open, folds the split into "
-    "a close the provider has not restated yet, so the stored close is ratio x as traded "
-    "until the next fetch"))
 def test_a_fetch_on_the_ex_dates_taipei_date_before_the_ny_open_stores_the_close_as_traded(
     prices: sqlite3.Connection,
 ) -> None:

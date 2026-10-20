@@ -15,9 +15,10 @@ from bisect import bisect_left, bisect_right
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from portfolio_dash.pricing.results import DividendEvent, FxRead, FxRow, PriceRead, PriceRow
-from portfolio_dash.shared.enums import Currency, Market
+from portfolio_dash.shared.enums import MARKET_TIMEZONE, Currency, Market
 from portfolio_dash.shared.money import cap_dp, from_db, to_db
 
 _DEFAULT_MAX_AGE = 4  # days
@@ -73,11 +74,55 @@ class SplitFactorFn(Protocol):
     Binding ``through`` in a closure instead was rejected: the caller passes
     ``fetched_at`` to :func:`upsert_prices` separately, so a closure could silently
     capture a different timestamp than the one written to the row, and nothing would
-    detect the mismatch. Here the row's own ``fetched_at`` IS the upper bound, by
-    construction.
+    detect the mismatch. Here the upper bound is derived from the row's own ``fetched_at``
+    and market, by construction: ``after`` is the row's ``as_of`` and ``through`` is
+    :func:`split_window_through` — the fetch's date on the EXCHANGE's calendar (owner ruling
+    2026-10-20), never the app clock's.
     """
 
     def __call__(self, symbol: str, *, after: date, through: date) -> Decimal: ...
+
+
+def split_window_through(fetched_at: datetime, market: Market) -> date:
+    """The last date whose splits a fetch of *market* at *fetched_at* could already have seen.
+
+    **THE one owner of the write window's upper bound** (owner ruling 2026-10-20, the
+    price-basis split edge). :func:`upsert_prices` and ``pricing.reconcile.reconcile_prices``
+    both call it, so a row's basis is the same whether it was set by the fetch or restated
+    later by a SPLIT edit. The bound is the fetch's date in the market's EXCHANGE timezone
+    (``shared.enums.MARKET_TIMEZONE``).
+
+    **Why not the app clock's date.** Every fetch carries the app clock (Asia/Taipei,
+    ``shared.clock.app_now``). The US quote job fires at 16:30 New York, which is 04:30 (EDT) or
+    05:30 (EST) Taipei the NEXT calendar day. So every scheduled fetch of a split's last
+    pre-split session had a Taipei date equal to the ex-date. The window then held the split,
+    and the seam multiplied a close the provider had NOT restated: the row was stored at ratio x
+    as traded until ``history_daily`` re-fetched it about 20 hours later. On the New York date,
+    that fetch is still the last pre-split session's own day, and the window is empty.
+
+    **TW and MY do not move.** Asia/Taipei and Asia/Kuala_Lumpur are both UTC+8 with no DST,
+    so for every instant the app clock stamps, the bound is exactly the ``fetched_at.date()``
+    it always was.
+
+    **A naive ``fetched_at`` keeps its own date**, unconverted, exactly as before: nothing says
+    which zone it was written in, and ``astimezone`` would read the HOST's local zone. Every
+    production fetch is aware (the app clock), so only test clocks and the stress harness's
+    naive stamps take this branch. An aware instant in another zone (UTC in tests) is
+    converted like any other, which is the point of the rule.
+
+    **What the ruling accepts.** The bound turns at the exchange's local MIDNIGHT, not at its
+    open. A fetch on the ex-date before the open (New York 00:00 to 09:30, which is 12:00 to
+    21:30 Taipei under EDT and 13:00 to 22:30 under EST) reads the split as already folded. A
+    provider that has not restated by then still gets a row at ratio x as traded, which the
+    next fetch heals as before. Only an owner's manual refresh can land there: ``quotes_us``
+    fires after the New York close, and ``history_daily`` (02:00 Taipei) runs mid-session in
+    New York. The rule also assumes a provider restates no earlier than the ex-date (the
+    measured behaviour the ruling rests on, spec 2026-10-18 §20 row 9): one that restated the
+    evening before would have that evening's fetch stored unfolded, healed the same way.
+    """
+    if fetched_at.utcoffset() is None:
+        return fetched_at.date()
+    return fetched_at.astimezone(ZoneInfo(MARKET_TIMEZONE[market])).date()
 
 
 def _no_factor(symbol: str, *, after: date, through: date) -> Decimal:
@@ -190,7 +235,9 @@ def upsert_prices(
     a split, so the close it delivers for a pre-split date is expressed in post-split
     share terms while the ledger's share count for that date is not. ``factor_of``
     returns the splits the provider had already folded in when this row was fetched —
-    the window ``(row.as_of, fetched_at]`` — and the row is stored as:
+    the window ``(row.as_of, through]``, with ``through`` the fetch's date on the row's
+    EXCHANGE calendar (:func:`split_window_through`, owner ruling 2026-10-20) — and the row
+    is stored as:
 
     * ``close_raw``  = the provider's value **exactly as delivered**, un-capped;
     * ``split_basis`` = the factor applied;
@@ -223,8 +270,9 @@ def upsert_prices(
     2026-08-10), and **the cap applied last, to the product** (F-20). Both live in
     :func:`express_close`, which W6b's reconcile also calls — see its docstring for the
     measured traps each one closes. This seam owns only *which* factor applies to a row
-    (the window ``(as_of, fetched_at]``); how a (raw, factor) pair becomes stored TEXT has
-    exactly one owner, so the write and the reconcile cannot drift apart.
+    (the window ``(as_of, through]``, its bound from :func:`split_window_through`, which the
+    reconcile also calls); how a (raw, factor) pair becomes stored TEXT has exactly one
+    owner, so the write and the reconcile cannot drift apart.
 
     **Why this seam keeps the identity DEFAULT while ``refresh_quotes`` / ``refresh_history``
     do not** (2026-09-10). ``architecture.md``'s injection obligation (1) — "the injected
@@ -258,10 +306,11 @@ def upsert_prices(
                 f"price close must be positive and finite: {r.instrument} "
                 f"@ {r.as_of.isoformat()} got {r.close}"
             )
-    through = fetched_at.date()
+    # One batch, one instant; the bound depends only on the market, so it is taken once each.
+    throughs = {m: split_window_through(fetched_at, m) for m in {r.market for r in rows}}
     params: list[tuple[str | None, ...]] = []
     for r in rows:
-        basis = factor_of(r.instrument, after=r.as_of, through=through)
+        basis = factor_of(r.instrument, after=r.as_of, through=throughs[r.market])
         close, stored_basis = express_close(r.close, basis)
         params.append((
             r.instrument, r.market.value, r.as_of.isoformat(), close,
