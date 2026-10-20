@@ -98,7 +98,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any, Literal
 
@@ -230,23 +230,35 @@ def _text(value: Decimal | None) -> str | None:
     return None if value is None else to_db(value)
 
 
-#: A ratio (period TWR, the rate, XIRR) restates only when it moved at this many decimal
-#: places. The TWR index is chain-linked over every day at Decimal's 28 digits, so a correction
+#: A ratio (period TWR, the rate, XIRR) restates only when it moved by more than this
+#: absolute amount — or, for a huge ratio, by more than :data:`RATIO_RESTATE_RELATIVE` of its
+#: size. The TWR index is chain-linked over every day at Decimal's 28 digits, so a correction
 #: that leaves a period's value unchanged in fact — a price revised on two flowless days whose
 #: two daily ratios cancel — still shifts the 27th digit, and a restatement row is never
-#: pruned (accountant as-built check, 2026-10-20: rich 2026-02 read +1.58% → +1.58%). 12
-#: places is ten orders below the display (0.01%) and far above the arithmetic's noise.
-RATIO_RESTATE_DP = 12
-_RATIO_STEP = Decimal(1).scaleb(-RATIO_RESTATE_DP)
+#: pruned (accountant as-built check, 2026-10-20: rich 2026-02 read +1.58% → +1.58%). 1e-12 is
+#: ten orders below the display (0.01%) and far above the arithmetic's noise.
+RATIO_RESTATE_TOLERANCE = Decimal("1e-12")
+#: A 28-digit value of size X carries noise near X·1e-27, so a huge ratio (a 30× gain in a
+#: ledger's first month annualises to ~2e17) is also compared relative to its size.
+RATIO_RESTATE_RELATIVE = Decimal("1e-20")
 
 
 def _moved(old: Decimal | None, new: Decimal | None, unit: str) -> bool:
     """Whether a close's figure changed enough to restate: money exactly (its canonical TEXT),
-    a ratio at :data:`RATIO_RESTATE_DP` places; a value appearing or disappearing always."""
+    a ratio beyond the tolerance above; a value appearing or disappearing always.
+
+    The ratio arithmetic runs in a WIDE local context: under the default 28 digits,
+    ``quantize``-ing a ratio of 1e16 or more to 12 places raised ``InvalidOperation`` and failed
+    every run that recomputed that close (accountant re-verification, 2026-10-20)."""
     if old is None or new is None:
         return (old is None) != (new is None)
     if unit == "ratio":
-        return old.quantize(_RATIO_STEP) != new.quantize(_RATIO_STEP)
+        with localcontext() as ctx:
+            ctx.prec = 80
+            diff = abs(old - new)
+            bound = max(RATIO_RESTATE_TOLERANCE,
+                        max(abs(old), abs(new)) * RATIO_RESTATE_RELATIVE)
+            return diff > bound
     return _text(old) != _text(new)
 
 
@@ -1458,7 +1470,7 @@ class _Run:
                               snap.by_currency.get(ccy), new_ccy.get(ccy)))
             for name, label, unit, old_v, new_v in pairs:
                 # money by VALUE (the snapshot's text is ``decimal_str``'s); a ratio at
-                # RATIO_RESTATE_DP places, as every other restatement
+                # tolerance (``_moved``), as every other restatement
                 if (not _moved(old_v, new_v, unit)) if unit == "ratio" else old_v == new_v:
                     continue
                 drafts.append(st.RestatementDraft(

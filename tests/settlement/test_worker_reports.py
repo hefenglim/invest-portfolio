@@ -291,7 +291,7 @@ def test_a_correction_that_moves_no_figure_restates_nothing(corpus_db: CorpusFac
     """Accountant as-built check (2026-10-20): on rich, 2330's close on Thu 2026-02-12 moves
     548 → 560. With no flow on the 12th or the 13th the two daily ratios cancel, so February's
     TWR is unchanged in fact — but the chain-linked index shifts its 27th digit. A ratio
-    restates only when it moved at ``RATIO_RESTATE_DP`` places; nothing in February moved."""
+    restates only when it moved beyond ``RATIO_RESTATE_TOLERANCE``; nothing in February moved."""
     rich = corpus_db("rich")
     prepare(rich)
     assert start_run(rich, 1) == "published"
@@ -311,13 +311,60 @@ def test_a_correction_that_moves_no_figure_restates_nothing(corpus_db: CorpusFac
             assert abs(Decimal(old) - Decimal(new)) >= Decimal("1e-12"), (field, old, new)
 
 
-def test_moved_compares_money_exactly_and_a_ratio_at_twelve_places() -> None:
+def test_moved_compares_money_exactly_and_a_ratio_within_a_tolerance() -> None:
     moved = settle_worker._moved
     assert not moved(Decimal("0.015809862654881264168528325"),
                      Decimal("0.015809862654881264168528324"), "ratio")
-    assert moved(Decimal("0.0158098626548"), Decimal("0.0158098626558"), "ratio")
+    assert moved(Decimal("0.0158098626548"), Decimal("0.0158098626568"), "ratio")
+    # a huge ratio (a 30x gain in the first month annualises to ~2e17) never raises, its
+    # last-digit noise does not restate, a real move does
+    huge = Decimal("195277164635138020.1234567890")
+    assert not moved(huge, huge + Decimal("0.0000000001"), "ratio")
+    assert moved(huge, huge * Decimal("1.0001"), "ratio")
     assert moved(Decimal("100.00"), Decimal("100.01"), "TWD")
     assert not moved(Decimal("100.00"), Decimal("100.00"), "TWD")
     assert moved(None, Decimal("0"), "ratio") and moved(Decimal("0"), None, "TWD")
     assert not moved(None, None, "ratio")
+
+
+def test_a_huge_xirr_never_fails_the_run_that_recomputes_it(corpus_db: CorpusFactory) -> None:
+    """Accountant re-verification (2026-10-20): a ledger that gains 30x in its first month has
+    a January 累計 XIRR near 2e17 (the 30-day gate admits it, as the live KPI shows). A dirty
+    run that recomputed it compared it by quantizing to 12 places under 28 digits, raised
+    ``InvalidOperation`` and failed — and so would every later run."""
+    from datetime import datetime, timedelta
+
+    from portfolio_dash.data_ingestion.config_seed import seed_accounts
+    from portfolio_dash.shared.enums import Market
+    from portfolio_dash.shared.models.enums import Side
+    from tests.conftest import init_golden_base
+    from tests.reference.corpora import TAIPEI, _closes, _instrument, _trade
+
+    path = corpus_db("golden").path.with_name("huge-xirr.db")
+    conn = open_db(path)
+    try:
+        init_golden_base(conn)
+        seed_accounts(conn)
+        _instrument(conn, "HUGE", Market.TW, Currency.TWD, board="TWSE")
+        days = [date(2025, 12, 31) + timedelta(days=i) for i in range(70)]
+        _closes(conn, "HUGE", Market.TW, [d for d in days if d.weekday() < 5],
+                lambda n, d: Decimal("1") if d == date(2025, 12, 31) else Decimal("30"),
+                fetched_at=datetime(2026, 3, 10, 12))
+        _trade(conn, "tw_broker", "HUGE", Side.BUY, "1000", "1", date(2025, 12, 31), fees="20")
+        conn.commit()
+    finally:
+        conn.close()
+    db = CorpusDB(path, datetime(2026, 3, 10, 14, 30, tzinfo=TAIPEI), Currency.TWD)
+    prepare(db)
+    assert start_run(db, 1) == "published"
+    _x(db, "UPDATE transactions SET fees = '21' WHERE symbol = 'HUGE'")
+    assert start_run(db, 2, scope="dirty", reason="prompt") == "published"
+    conn = open_db(path)
+    try:
+        jan = conn.execute("SELECT field, old_value, new_value FROM settle_restatement "
+                           "WHERE run_id = 2 AND period = '2026-01' AND field = 'xirr'"
+                           ).fetchall()
+    finally:
+        conn.close()
+    assert jan and Decimal(jan[0][1]) > Decimal("1e16")  # the huge XIRR, restated, not fatal
 
