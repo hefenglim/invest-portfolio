@@ -1429,6 +1429,77 @@ Owner items for W4, **ruled 2026-10-20** (「XIRR 沒問題、時間成本沒問
 - **The digest card's run** now goes to a child.
 - **Not yet reconciled by the stress audit:** `restated`, the run diff pages, and the openings activity line.
 
+**W4 (2026-10-20), done.**
+
+*Integration:*
+- the 23:50 月度快照 job, its runner seam and its boot DDL retired (`a16ad01`; the table, its schedule row and its history stay);
+- today's result pre-warmed 3 s after the last write window (`fe32fd5`);
+- the job time limit set to 60 min (owner ruling, `224e31d`);
+- 月度成績 e2e and the W4 e2e list on the real backend (F, `d094707` / `213f26a`), which also fixed the chip wrapping the top bar, 月度成績 not re-reading after a same-page change, and panel wording;
+- a frozen report never leaves 預熱 「待執行」 (`757cbc0`).
+
+*Cross tests:*
+- a 首頁 flow builds the dashboard at most once, and a reload builds it not at all (5 builds with the cache off; `10e2b24`);
+- the settle child killed in each of the seven phases keeps G, and the resume equals a fresh run (`ebdac91`);
+- an orphan child that outlives a restart cannot publish (`4f8280d`, held by several layers).
+
+*Documents:*
+- the three rules, manual v1.13 §7.1b with anchors E30 / E31, and DEPLOYMENT (`c491d09`);
+- whatsnew 0.1.32 (`f752e19`), CHANGELOG `[Unreleased]` (`c8ffcde`), LESSONS (`925ead6`).
+
+*Final reviews (both on `9fa2a76`):*
+- **The accountant as-built check:** SIGN-OFF-WITH-FIXES.
+  - Every close's KPIs equal the v0.1.31 month-end references on eight corpora.
+  - Holdings and cash hand-checked; Y ≡ December; Σ months ≡ year.
+  - The tax tie-out holds, including realized FX on a constructed case.
+  - TWR chain-links to 1e-27; E30 / E31 hold by hand.
+  - **MAJOR:** 1e-27 TWR noise was written as a permanent 已重述. Fixed: ratios compare beyond max(1e-12, 1e-20 × size) in an 80-digit context (`fc11a8e`, then `3f98a46` after its re-check found that quantizing a 1e16+ ratio crashed the run).
+  - **MINOR 7:** the live current period now reads 至今 (`2fcc4b3`).
+  - Re-check: SIGN-OFF.
+- **The senior review:** READY-WITH-FIXES, four MINORs.
+  - `fee_rule_overrides` was created by its first write. The table is now created at boot, guarded by a scan of every `CREATE TABLE` in the package (`22710ba`).
+  - Readers' `Dd` used the run's range. Now `Dd` = min(`dirty_from`, `run_dirty_from`), and an unpublished end puts back only the claimed dirty day (`668f61b`, `d7caa89`).
+  - The uncached build's read transaction is now tested (`e3318ad`).
+  - Doc lines (`e3318ad`, `2c7c54e`).
+  - Re-check: all four hold.
+  - It exercised a database built by v0.1.31's own lifespan through a v0.1.32 boot, a rollback and a re-upgrade: byte-identical throughout.
+
+*Heavy gates, once (`72e7fcb`):*
+- the non-e2e suite in 24 foreground chunks (736 files), green;
+- e2e: 395 tests in 40 foreground batches of at most 11, green;
+- `mypy --strict`: 1,200 files clean, after one test-file fix;
+- ruff clean;
+- stress phase 1 with the store on, `--ui`: ops=257 pass=152093 fail=0;
+- `engine_equality`: equal on the stress DB (105 event days, 351 points, fallback forced) and on both scratch DBs (461 days, 2,179 points).
+
+*P15 decision:* `build_book` stays as it is. It is `iter_books`' independent reference, and the equality above depends on it; making it a wrapper gains nothing measured. No gate re-run.
+
+*Local before/after* (dev machine, copies of the two scratch DBs, wall seconds, timings only):
+
+| Measure | prodlike, v0.1.31 | prodlike, v0.1.32 | bench, v0.1.31 | bench, v0.1.32 |
+| --- | --- | --- | --- | --- |
+| boot, incl. the first full settlement (v0.1.32) | 1.4 | 7.6 | 0.8 | 7.3 |
+| `/api/dashboard`, cold | 10.6 | 1.0 | 9.0 | 1.1 |
+| `/api/alerts`, cold | 9.4 | 0.8 | 9.4 | 0.8 |
+| `/api/performance/twr`, cold | 8.9 | 1.1 | 9.6 | 0.6 |
+| `/api/snapshots`, cold | 0.02 | 1.6 | 0.01 | 0.7 |
+| 首頁 flow, cold | 28.0 | 1.65 | 27.8 | 1.7 |
+| 首頁 flow, reload | 27.7 | 0.47 | 27.5 | 0.59 |
+
+`/api/snapshots` rose because v0.1.31 read the 23:50 freeze table, while v0.1.32 computes the live current period. The 首頁 flow is dashboard, alerts, snapshots, TWR and cash, in that order.
+
+*Post-release backlog:*
+- PERF-F2 and the price-basis split edge (owner ruling: after the deploy);
+- the accountant's MINORs:
+  - a restatement's reason names only the run's earliest change;
+  - an all-unpriced total shows 0 (v0.1.31 behaviour);
+  - no corporate-action activity line;
+  - two PERF-F2 reason texts;
+  - first-month XIRR annualised from a 30-day window;
+- the trend tooltip's JS `total_value − net_invested`;
+- the `job_worker` hook-clear has no test (it has no effect today);
+- `/api/snapshots` rebuilds once more when a job writes during a miss (about 7 s on prod).
+
 ## Appendix — code map (surveyed at `473fe5a`; re-check line numbers before editing)
 
 **Engine:**
