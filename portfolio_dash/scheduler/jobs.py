@@ -2333,7 +2333,7 @@ def _run_in_child(job_id: str, run_id: int, *, now: datetime,
 
 
 def _limit_text(seconds: float) -> str:
-    """「30 分鐘」 / 「45 秒」 — the limit in the sentence a stopped run's row carries."""
+    """「60 分鐘」 / 「45 秒」 — the limit in the sentence a stopped run's row carries."""
     if seconds >= 60:
         return f"{seconds / 60:g} 分鐘"
     return f"{seconds:g} 秒"

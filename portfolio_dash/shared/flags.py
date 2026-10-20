@@ -8,7 +8,8 @@ Five switches, each a closed vocabulary:
   (spec §9.2).
 - ``PD_JOB_MODE`` — ``child`` / ``inline``, prod ``child``: where a scheduled job executes
   (spec §16).
-- ``PD_PREWARM`` — ``1`` / ``0``, prod ``1``: pre-warm today's result after a run (§9.3 #8).
+- ``PD_PREWARM`` — ``1`` / ``0``, prod ``1``: pre-warm today's result 1 s after a settlement run
+  (§9.3 #8) and 3 s after the last write window (§12.1).
 - ``PD_STATIC_IMMUTABLE`` — ``1`` / ``0``, **unset means ``0`` on every instance**: answer a
   static asset whose ``?v=`` is the running version ``immutable`` for a year
   (``api/static_cache.py``, spec §13). Opt-in per instance because ``?v=`` is

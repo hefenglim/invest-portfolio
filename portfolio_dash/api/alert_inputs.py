@@ -294,10 +294,11 @@ def scan_alert_compute(conn: sqlite3.Connection, *, now: datetime) -> list[Alert
 def prewarm_today() -> None:
     """Compute today's dashboard and alerts into the result cache (PERF spec §12.1 pre-warm).
 
-    A ready ``fn`` for ``result_cache.schedule_prewarm`` — NOT wired yet: package E schedules
-    the pre-warm after a settlement run (and the main session decides on the one after the
-    last write window). It reads exactly what a request would — the clock and reporting
-    currency of ``api/deps.py``, its own ``shared.db.session`` — and the alerts carry the same
+    The ``fn`` of ``result_cache.schedule_prewarm``: scheduled 1 s after a settlement run
+    (``settlement_service._schedule_prewarm``) and 3 s after the last write window
+    (``api/app.py``'s middleware); both share one debounced timer. It reads exactly what a
+    request would — the clock and reporting currency of ``api/deps.py``, its own
+    ``shared.db.session`` — and the alerts carry the same
     ``calib_gap`` as ``GET /api/alerts`` and reuse the build only under the same state
     (``data_key``), so both entries are the ones the next request asks for. Reads only; a
     failure is logged by ``schedule_prewarm``.

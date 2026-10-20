@@ -92,7 +92,7 @@ _QUOTE_JOB_MARKET_ZH: dict[str, str] = {
 
 
 # =============================================================================================
-# The 23:50 snapshot (retired as a source; kept for the boot DDL and the W4 runner removal)
+# The 23:50 snapshot (retired: nothing writes or serves it; the table's one definition)
 # =============================================================================================
 
 _DDL = """
@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:
-    """The retired snapshot table — created at boot only (``api/app.py``), never on a read."""
+    """The retired snapshot table's DDL. Boot no longer creates it (plan W4): an existing
+    database keeps it for the go-live restatement; tests that build one call this."""
     conn.executescript(_DDL)
     conn.commit()
 
