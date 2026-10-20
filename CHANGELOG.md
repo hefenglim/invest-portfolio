@@ -9,6 +9,83 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+Three changes after v0.1.32, each its own branch, cherry-picked onto `fix/post-v0132`: the two
+defects the settlement-store work reproduced and the owner deferred (ruling 2026-10-19), and the
+v0.1.32 code-review follow-ups. Every `.py` under `portfolio/`, `pricing/` and `shared/` is in the
+settlement calc version, so the release that carries them re-settles in full at its first boot.
+
+### Owner sign-off
+- **2026-10-19** — PERF-F2 and the price-basis split edge are fixed after the v0.1.32 deploy, each as
+  its own change.
+- **2026-10-20** — the split window's upper bound is the EXCHANGE-LOCAL date of the fetch (not its
+  open). Of the nine v0.1.32 code-review candidates (one refuted on reading), findings 2, 4, 6 and
+  8 are fixed now; 1, 5, 7 and 9 go to the backlog. The three changes are built in parallel, each
+  reviewed independently, its findings fixed by its own author, then folded.
+
+### Fixed
+- **PERF-F2: the trend no longer disappears over a cash cost in a currency no holding is quoted
+  in.** A MYR rebate on a ledger without MY stocks removed the whole trend, and with it net worth,
+  含匯兌總損益 (B), 本金匯率效果 (B − A), 交易與融資成本 and the index comparison, although the
+  rate was stored and XIRR counted it. The trend's FX pair set now has one owner,
+  `portfolio/timeseries.py::trend_fx_currencies` (the quote currencies ∪ the currency of every
+  movement the trend converts, by XIRR's own predicate `returns.is_return_movement`), shared by the
+  dashboard and the settlement worker. A genuinely missing rate still withholds the trend. The
+  v0.1.31 reference payloads are kept; `tests/reference/perf_f2.py` owns the intended difference on
+  the `unquoted_ccy_cash` corpus, and every other corpus stays byte-identical. Stress: new
+  checkpoint `run_unquoted_ccy_cash`, isolated on a scratch copy with its own server (phase 1
+  ops=261 pass=155146 fail=0; with the old pair set fail=94, all at that checkpoint).
+- **Price basis: the split window closes on the exchange's own date** (the price-basis split edge,
+  spec 2026-10-18 §20 row 9). The write seam folded the splits in `(as_of, fetched_at.date()]` with
+  `fetched_at` on the app clock (Asia/Taipei). The US quote job fires at 16:30 New York, already the
+  next day in Taipei, so every scheduled fetch of a split's last pre-split session stored its
+  as-traded close × the ratio until `history_daily` re-fetched it about 20 hours later. The bound
+  is now the fetch's date in the market's exchange timezone (`pricing/store.split_window_through`;
+  `shared/enums.MARKET_TIMEZONE`), for the write seam and the reconcile alike. TW and MY rows
+  stamped +08:00 are unchanged. Every restatement now goes through one seam
+  (`api/instrument_service.restate_price_basis`), which also clears the symbols' derived signal
+  rows, and the reconcile reads and writes in one `BEGIN IMMEDIATE` transaction (a concurrent quote
+  write could leave a close derived from the old raw value beside the new one). New
+  `scripts/check_split_window.py` lists stored rows the new window disagrees with (read-only; US
+  and TW / MY apart; SUSPECT rows marked and skipped unless `--include-suspect`) and restates them
+  with `--apply` after a verified backup (exit codes 0 / 1 / 2 / 3 / 4).
+- **A clean stop no longer leaves `-wal` / `-shm` beside the database when a pre-warm is running**
+  (review finding 2). `result_cache.shutdown()` closes the cache for the rest of the lifespan,
+  waits up to 15 s for a running pre-warm, then closes the version connections before the TRUNCATE
+  checkpoint (`api/app.py::checkpoint_on_stop`). An outlived wait and a busy checkpoint are logged.
+  The lifespan reopens the cache at start.
+- **No settle child starts during a stop.** A run that ended while the app stopped used to start
+  its resume, chained or queued follow-up as a new child mid-stop; `settlement_service.shutdown()`
+  now refuses every start (`Stopping`, 409 on the run route) until the next boot.
+- **Cancelling a re-settlement no longer pops 「要重新結算歷史資料嗎？」** (review finding 4): the
+  settlement's own run / cancel POSTs never re-arm the prompt; every other write still does.
+- **A job queued behind a settlement no longer starts an automatic run for the owner's changes**
+  (review finding 6). A job worker child takes its after-job change-trail mark when the heavy gate
+  grants its turn (`child_runner.spawn(on_start=…)`), not before the wait, and the mark sums every
+  unsettled price / FX counter per key (claimed ones included), so a cancelled run's put-back is not
+  the job's change either. A child cancelled as its turn comes gets neither `on_start` nor a
+  process.
+- Docstrings (`live_from`, `stale_range`, `claim`, `end_without_publish`,
+  `dashboard._stored_bench`) now describe `Dd` = `dirty_day` and the benchmark's `claimed_day` as
+  built (review finding 8).
+
+### Changed
+- `docs/DEPLOYMENT.md`: the manual snapshot uses SQLite's online backup. A `-wal` left beside the
+  database holds committed changes: fold it back before a copy, and delete it only when a restore
+  replaces the file.
+- Accounting manual `v1.14` (zh + hand-translated en mirror): §7.1b (m) records both defects as
+  fixed.
+
+### Backlog (from the v0.1.32 code review, owner 2026-10-20)
+- An open write window anywhere in the process turns off caching and in-flight sharing for every
+  reader (`result_cache.key_for`); harmless while builds are sub-second.
+- `update_schedule` records the live row as the previous schedule even after an unrecorded hand
+  edit of `schedule_config`.
+- A cache-miss dashboard build replays the ledger twice (`build_book` and `iter_books`).
+- `api/snapshots.py::_labelled` re-walks `final_through` per request for 暫定 in the days after a
+  month end.
+- A settle or job child still running at stop can keep the TRUNCATE checkpoint busy; logged, not
+  waited for.
+
 ## [v0.1.32] - 2026-10-20
 
 The settlement store: history is settled ahead of time and served from it, results are kept in a

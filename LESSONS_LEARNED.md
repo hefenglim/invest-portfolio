@@ -2269,3 +2269,28 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
   `running`. Rule: anything acquired before a step that can fail is released on that failure, and
   the caller's row and in-process state are ended, never left active.
 
+
+## After v0.1.32: the code review, PERF-F2 and the split edge (2026-10-20..21)
+
+- **A date window on the app clock is a window on the wrong calendar (split edge).** The write
+  seam asked "which splits had the provider folded in?" with the TAIPEI date of the fetch. The
+  defect was filed as an edge (a manual fetch before the New York open), but the US quote job
+  itself fires at 16:30 New York, already the next day in Taipei, so EVERY scheduled fetch of a
+  split's last pre-split session hit it. It surfaced only when someone set the job's cron zone
+  beside the window's clock. Rule: a window about an exchange's events is computed on that
+  exchange's calendar, and a defect's reach is measured against the schedule that actually runs,
+  not against the scenario that first exposed it.
+- **A repair script must enter through the app's seam, not the function under it (split edge,
+  review finding 1).** `--apply` called `reconcile_prices` directly and skipped the signal
+  invalidation that lived one layer up in the doors' wrapper; the next scan would have fired
+  phantom transitions. Rule: a side effect that must accompany a write belongs in the ONE seam
+  every path calls, and a script calls that seam.
+- **Cancelling a pending timer is not a stop (review finding 2).** `reset()` cancelled the next
+  pre-warm but not the one running, which then reopened what had just been closed. Rule: a
+  shutdown forbids new work, waits (bounded) for the work in progress, and only then releases.
+- **A before/after mark taken before a queue wait counts everyone's changes as the queued job's
+  (review finding 6).** And a mark of the PENDING counters only read a cancelled run's put-back
+  as new. Rule: take the mark when the work starts, over every state the counted thing can be in.
+- **A stop must also stop follow-ups (review of finding 2's fix).** A settle waiter finishing
+  during the stop started the run's resume as a new child. Rule: once shutdown began, nothing
+  starts; boot picks up what was left.

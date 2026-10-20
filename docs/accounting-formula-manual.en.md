@@ -11,7 +11,7 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.13` (2026-10-20)
+> **Version**: `v1.14` (2026-10-21)
 > **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
 > SPLIT / EXCHANGE / SPINOFF; incl. the 2026-08-13 **seven cash-movement kinds / two-axis
 > table** and the **US cash dividend, P1b**)
@@ -1759,21 +1759,37 @@ months before a ledger import reflect an empty ledger, so a one-time restatement
 The activity lines and the holdings are recomputed on every run and never recorded as
 restatements.
 
-**(m) Known defects the owner ruled to defer** (ruling 2026-10-19: v0.1.32 first keeps its
-byte-for-byte identity with v0.1.31, and each is fixed as its own change after the release; both
-are pinned `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`):
-- **PERF-F2**: the trend's FX pairs hold only the ledger's **quote currencies**. If an XIRR-kind
-  cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) is in a currency no instrument is quoted
-  in, **the whole trend** (net worth, B, B−A, the index comparison) is unavailable, although its
-  rate is stored and XIRR already counts that movement. A close stored for a day before that flow
-  keeps its trend fields. A close from that flow on carries `notes.trend_unavailable` and no
-  period return. On such a ledger, a past close computed live has no trend fields at all.
-- **The price-basis split edge**: `upsert_prices` folds in the splits in `(as_of, fetched_at]`,
-  with `fetched_at` the **Taipei** date. A US quote fetched on the split's effective date in
-  Taipei, before the New York open (the provider still delivers the previous session's raw
-  close), is multiplied by the split ratio. The next day's fetch, after the provider has
-  restated, restores the correct value. In between, a day or a close valued from that row is off
-  by one ratio.
+**(m) Two defects fixed after v0.1.32** (ruling 2026-10-19: v0.1.32 first kept its
+byte-for-byte identity with v0.1.31, and each was fixed as its own change after the release;
+until then both were pinned `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`, and
+they are plain regression tests now):
+- **PERF-F2 (fixed)**: the trend's FX pairs held only the ledger's **quote currencies**. If an
+  XIRR-kind cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) was in a currency no
+  instrument is quoted in, **the whole trend** (net worth, B, B−A, the trading and financing
+  cost, the index comparison) was unavailable, although its rate was stored and XIRR already
+  counted that movement. The trend's FX pairs are now the quote currencies ∪ the currency of
+  every cash movement the trend converts (`timeseries.trend_fx_currencies`, with XIRR's own
+  predicate `returns.is_return_movement`; the live build and the settlement worker share this
+  one source). When a flow genuinely has no rate on or before its date, the whole trend is
+  still unavailable (「帳本中有交易日期缺少匯率資料」): a close stored for a day before that flow
+  keeps its trend fields, a close from that flow on carries `notes.trend_unavailable` and no
+  period return, and on such a ledger a past close computed live (the live trend being wholly
+  unavailable) has no trend fields at all.
+- **The price-basis split edge (fixed, owner ruling 2026-10-20)**: the upper bound `T` of the
+  write window `(as_of, T]` was the fetch's **Taipei** date. When the US quote job fetched a
+  split's last pre-split session at 16:30 New York, it was already the next day (the ex-date) in
+  Taipei, so the old rule multiplied a close the provider had not restated by the split ratio,
+  until `history_daily` re-fetched it about 20 hours later; in between, a day or a close valued
+  from that row was off by one ratio. `T` is now the fetch's date on the **exchange's** calendar
+  (New York's for US stocks; `pricing/store.split_window_through`, shared by the write and the
+  reconcile): that fetch's New York date is still the session's own day, the window holds no
+  split, and the close is stored as traded. TW and MY rows (UTC+8, no DST) stamped +08:00 or
+  with no timezone are unaffected. Residuals, each healed by the next fetch after the split takes
+  effect: ① a manual fetch on the ex-date between New York's midnight and its open (12:00–21:30
+  Taipei, 13:00–22:30 in winter) still folds the ratio if the provider has not restated yet;
+  ② if the provider restates before the exchange's local midnight, that fetch stores an
+  un-folded post-split price — for a Monday ex-date, the weekend `history_daily` runs (Taipei
+  Saturday to Monday 02:00) fall in this range.
 
 **Verification anchors (E30, E31; both hand-checkable)**
 
@@ -2865,6 +2881,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.11` | 2026-10-05 | **New §6.6 Refused Dividends** (owner rulings 2026-10-05; baseline `feat/corporate-actions` after the pre-merge code review CR-01..14 / R1..R12 / S1..S11): the three refusal kinds (no position / open short / exchanged away) recorded on the book, contributing 0 to every money figure, listed and marked 「未入帳（待釐清）」 but left out of every total, the trend day marked incomplete while a held carrier keeps its value, and one owner for the remedy wording; the verification anchor matches the current run (phase-1 137 ops / 11,406 assertions / 0 fail). Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than §6.6.** |
 | `v1.12` | 2026-10-10 | **New §4.5 US Equity Options** (owner rulings R1–R7, OPT-D1..D22; baseline `feat/options-ledger`): a contract as an instrument, share-equivalents, sell-to-open as the declared short, price-0 close rows (expiry / assignment / exercise) and R5, the option fee branch, §4.4 a close row never opens a lot, `OPTION_ADJUST`, last-trade valuation and the point-in-time / trend-derived split, OPT-D20; worked examples and anchors from the current run (phase-1 164 ops / 19,948 assertions / 0 fail). Mirror regenerated in the same change set. **No formula or accounting definition of a stock changed.** |
 | `v1.13` | 2026-10-20 | **Month and year closes replace the monthly snapshot** (PERF-D7, spec `docs/spec/2026-10-18-settlement-store.md` §11; baseline `perf/settlement-store`, v0.1.32). ① **New §7.1b**: the end day D (a calendar day), prices and FX "on or before D", cumulative KPIs (the same gates as live), `period_twr` = I(D) / I(previous end) − 1 and 「待結算」 across the seam between the old and the new version, the trend fields named apart from KPI 總市值, the `notes` (including `trend_unavailable`, `missing_cash_fx` and the `dividends_receivable` computed when read), the first period as the month of the ledger's first row in any table, the eight kinds of period-activity line (**not additive**) and the sheet-by-sheet tie-out with the tax package, the holdings at the period end and the cash at the period end counting booked dividends only, the year close ≡ the December close, provisional / the pre-update version, restatements and the one-time go-live restatement, and the two known defects the owner ruled to defer, PERF-F2 and the price-basis split edge; added §12.1 **E30 / E31** and five §12.2 glossary rows. ② **The §7.1 monthly-snapshot paragraph is rewritten as a retirement note**: the 23:50 freeze (the previous day's US close, never corrected afterwards) is no longer written, and the basis for arbitrating a month-end historical amount is now §7.1b; the §7.3 `by_currency` note is synchronized. ③ **§7.2.1 `xirr_window_days` corrected** (owner ruling 2026-10-20: keep v0.1.31's behaviour): the original "reported in every case" did not match the implementation — it is `null` when XIRR is withheld before it is computed (a 待釐清, a missing rate, no flow). ④ §7.1b added to the §12.4 locating list. Verification anchors match the current run (phase-1 257 ops / 152,086 assertions / 0 fail). Mirror re-translated by hand in the same change set. **No formula or accounting definition of the live KPIs, cost, P&L, XIRR or cash changed**: with the settlement store clean, the dashboard is byte-identical to v0.1.31. |
+| `v1.14` | 2026-10-21 | **Two fixes after v0.1.32** (owner rulings 2026-10-19 and 2026-10-20): §7.1b (m) now records them as fixed. ① **PERF-F2**: the trend's FX pairs are the quote currencies ∪ the currency of every cash movement the trend converts (`timeseries.trend_fx_currencies`), so a REBATE / INTEREST_EXPENSE / BROKER_FEE in a currency no instrument is quoted in no longer makes the whole trend, B, B−A, the trading and financing cost and the index comparison unavailable; a genuinely missing rate still does. ② **The price-basis split edge**: the write window's bound is the exchange-local date. Stress phase 1 gains the `run_unquoted_ccy_cash` checkpoint (on a copy, with its own server). Mirror re-translated by hand in the same change set. **No formula or accounting definition of XIRR, cost, P&L or cash changed**; what moves is only the trend-derived figures that were unavailable for want of an FX pair, and the temporarily wrong close of a split's last pre-split session. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

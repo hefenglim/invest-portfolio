@@ -1,21 +1,24 @@
-"""Two suspected pre-existing defects, reproduced and NOT fixed (PERF plan §5.1 "Repro, don't
-fix"; spec §8 item 5 and §20). A fix changes output, so each waits for the owner's ruling and
-is then its own change. Each ``xfail(strict=True)`` states what the CORRECT behaviour would be:
-it fails today (the defect is there), and the day a fix lands it passes and ``strict`` turns
-that into a failure, so the marker has to be removed with the fix.
+"""Two pre-existing defects, reproduced during the settlement-store work (PERF plan §5.1
+"Repro, don't fix"; spec §8 item 5 and §20) and FIXED after v0.1.32, each as its own change
+(owner rulings 2026-10-19 and 2026-10-20). Until then each test below was pinned
+``xfail(strict=True)``; they are plain regression tests now.
 
-PERF-F2 — the trend's FX pair set omits the currency of a cash-kind flow
-    The trend loads FX only for the ledger's quote currencies. A cash movement of an XIRR kind
-    (REBATE / INTEREST_EXPENSE / BROKER_FEE) in a currency no instrument is quoted in finds no
-    rate in that map, so the WHOLE trend is unavailable — and with it net worth, B, B − A and
-    the benchmark — although the rate is stored and XIRR counts the same movement.
+PERF-F2 — the trend's FX pair set omitted the currency of a cash-kind flow (FIXED)
+    The trend loaded FX only for the ledger's quote currencies, so a cash movement of an XIRR
+    kind (REBATE / INTEREST_EXPENSE / BROKER_FEE) in a currency no instrument is quoted in left
+    the WHOLE trend unavailable — and with it net worth, B, B − A and the benchmark — although
+    the rate was stored and XIRR counted the same movement. The pair set is now
+    ``portfolio.timeseries.trend_fx_currencies``; ``tests/portfolio/test_trend_fx_currencies.py``
+    covers the rule and ``tests/reference/perf_f2.py`` owns the intended payload difference.
 
-The price-basis split edge (spec §20 row 9)
-    ``upsert_prices`` folds in the splits dated in ``(as_of, fetched_at]``, with *fetched_at*
-    the TAIPEI date of the fetch. A US fetch made in Taipei on a split's ex-date but before the
-    New York open — when the provider still delivers the previous session's close as traded —
-    multiplies that close by the split ratio. The next day's fetch, after the provider has
-    restated its history, stores the right value again.
+The price-basis split edge (spec §20 row 9) (FIXED)
+    ``upsert_prices`` folded in the splits dated in ``(as_of, fetched_at]`` with *fetched_at*
+    the TAIPEI date, so a US fetch whose Taipei date was a split's ex-date but whose New York
+    date was still the last pre-split session — every scheduled ``quotes_us`` run at 16:30 New
+    York — multiplied that session's as-traded close by the ratio until the next day's
+    restated fetch. The bound is now the fetch's date on the exchange's calendar
+    (``pricing.store.split_window_through``); ``tests/pricing/test_split_window_exchange_date.py``
+    covers the rule.
 """
 
 from __future__ import annotations

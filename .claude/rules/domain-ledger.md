@@ -556,20 +556,25 @@ corrected afterwards. Owner `portfolio/period_close.py`; the worker, the read pa
     restatement is expected.
 
   Activity lines and holdings are recomputed on every run but not restated.
-- **Known, owner-deferred defects** (ruling 2026-10-19: v0.1.32 keeps its byte identity
-  against v0.1.31, and each is fixed as its own change AFTER the release; each is pinned
-  `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`):
-  - **PERF-F2.** The trend's FX pair set holds only the ledger's QUOTE currencies. An XIRR-kind
+- **Two defects found during the store work, fixed after v0.1.32** (ruling 2026-10-19:
+  v0.1.32 kept its byte identity against v0.1.31, and each was fixed as its own change after
+  the release; their former `xfail(strict=True)` tests in `tests/portfolio/test_engine_repro.py`
+  are plain regression tests now):
+  - **PERF-F2.** The trend's FX pair set held only the ledger's QUOTE currencies, so an XIRR-kind
     cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) in a currency no instrument is quoted
-    in makes the WHOLE trend unavailable (net worth, B, B − A, the benchmark), although its rate
-    is stored and XIRR counts it.
-    - A close stored for a day before that flow keeps its trend figures.
-    - A close from it on carries `notes.trend_unavailable` and no 當期報酬.
-    - A past close computed LIVE on such a ledger has no trend figure at all.
-  - **The price-basis split edge.** `upsert_prices` folds in the splits dated in
-    `(as_of, fetched_at]`, with `fetched_at` the TAIPEI date. A US fetch made in Taipei on a
-    split's ex-date but before the New York open (the provider still delivers the previous
-    session's as-traded close) multiplies that close by the ratio. The next day's restated
-    fetch stores the right value again. A day or close valued from that row in between is wrong
-    by the ratio. If that day is already settled, the corrected row's `prices` trigger marks it
-    dirty and the next run settles it again; otherwise it is live and simply heals.
+    in made the WHOLE trend unavailable (net worth, B, B − A, 交易與融資成本, the benchmark),
+    although its rate was stored and XIRR counted it. The set now has ONE owner,
+    `portfolio/timeseries.py::trend_fx_currencies`: the quote currencies of
+    `trend_symbols(bundle)` plus the currency of every movement the trend converts, by
+    `returns.is_return_movement` (XIRR's own predicate). The live build and the settlement
+    worker both read it. Only a rate genuinely missing on or before a flow's date still makes
+    the trend unavailable (「帳本中有交易日期缺少匯率資料」); on such a ledger a past close
+    computed live has no trend figure at all. The worker's placeholder widening is now defense
+    in depth with no known production trigger; its test reaches it through v0.1.31's pair set.
+    `tests/reference/perf_f2.py` owns the intended payload difference on the
+    `unquoted_ccy_cash` corpus (the v0.1.31 reference files are never regenerated).
+  - **The price-basis split edge.** The write window's bound was the TAIPEI date of the fetch,
+    so every scheduled US fetch of a split's last pre-split session (16:30 New York, already
+    the ex-date in Taipei) stored its as-traded close × the ratio until `history_daily`
+    re-fetched it about 20 hours later. The bound is now the fetch's date on the exchange's
+    calendar (owner ruling 2026-10-20; `data-and-pricing.md` → the stored price basis).

@@ -144,9 +144,16 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   `jobs.register_settlement_runner` (→ `settlement_service.scheduled_run`: the
   `settlement_nightly` run at 06:40 Taipei and the `settlement_selfcheck` run on Sundays at 04:30)
   and `jobs.register_after_job_hook` (→ `settlement_service.after_job_hook`). The hook is two-phase:
-  it is asked before a static job runs and called once the job's row is final, and it starts an
+  it is asked before a static job runs — for a job worker child, when the heavy gate grants the
+  run its turn (`child_runner`'s `on_start`, `jobs._run_static_in_child`), never before the
+  wait — and called once the job's row is final, exactly when the mark was taken (including a
+  child that died, overran its limit, or never started after the mark). It starts an
   automatic `dirty` run (reason `job:<id>`) only when the JOB'S OWN trail rows reach before the
-  live window. A direct import would point up the ladder and cycle through `start_job_run` /
+  live window. The mark sums every UNSETTLED price / FX counter per key, claimed ones included,
+  so a cancelled run's put-back after the mark is not the job's change, and the owner's
+  changes during a gate wait are not either (code review of v0.1.32, 2026-10-20). Residual: an
+  owner's price / FX change made WHILE the job runs is still indistinguishable (counters carry
+  no actor). A direct import would point up the ladder and cycle through `start_job_run` /
   `finish_job_run`. Both seams are bound, with every other scheduler seam, by ONE function,
   `api/composition.py::bind_runtime()`. The lifespan calls it, and so does the job worker child
   (`api/job_worker.py`), so a job runs against the same runners in either process.
@@ -202,7 +209,8 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   gate messages and run details — a renderer never falls back to the id; and every alert
   TITLE names its rule in the rule's own words, DEF-076 2026-09-26: `tests/contract/
   test_def076_alert_titles_use_rule_vocabulary.py` derives the (rule, title) pairs from the
-  code, and a different wording must be a reviewed entry with its reason), the LLM client.
+  code, and a different wording must be a reviewed entry with its reason), the market exchange
+  timezones (`enums.MARKET_TIMEZONE`, the split window's bound), the LLM client.
   Pure, importable everywhere. **The exceptions to "pure"** are the modules that hold
   process-wide state or reach the OS:
   - **`flight.py`** (2026-10-13) lets callers asking for the SAME computation while it RUNS
@@ -238,9 +246,17 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     - **Pre-warm** (`PD_PREWARM=1`): a debounced daemon timer computes today's dashboard and
       alerts (`api/alert_inputs.prewarm_today`). It fires 3 s after the last write window closes
       (`api/app.py::WRITE_PREWARM_DELAY_S`) and 1 s after a settlement run ends.
-    - **Shutdown.** The lifespan calls `result_cache.reset()` first, which closes the version
-      connections, and THEN runs `PRAGMA wal_checkpoint(TRUNCATE)`. A read-only connection cannot
-      checkpoint, and a clean stop must leave the database in one file.
+    - **Shutdown.** The lifespan calls `result_cache.shutdown()` first. It closes the cache for
+      the rest of the lifespan (no pre-warm starts, no version connection opens, no entry is
+      kept), waits up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running —
+      whose read snapshot would keep a TRUNCATE checkpoint from finishing and which would
+      reopen a version connection — and closes the version connections. THEN the lifespan runs
+      `PRAGMA wal_checkpoint(TRUNCATE)` (`api/app.py::checkpoint_on_stop`, result on
+      `app.state.stop_checkpoint`). A read-only connection cannot checkpoint, and a clean stop
+      must leave the database in one file. A pre-warm that outlives the wait (a full live build
+      while the store is unusable) and a busy checkpoint are logged and the stop goes on;
+      `-wal` / `-shm` may then remain, and the `-wal` holds committed changes. The lifespan
+      calls `result_cache.reset()` at START, so a second lifespan in one process caches again.
 
     `tests/shared/test_result_cache*.py`.
   - **`flags.py`** reads the five `PD_*` process flags from `os.environ` on every call, never
@@ -266,6 +282,11 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       package's own root, and `DB_PATH` is made absolute. It never uses `-I`, which would drop
       both.
     - `terminate_and_wait` returns once the process is gone AND `on_exit` has returned.
+    - **`on_start`** (optional) runs on the waiter thread once the child's turn has come (after
+      the heavy gate, for a heavy child) and before its process starts, unless the child was
+      cancelled by then. A cancel landing during or right after it still keeps the process from
+      starting, so a caller pairs it with `on_exit`, which fires either way. A raise is logged
+      and the child still starts.
 
     The runner knows nothing about settlement or jobs.
   - **`db.py`'s change actor.** `install_actor` registers a connection-local function and a
@@ -320,6 +341,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   `*_service` modules orchestrate cross-module flows, `app.py` is the composition root (its
   lifespan, its middlewares) and `composition.py::bind_runtime()` binds every scheduler seam.
   No business logic; every mutating route has an action-log label.
+  `instrument_service.restate_price_basis` is the ONE price-basis restatement seam: every
+  corporate-action door and `scripts/check_split_window.py` call it, and it owns the W6 signal
+  invalidation (`data-and-pricing.md` → the stored price basis).
   **A GET never writes** (DEF-065, 2026-09-25): no seed, no `CREATE`/`ALTER`, no write
   transaction — every table a read path touches is created (and seeded) at boot in
   `app.py`'s lifespan, and `shared/config_store.ensure_seeded` decides seed-once under the
@@ -359,7 +383,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     its `preparing` report in ONE commit, then spawns the worker. Its waiter finalises what the
     child did not, sends the 「重新結算失敗」 push of a failed automatic run (P4; held through quiet
     hours and sent once they end, Q-P1 = (a)), calls `flight.note_write()`, pre-warms, and
-    starts the follow-up (chained, resume or queued). It also owns cancel, the boot hook
+    starts the follow-up (chained, resume or queued). `shutdown()` stops every new start:
+    `start_run` raises `Stopping`, `start_automatic` starts nothing, and a waiter finishing
+    during the stop leaves its follow-up to the next boot (`on_boot` opens it again). It also
+    owns cancel, the boot hook
     (`on_boot` plans inside the boot session; `start_after_boot` starts once that session has
     committed) and the chip's `status`, which only reads.
   - `snapshots.py` serves 月度成績 and the period routes from ONE rule: a past close whose end
@@ -489,5 +516,7 @@ Because implementation is AI-driven, every module must be self-verifiable:
   - byte identity against reference payloads generated by v0.1.31's OWN code, never against the
     new code with the store switched off.
 
-  The two pre-existing defects PERF-F2 and the price-basis split edge are pinned as
-  `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`.
+  The two pre-existing defects PERF-F2 and the price-basis split edge, pinned as
+  `xfail(strict=True)` through v0.1.32, were fixed after it; `tests/portfolio/test_engine_repro.py`
+  keeps their regression tests, and `tests/reference/perf_f2.py` owns PERF-F2's intended
+  payload difference.
