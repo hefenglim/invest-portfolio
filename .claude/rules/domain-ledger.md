@@ -422,3 +422,154 @@ calls and puts with the standard 100-share deliverable; anything else is refused
   option, so a stock ledger's payload is byte-identical). KPI 總市值 = the stock grand subtotal +
   `options.market_value`. AI insights, signals, alerts, digest, news, fundamentals, target
   weights, rebalance and what-if exclude options (OPT-D10).
+
+## Month and year closes (月結／年結, PERF-D7; spec 2026-10-18 §11, as built 2026-10-20)
+
+A close is a COMPUTED figure, never a source of truth. It is rebuilt from the ledgers like
+every other report, and the settlement store only keeps it (`data-and-pricing.md` → the
+settlement store). The 23:50 月度快照 it replaces froze the dashboard's KPIs on the last evening
+of the month. That was before the US close of that day existed, and the freeze was never
+corrected afterwards. Owner `portfolio/period_close.py`; the worker, the read path
+(`api/snapshots.py`) and the stress oracle all compute the same definition.
+
+- **A close is valued AS AT its end day D**, the period's last CALENDAR day (a weekend or a
+  holiday carries the last close forward, as every chart does). Its KPI block is the
+  dashboard's own computation (`dashboard.kpis_as_of`) with the sources "on or before D":
+  - **the ledger** — the book of `valued_as_of(D)`, with cash movements and FX conversions cut
+    by `valued_rows_as_of(…, D)`. Every row counts from its own date;
+  - **a held stock** — the latest stored close with `as_of_date ≤ D`, re-expressed by
+    `price_in` for the splits in `(priced_on, D]`. A split dated ON a weekend D halves Friday's
+    close and doubles the shares, so the value at D is unchanged;
+  - **an option contract** — its last ordinary trade price on or before D (R2);
+  - **FX** — the latest rate on or before D (direct, else inverse). The rates used and their
+    dates are stored in `fx_used`.
+
+  A held stock with no such price follows exactly the live rule. Its value is `None`, so it is
+  left out of 總市值 and of the unrealized part of 總報酬 while its cost stays in the rate's
+  denominator. XIRR is `None`, because XIRR is all-or-nothing. And the close says so.
+- **Every KPI is SINCE INCEPTION, as at D:**
+  - 總市值, stocks + options;
+  - 累計總報酬 A and 累計報酬率;
+  - 累計 XIRR with `xirr_window_days` / `xirr_reason`, under the same gates as the live KPI
+    (manual §7.2.1, owner ruling 2026-10-20);
+  - `by_currency_value`.
+
+  None of these is the period's own return. A year row is never "that year's return".
+- **The period's own return is `period_twr` = `I(D) / I(previous end) − 1`**, on the full-series
+  TWR index that `/api/performance/twr` uses. That index is the trend's, so options are excluded
+  (R3).
+  - The first period starts from the index's anchor (100).
+  - The TWR is `None`, with its reason, when either end day is incomplete or has no trend point.
+  - While history is stale, a period whose `(previous end, D]` contains `live_from` or overlaps
+    the stale range reads `None` with 「待結算：此期間包含尚未重新結算的日子，當期報酬暫不計算」. A
+    return across the join of stale and live days would book a back-dated position's whole gain
+    as one day's return.
+- **The trend figures at D** are `trend_total_value` (證券市值: stocks only, a partial sum on an
+  incomplete day), `net_invested` and `net_worth`, all from the settled day D. They are named
+  apart from KPI 總市值 (options included, all-or-nothing on FX), so the two are never
+  confused. **FX P&L at D is not part of a close** in this release, and its absence is not a zero.
+- **`notes`, every reason a figure is absent or unconfirmed:**
+  - `incomplete`;
+  - `missing_prices`, and `stale_prices` (older than the live 4-day age before D);
+  - `unconfirmed_closes` — a close settled by the 4-day rule that no `ok` quote run confirmed,
+    matched by the PRICE date, so a Saturday month end carries Friday's partial run;
+  - `missing_fx` / `stale_fx`;
+  - `pending_positions` — the 待釐清 on the book at D: 賣超, an unapplied action, a refused
+    dividend, a refused close;
+  - `options_value_excluded`, and `options_past_expiry`;
+  - `trend_unavailable` — no trend point at D. Either a flow has no on-or-before rate (「部分投入
+    流量缺少當日匯率，該日沒有走勢資料」), or the series has not started yet (「走勢自第一筆交易、股
+    利或期初庫存起算，此日尚無走勢資料」);
+  - `missing_cash_fx` — a non-empty cash pool at D with no rate to the reporting currency;
+  - `dividends_receivable` — computed when the close is READ, never stored. It lists every
+    non-STOCK row with `ex_date ≤ D < payment date`: shown, never counted. A refused one is
+    marked 「未入帳（待釐清）」 (X1). It is hidden on a stale row.
+- **The closes start at the month of the ledger's FIRST ROW in any table.** A deposit or a
+  conversion may precede the first trade. So every period's activity lies inside its own
+  calendar period, and each year ties out with that year's tax sheets. A month before the
+  series has its cash, its activity and its KPIs, with zero holdings, no trend point
+  (`trend_unavailable`) and XIRR 「尚無持倉，XIRR 不計」.
+- **Activity in the period** (spec §11.3). Each line is in native currency AND in the reporting
+  currency at each row's OWN date's FX (the trend's flow conversion; `None` when a row has no
+  rate). Rows count inside `[the period's first day, D]` by the dates the ledger cut uses. The
+  lines:
+  - **realized — sales and short covers** (`kind` `sale` / `short_cover`), split by
+    `asset_type`. Each is shown vs ADJUSTED cost (`realized`, ties to 總報酬) and vs ORIGINAL
+    cost (`proceeds_net − original_cost_removed`, the capital gain);
+  - **realized — dividends after a full close** (audit H2), listed apart because the same payout
+    is also on the dividends line;
+  - **dividends** — BOOKED rows only, by type, account and currency. CASH / NET carry gross,
+    withholding and net; DRIP adds the reinvested shares; STOCK is shares only;
+  - **dividends not booked** — the period's refused payouts: count and net, 「未入帳（待釐清）」;
+  - **trade fees and tax**, by account;
+  - **every cash-movement kind**, by account × currency;
+  - **FX conversions** (from / to amounts) and **realized FX** (`realized_fx_rows_as_of`, the
+    換匯損益 owner);
+  - **openings** with `build_date` in the period.
+
+  ⚠ **The lines are NOT additive.** Under the adjusted-cost model a sale's realized already
+  contains the cash dividends folded into that position's cost, so 已實現 + 股利 is not "what
+  the period earned". No total of them is formed or shown.
+- **Tie-out with the tax package, sheet by sheet.**
+  - Realized sales and covers, both columns, ≡ `realized_gains_<year>.csv`.
+  - Booked CASH / NET / DRIP dividends ≡ `dividends_<year>.csv`.
+  - Realized FX ≡ `fx_realized_<year>.csv`.
+
+  It holds by construction: `period_close.realized_rows` / `dividend_rows` / `fx_realized_rows`
+  are the ONE row selection both `export/tax.py` and a close read. The tax package replays
+  STRICTLY, so on a ledger with a refused payout it answers 422 and there is no package to tie
+  to. The close then lists the refusal as 未入帳（待釐清）. Fees, cash movements, conversions,
+  openings and cash at D have no tax counterpart.
+- **Holdings and cash at D.**
+  - **Holdings:** every position, per account × symbol, stocks AND options tagged `asset_type`
+    (OPT-D5). Each row carries the shares, the original and adjusted cost totals, the price used
+    and its date, the market value and the unrealized P&L (`None` on a 待釐清 position), and the
+    待釐清 flags.
+  - **Cash:** every pool's END-OF-DAY balance at D (`cash_balances(…, as_of=D)`), fed with
+    BOOKED dividends only (`booked_dividends(…, book.refused_dividends)`, ⑪), so a refused payout
+    never lands in month-end cash. Its reporting value is at D's rate. An empty pool needs no
+    rate. So cash ties to each broker's month-end statement, as positions do.
+- **The year close ≡ the December close.** They share the same D (12-31), so they have the
+  same KPI block, holdings and cash. Two things differ. A year's `period_twr` runs from the
+  previous year's 12-31, and its activity covers the whole year: every FLOW line is the sum of
+  its months, while balances are never summed. The current month and year are live, as at
+  today.
+- **Where a close comes from.** A past close whose D is before `live_from` is the store's.
+  Every other one is computed live with the same functions, so a correction dated last month
+  changes last month's row at once. A store row inside the stale range is served with
+  `stale: true` and reads 「更新前版本」.
+- **暫定 (provisional)** marks a past period whose D is after `final_through`: a market quote job
+  due on D has not ended `ok`. The note reads 「月底收盤價尚未確定：<市場>報價工作未完成」
+  (「年底…」 for a year). It depends on the price data, never on the store. After 4 days the
+  close settles anyway, with `notes.unconfirmed_closes`.
+- **Restatements.**
+  - **已重述:** when a run changes a published close's KPI, it writes a `settle_restatement` row.
+    The row records the field's zh label (總市值 / 累計總報酬 / 累計報酬率 / 累計 XIRR /
+    當期報酬（TWR） / 證券市值 / 淨投入 / 淨資產 / `<ccy> 市值`), the unit, before → after, the
+    notes before and after, the reason (e.g. 「計算規則更新」, or a dated correction) and the
+    time. Restatement rows are never pruned, so the row's 已重述 mark always explains itself.
+  - **上線重述 at go-live:** on a month's FIRST publish, its close is compared with the retired
+    `portfolio_snapshots` freeze, but only when that freeze was written on the month's last day
+    (the go-live month's row was never a close). Every difference is recorded with `cutover = 1`
+    and the reason 「上線重述：月底定格值改為月底結算值」. The 23:50 freeze used the previous
+    day's US close, and months before a ledger import reflect the empty ledger: a one-time
+    restatement is expected.
+
+  Activity lines and holdings are recomputed on every run but not restated.
+- **Known, owner-deferred defects** (ruling 2026-10-19: v0.1.32 keeps its byte identity
+  against v0.1.31, and each is fixed as its own change AFTER the release; each is pinned
+  `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`):
+  - **PERF-F2.** The trend's FX pair set holds only the ledger's QUOTE currencies. An XIRR-kind
+    cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) in a currency no instrument is quoted
+    in makes the WHOLE trend unavailable (net worth, B, B − A, the benchmark), although its rate
+    is stored and XIRR counts it.
+    - A close stored for a day before that flow keeps its trend figures.
+    - A close from it on carries `notes.trend_unavailable` and no 當期報酬.
+    - A past close computed LIVE on such a ledger has no trend figure at all.
+  - **The price-basis split edge.** `upsert_prices` folds in the splits dated in
+    `(as_of, fetched_at]`, with `fetched_at` the TAIPEI date. A US fetch made in Taipei on a
+    split's ex-date but before the New York open (the provider still delivers the previous
+    session's as-traded close) multiplies that close by the ratio. The next day's restated
+    fetch stores the right value again. A day or close valued from that row in between is wrong
+    by the ratio. If that day is already settled, the corrected row's `prices` trigger marks it
+    dirty and the next run settles it again; otherwise it is live and simply heals.

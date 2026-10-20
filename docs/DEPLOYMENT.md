@@ -118,6 +118,13 @@ Restart=always
 RestartSec=3
 # 1 GB box: cap memory so a runaway never takes down the VM (restarts instead).
 MemoryMax=700M
+# Settlement store + job workers (v0.1.32) — the PROD values; see "Process flags" below.
+# PD_STATIC_IMMUTABLE=1 belongs on an instance that runs released tags ONLY (never a test/demo).
+Environment=PD_SETTLE=on
+Environment=PD_SETTLE_MODE=child
+Environment=PD_JOB_MODE=child
+Environment=PD_PREWARM=1
+Environment=PD_STATIC_IMMUTABLE=1
 
 [Install]
 WantedBy=multi-user.target
@@ -128,6 +135,28 @@ sudo systemctl enable --now portfolio-dash
 sudo systemctl status portfolio-dash --no-pager      # should be "active (running)"
 curl -s http://127.0.0.1:8400/api/health             # -> {"status":"ok"}
 ```
+
+### Process flags (v0.1.32)
+
+Read from the environment on every call (`portfolio_dash/shared/flags.py`). An unset flag means
+the value in the "unset" column. Any other value outside the allowed set **stops the boot** with
+a message naming the variable, so a typo in the kill switch can never quietly mean "on".
+
+| Flag | Allowed | Unset | Prod | What it does |
+| --- | --- | --- | --- | --- |
+| `PD_SETTLE` | `on` / `off` | `on` | `on` | The settlement store. `off` is the kill switch: no settlement run starts, and every page computes its history live (v0.1.31's behaviour, slower). |
+| `PD_SETTLE_MODE` | `child` / `inline` | `child` | `child` | Where a settlement run executes: a low-priority child process, or synchronously in-process (tests / Windows dev only). |
+| `PD_JOB_MODE` | `child` / `inline` | `child` | `child` | Where a scheduled job executes. A job child is limited to 60 minutes, and only one heavy child (a job or a settlement run) runs at a time. |
+| `PD_PREWARM` | `1` / `0` | `1` | `1` | Pre-compute today's dashboard 3 s after the last save and 1 s after a settlement run, so the next page load is a cache hit. |
+| `PD_STATIC_IMMUTABLE` | `1` / `0` | `0` | **`1`** | Serve a `?v=<version>` asset as `immutable` for a year. |
+
+**`PD_STATIC_IMMUTABLE=1` on prod only — never on a test/demo instance.** `?v=` is the package
+version, and only a release moves it. A test/demo instance runs work-in-progress commits under
+an unchanged version, so an immutable copy would pin a browser to old JavaScript there. Leave
+the flag unset on such an instance.
+
+Set the flags as `Environment=` lines in the unit (above), then
+`sudo systemctl daemon-reload && sudo systemctl restart portfolio-dash`.
 
 ---
 
@@ -173,6 +202,23 @@ curl -s http://127.0.0.1:8400/api/health
 Read `CHANGELOG.md` for what changed; the DB is forward-compatible (idempotent bootstrap,
 append-only ledgers — your data is never rewritten).
 
+**Upgrading to v0.1.32 (the settlement store):**
+- **FastAPI floor `fastapi>=0.121.1`.** It is the first version with `Depends(scope="function")`,
+  which every route now relies on to commit before the response starts. The
+  `pip install -e .` step above upgrades an older FastAPI. Do not skip it.
+- **Set the process flags** in the unit (step 5, "Process flags"). Do it before the restart.
+- **The first boot settles in full, automatically.** The store is empty, so the app starts a
+  full settlement run at boot, in a low-priority child process. The site answers meanwhile:
+  history is computed live until the run publishes, which can take minutes on an `e2-micro`.
+  The status chip in the top bar shows the progress (結算中 N%). A release that changes the
+  calculation code re-settles in full at its first boot the same way.
+- **The first boot closes stuck `job_runs` rows.** Every scheduled-job run that older versions
+  left `running`, owned by no live process, is closed as `error`
+  「系統重新啟動時此工作尚未完成」. The 排程中心 history shows them, and this is expected once.
+- **The 23:50 月度快照 job is retired.** 月度成績 now shows month-end closes. On the first run,
+  every past month moves once to the value today's ledger gives for its last day, marked
+  上線重述.
+
 ### Backups (built-in + off-VM copy)
 - **Automatic:** the scheduler runs a **daily backup at 01:30 (Asia/Taipei)** →
   `data/backups/portfolio_YYYY-MM-DD.db.gz` (keeps the latest 30; runs `PRAGMA
@@ -198,6 +244,27 @@ sudo systemctl start portfolio-dash
 ```
 (`make` uses the repo venv; if `make` isn't installed: `sudo apt -y install make`, or just
 `cp <backup> data/portfolio.db` while the service is stopped.)
+
+**WAL files — check before you copy.** The database runs in WAL mode.
+- **Clean stop** (`systemctl stop` / restart, v0.1.32+): the app checkpoints on the way out, so
+  `data/` holds ONE file, `portfolio.db`.
+- **Crash** (an OOM kill, a power loss, a `kill -9`): `data/portfolio.db-wal` and
+  `data/portfolio.db-shm` may remain. A file-copy restore must DELETE both before the service
+  starts. Otherwise SQLite replays the stale WAL into the restored file. `make restore` does not
+  delete them.
+
+```bash
+sudo systemctl stop portfolio-dash
+ls -l ~/invest-portfolio/data/portfolio.db*           # any -wal / -shm left?
+rm -f ~/invest-portfolio/data/portfolio.db-wal ~/invest-portfolio/data/portfolio.db-shm
+make restore FILE=data/backups/portfolio_YYYY-MM-DD.db
+sudo systemctl start portfolio-dash
+```
+
+The settlement store needs no restore of its own. It is derived from the ledgers, and a backup
+carries its own store, consistent with its own ledger. The boot after a restore settles in full
+by itself in two cases: the restored store is empty (a backup older than v0.1.32), or it was
+built by other code.
 
 ### Monitor / health
 ```bash

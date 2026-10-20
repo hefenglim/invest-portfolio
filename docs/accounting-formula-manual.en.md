@@ -11,7 +11,7 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.12` (2026-10-10)
+> **Version**: `v1.13` (2026-10-20)
 > **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
 > SPLIT / EXCHANGE / SPINOFF; incl. the 2026-08-13 **seven cash-movement kinds / two-axis
 > table** and the **US cash dividend, P1b**)
@@ -1612,14 +1612,226 @@ where `gross_invested` (from `cost_basis.build_book`) = each currency's **cumula
 all-in original buy cost**. The table's `realized_total` / `unrealized_total` are this
 blended value (anchors `kpi.realized_total` / `kpi.unrealized_total`).
 
-**Monthly snapshot (月度快照)**: `api/snapshots.py::write_snapshot` each night uses the
-**same combiner** to store the current month's `total_market_value / total_return /
-total_return_rate / xirr / by_currency` (by_currency see §7.3 currency view) as a
-**month-end record** (at month close the last ascending value is the month-end value,
-upsert-by-month). The snapshot only **persists** the KPIs of this section and §7.3; it
-**introduces no new formula**; optional KPIs missing price / FX are stored NULL (honest
-degradation). When arbitrating a month-end historical amount, the value stored in the
-snapshot row = the combiner's output under this manual's formulas at that time governs.
+**Monthly snapshot (月度快照; retired, 2026-10-20)**: `api/snapshots.py::write_snapshot` used to
+run each night at 23:50 and, with the **same combiner**, upsert the current month's
+`total_market_value / total_return / total_return_rate / xirr / by_currency` as the "month-end
+record". The value written on the month's last evening froze as that month. At that moment,
+though, the US close of that day did not exist yet, and the freeze was never corrected
+afterwards. From v0.1.32 the job (`snapshot_monthly`) is retired and `portfolio_snapshots` is
+**no longer written**. An existing database keeps the old table, only as the old values of the
+go-live restatement (§7.1b(l)). The month-end and year-end record is now **§7.1b Month and Year
+Closes**. **When arbitrating a month-end (year-end) historical amount, §7.1b's definition
+governs**; the value in an old snapshot row is no longer the basis of arbitration.
+
+### 7.1b Month and Year Closes (月度成績; PERF-D7, replacing the monthly snapshot on 2026-10-20)
+
+Implementation: `portfolio/period_close.py` (the KPIs, the period activity, the holdings and cash
+at the period end), `portfolio/settle_worker.py` (settles every period and stores it in the
+settlement store), `api/snapshots.py` (月度成績 and the period routes). A month close (`M`,
+`YYYY-MM`) and a year close (`Y`, `YYYY`) **introduce no new money formula**. They are this
+manual's existing formulas taken at the period's end day D, plus a set of period-activity lines
+and one period return. The settlement store only **keeps** them; like every other report they
+are rebuilt from the ledgers (§1.4).
+
+**(a) The end day, and the "as at D" sources.** D = the period's last **calendar** day (a weekend
+or a holiday included; the price carries the last close forward, as every chart does). The KPI
+block is the dashboard's own computation, `dashboard.kpis_as_of`, with only its sources swapped
+for "on or before D":
+
+| Item | Definition at D |
+| --- | --- |
+| Ledger | the dashboard-path replay of `bundle.valued_as_of(D)`; cash movements and FX conversions cut by `valued_rows_as_of(…, D)` — every row counts from its own date |
+| Price of a held stock | the latest stored close with `as_of_date ≤ D`, re-expressed by `price_in` for the splits in `(price date, D]` (§4.4.7) |
+| A held stock with no such price | exactly the live rule (§5.3): market value `None`, left out of 總市值 and of the unrealized part of 總報酬 while its cost stays in the denominator; XIRR all-or-nothing → `None`; and named in `notes.missing_prices` |
+| Option contract | its last ordinary trade price on or before D (§4.5) |
+| FX | the latest rate on or before D (direct pair, else the inverse pair); the rates used and their dates are stored in `fx_used` |
+
+**(b) Every KPI is "cumulative since inception", as at D**: `total_market_value` (總市值 = the
+stock subtotal + options), `total_return` (cumulative total return A, §7.1a),
+`total_return_rate` (cumulative return rate), `xirr` with `xirr_window_days` / `xirr_reason`
+(cumulative XIRR, the same gates as §7.2 / §7.2.1), and `by_currency_value` (§7.3). **None of
+them is the period's own return.** A year row must never be read as "that year's return".
+
+**(c) The period return (TWR)**:
+
+$$\text{period\_twr} = \frac{I(D)}{I(\text{前一期末})} - 1$$
+
+$I$ is the same full-series TWR index that `/api/performance/twr` uses. It is taken from §7.5's
+trend, so it **excludes the options' value** (R3). The first period starts from the index's
+anchor (100). When either end day's valuation is incomplete or has no trend point → `None`,
+with its reason. While history is still awaiting re-settlement, a period whose
+`(previous end, D]` contains `live_from` or overlaps the stale range → `None`, with the reason
+「待結算：此期間包含尚未重新結算的日子，當期報酬暫不計算」. A return across the seam between the old
+and the new version would book a back-dated position's whole gain as one day's return.
+
+**(d) The trend fields**: `trend_total_value` (證券市值, stocks only; a partial sum on an
+incomplete day), `net_invested` and `net_worth`, taken from the settled trend point of day D
+(§7.5 / §7.6). They are **named apart from KPI 總市值 (options included, all-or-nothing on FX),
+and must not be read as one another**. **FX P&L (§8) at D is not part of a close in this
+release**: its absence is not a zero.
+
+**(e) `notes` (every reason a figure is blank or unconfirmed)**:
+- `incomplete`; `missing_prices`; `stale_prices` (a price date more than 4 days before D, the
+  same 4-day threshold as live);
+- `unconfirmed_closes`: a close settled by the 4-day rule but never confirmed by an `ok` quote
+  job, matched by the **price date** (a Saturday month end carries Friday's partial failure);
+- `missing_fx` / `stale_fx`; `pending_positions` (the 待釐清 on the book at D: 賣超, an unapplied
+  corporate action, a refused dividend, a refused close row); `options_value_excluded`,
+  `options_past_expiry`;
+- `trend_unavailable`: D has no trend point. Either part of the invested flows has no rate on or
+  before its own date (「部分投入流量缺少當日匯率，該日沒有走勢資料」), or the trend has not
+  started yet (「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」);
+- `missing_cash_fx`: a non-empty cash pool at D with no rate to the reporting currency;
+- `dividends_receivable`: **computed when the close is read, never stored**. It holds every
+  non-STOCK dividend with `ex_date ≤ D < payment date` (the price has already dropped, while the
+  dividend counts from its payment date). It is **listed, and never counted**. A refused one is
+  marked 「未入帳（待釐清）」 (§6.6). It is not shown on a row of the pre-update version.
+
+**(f) The first period** = the month of the ledger's first row **in any table** (a deposit or
+a conversion may precede the first trade). So every period's activity falls inside its own
+calendar period, and every year can be tied out with that year's tax package. A month before
+the trend starts has zero holdings, its cash and its activity, no trend point
+(`trend_unavailable`), and the XIRR reason 「尚無持倉，XIRR 不計」.
+
+**(g) The period activity** (from the period's first day through D, counted by the dates the
+ledger cut uses). Every line is in native currency **and** in the reporting currency, which is
+converted at the rate of **each row's own date**, the trend's flow conversion; a missing rate →
+reporting value `None`:
+
+| Line | Definition (where it has a counterpart, the tax package's, `export/tax.py`) |
+| --- | --- |
+| Realized — sales and short covers | the period's realized rows of `kind` = `sale` / `short_cover`: vs **adjusted cost** (`realized`, consistent with total return) and vs **original cost** (`proceeds_net − original_cost_removed`, the capital gain); split by `asset_type` (stock / option) |
+| Realized — dividends after a full close | the rows of `kind = "dividend"` (§6.3b), listed apart because the same payout is also on the dividends line |
+| Dividends | **booked rows only**, by type, account and currency: CASH / NET as gross / withholding / net; DRIP adds the reinvested shares; STOCK as shares only (no amount) |
+| Dividends not booked | the period's refused dividends (§6.6): count and net, marked 「未入帳（待釐清）」 |
+| Trade fees and tax | the period's `transactions.fees + tax`, by account |
+| Cash movements | the seven kinds (§9.1.1), by account × currency |
+| FX conversions | the period's conversions (from / to amounts, by account) and the realized FX (the same exit as §8.2, `realized_fx_rows_as_of`) |
+| Opening inventory | the rows whose `build_date` lies in the period |
+
+> ⚠ **The lines are not additive.** Under the adjusted-cost model a sale's realized **already
+> contains** the cash dividends folded into that position's cost (§6.1). So "realized" +
+> "dividends" is **not** "what the period earned"; the system neither forms nor shows any
+> cross-line total (in the spirit of I4: a dividend enters total return once). See E31 below.
+
+**(h) Tie-out with the tax package, sheet by sheet**: realized sales and short covers (both the
+adjusted and the original column) ≡ `realized_gains_<year>.csv`; booked CASH / NET / DRIP
+dividends ≡ `dividends_<year>.csv`; realized FX ≡ `fx_realized_<year>.csv`. This holds **by
+construction**: both read the same row-selection functions (`period_close.realized_rows` /
+`dividend_rows` / `fx_realized_rows`). The tax package is produced by a **strict** replay. On a
+ledger with a refused dividend the package answers 422 and there is no package to tie to,
+while the close lists that row as 「未入帳（待釐清）」. Fees, cash movements, conversions, openings
+and cash at the period end have no tax sheet.
+
+**(i) Holdings and cash at the period end.** Holdings: every account × symbol position, stocks
+and options alike, told apart by `asset_type` (OPT-D5). Each carries the shares, the original
+and adjusted cost totals, the price used and its date, the market value and the unrealized P&L
+(`None` on a 待釐清 position), and the 待釐清 flags. Cash: every pool's **end-of-day balance** at D
+(`cash_balances(…, as_of=D)`, counting **booked dividends only**, §6.6, so a refused dividend never
+lands in month-end cash) and its reporting value at D's rate (an empty pool needs no rate). So
+cash ties to each broker's monthly statement, as positions do.
+
+**(j) The year close ≡ the December close**: the same D (12-31), so the KPI block, the holdings
+and the cash at the period end are identical. Only two things differ: the year close's
+`period_twr` starts from the previous year's 12-31, and the year close's activity covers the
+whole year, where **every flow line = the sum of its months** and balances are never summed.
+The current month and the current year are live values (as at today).
+
+**(k) Source, provisional, and the pre-update version.** A past period whose D is before
+`live_from` is taken from the settlement store; every other one is computed live with the same
+functions, so a correction dated last month changes last month's row at once. **Provisional
+(暫定)**: a past period whose D is after `final_through` (a market quote job due on D did not end
+`ok`) carries the note 「月底收盤價尚未確定：<市場>報價工作未完成」 (「年底…」 for a year close). It
+depends on the price data, not on the settlement store. After 4 days the period is settled anyway,
+and the unconfirmed close price is recorded in `notes.unconfirmed_closes`. A store row whose D lies in the stale
+range is marked `stale: true` and shows 「更新前版本」.
+
+**(l) Restatements.** When a re-settlement changes a published period's KPI, it writes one
+`settle_restatement` row. The row holds the field's Chinese label (總市值 / 累計總報酬 /
+累計報酬率 / 累計 XIRR / 當期報酬（TWR） / 證券市值 / 淨投入 / 淨資產 / `<currency> 市值`), the unit,
+the old value → the new value, the notes before and after, the reason and the time. The row is
+**never deleted**, and the period row is marked 「已重述」. **The go-live restatement (上線重述)**: on
+each month's first publish, if the old `portfolio_snapshots` holds that month's freeze **written
+on the month's last day** (the go-live month's row was never a close and is not compared), every
+field that differs is recorded with `cutover = 1` and the reason
+「上線重述：月底定格值改為月底結算值」. The 23:50 freeze used the previous day's US close, and the
+months before a ledger import reflect an empty ledger, so a one-time restatement is expected.
+The activity lines and the holdings are recomputed on every run and never recorded as
+restatements.
+
+**(m) Known defects the owner ruled to defer** (ruling 2026-10-19: v0.1.32 first keeps its
+byte-for-byte identity with v0.1.31, and each is fixed as its own change after the release; both
+are pinned `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`):
+- **PERF-F2**: the trend's FX pairs hold only the ledger's **quote currencies**. If an XIRR-kind
+  cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) is in a currency no instrument is quoted
+  in, **the whole trend** (net worth, B, B−A, the index comparison) is unavailable, although its
+  rate is stored and XIRR already counts that movement. A close stored for a day before that flow
+  keeps its trend fields. A close from that flow on carries `notes.trend_unavailable` and no
+  period return. On such a ledger, a past close computed live has no trend fields at all.
+- **The price-basis split edge**: `upsert_prices` folds in the splits in `(as_of, fetched_at]`,
+  with `fetched_at` the **Taipei** date. A US quote fetched on the split's effective date in
+  Taipei, before the New York open (the provider still delivers the previous session's raw
+  close), is multiplied by the split ratio. The next day's fetch, after the provider has
+  restated, restores the correct value. In between, a day or a close valued from that row is off
+  by one ratio.
+
+**Verification anchors (E30, E31; both hand-checkable)**
+
+**E30 — A month end that is a split date (a Sunday).** `tw_broker/SPB` buys 500 shares on
+2026-05-05. Its close series (the stress audit's `MONTH_END_SERIES`: 80 from 2026-01-05, +0.005
+per calendar day) is $80 + 144 \times 0.005 = 80.72$ on Friday 2026-05-29. A 2-for-1 split is
+recorded on Sunday 2026-05-31 (= D).
+
+| 2026-05 close | Shares | Price used (price date) | Market value (TWD) |
+| --- | ---: | --- | ---: |
+| Before the split is entered | 500 | 80.72 (2026-05-29) | $500 \times 80.72 = 40{,}360$ |
+| After the split is entered | 1,000 (the split is dated D, and counts from D) | $80.72 \div 2 = 40.36$ (2026-05-29, re-expressed by `price_in`) | $1{,}000 \times 40.36 = 40{,}360$ |
+
+Entering the split does not change May's close value. Neither does `SPA`'s split, entered at the
+same time and dated after D (2026-06-01): May's 總市值 / 總報酬 / return rate / XIRR are identical
+value by value before and after. Anchors: `month_end.anchor.split scope = 2026-05
+tw_broker/SPB` (`["1000", "40.36", "2026-05-29", "40360"]`), `month_end.split_leaves_close_unchanged
+scope = 2026-05 <field>` (`phase1:month_end`). Further anchors in the same scenario:
+- at the 2026-02 month end `MPX` has no price → `notes.missing_prices = ["MPX"]` and
+  `xirr = null` (`month_end.anchor.missing_price`,
+  `month_end.anchor.missing_price_withholds_xirr`);
+- `STL`'s price is 6 days old on 2026-04-30 → `stale_prices`; exactly 4 days old on 2026-05-31 →
+  not listed (`month_end.anchor.stale_boundary`);
+- a 2330 CASH dividend with ex-date 2026-04-28 and payment 2026-05-15 → listed only in April's
+  `dividends_receivable` (`month_end.anchor.receivable`).
+
+**E31 — A closed year, and "the lines are not additive".** `tw_broker/YRA`: buy 1,000@120 on
+2025-11-04 (fee 171, §3.1); CASH dividend 3,000 on 2025-12-10; sell 400@125 on 2025-12-16 (fee 71,
+tax 150). Its close series is $120 + 58 \times 0.005 = 120.29$ on 2025-12-31.
+
+| Step | Computation | Value (TWD) |
+| --- | --- | ---: |
+| Original cost | $120{,}000 + 171$ | 120,171 |
+| Adjusted cost (after the dividend) | $120{,}171 - 3{,}000$ | 117,171 |
+| Net sale proceeds | $50{,}000 - 71 - 150$ | 49,779 |
+| Realized (vs adjusted, activity line `realized`) | $49{,}779 - 117{,}171 \times \tfrac{400}{1{,}000}$ | **2,910.6** |
+| Capital gain (vs original, activity line `capital_gain`) | $49{,}779 - 120{,}171 \times \tfrac{400}{1{,}000}$ | **1,710.6** |
+| Dividends line (booked CASH net) | — | **3,000** |
+| Holding at the period end (D = 2025-12-31) | 600 shares; original $120{,}171 \times 0.6$; adjusted $117{,}171 \times 0.6$ | 72,102.6 / 70,302.6 |
+| Market value / unrealized (vs adjusted) at the period end | $600 \times 120.29$; $72{,}174 - 70{,}302.6$ | 72,174 / 1,871.4 |
+
+The difference between realized and capital gain, $2{,}910.6 - 1{,}710.6 = 1{,}200 = 3{,}000
+\times \tfrac{400}{1{,}000}$, is exactly the dividend the 400 sold shares received, already folded
+into cost. Adding "realized 2,910.6" and "dividends 3,000" would count that 1,200 twice, which is
+why the system forms no cross-line total. The 2025 year close's KPI block, holdings and cash ≡
+the 2025-12 close. The year's flow lines = November + December. Both realized columns ≡
+`realized_gains_2025.csv`, and the dividends ≡ `dividends_2025.csv`. Anchors:
+`prior_year.anchor.tax_2025` (2025's realized rows and dividend rows are both YRA only),
+`tax.realized_adjusted` / `tax.realized_original scope = 2025 TWD`, `tax.dividends scope = 2025
+TWD gross/withholding/net`, `period.year_equals_december scope = Y 2025 <field>`,
+`period_detail.price` / `period_detail.adjusted_cost_total scope = 2025-12 tw_broker|YRA` (every
+checkpoint from `phase1:prior_year` on).
+
+> **Where the numbers come from**: E30's literal values are the stress-audit anchors themselves.
+> E31's literal values are computed by hand from this manual's §3.1 / §4 / §5.1 formulas and
+> checked by replaying them through the app's `build_book`; the stress audit compares the same
+> scenario value by value against its independent oracle (the anchors above). Current run
+> (2026-10-20, the wave-3 merge): phase-1 **257 ops / 152,086 assertions / 0 fail**.
 
 ### 7.2 XIRR (annualized, money-weighted, FX-aware — the primary decision metric)
 
@@ -1758,8 +1970,21 @@ simply not readable as a return rate. Therefore:
 - **What is withheld is the annualization, never the return.** `total_return_rate` (§7.1)
   is untouched and stays on the wire, carrying the same information un-annualized, so the
   KPI band is never left blank.
-- `xirr_window_days` is reported in **every** case, including when the rate is `None`;
-  the existing short-window hint still applies over 30–365 days.
+- `xirr_window_days` is **reported whenever `xirr_reporting` actually runs**, including when
+  the rate is `None` (a missing current price, a cashflow series with no sign change,
+  non-convergence) and under this section's "below 30 days, not annualized" rule. The existing
+  short-window hint still applies over 30–365 days. **It is `null` when XIRR is withheld before
+  it is computed** (owner ruling 2026-10-20: keep v0.1.31's behaviour). That happens in three
+  cases:
+  ① the ledger carries a 待釐清 that withholds XIRR: a 賣超 (one netted back to zero included),
+  an unapplied corporate action, a dividend with no position, or a refused option close row
+  (§5.3, §4.4.6, §6.6, §4.5);
+  ② a required FX rate is missing (「查無 … 匯率」, which aborts the computation);
+  ③ the ledger has no invested flow at all.
+
+  The month and year closes' `xirr_window_days` follows the same rule (§7.1b). The original
+  wording of this bullet, "reported in **every** case", did not match the implementation and is
+  rewritten under that ruling.
 - **The calculation itself is unchanged**: `returns.py::xirr_reporting` builds and solves
   the same cashflow series, and the stress-audit oracle's anchors are unaffected. This
   section governs a **presentation threshold**, not the formula.
@@ -1805,8 +2030,8 @@ are skipped.
 $$\text{by\_currency\_value}[ccy] = \sum_{h:\ quote=ccy}\text{market\_value}_h\ (\text{原幣，不換算}),\qquad \text{reporting\_total\_value} = \sum_h \operatorname{convert}(\text{market\_value}_h,\ \text{spot})$$
 
 `reporting_total_value` is §7.1's `total_market_value`; `by_currency_value` is **each
-quote currency's native market value** (the monthly snapshot's `by_currency` stores this,
-see §7.1).
+quote currency's native market value** (the month and year closes' `by_currency_value` takes
+this value at D, see §7.1b; the retired monthly snapshot's `by_currency` stored it too).
 
 **Export-layer reporting-currency values and TOTAL rows**: the export reports'
 (`export/holdings*.py`, `ledgers_report.py`, `tax.py`, `rebalance_report.py`)
@@ -2566,6 +2791,8 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E27 | Option sell-to-open → buy-to-close (`OPA260918P00045000` 2 contracts → **217.39**) | §4.5 | `options.anchor.realized schwab/OPA260918P00045000@2026-08-14 None` |
 | E28 | Partial close after a 1 → 3 contract adjustment (`OPA261218P00020000` → **9.13**; last_price **1**) | §4.5 | `options.anchor.realized schwab/OPA261218P00020000@2026-09-02 None`, `options.anchor.open.last_price schwab/OPA261218P00020000` |
 | E29 | Sold put assigned (`OPA260918P00040000` → premium **218.69** stays option P&L; OPA 300 shares cost **12,200**) | §4.5 | `options.anchor.realized schwab/OPA260918P00040000@2026-09-18 assigned`, `options.anchor.stock_legs_cost schwab|OPA` |
+| E30 | A month end that is a split date (`SPB` 2-for-1 on Sunday 2026-05-31 → 1,000 shares @40.36; market value **40,360** unchanged before and after) | §7.1b | `month_end.anchor.split scope = 2026-05 tw_broker/SPB`, `month_end.split_leaves_close_unchanged` (`phase1:month_end`) |
+| E31 | A closed year, and the lines are not additive (`YRA` realized **2,910.6** / capital gain **1,710.6** / dividends 3,000; the 1,200 difference = the dividend the sold shares received) | §7.1b | `prior_year.anchor.tax_2025`, `tax.realized_adjusted scope = 2025 TWD`, `period.year_equals_december scope = Y 2025 <field>` (from `phase1:prior_year` on) |
 
 ### 12.2 Glossary (Chinese term ↔ English identifier)
 
@@ -2613,6 +2840,11 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 同日優先序 (same-day priority) | `EventPriority` (`OPENING`/`CORPORATE_ACTION`/`BUY`/`SELL`/`DIVIDEND`) | §4.1 / §4.4.3 |
 | 未能套用之公司行動 (unapplied corporate action) | `unbookable_action` / `UnappliedAction` / `Book.unapplied_actions` | §4.4.6 / §5.3 |
 | 行情原值／分割基礎 (raw close / split basis) | `close_raw` / `split_basis` (the two-column price basis) | §4.4.7 |
+| 月結／年結（期末日 D）(month / year close, end day D) | `settled_period` (`kind` = `M` / `Y`, `end_day`) / `PeriodKpi` | §7.1b |
+| 當期報酬（時間加權）(period return, time-weighted) | `period_twr` / `period_twr_reason` | §7.1b |
+| 證券市值（走勢，僅股票）(securities value, trend, stocks only) | `trend_total_value` | §7.1b |
+| 期間活動 (period activity) | `PeriodActivity` (`realized` 〔each line holds `realized` / `capital_gain`〕 / `dividends` / `dividends_not_booked` / `fees` / `cash_movements` / `fx_conversions` / `fx_realized` / `openings`) | §7.1b |
+| 暫定／更新前版本／已重述 (provisional / pre-update version / restated) | `provisional` / `stale` / `restated` (`settle_restatement`, the go-live restatement `cutover`) | §7.1b |
 
 ### 12.3 Version History
 
@@ -2632,6 +2864,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.10` | 2026-09-06 | **§7.2 / §9.1.1 D1 = A leftovers synchronized to AI-D42** (QA DOC-02; baseline `v0.1.28 + feat/corporate-actions`). AI-D42 (2026-08-24) admitted `REBATE` / `INTEREST_EXPENSE` / `BROKER_FEE` into XIRR (the §7.2 table and the §4.4.7 banner were updated then), but the whole "D1 = A" paragraph of §7.2 ("does not take `cash_movements` in its signature at all", verification anchor "no `cash_movements` parameter") and §9.1.1's "all seven kinds are excluded from XIRR" carried **no supersession marker** and contradicted the table directly above them; `portfolio/returns.py::xirr_reporting` in fact takes a **required** keyword argument `cash_movements` (no default, deliberately). This version: ① a supersession banner on the §7.2 D1 = A paragraph (original text kept in full); ② the §9.1.1 sentence rewritten as three-in / four-out; ③ **`INTEREST` stays out of XIRR — reconfirmed** (measured: adding one `INTEREST` 500 USD row leaves XIRR byte-identical at `0.3336061959279546`; the `BROKER_FEE` 500 USD control moves it to `0.33285721007646424`), and the one passage in the engineering rule file `.claude/rules/domain-ledger.md` that listed `INTEREST` as a flow is corrected (the only inverted statement in the repository; the `CASH_KIND_TABLE.credit` it cited does not exist — the real name is `shared/cash_kinds.py::movement_sign`). This mirror had not received AI-D42 since v1.8 (`grep -c AI-D42` = 0): regenerated in the same change set — the §4.4.7 banner, the §7.2 table and its two banners, the §7.6 AI-D48 / AI-D49 passage, the §9.1.1 sentence and the version record. **No formula or accounting definition changed; no figure moved.** |
 | `v1.11` | 2026-10-05 | **New §6.6 Refused Dividends** (owner rulings 2026-10-05; baseline `feat/corporate-actions` after the pre-merge code review CR-01..14 / R1..R12 / S1..S11): the three refusal kinds (no position / open short / exchanged away) recorded on the book, contributing 0 to every money figure, listed and marked 「未入帳（待釐清）」 but left out of every total, the trend day marked incomplete while a held carrier keeps its value, and one owner for the remedy wording; the verification anchor matches the current run (phase-1 137 ops / 11,406 assertions / 0 fail). Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than §6.6.** |
 | `v1.12` | 2026-10-10 | **New §4.5 US Equity Options** (owner rulings R1–R7, OPT-D1..D22; baseline `feat/options-ledger`): a contract as an instrument, share-equivalents, sell-to-open as the declared short, price-0 close rows (expiry / assignment / exercise) and R5, the option fee branch, §4.4 a close row never opens a lot, `OPTION_ADJUST`, last-trade valuation and the point-in-time / trend-derived split, OPT-D20; worked examples and anchors from the current run (phase-1 164 ops / 19,948 assertions / 0 fail). Mirror regenerated in the same change set. **No formula or accounting definition of a stock changed.** |
+| `v1.13` | 2026-10-20 | **Month and year closes replace the monthly snapshot** (PERF-D7, spec `docs/spec/2026-10-18-settlement-store.md` §11; baseline `perf/settlement-store`, v0.1.32). ① **New §7.1b**: the end day D (a calendar day), prices and FX "on or before D", cumulative KPIs (the same gates as live), `period_twr` = I(D) / I(previous end) − 1 and 「待結算」 across the seam between the old and the new version, the trend fields named apart from KPI 總市值, the `notes` (including `trend_unavailable`, `missing_cash_fx` and the `dividends_receivable` computed when read), the first period as the month of the ledger's first row in any table, the eight kinds of period-activity line (**not additive**) and the sheet-by-sheet tie-out with the tax package, the holdings at the period end and the cash at the period end counting booked dividends only, the year close ≡ the December close, provisional / the pre-update version, restatements and the one-time go-live restatement, and the two known defects the owner ruled to defer, PERF-F2 and the price-basis split edge; added §12.1 **E30 / E31** and five §12.2 glossary rows. ② **The §7.1 monthly-snapshot paragraph is rewritten as a retirement note**: the 23:50 freeze (the previous day's US close, never corrected afterwards) is no longer written, and the basis for arbitrating a month-end historical amount is now §7.1b; the §7.3 `by_currency` note is synchronized. ③ **§7.2.1 `xirr_window_days` corrected** (owner ruling 2026-10-20: keep v0.1.31's behaviour): the original "reported in every case" did not match the implementation — it is `null` when XIRR is withheld before it is computed (a 待釐清, a missing rate, no flow). ④ §7.1b added to the §12.4 locating list. Verification anchors match the current run (phase-1 257 ops / 152,086 assertions / 0 fail). Mirror re-translated by hand in the same change set. **No formula or accounting definition of the live KPIs, cost, P&L, XIRR or cash changed**: with the settlement store clean, the dashboard is byte-identical to v0.1.31. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 
@@ -2641,7 +2874,7 @@ Given an amount "displayed as X on the site but believed to be Y":
    average §4; **corporate actions (split / exchange / spinoff) §4.4**;
    realized §5.1; unrealized / capital gain §5.2; dividends §6;
    **dividend-detection estimate §6.5**; total return / return rate (incl. blended) §7.1;
-   XIRR §7.2; **allocation weight / sector / currency view / reporting-currency valuation /
+   **month / year close (月度成績) §7.1b**; XIRR §7.2; **allocation weight / sector / currency view / reporting-currency valuation /
    tax realized §7.3**; **dividend-income summary / annual projection §7.4**; **net-value
    and invested trend §7.5**; FX P&L §8; cash balance §9; rebalance §11 (**rollup §11.4;
    What-if §11.5**). If the number is none of the above → check §12.5 whether it is
