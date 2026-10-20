@@ -614,3 +614,140 @@ def test_a_failing_prewarm_is_logged_not_raised(monkeypatch: pytest.MonkeyPatch,
     result_cache.schedule_prewarm(boom, 0.0)
     assert done.wait(5)
     _wait_for(lambda: any("pre-warm failed" in r.getMessage() for r in caplog.records))
+
+
+# --- the stop: shutdown() ------------------------------------------------------------------
+
+
+class BlockedPrewarm:
+    """A pre-warm shaped like ``api/alert_inputs.prewarm_today``: its own connection, a cached
+    "dashboard" build that reads (so its read snapshot holds the WAL) and then blocks until
+    released, then the "alerts" key. It records that second key (``None`` = computed
+    uncached, no version connection touched)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.alerts_keys: list[result_cache.CacheKey | None] = []
+
+    def __call__(self) -> None:
+        conn = connect_path(self.path)
+        try:
+            def build() -> dict[str, int]:
+                # read FIRST: the snapshot's read lock is held from the first read on
+                value = {"x": int(conn.execute("SELECT x FROM t").fetchone()[0])}
+                self.started.set()
+                assert self.release.wait(30), "never released"
+                return value
+
+            result_cache.cached(conn, name="dashboard", now=NOW, compute=build, copy=_own)
+            self.alerts_keys.append(result_cache.key_for(conn, name="alerts", now=NOW))
+        finally:
+            conn.close()
+            self.finished.set()
+
+
+@pytest.fixture
+def prewarm(db: Path) -> Iterator[BlockedPrewarm]:
+    """A :class:`BlockedPrewarm` on the app's database, always released at teardown (before
+    the autouse fixture checks that no flight outlived its computation)."""
+    blocked = BlockedPrewarm(db)
+    yield blocked
+    blocked.release.set()
+    if blocked.started.is_set():
+        assert blocked.finished.wait(30), "the blocked pre-warm never finished"
+
+
+@pytest.fixture
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every version connection the cache opens, by path."""
+    seen: list[str] = []
+    real = result_cache._open_version_conn
+
+    def spy(path: str, identity: tuple[int, int]) -> object:
+        seen.append(path)
+        return real(path, identity)
+
+    monkeypatch.setattr(result_cache, "_open_version_conn", spy)
+    return seen
+
+
+def _side_files(path: Path) -> list[str]:
+    return [s for s in ("-wal", "-shm") if path.with_name(path.name + s).exists()]
+
+
+def test_shutdown_waits_for_a_running_prewarm_then_the_checkpoint_truncates(
+    db: Path, prewarm: BlockedPrewarm, opened: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-warm blocked mid-build when the stop begins: shutdown waits for it, the pre-warm
+    opens no version connection after the stop began (its alerts read computes uncached),
+    and the lifespan's TRUNCATE checkpoint completes — ONE file left (docs/DEPLOYMENT.md)."""
+    monkeypatch.setenv("PD_PREWARM", "1")
+    assert result_cache.schedule_prewarm(prewarm, 0.0)
+    assert prewarm.started.wait(5)
+    _commit(db)  # WAL frames the pre-warm's snapshot predates: a checkpoint must wait for it
+    assert opened == [str(db)]                       # the dashboard key, before the stop
+    returned: list[bool] = []
+    stopper = threading.Thread(target=lambda: returned.append(result_cache.shutdown(10.0)))
+    stopper.start()
+    time.sleep(0.3)
+    assert stopper.is_alive(), "shutdown returned while a pre-warm still ran"
+    assert not result_cache.schedule_prewarm(lambda: None, 0.0), "a pre-warm after the stop"
+    prewarm.release.set()
+    stopper.join(10)
+    assert returned == [True]
+    assert prewarm.finished.is_set() and prewarm.alerts_keys == [None]
+    assert opened == [str(db)], "a version connection was reopened after the stop began"
+    assert result_cache._versions == {}
+    conn = connect_path(db)
+    try:
+        busy, _log, _done = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    finally:
+        conn.close()
+    assert busy == 0
+    assert _side_files(db) == []
+
+
+def test_a_prewarm_that_outlives_the_wait_is_logged_and_reopens_nothing(
+    db: Path, prewarm: BlockedPrewarm, opened: list[str], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bounded wait runs out: shutdown says so (``False`` and a warning naming the
+    consequence), closes the version connections anyway, and never hangs. The late pre-warm
+    then finishes uncached — no version connection, no entry kept."""
+    monkeypatch.setenv("PD_PREWARM", "1")
+    assert result_cache.schedule_prewarm(prewarm, 0.0)
+    assert prewarm.started.wait(5)
+    started = time.monotonic()
+    assert result_cache.shutdown(0.2) is False
+    assert time.monotonic() - started < 5
+    assert result_cache._versions == {}
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("pre-warm" in m and "-wal" in m for m in warned), warned
+    prewarm.release.set()
+    assert prewarm.finished.wait(10)
+    assert prewarm.alerts_keys == [None]
+    assert opened == [str(db)] and result_cache._versions == {}
+    assert result_cache._entries == {}, "the late pre-warm kept an entry after the stop"
+
+
+def test_shutdown_cancels_a_pending_prewarm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PD_PREWARM", "1")
+    ran: list[int] = []
+    assert result_cache.schedule_prewarm(lambda: ran.append(1), 0.2)
+    assert result_cache.shutdown(1.0) is True
+    time.sleep(0.4)
+    assert ran == []
+
+
+def test_reset_opens_the_cache_again_after_a_shutdown(reader: Reader) -> None:
+    """``shutdown`` is final for a stopping process; tests (and a second lifespan in one
+    process) get a working cache back from ``reset``."""
+    assert result_cache.shutdown(1.0) is True
+    assert reader.read() == reader.read() == {"x": 1}
+    assert reader.runs == 2                          # closed: every read computes
+    result_cache.reset()
+    assert reader.read() == reader.read() == {"x": 1}
+    assert reader.runs == 3                          # open again: the second read is a hit

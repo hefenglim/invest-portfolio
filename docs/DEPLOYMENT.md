@@ -247,7 +247,9 @@ sudo systemctl start portfolio-dash
 
 **WAL files — check before you copy.** The database runs in WAL mode.
 - **Clean stop** (`systemctl stop` / restart, v0.1.32+): the app checkpoints on the way out, so
-  `data/` holds ONE file, `portfolio.db`.
+  `data/` holds ONE file, `portfolio.db`. It first waits up to 15 s for a background pre-warm
+  still reading the database. If `app.log` shows `the WAL checkpoint could not complete` or
+  `pre-warm(s) still running` for that stop, treat it like a crash below.
 - **Crash** (an OOM kill, a power loss, a `kill -9`): `data/portfolio.db-wal` and
   `data/portfolio.db-shm` may remain. A file-copy restore must DELETE both before the service
   starts. Otherwise SQLite replays the stale WAL into the restored file. `make restore` does not

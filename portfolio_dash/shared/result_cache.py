@@ -64,6 +64,13 @@ compute it afresh.
 **Pre-warm:** :func:`schedule_prewarm` runs a computation on a background thread after a
 quiet delay (``PD_PREWARM=1``), debounced, so the next page load is a hit.
 
+**The stop:** :func:`shutdown` closes the cache for the rest of the process, BEFORE the
+lifespan's ``wal_checkpoint(TRUNCATE)``: no pre-warm starts and no version connection opens
+again, a pre-warm already running is waited for (bounded), then the version connections are
+closed — a read-only connection cannot checkpoint, and a reader still in a read transaction
+keeps a TRUNCATE checkpoint from finishing, so either would leave ``-wal`` / ``-shm`` beside
+the database after a clean stop. :func:`reset` (tests) opens it again.
+
 Imports nothing above ``shared/``.
 """
 
@@ -126,12 +133,25 @@ class Stats:
 #: database files; the bound only matters to a test session that opens hundreds.
 MAX_VERSION_CONNECTIONS = 4
 
+#: How long :func:`shutdown` waits for a pre-warm already running. A pre-warm is one dashboard
+#: build and one alerts evaluation — about a second on the VM with the settlement store (W4);
+#: the bound leaves room for a slow live build and stays far inside systemd's default 90 s
+#: stop timeout.
+SHUTDOWN_PREWARM_WAIT_S = 15.0
+
 _lock = threading.Lock()
 _versions: dict[str, _VersionConn] = {}
 _epoch = 0
 _entries: dict[str, _Entry] = {}
 _stats: dict[str, Stats] = {}
 _prewarm_timer: threading.Timer | None = None
+#: Set by :func:`shutdown`, cleared by :func:`reset`: no pre-warm starts, no version
+#: connection opens and no entry is kept while it is set.
+_closed = False
+#: Pre-warms running now (a debounced timer can fire while an earlier one still runs), and
+#: the condition :func:`shutdown` waits on until they are done.
+_prewarms_running = 0
+_prewarms_done = threading.Condition(_lock)
 
 _MISS = object()
 
@@ -179,11 +199,14 @@ def _open_version_conn(path: str, identity: tuple[int, int]) -> _VersionConn:
 
 def data_version(path: str) -> tuple[int, int] | None:
     """``(epoch, PRAGMA data_version)`` of the file at *path*, read on the dedicated
-    connection; ``None`` when the file cannot be read (no caching)."""
+    connection; ``None`` when the file cannot be read, or once :func:`shutdown` closed the
+    cache (no caching — and no version connection is opened again)."""
     identity = _identity(path)
     if identity is None:
         return None
     with _lock:
+        if _closed:
+            return None
         try:
             held = _versions.pop(path, None)  # re-inserted below: most recently used last
             if held is not None and held.identity != identity:
@@ -279,6 +302,8 @@ def _lookup(key: CacheKey) -> object:
 
 def _store(key: CacheKey, value: object) -> None:
     with _lock:
+        if _closed:  # a computation that outlived shutdown()'s wait keeps nothing
+            return
         _entries[key.name] = _Entry(key, value)
 
 
@@ -415,22 +440,77 @@ def stats() -> dict[str, Stats]:
         return {k: Stats(v.hits, v.misses, v.uncached) for k, v in _stats.items()}
 
 
+def _close_versions() -> None:
+    """Close every version connection (the caller holds ``_lock``)."""
+    for held in _versions.values():
+        try:
+            held.conn.close()
+        except sqlite3.Error:  # pragma: no cover - closing an idle connection
+            pass
+    _versions.clear()
+
+
+def _cancel_pending_prewarm() -> None:
+    """Cancel a pre-warm timer that has not fired (the caller holds ``_lock``)."""
+    global _prewarm_timer
+    if _prewarm_timer is not None:
+        _prewarm_timer.cancel()
+        _prewarm_timer = None
+
+
 def reset() -> None:
     """Forget everything: entries, counters, a pending pre-warm, and close every version
-    connection (tests; a process that is about to replace or delete a database file)."""
-    global _prewarm_timer
+    connection (tests; a process that is about to replace or delete a database file). The
+    cache is open afterwards — also after :func:`shutdown` (a test, or a second lifespan in
+    one process). A pre-warm already running is not waited for: a stopping process calls
+    :func:`shutdown`."""
+    global _closed
     with _lock:
         _entries.clear()
         _stats.clear()
-        for held in _versions.values():
-            try:
-                held.conn.close()
-            except sqlite3.Error:  # pragma: no cover - closing an idle connection
-                pass
-        _versions.clear()
-        if _prewarm_timer is not None:
-            _prewarm_timer.cancel()
-            _prewarm_timer = None
+        _close_versions()
+        _cancel_pending_prewarm()
+        _closed = False
+
+
+def shutdown(timeout: float = SHUTDOWN_PREWARM_WAIT_S) -> bool:
+    """Close the cache for a stopping process — the lifespan calls it right BEFORE its
+    ``wal_checkpoint(TRUNCATE)``, so a clean stop leaves the database in ONE file
+    (``docs/DEPLOYMENT.md``, "WAL files — check before you copy"):
+
+    1. from now on no pre-warm starts (a pending timer is cancelled; one that already fired
+       finds the cache closed), no version connection is opened again (:func:`key_for`
+       answers ``None``, so every later read computes uncached) and no entry is kept;
+    2. a pre-warm already RUNNING is waited for, up to *timeout* seconds — it holds a read
+       transaction on its own connection, under which a TRUNCATE checkpoint cannot finish;
+    3. the version connections are closed (read-only: they cannot checkpoint, and while one
+       is open the last writable close no longer folds the WAL back) and the entries
+       dropped.
+
+    Returns ``True`` when no pre-warm was running at the end of the wait. A pre-warm that
+    outlives the wait is never waited for longer: shutdown logs a warning and returns
+    ``False``, and the stop goes on. The late pre-warm then finishes uncached and opens
+    nothing, but its read transaction may keep the checkpoint from truncating the WAL (the
+    lifespan logs that result too), and a daemon thread still reading at interpreter exit
+    leaves ``-wal`` / ``-shm`` behind exactly as a crash does. Never hangs.
+
+    Final for the process: only :func:`reset` opens the cache again.
+    """
+    global _closed
+    with _prewarms_done:
+        _closed = True
+        _cancel_pending_prewarm()
+        finished = _prewarms_done.wait_for(lambda: _prewarms_running == 0, timeout)
+        late = _prewarms_running
+        _close_versions()
+        _entries.clear()
+    if not finished:
+        logger.warning(
+            "result cache: %d pre-warm(s) still running %.0f s into the stop; the stop goes "
+            "on — the WAL checkpoint may not complete, and -wal / -shm may remain beside the "
+            "database (delete both before a file-copy restore, docs/DEPLOYMENT.md)",
+            late, timeout)
+    return finished
 
 
 # --- pre-warm ------------------------------------------------------------------------------
@@ -440,9 +520,10 @@ def schedule_prewarm(fn: Callable[[], object], delay: float) -> bool:
     """Run ``fn()`` on a daemon thread *delay* seconds from now, debounced: a later call
     replaces a pending one, so a burst of writes pre-warms once, after the last.
 
-    Off unless ``PD_PREWARM=1`` (returns ``False``; the unit tests' default). At fire time a
-    write window still open skips the run — its end schedules the next one. A failing
-    ``fn`` is logged, never raised: a pre-warm only saves the next reader a build.
+    Off unless ``PD_PREWARM=1`` (returns ``False``; the unit tests' default), and after
+    :func:`shutdown` (``False``). At fire time a write window still open skips the run — its
+    end schedules the next one. A failing ``fn`` is logged, never raised: a pre-warm only
+    saves the next reader a build.
     """
     global _prewarm_timer
     if not flags.prewarm_enabled():
@@ -451,24 +532,33 @@ def schedule_prewarm(fn: Callable[[], object], delay: float) -> bool:
     timer.daemon = True
     timer.name = "result-cache-prewarm"
     with _lock:
-        if _prewarm_timer is not None:
-            _prewarm_timer.cancel()
+        if _closed:
+            return False
+        _cancel_pending_prewarm()
         _prewarm_timer = timer
     timer.start()
     return True
 
 
 def _run_prewarm(fn: Callable[[], object]) -> None:
-    global _prewarm_timer
+    global _prewarm_timer, _prewarms_running
     with _lock:
         if _prewarm_timer is threading.current_thread():
             _prewarm_timer = None
-    if flight.write_generation() is None:
-        return
+        if _closed:  # fired as shutdown() began: it does not run at all
+            return
+        _prewarms_running += 1
     try:
-        fn()
-    except Exception:  # noqa: BLE001 - see schedule_prewarm
-        logger.warning("result cache: pre-warm failed", exc_info=True)
+        if flight.write_generation() is None:
+            return
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - see schedule_prewarm
+            logger.warning("result cache: pre-warm failed", exc_info=True)
+    finally:
+        with _prewarms_done:
+            _prewarms_running -= 1
+            _prewarms_done.notify_all()
 
 
 __all__ = [
@@ -486,5 +576,6 @@ __all__ = [
     "same_state",
     "schedule_prewarm",
     "serve",
+    "shutdown",
     "stats",
 ]

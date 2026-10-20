@@ -1,5 +1,6 @@
 """FastAPI app factory: lifespan (DB + scheduler), /api routers, static web/ frontend."""
 
+import logging
 import os
 import sqlite3
 import time
@@ -112,6 +113,26 @@ from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 #: Seconds after the last write window closes before today's result is pre-warmed (plan W4).
 WRITE_PREWARM_DELAY_S = 3.0
+
+logger = logging.getLogger(__name__)
+
+
+def checkpoint_on_stop(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """``PRAGMA wal_checkpoint(TRUNCATE)`` at a clean stop: ``(busy, log, checkpointed)``.
+
+    ``busy = 1`` means a connection of this process or another still held the database past
+    the busy timeout — a pre-warm that outlived ``result_cache.shutdown``'s wait, a settle or
+    job child still running. The WAL was not truncated, so ``-wal`` / ``-shm`` may remain
+    beside the database: logged, never raised (the stop goes on).
+    """
+    row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    busy, log, done = int(row[0]), int(row[1]), int(row[2])
+    if busy:
+        logger.warning(
+            "clean stop: the WAL checkpoint could not complete (busy; %d of %d frames "
+            "checkpointed) — -wal / -shm may remain beside the database (delete both before a "
+            "file-copy restore, docs/DEPLOYMENT.md)", done, log)
+    return busy, log, done
 
 
 @asynccontextmanager
@@ -230,12 +251,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             scheduler.shutdown(wait=False)
         # The result cache holds a READ-ONLY connection per database for the life of the
         # process, and a read-only connection cannot checkpoint: left open, the last close no
-        # longer folds the WAL back and deletes it. Close them, then checkpoint, so a clean
-        # stop leaves the database in one file (a backup restored by file copy must never meet
-        # a stale `-wal`; fold verification 2026-10-19).
-        result_cache.reset()
+        # longer folds the WAL back and deletes it. Close it for good — it also waits (bounded)
+        # for a pre-warm still running, whose read transaction would keep the checkpoint from
+        # finishing and which would otherwise reopen a version connection — then checkpoint,
+        # so a clean stop leaves the database in one file (a backup restored by file copy must
+        # never meet a stale `-wal`; fold verification 2026-10-19, review 2026-10-20).
+        result_cache.shutdown()
         with session() as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # What the stop's checkpoint found (read by tests and diagnostics, never a route).
+            app.state.stop_checkpoint = checkpoint_on_stop(conn)
 
 
 def create_app() -> FastAPI:
