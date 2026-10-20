@@ -1,0 +1,9 @@
+{
+ "status": 422,
+ "body": {
+  "error": {
+   "code": "unbookable_ledger",
+   "message": "XYZ 在 2026-04-08 的公司行動資料不完整，無法套用（SPLIT 0/1）— 比例必須是兩個正整數，且分割的前後代號必須相同。請到公司行動帳本修正這一筆（1 validation error for CorporateAction）"
+  }
+ }
+}

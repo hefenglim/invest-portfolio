@@ -255,6 +255,9 @@ _DIVIDEND_READERS = {
     # replay inputs — the rows the refusal is decided FROM
     "api/replay_guard.py::_read_ledgers",
     "data_ingestion/store.py::load_ledger_bundle",
+    # the settlement's one read snapshot: the replay's bundle, and its cash series through
+    # booked_dividends(…, the replay's refused_dividends) — the dashboard's split (⑪)
+    "portfolio/settle_worker.py::_load",
     # the inbox's "already recorded?" guard: a refused row IS recorded — offering the event
     # again would invite a duplicate of a row the owner has to correct, not add to
     "api/dividend_inbox.py::detect",

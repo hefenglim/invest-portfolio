@@ -25,8 +25,6 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
-import yfinance as yf
-
 SOURCE = "yfinance"
 DATASET = "consensus"
 
@@ -181,6 +179,7 @@ def build_consensus(
 
 def _fetch_price_targets(symbol: str) -> dict[str, Any] | None:
     """Raw ``analyst_price_targets`` dict for ``symbol`` (yf), or None when empty."""
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     data = yf.Ticker(symbol).analyst_price_targets
     return dict(data) if isinstance(data, dict) and data else None
 
@@ -192,6 +191,7 @@ def _fetch_recommendations(symbol: str) -> list[dict[str, Any]] | None:
     a column or the index (recent yfinance uses the index), so the pure builder always
     sees a ``period`` key.
     """
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     df = yf.Ticker(symbol).recommendations_summary
     if df is None or getattr(df, "empty", True):
         return None

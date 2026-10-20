@@ -459,9 +459,11 @@
      the fetches there rather than throw. */
   function bootOffDashboard() {
     if (!window.pdApi) return;  // thin page without api.js — keep the empty/placeholder UI
+    /* PERF spec §13 (a): the bell and the quota chip are not the page's content — both reads
+       stay out of the top progress bar. */
     (async function bootAlerts() {
       try {
-        const res = await window.pdApi.get('/api/alerts');
+        const res = await window.pdApi.get('/api/alerts', null, { background: true });
         alerts = res && Array.isArray(res.alerts) ? res.alerts : [];
         window.PD_ALERTS = alerts;
         try { localStorage.setItem('pd_alerts_cache', JSON.stringify(alerts)); } catch (e) { /* noop */ }
@@ -471,7 +473,10 @@
     })();
     (async function bootQuota() {
       try {
-        const cfg = await window.pdApi.get('/api/llm/config');
+        /* PERF §13 "Duplicates": ONE /api/llm/config per page load — the trades page's AI
+           model picker (input.js) reads the same promise instead of asking again. */
+        const cfg = await (window.pdLlmConfig
+          || (window.pdLlmConfig = window.pdApi.get('/api/llm/config', null, { background: true })));
         const quota = (cfg && cfg.quota) || {};
         renderQuotaChip(quota.remaining_usd, quota.alert_threshold_usd, quota.ai_active);
       } catch (e) { /* degrade: keep the placeholder chip */ }

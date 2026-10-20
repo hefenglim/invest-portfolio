@@ -26,16 +26,20 @@ from portfolio_dash.api.errors import error_body
 from portfolio_dash.llm_insight import composer_store as cs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
+    RETIRED_JOB_IDS,
+    busy_sentence,
     ensure_job_rows,
     insight_job_id,
     insight_task_of,
     job_kind,
     latest_run_unfinished,
+    queued_progress,
     run_job_func,
     running_job_ids,
     running_progress,
     start_run,
     unknown_job_message,
+    update_schedule,
 )
 from portfolio_dash.scheduler.runtime import reschedule_job
 from portfolio_dash.shared.wire import decimal_str, stored_decimal_str
@@ -207,7 +211,7 @@ def _job_element(
 @router.get("/scheduler/jobs")
 def list_jobs(
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     """§15.1 — schedule config + latest run + next fire for every scheduled job.
 
@@ -222,7 +226,9 @@ def list_jobs(
     ).fetchall()
     tasks = _insight_tasks(conn)
     return {
-        "jobs": [_job_element(conn, r, scheduler, tasks) for r in rows],
+        # A retired job (plan P11) is not listed; its run history stays in /scheduler/runs.
+        "jobs": [_job_element(conn, r, scheduler, tasks) for r in rows
+                 if r["job_id"] not in RETIRED_JOB_IDS],
         "scheduler": scheduler_state(request),
     }
 
@@ -238,7 +244,8 @@ def update_job(
     job_id: str,
     body: _PutBody,
     request: Request,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    now: datetime = Depends(get_now),
 ) -> Any:
     """§15.2 — edit cron/tz/enabled (subset merge), validate, persist + live reschedule."""
     ensure_job_rows(conn)
@@ -270,11 +277,9 @@ def update_job(
             content=error_body("invalid_cron", f"cron 表達式無效：{exc}", field="cron"),
         )
 
-    conn.execute(
-        "UPDATE schedule_config SET cron = ?, timezone = ?, enabled = ? WHERE job_id = ?",
-        (cron, tz, 1 if enabled else 0, job_id),
-    )
-    conn.commit()
+    # A change is stamped (``schedule_config.updated_at``): the settlement's final_through
+    # never re-judges the fires before it by the new cron (PERF review E #2).
+    update_schedule(conn, job_id, cron=cron, tz=tz, enabled=enabled, now=now)
     reschedule_job(get_scheduler(request), job_id, cron=cron, tz=tz, enabled=enabled)
 
     updated = conn.execute(
@@ -315,7 +320,9 @@ def insight_task_run_refusal(
     if latest_run_unfinished(conn, insight_job_id(insight_type_id)):
         return JSONResponse(
             status_code=409,
-            content=error_body("already_running", f"洞察組合 {insight_type_id} 執行中"),
+            # A run waiting for the heavy gate is said to be queued, not running (H review).
+            content=error_body("already_running", busy_sentence(
+                insight_job_id(insight_type_id), f"洞察組合 {insight_type_id}")),
         )
     return None
 
@@ -323,7 +330,7 @@ def insight_task_run_refusal(
 @router.post("/scheduler/jobs/{job_id}/run")
 def run_job_now(
     job_id: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """§15.3 — fire a job once now (async 202; background thread opens its own session).
@@ -351,7 +358,7 @@ def run_job_now(
     elif latest_run_unfinished(conn, job_id):
         return JSONResponse(
             status_code=409,
-            content=error_body("already_running", f"{job_id} 執行中"),
+            content=error_body("already_running", busy_sentence(job_id, job_id)),
         )
     run_id = start_run(conn, job_id, now=now)
     thread = threading.Thread(
@@ -422,7 +429,7 @@ def _status_last_run(row: Any) -> dict[str, Any]:
 
 
 @router.get("/scheduler/status")
-def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def job_status(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     """FU-D36/D46 — per-job live run status for the 排程中心 poll (needs 七).
 
     For every scheduled job → ``{running, queued, progress, last_run}``. ``running`` = the
@@ -441,6 +448,7 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     job_ids = [
         r["job_id"]
         for r in conn.execute("SELECT job_id FROM schedule_config ORDER BY job_id")
+        if r["job_id"] not in RETIRED_JOB_IDS  # plan P11: the listing skips retired jobs
     ]
     # Latest row overall per job (finished or not) → detects an in-flight run (queued/running).
     latest_overall: dict[str, Any] = {
@@ -465,6 +473,7 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     }
     running = running_job_ids()
     progress_by_job = running_progress()
+    queued_notes = queued_progress()
     jobs: dict[str, Any] = {}
     active = False
     for jid in job_ids:
@@ -478,7 +487,8 @@ def job_status(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         jobs[jid] = {
             "running": is_running,
             "queued": is_queued,
-            "progress": progress_by_job.get(jid) if is_running else None,
+            "progress": (progress_by_job.get(jid) if is_running
+                         else queued_notes.get(jid) if is_queued else None),
             "last_run": _status_last_run(done) if done is not None else None,
         }
     return {"jobs": jobs, "active": active}
@@ -519,7 +529,7 @@ def _run_row(
 
 @router.get("/scheduler/runs")
 def list_runs(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     job_id: str | None = None,
     limit: int = 50,
     offset: int = 0,

@@ -727,15 +727,16 @@
       });
   }
 
-  /* A contract's underlying / right: the builder's own record, else the drawer wire's terms
-     (parsed from the symbol by the server — never here). */
+  /* A contract's underlying / right: the builder's own record, else the server's recognition
+     answer (parsed from the symbol by the server — never here). PERF spec §12.2: this read
+     the whole symbol drawer (/api/symbol/{s}/detail — a dashboard build, signals, prices)
+     for two terms the compose endpoint's `text=` form answers on its own. */
   async function optionTerms(sym) {
     const s = (sym || '').trim().toUpperCase();
     if (optState.built[s]) return optState.built[s];
     try {
-      const d = await api.get('/api/symbol/' + encodeURIComponent(s) + '/detail');
-      const c = d && d.options && d.options.contract;
-      return c ? { underlying: c.underlying, right: c.right, name: c.name } : null;
+      const c = await api.get('/api/input/option-symbol', { text: s });
+      return c && c.symbol ? { underlying: c.underlying, right: c.right, name: c.name } : null;
     } catch (e) {
       return null;
     }
@@ -2413,7 +2414,11 @@
     if (!sel) return;
     const before = sel.value;   // I-12: a pick made while the config loads is the owner's
     let cfg;
-    try { cfg = await api.get('/api/llm/config'); } catch (e) { return; }
+    /* PERF §13 "Duplicates": the bell's quota chip (alerts.js) has already asked for the
+       config on this page load — read its promise rather than a second request. */
+    try {
+      cfg = await (window.pdLlmConfig || (window.pdLlmConfig = api.get('/api/llm/config')));
+    } catch (e) { return; }
     const models = (cfg && cfg.models) || [];
     models.filter((mo) => mo.enabled).forEach((mo) => {
       const o = el('option', null, mo.alias + (mo.vision ? '・支援影像' : ''));
@@ -4006,7 +4011,9 @@
      asserts ZERO console errors). 401 is handled inside api.js. ===== */
   async function boot() {
     try {
-      const resp = await api.get('/api/input/context');
+      /* PERF §13 "Duplicates": the page's ONE boot read of the context — broker-import.js
+         (the 匯入 tab's account picker) awaits this same promise instead of asking again. */
+      const resp = await (window.pdInputContext = api.get('/api/input/context'));
       ctx = {
         accounts: (resp && resp.accounts) || [],
         fee_rules: (resp && resp.fee_rules) || {},

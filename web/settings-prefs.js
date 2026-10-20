@@ -25,7 +25,8 @@
      shared late-write guard — a selection the owner made while the GET was in flight has
      already been PUT by the change handler, and the stale answer must not revert it. */
   const bootSel = sel.value;
-  window.pdApi.get('/api/ui-prefs').then(function (p) {
+  /* PERF §13: the shell's boot read of the prefs (window.pdUiPrefs) is this read too. */
+  (window.pdUiPrefs || window.pdApi.get('/api/ui-prefs')).then(function (p) {
     if (p && p.page_size != null
         && window.pdField.writeIfUntouched(sel, bootSel, String(p.page_size))) {
       applyLocal(p.page_size);

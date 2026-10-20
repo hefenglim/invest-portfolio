@@ -1,0 +1,281 @@
+{
+ "as_of": "2025-10-31T23:59:00+08:00",
+ "reporting_currency": "USD",
+ "kpis": {
+  "reporting_currency": "USD",
+  "total_market_value": "32037.61755485893416927899686",
+  "total_return": "3824.451410658307210031347962",
+  "total_return_rate": "0.1355555555555555555555555556",
+  "realized_total": "0.00000000000000000000000000000",
+  "unrealized_total": "3824.451410658307210031347962",
+  "total_return_fx_complete": "3824.45141065830721003134796",
+  "principal_fx_effect": "-0.000000000000000000000002",
+  "trading_financing_cost": "0",
+  "fx_complete_reason": null,
+  "xirr": "3.6957182859534052",
+  "xirr_window_days": 30,
+  "fx_realized": "0.00000000000000000000000000000",
+  "fx_unrealized": "0.000000000000000000000000000000"
+ },
+ "holdings": [
+  {
+   "account_id": "tw_broker",
+   "account_name": "{account:tw_broker}",
+   "symbol": "2330",
+   "name": "2330 Corp",
+   "market": "TW",
+   "sector": "Tech",
+   "board": "TWSE",
+   "quote_ccy": "TWD",
+   "shares": "2000",
+   "original_avg": "450",
+   "adjusted_avg": "450",
+   "original_cost_total": "900000",
+   "adjusted_cost_total": "900000",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": "511",
+   "market_value": "1022000",
+   "unrealized_pnl": "122000",
+   "capital_gain": "122000",
+   "price_stale": false,
+   "price_as_of": "2025-10-31",
+   "weight": "1",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "0.1355555555555555555555555556"
+  }
+ ],
+ "holdings_subtotals": [
+  {
+   "account_id": null,
+   "market": null,
+   "total_market_value": "32037.61755485893416927899686",
+   "unrealized_total": "3824.451410658307210031347962"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": null,
+   "total_market_value": "32037.61755485893416927899686",
+   "unrealized_total": "3824.451410658307210031347962"
+  },
+  {
+   "account_id": null,
+   "market": "TW",
+   "total_market_value": "32037.61755485893416927899686",
+   "unrealized_total": "3824.451410658307210031347962"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": "TW",
+   "total_market_value": "32037.61755485893416927899686",
+   "unrealized_total": "3824.451410658307210031347962"
+  }
+ ],
+ "realized": {
+  "rows": [],
+  "by_currency": {}
+ },
+ "returns": {
+  "by_currency": {
+   "TWD": {
+    "realized": "0",
+    "unrealized": "122000",
+    "total_return": "122000",
+    "gross_invested": "900000",
+    "rate": "0.1355555555555555555555555556"
+   }
+  },
+  "reporting_currency": "USD",
+  "reporting_total_return": "3824.451410658307210031347962",
+  "xirr": null
+ },
+ "allocation": {
+  "by_sector": {
+   "Information Technology": "32037.61755485893416927899686"
+  },
+  "weights": {
+   "Information Technology": "1"
+  },
+  "reporting_currency": "USD"
+ },
+ "currency_view": {
+  "by_currency_value": {
+   "TWD": "1022000"
+  },
+  "by_currency_reporting": {
+   "TWD": "32037.61755485893416927899686"
+  },
+  "reporting_total_value": "32037.61755485893416927899686",
+  "reporting_currency": "USD"
+ },
+ "fx": {
+  "by_account": {
+   "moomoo_my": {
+    "account_id": "moomoo_my",
+    "home_ccy": "MYR",
+    "foreign_ccy": "USD",
+    "avg_rate": null,
+    "current_spot": "4.412",
+    "foreign_cash": "0",
+    "foreign_stock_value": "0",
+    "realized_fx": null,
+    "unrealized_fx_stocks": null,
+    "unrealized_fx_cash": null,
+    "unrealized_fx_total": null,
+    "spot_delta": null,
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   },
+   "schwab": {
+    "account_id": "schwab",
+    "home_ccy": "TWD",
+    "foreign_ccy": "USD",
+    "avg_rate": "31.9",
+    "current_spot": "31.9",
+    "foreign_cash": "5000",
+    "foreign_stock_value": "0",
+    "realized_fx": "0",
+    "unrealized_fx_stocks": "0.0",
+    "unrealized_fx_cash": "0.0",
+    "unrealized_fx_total": "0.0",
+    "spot_delta": "0.0",
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   }
+  },
+  "reporting_currency": "USD",
+  "reporting_realized_fx": "0.00000000000000000000000000000",
+  "reporting_unrealized_fx": "0.000000000000000000000000000000",
+  "excluded_accounts": [],
+  "reporting_unavailable_reason": null
+ },
+ "dividends": {
+  "by_year": [],
+  "total_by_currency": {},
+  "ttm_net": {}
+ },
+ "ex_dividend_calendar": [],
+ "trend": {
+  "points": [
+   {
+    "date": "2025-10-31",
+    "total_value": "32037.61755485893416927899686",
+    "net_invested": "28213.16614420062695924764890",
+    "incomplete": false,
+    "net_worth": "99733.54231974921630094043886"
+   }
+  ],
+  "reporting_currency": "USD",
+  "available": true
+ },
+ "benchmark": {
+  "available": true,
+  "reason": null,
+  "terminal_value": "29592.47021943573667711598746",
+  "net_invested": "28213.16614420062695924764890",
+  "benchmark_return": "1379.30407523510971786833856",
+  "excess": "2445.14733542319749216300940",
+  "uncovered_markets": [],
+  "uncovered_ratio": "0",
+  "by_market": [
+   {
+    "market": "TW",
+    "label": "元大台灣50",
+    "terminal_value": "29592.47021943573667711598746",
+    "net_invested": "28213.16614420062695924764890"
+   }
+  ]
+ },
+ "freshness": {
+  "prices": [
+   {
+    "symbol": "2330",
+    "as_of": "2025-10-31",
+    "stale": false
+   }
+  ],
+  "fx": [
+   {
+    "base": "MYR",
+    "quote": "USD",
+    "as_of": "2025-10-31",
+    "stale": false,
+    "source": "test"
+   },
+   {
+    "base": "TWD",
+    "quote": "USD",
+    "as_of": "2025-10-31",
+    "stale": false,
+    "source": "test"
+   },
+   {
+    "base": "USD",
+    "quote": "MYR",
+    "as_of": "2025-10-31",
+    "stale": false,
+    "source": "test"
+   },
+   {
+    "base": "USD",
+    "quote": "TWD",
+    "as_of": "2025-10-31",
+    "stale": false,
+    "source": "test"
+   }
+  ],
+  "any_stale": false,
+  "missing_prices": [],
+  "missing_fx": [],
+  "xirr_unavailable_reason": null,
+  "trend_unavailable_reason": null,
+  "fx_unavailable_reason": null,
+  "unregistered_symbols": [],
+  "last_backup_at": null,
+  "fx_triangulation": [],
+  "scheduler_running": false
+ },
+ "dividend_projection": {
+  "year": 2025,
+  "by_currency": {},
+  "basis": "declared_only"
+ },
+ "unapplied_actions": [],
+ "options": {
+  "open": [],
+  "obligation_subtotals": [],
+  "market_value": {
+   "by_currency": {},
+   "reporting": "0"
+  },
+  "unrealized": {
+   "by_currency": {},
+   "reporting": "0"
+  },
+  "refused_closes": [],
+  "realized": {
+   "rows": [],
+   "by_contract": [],
+   "by_year": [],
+   "by_underlying": [],
+   "realized_total": {
+    "by_currency": {},
+    "reporting": "0"
+   }
+  },
+  "trend_excludes_value": false,
+  "note": null,
+  "principal_fx_note": null
+ }
+}

@@ -19,15 +19,13 @@ from portfolio_dash.api.wire import alerts_wire
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.llm_insight import composer_store, insights_store
 from portfolio_dash.ops import backup as backup_ops
-from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.dashboard import build_dashboard_keyed
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.pricing.store import get_price_history
 from portfolio_dash.shared.corporate_actions import kind_label
 from portfolio_dash.shared.enums import Currency
-from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
+from portfolio_dash.shared.llm_config import ai_active, budget_remaining
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy.alerts import compute_alerts_from
-from portfolio_dash.strategy.rules_config import get_alert_rules
 
 router = APIRouter()
 
@@ -38,12 +36,12 @@ _INSIGHT_N = 3
 @router.get("/dashboard")
 def dashboard(
     trend_days: int = Query(90, ge=1, le=3650),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
     scheduler_running: bool | None = Depends(scheduler_running_dep),
 ) -> dict[str, Any]:
-    data = build_dashboard(conn, now=now, reporting=reporting)
+    data, data_key = build_dashboard_keyed(conn, now=now, reporting=reporting)
     payload: dict[str, Any] = to_wire(data.model_dump())
     # Options spec §7.1 / invariant 1: the 選擇權 block exists only on a ledger with an option;
     # without one the key is ABSENT, so a stock ledger's payload is the golden byte for byte.
@@ -106,19 +104,14 @@ def dashboard(
     # calib_gap is fed in from the single-source helper (None below the min_samples gate); the
     # P3 market-risk metrics (drawdown / vol / drift / consensus) are assembled from the SAME
     # `data` + stored prices/consensus/target-weights via the shared alert_inputs seam, so the
-    # embed and GET /api/alerts feed byte-identical inputs.
+    # embed and GET /api/alerts feed byte-identical inputs. Since PERF (2026-10-18) both go
+    # through ONE function and its cached result (`alert_inputs.compute_alerts_full`, entry
+    # "alerts"): this request's `data` feeds a miss, so there is still no second build — and
+    # `data_key` (the key `data` was served under) keeps a commit that landed since the build
+    # from filing these alerts under a newer version than their data.
     calib = insight_service.calibration_gap(conn)
-    fed = alert_inputs.assemble(conn, data, now=now)
-    alerts = compute_alerts_from(
-        data, get_alert_rules(conn),
-        quota_remaining=budget_remaining(conn),
-        quota_threshold=get_alert_threshold(conn),
-        ai_active=ai_on,
-        calib_gap=calib,
-        symbol_metrics=fed.symbol_metrics,
-        target_weights=fed.target_weights,
-        consensus_deltas=fed.consensus_deltas,
-        target_levels=fed.target_levels,  # FU-D28: keep the embed identical to GET /api/alerts
+    alerts = alert_inputs.compute_alerts_full(
+        conn, now=now, reporting=reporting, calib_gap=calib, data=data, data_key=data_key
     )
     payload["alerts"] = alerts_wire(alerts)   # I-16: + scope / subject
 

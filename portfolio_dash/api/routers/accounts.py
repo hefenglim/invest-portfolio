@@ -35,7 +35,7 @@ def _seeded_at(conn: sqlite3.Connection) -> str | None:
 
 
 @router.get("/accounts")
-def list_all(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def list_all(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     meta = {
         r["account_id"]: r
         for r in conn.execute(

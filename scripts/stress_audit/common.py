@@ -268,6 +268,13 @@ class LocalServer:
         env = dict(os.environ)
         env["DB_PATH"] = str(self.db_path)
         env["PD_DISABLE_SCHEDULER"] = "1"
+        # PERF spec 2026-10-18 §18 "Stress audit": phase 1 runs with the settlement store ON,
+        # and every run in a REAL child process, as on prod (``PD_SETTLE_MODE=child``) — an
+        # inline run would share the web process's imports and connection and hide exactly
+        # the cross-process paths (``data_version``, the progress file, the waiter) a
+        # settlement depends on. The child inherits ``PYTHONPATH`` / ``cwd`` = this checkout.
+        env["PD_SETTLE"] = "on"
+        env["PD_SETTLE_MODE"] = "child"
         env["PYTHONPATH"] = str(REPO_ROOT)
         env["PYTHONIOENCODING"] = "utf-8"
         fh = self.log.open("wb")
@@ -600,6 +607,39 @@ def load_facts_from_db(db_path: Path) -> O.Facts:
                     ratio_to=dec(r["ratio_to"]), ratio_from=dec(r["ratio_from"]),
                     cost_carry=None if _cc is None else dec(_cc), note=r["note"]))
         return f
+    finally:
+        conn.close()
+
+
+def load_closes(db_path: Path) -> O.Closes:
+    """Every stored close, ``{symbol: [(as_of_date, close), ...]}`` ascending — a FACT read
+    back like the ledger (the month-end oracle's price input, PERF spec §11.2). The stored
+    ``close`` is the as-traded value on its own date (data-and-pricing.md), so the oracle
+    re-expresses it for later splits itself."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        out: O.Closes = {}
+        for sym, day, close in conn.execute(
+                "SELECT instrument, as_of_date, close FROM prices "
+                "ORDER BY instrument, as_of_date"):
+            if close is None:
+                continue
+            out.setdefault(sym, []).append((date.fromisoformat(day), dec(close)))
+        return out
+    finally:
+        conn.close()
+
+
+def load_fx_rows(db_path: Path) -> O.FxRows:
+    """Every stored FX row, ``{(base, quote): [(as_of_date, rate), ...]}`` ascending."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        out: O.FxRows = {}
+        for base, quote, day, rate in conn.execute(
+                "SELECT base, quote, as_of_date, rate FROM fx_rates "
+                "ORDER BY base, quote, as_of_date"):
+            out.setdefault((base, quote), []).append((date.fromisoformat(day), dec(rate)))
+        return out
     finally:
         conn.close()
 

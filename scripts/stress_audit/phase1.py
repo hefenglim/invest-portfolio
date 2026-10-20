@@ -7,16 +7,27 @@ by the independent oracle (absolute assertions from zero).
 Trade-date FX is seeded at the scenario start (2026-01-01) AND at the valuation as-of
 (2026-07-14), so the app resolves each flow at its on-or-before rate and the terminal
 value at spot — exercising the FX-aware reporting XIRR for real (the one tolerance check).
+
+The settlement store is ON (PERF spec 2026-10-18 §18 "Stress audit"): every checkpoint first
+asserts what the store's status says about the writes since the last settlement (the dirty
+day, the stale range, the live window — BEFORE a run), then starts a settlement and waits for
+it, so every family below reads a settled store. The month-end closes (``/api/settlement/
+periods`` and the past-month ``/api/snapshots`` rows) are reconciled against the oracle's own
+"as at D" values (``oracle.period_end``, spec §11.2).
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import json
 import sqlite3
 import time
-from datetime import date, timedelta
-from decimal import Decimal
+import zipfile
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo
 
 import common as C
 import oracle as O
@@ -90,6 +101,37 @@ INSTRUMENTS = [
     # price beside the strike of every open OPA contract. OPB / OPC / OPD stay unregistered —
     # "the underlying need not be registered" is the other half of OPT-D7.
     ("OPA", "US", "USD", "Option Underlying A", "Technology", False),
+    # ---- Month-end closes (PERF spec 2026-10-18 §11.2 / §18). DEDICATED symbols whose closes
+    # are a FIXED, DRIFTING weekday series (``MONTH_END_SERIES``), never re-derived from the
+    # actions the way ``_ensure_daily_prices`` derives the PRICES symbols: a split must be
+    # entered AGAINST a price history that already carries it, or "entering the split leaves
+    # the month-end value unchanged" would be the fixture agreeing with itself. The series
+    # drift every day, so a close read off the wrong date moves a money figure.
+    #   SPA — 2-for-1 dated Mon 2026-06-01, the first trading day after month end 2026-05-31;
+    #   SPB — 2-for-1 dated Sun 2026-05-31 — ON the month end, which is a weekend D, so the
+    #         close is Friday's and the READ must re-express it (the edge §18 names);
+    #   MPX — held across month end 2026-02-28 with no close stored until 2026-03-02: the
+    #         "held stock with no such price" row (missing price, XIRR withheld).
+    ("SPA", "TW", "TWD", "Month-end Split After D", "Industrials", False),
+    ("SPB", "TW", "TWD", "Month-end Split On D", "Industrials", False),
+    ("MPX", "TW", "TWD", "Month-end Missing Price", "Industrials", False),
+    #   STL — held across two month ends with a gap in its closes before each: 6 days old at
+    #         2026-04-30 (stale) and EXACTLY 4 days old at 2026-05-31 (not stale — the live
+    #         rule is "more than 4 days"), so the staleness boundary itself is pinned.
+    ("STL", "TW", "TWD", "Month-end Stale Price", "Industrials", False),
+    #   SPD — 2-for-1 dated Tue 2026-03-31, a TRADING-DAY month end with its own (post-split)
+    #         close, so nothing is carried and nothing re-expressed;
+    #   SPE — held in TWO accounts (schwab, moomoo_my), its 2-for-1 dated Sat 2026-02-28 (a
+    #         weekend month end) recorded once per account — 2:1 and 4:2. One market event:
+    #         Friday's close is re-expressed ONCE (the reduced-ratio dedupe), never twice.
+    ("SPD", "US", "USD", "Month-end Split On Trading D", "Technology", False),
+    ("SPE", "US", "USD", "Month-end Split Two Accounts", "Technology", False),
+    # ---- Prior year (PERF §18 "Period closes": a CLOSED year — Y 2025 ≡ December 2025 and
+    # Σ months ≡ year ≡ the 2025 tax package). TWD only: 2025 has no FX row on purpose.
+    ("YRA", "TW", "TWD", "Prior Year Holding", "Industrials", False),
+    # ---- A 賣超 netted back to EXACTLY zero (CR-11): flat, but the book records it, so XIRR
+    # stays withheld with the row named until the oversell is resolved.
+    ("OVF", "TW", "TWD", "Flat Oversell", "Industrials", False),
 ]
 
 PRICES = {  # current spot / valuation prices, dated ASOF
@@ -123,6 +165,8 @@ PRICES = {  # current spot / valuation prices, dated ASOF
     # 「標的現價」 beside the strike of every open OPA contract. Contracts are NEVER priced
     # here: an option is valued at its last ledger trade (spec §5), never at a stored quote.
     "OPA": D("45"),
+    # The flat-oversell symbol (CR-11). Held again after the oversell is resolved.
+    "OVF": D("33.30"),
 }
 # Current spot FX (latest row -> drives the Spot resolver + terminal XIRR value).
 # USD/MYR spot (4.6) is deliberately != the moomoo_my USD-pool weighted-avg acquisition rate
@@ -138,6 +182,100 @@ ASOF = date(2026, 7, 14)
 # to THIS row (different from spot), so the XIRR check genuinely exercises trade-date FX.
 EARLY_ASOF = date(2026, 1, 1)
 EARLY_FX_RATES = {("USD", "TWD"): D("31.0"), ("USD", "MYR"): D("4.3"), ("MYR", "TWD"): D("7.0")}
+
+#: Where every fixture close series begins — fixed, never derived from the ledger, so the
+#: harness always knows exactly which rows it has written (``fixture_closes``). The prior-year
+#: block's first row is on this day.
+PRICE_SERIES_START = date(2025, 11, 3)
+
+#: The daily drift of a :data:`MONTH_END_SERIES` close, per calendar day.
+SERIES_DRIFT = D("0.005")
+
+#: The month-end symbols' FIXED close series (see INSTRUMENTS):
+#: ``(market, first close, price on the first day, split date, split ratio (to, from), gaps)``.
+#: Weekdays only, through ASOF, minus the ``gaps`` (inclusive date ranges with no close — a
+#: suspension, a data hole). The underlying value DRIFTS by :data:`SERIES_DRIFT` a calendar day;
+#: from the split date on, the close is AS TRADED in post-split terms (the value ÷ the ratio),
+#: so a position's value never jumps across the split. Every value is exact at 4 dp — the
+#: storage precision (data-and-pricing.md) — so the stored close IS the fixture's value, and a
+#: cap at fewer places (the M6 mutation) shows. Each row is stamped ``fetched_at`` = its own
+#: date (``C.seed_prices_daily``), so neither the write window nor a reconcile re-expresses it.
+MONTH_END_SERIES: dict[str, tuple[str, date, Decimal, date | None, tuple[int, int],
+                                   tuple[tuple[date, date], ...]]] = {
+    # May close (Fri 05-29, 144 days in): 100.72. 06-01 (147 days): 100.735 / 2 = 50.3675.
+    "SPA": ("TW", date(2026, 1, 5), D("100"), date(2026, 6, 1), (2, 1), ()),
+    # Fri 05-29: 80.72 — at D = Sun 05-31 (the split's own day) read as 80.72 / 2 = 40.36.
+    "SPB": ("TW", date(2026, 1, 5), D("80"), date(2026, 5, 31), (2, 1), ()),
+    "MPX": ("TW", date(2026, 3, 2), D("52"), None, (1, 1), ()),
+    # Last close before Thu 2026-04-30 is Fri 04-24 (6 days: stale); before Sun 2026-05-31 it
+    # is Wed 05-27 (4 days: NOT stale).
+    "STL": ("TW", date(2026, 3, 2), D("60"), None, (1, 1),
+            ((date(2026, 4, 27), date(2026, 4, 30)), (date(2026, 5, 28), date(2026, 5, 29)))),
+    # Tue 03-31 (29 days in): 60.145 / 2 = 30.0725 — the close of D itself, post-split.
+    "SPD": ("US", date(2026, 3, 2), D("60"), date(2026, 3, 31), (2, 1), ()),
+    # Fri 02-27 (53 days in): 40.265 — at D = Sat 02-28 read once as 40.265 / 2 = 20.1325.
+    "SPE": ("US", date(2026, 1, 5), D("40"), date(2026, 2, 28), (2, 1), ()),
+    # Prior year: Fri 2025-11-28 (25 days in) 120.125; Wed 2025-12-31 (58 days in) 120.29.
+    "YRA": ("TW", date(2025, 11, 3), D("120"), None, (1, 1), ()),
+}
+
+
+def month_end_series(symbol: str) -> dict[date, Decimal]:
+    """The weekday closes of a :data:`MONTH_END_SERIES` symbol, ``{date: close}``."""
+    _market, first, p0, split_on, (to, frm), gaps = MONTH_END_SERIES[symbol]
+    out: dict[date, Decimal] = {}
+    day = first
+    while day <= ASOF:
+        if day.weekday() < 5 and not any(lo <= day <= hi for lo, hi in gaps):
+            value = p0 + SERIES_DRIFT * (day - first).days
+            if split_on is not None and day >= split_on:
+                value = value * frm / to
+            out[day] = value.quantize(D("0.0001"), rounding=ROUND_HALF_UP)
+        day += timedelta(days=1)
+    return out
+
+
+#: The :data:`MONTH_END_SERIES` symbols whose series the scenario has written so far — the
+#: fixture's own record of what it put in the prices table.
+SEEDED_SERIES: set[str] = set()
+
+
+def fixture_closes(facts) -> O.Closes:
+    """The closes the FIXTURE wrote, ``{symbol: [(day, close), ...]}`` — the oracle's price
+    input (README §9): every PRICES symbol on every day from :data:`PRICE_SERIES_START` through
+    ASOF as traded on that day (``oracle.price_as_traded`` over the CURRENT corporate actions,
+    exactly what :func:`_ensure_daily_prices` writes), and every seeded month-end series.
+
+    Never the stored ``close`` column: the app DERIVES that column (``cap_4dp(close_raw ×
+    split_basis)``), so an oracle reading it would agree with a wrong cap or a wrong basis by
+    construction — the review's M6 mutation (a 2-dp cap) passed exactly that way.
+    ``prices.stored_close`` compares the stored column against this instead.
+    """
+    out: O.Closes = {}
+    for sym, quote in PRICES.items():
+        series: list[tuple[date, Decimal]] = []
+        day = PRICE_SERIES_START
+        while day <= ASOF:
+            series.append((day, O.price_as_traded(facts, sym, day, quote=quote,
+                                                  quoted_on=ASOF)))
+            day += timedelta(days=1)
+        out[sym] = series
+    for sym in sorted(SEEDED_SERIES):
+        out[sym] = sorted(month_end_series(sym).items())
+    return out
+
+
+def fixture_fx_rows() -> O.FxRows:
+    """The FX rows the fixture wrote (``seed_all``): the trade-date schedule at EARLY_ASOF and
+    spot at ASOF — the oracle's FX input, for the same reason as :func:`fixture_closes`."""
+    out: O.FxRows = {}
+    for (b, q), rate in EARLY_FX_RATES.items():
+        out.setdefault((b, q), []).append((EARLY_ASOF, rate))
+    for (b, q), rate in FX_RATES.items():
+        out.setdefault((b, q), []).append((ASOF, rate))
+    for pair in out:
+        out[pair].sort()
+    return out
 
 
 def fx_on_resolver():
@@ -559,58 +697,65 @@ def _trend_sample_dates(facts, by_date, last_iso: str) -> list[str]:
     return sorted(out)
 
 
-def _daily_price_span(facts) -> date | None:
-    """The first ledger date — where the daily close series has to begin, or ``None``."""
-    days: list[date] = [t.trade_date for t in facts.txs]
-    days += [dv.effective for dv in facts.divs] + [dv.d for dv in facts.divs]
-    days += [o.build_date for o in facts.openings] + [a.d for a in facts.actions]
-    return min(days) if days else None
-
-
 def _ensure_daily_prices(db_path, facts) -> int:
-    """Seed a DAILY close for every fixture symbol across the whole replay span.
+    """Seed a DAILY close for every PRICES symbol over the whole fixture span.
 
     This is what closes the last half of the point-in-time gap. ``seed_all`` seeds exactly
     ONE close per symbol, dated :data:`ASOF`, so every earlier day was unpriced by
     construction and ``trend.total_value`` could not be asserted before ASOF — which is
     precisely where a share-count defect confined to a window (R6's ex-date) lives. With a
-    price on every day, ``total_value`` at a KNOWN price pins the SHARE COUNT: the app and
-    the oracle read the same close, so any disagreement left is a quantity.
+    price on every day, ``total_value`` at a KNOWN price pins the SHARE COUNT.
 
     Two properties make this safe rather than a fixture that quietly lies:
 
     * **The closes are AS TRADED on their own date** — :func:`oracle.price_as_traded`
       multiplies the ASOF quote back out by the splits between that day and ASOF, which is
-      the invariant ``data-and-pricing.md`` states for the column. Seeding the post-split
-      quote on a pre-split day would store a basis the ledger never traded on.
+      the invariant ``data-and-pricing.md`` states for the column.
     * **Each row is stamped ``fetched_at`` = its own date**, so both the write window
-      ``(as_of, fetched_at]`` and the read window ``(priced_on, day]`` are empty. Nothing
-      re-expresses these rows — not ``upsert_prices``, not ``reconcile_prices`` — so a SPLIT
-      inserted or deleted later cannot repaint the history this family asserts against.
+      ``(as_of, fetched_at]`` and the read window ``(priced_on, day]`` are empty for it.
 
-    Called from :func:`reconcile` BEFORE the dashboard is fetched, and derived from ``facts``
-    each time, so it is self-correcting: a checkpoint that runs before the scenario's
-    corporate actions exist seeds an unadjusted series, and the next one re-seeds the same
-    dates on the corrected basis (idempotent upsert on ``(instrument, as_of_date)``).
+    The span is FIXED (:data:`PRICE_SERIES_START` .. ASOF), never derived from the ledger, so
+    the rows the fixture has written are always exactly :func:`fixture_closes` — the oracle's
+    price input — and re-seeding after a split changes precisely the rows it must. Called from
+    :func:`reconcile` BEFORE the settlement, so the price writes are changes the run takes.
     """
-    start = _daily_price_span(facts)
-    if start is None or start > ASOF:
+    if not (facts.txs or facts.divs or facts.openings or facts.actions):
         return 0
     mkt_of = {i[0]: i[1] for i in INSTRUMENTS}
+    closes = fixture_closes(facts)
     rows_by_date: dict[date, list] = {}
-    day = start
-    while day <= ASOF:
-        batch = [
-            (sym, mkt_of[sym],
-             O.price_as_traded(facts, sym, day, quote=quote, quoted_on=ASOF))
-            for sym, quote in PRICES.items() if sym in mkt_of
-        ]
-        rows_by_date[day] = batch
-        day += timedelta(days=1)
+    for sym in PRICES:
+        for day, close in closes[sym]:
+            rows_by_date.setdefault(day, []).append((sym, mkt_of[sym], close))
     return C.seed_prices_daily(db_path, rows_by_date)
 
 
-def _day_incomplete(res_d, day: date) -> bool:
+def _reconcile_stored_prices(ev: C.Evidence, db_path, closes: O.Closes, phase: str) -> None:
+    """``prices.stored_close`` / ``fx.stored_rate``: the STORED columns equal what the fixture
+    wrote, on every day of every fixture symbol and pair. The stored ``close`` is derived by
+    the app's write seam (``cap_4dp(close_raw × split_basis)``, data-and-pricing.md), so this
+    is where a wrong cap, a wrong basis or a lost row shows — the oracle itself never reads it
+    (README §9). One assertion per symbol, naming the first wrong days."""
+    stored = C.load_closes(db_path)
+    for sym, series in sorted(closes.items()):
+        have = dict(stored.get(sym, []))
+        wrong = [f"{d.isoformat()}: stored {have.get(d)} != {v}" for d, v in series
+                 if have.get(d) is None or have[d] != v]
+        ev.check("prices.stored_close", f"{sym} ({len(series)} days)", [], wrong[:5], phase)
+    stored_fx = C.load_fx_rows(db_path)
+    for pair, rows in sorted(fixture_fx_rows().items()):
+        have = dict(stored_fx.get(pair, []))
+        wrong = [f"{d.isoformat()}: stored {have.get(d)} != {v}" for d, v in rows
+                 if have.get(d) is None or have[d] != v]
+        ev.check("fx.stored_rate", f"{pair[0]}/{pair[1]}", [], wrong, phase)
+
+
+def _priced(closes, actions, symbol: str, day: date) -> bool:
+    """Whether a stored close on or before *day* values *symbol* (``oracle.price_at``)."""
+    return O.price_at(closes, actions, symbol, day) is not None
+
+
+def _day_incomplete(res_d, day: date, closes, actions) -> bool:
     """Whether the app must publish this trend day as ``incomplete`` - derived, not read.
 
     Three causes, from ``domain-ledger.md`` plus this fixture's own price schedule:
@@ -620,14 +765,11 @@ def _day_incomplete(res_d, day: date) -> bool:
       dividend leaves the value honest and only the payout 待釐清 (Y3, owner ruling
       2026-10-05) — the day is marked all the same, and :func:`_day_value_judgeable` decides
       the value separately;
-    * a held position with NO stored price on-or-before ``day`` cannot be valued. Since
-      :func:`_ensure_daily_prices` seeds a close for every fixture symbol on every day from
-      the first ledger event through :data:`ASOF`, the only symbol that can now hit this is
-      one absent from :data:`PRICES` entirely — a future scenario symbol nobody priced.
+    * a held position with NO close on-or-before ``day`` cannot be valued — read from the
+      fixture's closes (:func:`fixture_closes`): since PERF §11.2 the scenario carries series
+      that start late on purpose (``MPX``). A day AFTER a series ends is NOT incomplete: the
+      read carries the last close forward, which is a valid valuation and what the app does;
     * a day holding nothing is COMPLETE with a zero total - the app's loop simply adds nothing.
-
-    FX is not a cause: the fixture seeds every needed pair at ``EARLY_ASOF``, which precedes
-    the first ledger event, so an on-or-before rate always resolves.
 
     K3 (owner ruling 2026-10-05) adds a fourth, independent of what is held: a dividend
     refused by ``day`` because it landed on an open short. The 2609 lifecycle covers that short
@@ -636,12 +778,14 @@ def _day_incomplete(res_d, day: date) -> bool:
     """
     if res_d.refused_dividends:
         return True
+    if res_d.oversold_keys:
+        # CR-11: a 賣超 is recorded on the BOOK, flat or held, and every reader of "is this
+        # position 賣超" reads that record — so, like a refused dividend (K3), every day from it
+        # stays incomplete after the position nets back to zero; its basis is gone for good.
+        return True
     if res_d.refused_closes:
-        # Options spec §4.4: a refused close is a RECORD "like orphan_dividends" — XIRR and
-        # B are withheld while it stands, B through the same day rule as K3: every day from
-        # the close's own date is incomplete (`res_d` holds only closes dated on or before
-        # *day*), whether or not its position is still held. The value stays judgeable — the
-        # refused row booked nothing, so every share is right (Y3's reading).
+        # Options spec §4.4: a refused close is a RECORD "like orphan_dividends" — every day
+        # from the close's own date is incomplete, whether or not its position is still held.
         return True
     for h in res_d.holdings.values():
         if h.shares == O.ZERO:
@@ -653,148 +797,192 @@ def _day_incomplete(res_d, day: date) -> bool:
             return True
         if O.is_option(h.symbol):
             # Options spec §5 / R3: the trend EXCLUDES an open contract's value "without
-            # marking the day incomplete" — it is never priced from `prices`, so it can
-            # never be the unpriced position below.
+            # marking the day incomplete".
             continue
-        if h.symbol not in PRICES:
-            # No seeded close AT ALL. Written as a derivation rather than assumed: without
-            # this a future scenario symbol with no price would CRASH this family on the
-            # `PRICES[...]` lookup below instead of failing an assertion, and a harness that
-            # crashes on new data is a harness people stop extending.
-            #
-            # A day AFTER the seeded series is NOT incomplete: the read carries the last
-            # close forward (on-or-before), which is a valid valuation and what the app does.
-            # Measured — treating `day > ASOF` as unpriced reddened four days the app values
-            # correctly from the ASOF close.
+        if not _priced(closes, actions, h.symbol, day):
             return True
     return False
 
 
-def _day_value_judgeable(res_d) -> bool:
+def _day_value_judgeable(res_d, day: date, closes, actions) -> bool:
     """Whether ``trend.total_value`` is assertable on a day - every held position has an
-    honest value, derived from ``domain-ledger.md``, not read off the app.
-
-    Separate from :func:`_day_incomplete` since Y3 (owner ruling 2026-10-05): a day can be
-    INCOMPLETE and still have an honest total. A refused dividend (held carrier flagged
-    ``unbookable_dividend``, or a refusal whose carrier is flat) leaves every SHARE right, so
-    the app counts the position and this family asserts the total on that day too. A held
-    賣超 (basis discarded) or ``unbookable_action`` (pre-action shares against a post-action
-    price) has no honest value: the app leaves it out, so the total is not asserted. An
-    unpriced symbol cannot be valued either (see :func:`_day_incomplete`).
-    """
+    honest value. A held 賣超 (basis discarded) or ``unbookable_action`` (pre-action shares
+    against a post-action price) has no honest value: the app leaves it out, so the total is
+    not asserted; an unpriced symbol cannot be valued either. A refused dividend leaves every
+    SHARE right (Y3), so its days are judged although incomplete."""
     for h in res_d.holdings.values():
         if h.shares == O.ZERO or O.is_option(h.symbol):
             continue      # R3: an open contract's value is not in the trend at all
-        if h.oversold or h.unbookable_action or h.symbol not in PRICES:
+        if (h.oversold or h.unbookable_action
+                or not _priced(closes, actions, h.symbol, day)):
             return False
     return True
 
 
-def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
+def _event_days(facts: O.Facts) -> set[date]:
+    days = {t.trade_date for t in facts.txs} | {o.build_date for o in facts.openings}
+    days |= {dv.effective for dv in facts.divs} | {dv.d for dv in facts.divs}
+    days |= {a.d for a in facts.actions} | {c.d for c in facts.cash} | {f.d for f in facts.fxs}
+    return days
+
+
+class _TrendOracle:
+    """The oracle's WHOLE daily trend, from the first trade / dividend / opening to *end*.
+
+    Every point is ``{"net_invested"}`` (price-free, exact) plus, unless a corporate action was
+    refused by that day (``"refused_action"``: the family does not re-derive that path's
+    marking), ``"incomplete"`` (:func:`_day_incomplete`) and — on a day whose every holding has
+    an honest value (:func:`_day_value_judgeable`) — ``"total_value"`` and ``"net_worth"``.
+
+    ``available`` is ``False`` when some flow has no on-or-before rate — the app then publishes
+    NO trend at all (``daily_value_series``' honest bail), and nothing is compared.
+
+    One replay per EVENT day (the cut, and so the book, only changes there), one valuation per
+    calendar day: the close of a day is the latest fixture close on or before it re-expressed
+    for the splits since (``oracle.price_at``) — the as-traded close of that very day for a
+    PRICES symbol, Friday's carried across a weekend for a month-end series.
+    """
+
+    def __init__(self, facts: O.Facts, closes: O.Closes, fx_rows: O.FxRows, end: date) -> None:
+        self.facts = facts
+        self.closes = closes
+        self.end = end
+        self.points: dict[date, dict] = {}
+        starts = ([t.trade_date for t in facts.txs] + [dv.effective for dv in facts.divs]
+                  + [o.build_date for o in facts.openings])
+        self.first = min(starts) if starts else None
+        fx_on = O.fx_resolver(fx_rows)
+        refused = O.replay(facts).refused_dividend_ids
+        #: The first day some flow counting by it has no rate on or before its own date: from
+        #: it on no point exists (a period close says ``trend_unavailable`` — "the series is
+        #: unavailable ON D", W2-D), and the live series as a whole is unavailable.
+        self.first_unavailable: date | None = None
+        self.available = self.first is not None
+        if self.first is None:
+            return
+        events = _event_days(facts)
+        res_d = None
+        net_invested = O.ZERO
+        day = self.first
+        while day <= end:
+            if res_d is None or day in events:
+                try:
+                    net_invested = O.net_invested_through(facts, day, REPORTING, fx_on,
+                                                          refused=refused)
+                except KeyError:
+                    self.first_unavailable = day
+                    self.available = False
+                    return
+                res_d = O.replay_through(facts, day)
+            point: dict = {"net_invested": net_invested}
+            if res_d.action_refusals:
+                point["refused_action"] = True
+            else:
+                point["incomplete"] = _day_incomplete(res_d, day, closes, facts.actions)
+                if _day_value_judgeable(res_d, day, closes, facts.actions):
+                    total = O.ZERO
+                    for h in res_d.holdings.values():
+                        if h.shares == O.ZERO or O.is_option(h.symbol):
+                            continue   # R3 / OPT-D4: the trend excludes an open contract
+                        rate = (O.ONE if h.quote_ccy == REPORTING
+                                else fx_on(day, h.quote_ccy, REPORTING))
+                        close = O.price_at(closes, facts.actions, h.symbol, day)
+                        assert close is not None   # _day_value_judgeable proved it
+                        total += close[0] * h.shares * rate
+                    cash_total = O.ZERO
+                    for (_acct, ccy), bal in res_d.cash.items():
+                        if bal == O.ZERO:
+                            continue
+                        cash_total += bal * (O.ONE if ccy == REPORTING
+                                             else fx_on(day, ccy, REPORTING))
+                    point["total_value"] = total
+                    point["net_worth"] = total + cash_total
+            self.points[day] = point
+            day += timedelta(days=1)
+
+    def at(self, day: date) -> dict | None:
+        return self.points.get(day)
+
+    def twr(self) -> tuple[dict[date, Decimal], date | None, dict[date, bool], date | None]:
+        """The TWR index over the points (``oracle.twr_index``), its anchor, each day's
+        ``incomplete``, and the first day the chain cannot be built past (a refused action's
+        day — its marking is not re-derived), ``None`` when it runs to the end."""
+        pts: list[tuple[date, Decimal | None, Decimal, bool]] = []
+        incomplete: dict[date, bool] = {}
+        broken: date | None = None
+        for day in sorted(self.points):
+            p = self.points[day]
+            if p.get("refused_action"):
+                broken = day
+                break
+            incomplete[day] = p["incomplete"]
+            pts.append((day, p.get("total_value"), p["net_invested"], p["incomplete"]))
+        index, anchor = O.twr_index(pts)
+        return index, anchor, incomplete, broken
+
+
+def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, point: dict,
+                       phase: str) -> None:
+    """Compare one published trend point with the oracle's."""
+    ev.check(f"{prefix}.net_invested", day_iso, want["net_invested"],
+             dec(point["net_invested"]), phase)
+    if want.get("refused_action"):
+        return
+    ev.check(f"{prefix}.incomplete", day_iso, want["incomplete"], bool(point["incomplete"]),
+             phase)
+    if "total_value" not in want:
+        return
+    ev.check(f"{prefix}.total_value", day_iso, want["total_value"],
+             dec(point["total_value"]), phase)
+    ev.check(f"{prefix}.net_worth", day_iso, want["net_worth"],
+             dec(point.get("net_worth")) if point.get("net_worth") is not None else None,
+             phase)
+
+
+def _reconcile_trend(ev: C.Evidence, dash, oracle_trend: _TrendOracle, phase: str) -> None:
     """POINT-IN-TIME reconciliation of the daily replay (the ``trend.*`` family).
 
     Why it exists: every other family in this harness compares the app and the oracle at the
     CURRENT state, and a whole class of defect is invisible there - anything whose effect is
     confined to a window between two dates ends at the same place either way. R6's ex-date is
-    exactly that shape (a 配股's shares arrive a month earlier; the position at ``as_of`` is
-    identical), which is why ``fail=0`` was silent about it. Disclosed in README section 6 on
-    2026-08-26 and closed here to the extent the app's surfaces allow.
+    exactly that shape, which is why ``fail=0`` was silent about it (README section 6).
 
-    What is compared:
-
-    * ``trend.start`` / ``trend.contiguous_days`` - the replay's span, derived from the
-      earliest ledger event with dividends on their EFFECTIVE date.
-    * ``trend.net_invested`` - EXACT and price-free, the subtrahend of B
-      (``total_value - net_invested``) in AI-D41's A / B / B-A decomposition. This is the
-      assertion that guards the owner's 「B 收三類」 ruling: the app and the oracle must move
-      onto the three cash kinds together, and this family goes red in between.
-    * ``trend.incomplete`` - the app's honesty about days it cannot value, derived
-      independently by :func:`_day_incomplete` over a point-in-time replay.
-    * ``trend.total_value`` - on every day whose holdings all have an honest value
-      (:func:`_day_value_judgeable`), INCLUDING a day marked incomplete only for a refused
-      dividend (Y3: the app keeps that position's value). Asserting it on an unpriced day would
-      be asserting the fixture, not the app.
-    * ``trend.net_worth`` - on the same days: ``total_value`` plus every cash pool's
-      end-of-day balance, each converted at that day's on-or-before rate (FU-D29 / C8). The
-      pools are the oracle's own point-in-time replay (``res_d.cash``), so a refused payout
-      moves no day's net worth (⑪) while the carrier's value stays in it (Y3).
-
-    What is NOT compared, and why: a point-in-time per-symbol SHARE COUNT, because no app
-    surface returns one. ``trend.points`` carries four portfolio-level numbers, and the sell
-    preview's date-awareness lives in the 賣超 guard, not in a report. Closing that needs a
-    DAILY price fixture so ``total_value`` becomes assertable across the whole span - and that
-    is not one line, because back-dating this fixture's post-action prices would hand the read
-    side a wrong split basis. Recorded in the README rather than approximated here.
+    What is compared: ``trend.available`` (derived: every flow has a rate), ``trend.start`` /
+    ``trend.contiguous_days``, and on the sampled days (every ledger date and the day before,
+    ASOF, the last point) ``trend.net_invested`` (exact, price-free — the subtrahend of B),
+    ``trend.incomplete``, and on every day whose holdings all have an honest value
+    ``trend.total_value`` / ``trend.net_worth``. Since PERF (2026-10-18) the series is SETTLED:
+    the harness settles before it reads, so on a clean store the whole series must equal the
+    oracle — byte identity is the spec's own guarantee (§10, §18).
     """
+    facts = oracle_trend.facts
     trend = (dash.get("trend") or {})
     pts = trend.get("points") or []
-    ev.check("trend.available", "series", True, bool(trend.get("available")), phase)
-    if not pts:
+    ev.check("trend.available", "series", oracle_trend.available, bool(trend.get("available")),
+             phase)
+    if not pts or not oracle_trend.available:
         return
     by_date = {p["date"]: p for p in pts}
     first_iso, last_iso = min(by_date), max(by_date)
     span = date.fromisoformat(last_iso).toordinal() - date.fromisoformat(first_iso).toordinal()
     ev.check("trend.contiguous_days", "series", span + 1, len(pts), phase)
+    if oracle_trend.first is not None:
+        ev.check("trend.start", "series", oracle_trend.first.isoformat(), first_iso, phase)
 
-    starts = ([t.trade_date for t in facts.txs]
-              + [dv.effective for dv in facts.divs]
-              + [o.build_date for o in facts.openings])
-    if starts:
-        ev.check("trend.start", "series", min(starts).isoformat(), first_iso, phase)
-
-    fx_on = fx_on_resolver()
     skipped: list[str] = []
     for day_iso in _trend_sample_dates(facts, by_date, last_iso):
-        p = by_date[day_iso]
-        day = date.fromisoformat(day_iso)
-        try:
-            expected_ni = O.net_invested_through(facts, day, REPORTING, fx_on)
-        except KeyError:
-            # No on-or-before rate for some flow - the app publishes NO trend at all in that
-            # state, so there is nothing to compare rather than a zero to agree with.
+        want = oracle_trend.at(date.fromisoformat(day_iso))
+        if want is None:
             continue
-        ev.check("trend.net_invested", day_iso, expected_ni, dec(p["net_invested"]), phase)
-
-        res_d = O.replay_through(facts, day)
-        if res_d.action_refusals:
-            # WHICH rule refused is scenario knowledge (see the A0 note in reconcile), and the
-            # app's refusal path marks the day incomplete for reasons this family does not
-            # re-derive. Collected and logged ONCE below — never per day: `ops` is a signal
-            # ("did the scenario change?"), and diagnostic logging that moves it by 75 turns
-            # that signal into noise.
+        if want.get("refused_action"):
+            # WHICH rule refused is scenario knowledge, and the app's refusal path marks the
+            # day for reasons this family does not re-derive — logged ONCE below, never per
+            # day (`ops` is a signal).
+            ev.check("trend.net_invested", day_iso, want["net_invested"],
+                     dec(by_date[day_iso]["net_invested"]), phase)
             skipped.append(day_iso)
             continue
-        expected_inc = _day_incomplete(res_d, day)
-        ev.check("trend.incomplete", day_iso, expected_inc, bool(p["incomplete"]), phase)
-        if not _day_value_judgeable(res_d):
-            continue
-        total = O.ZERO
-        for h in res_d.holdings.values():
-            if h.shares == O.ZERO or O.is_option(h.symbol):
-                # R3 / OPT-D4: the trend EXCLUDES an open contract's value (its premium is in
-                # the cash series, so net worth is overstated by a sold contract's value and
-                # understated by a bought one's — the note the options block carries).
-                continue
-            # The close for THIS day, as traded on it. `_ensure_daily_prices` seeded one
-            # per symbol per day at exactly this value, so the app reads the same number and
-            # the read-side window (priced_on, day] is empty — no factor on either side. The
-            # comparison that survives is therefore a pure SHARE-COUNT comparison, which is
-            # the whole reason the series exists.
-            rate = (O.ONE if h.quote_ccy == REPORTING
-                    else fx_on(day, h.quote_ccy, REPORTING))
-            close = O.price_as_traded(facts, h.symbol, day,
-                                      quote=PRICES[h.symbol], quoted_on=ASOF)
-            total += close * h.shares * rate
-        ev.check("trend.total_value", day_iso, total, dec(p["total_value"]), phase)
-        cash_total = O.ZERO
-        for (_acct, ccy), bal in res_d.cash.items():
-            if bal == O.ZERO:
-                continue          # a zero pool contributes nothing and needs no rate
-            cash_total += bal * (O.ONE if ccy == REPORTING else fx_on(day, ccy, REPORTING))
-        ev.check("trend.net_worth", day_iso, total + cash_total,
-                 dec(p.get("net_worth")) if p.get("net_worth") is not None else None, phase)
-
-    # No silent caps: a day this family declined to judge is named, not quietly absent.
+        _check_trend_point(ev, "trend", day_iso, want, by_date[day_iso], phase)
     if skipped:
         ev.op(phase, "ORACLE", "trend.days_not_judged",
               {"reason": "corporate action refused by the oracle on that day"},
@@ -803,12 +991,26 @@ def _reconcile_trend(ev: C.Evidence, dash, facts, phase: str) -> None:
 
 def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True,
               reports=False):
-    """Full oracle-vs-system reconciliation at the current state."""
+    """Full oracle-vs-system reconciliation at the current state.
+
+    Order matters: the fixture's price writes first (they are writes, so they belong to the
+    changes a settlement must take), then :func:`settle` — the status asserted BEFORE the run,
+    the run started and waited for, the clean state asserted after — and only then any read of
+    a figure, so every family below reads a settled store.
+    """
     phase = f"phase1:{label}"
     raw = C.load_facts_from_db(db_path)
     # BEFORE any API call: the dashboard must be built over the daily series, or the trend
     # family would compare an app that could not value a day against an oracle that could.
+    CHECKPOINT.today = server_today()
     _ensure_daily_prices(db_path, raw)
+    settle(ev, api, db_path, label, raw)
+    # The oracle's price and FX inputs are what the FIXTURE wrote — never the stored columns,
+    # which the app derives (README §9); `prices.stored_close` / `fx.stored_rate` hold the two
+    # together.
+    closes = fixture_closes(raw)
+    fx_rows = fixture_fx_rows()
+    _reconcile_stored_prices(ev, db_path, closes, phase)
     dash = api.get("/api/dashboard").json()
     # DEF-016 / DEF-056: the valuation reads only the rows that count by the app's own as_of
     # (read back from the response, as the XIRR family does) — every ledger from its own
@@ -818,7 +1020,15 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
     facts = O.facts_valued_as_of(raw, as_of)
     res = O.replay(facts)
     sp = spots()
-    prices = dict(PRICES)
+    trend_oracle = _TrendOracle(facts, closes, fx_rows, as_of)
+    # The valuation price of every symbol with a stored close: the latest on or before as_of,
+    # re-expressed for any later split (oracle.price_at). For a PRICES symbol that is exactly
+    # its ASOF quote, as before; for a MONTH_END_SERIES symbol its last weekday close.
+    prices: dict[str, Decimal] = {}
+    for sym in closes:
+        got = O.price_at(closes, facts.actions, sym, as_of)
+        if got is not None:
+            prices[sym] = got[0]
     # Options (spec §5, R2): an open contract is valued at its LAST LEDGER TRADE, never at a
     # stored quote — the oracle's own derivation, keyed by symbol like every other price.
     for sym, (px, _on) in O.option_prices(facts, as_of).items():
@@ -934,7 +1144,7 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
 
     # ---- E. KPI totals + XIRR scalar ----
     if valuation and not oversold:
-        _reconcile_kpis(ev, res, dash, facts, prices, sp, phase)
+        _reconcile_kpis(ev, res, dash, facts, prices, sp, phase, closes, trend_oracle)
         _reconcile_xirr(ev, res, dash, facts, prices, sp, phase)
     if valuation and not undeclared_oversell:
         # E3. POINT-IN-TIME: the daily replay, sampled at event boundaries. Behind the 賣超
@@ -942,7 +1152,18 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
         # judging its trend would be judging a state the app itself declines to value — but
         # a declared short is valued, and the `short_open` checkpoint is where a held carrier
         # of a refused dividend lives (Y3).
-        _reconcile_trend(ev, dash, facts, phase)
+        _reconcile_trend(ev, dash, trend_oracle, phase)
+
+    # ---- E4. Month-end values (PERF spec §11.2). First the oracle's "as at D" block at
+    # D = today against the LIVE KPI block — runnable on any build, and the proof that the
+    # transcription is right before a single period route is read. Then (package G's routes)
+    # every past month's close and the past-month 月度成績 rows against the same oracle.
+    _reconcile_asof_identity(ev, dash, raw, closes, fx_rows, as_of, phase)
+    ctx = _Periods(raw, closes, fx_rows, as_of, trend_oracle)
+    _reconcile_store_periods(ev, db_path, ctx, phase)
+    if READ_PATH:
+        _reconcile_periods(ev, api, ctx, phase)
+    _reconcile_tax_tieout(ev, api, db_path, ctx, phase)
 
     # ---- E2. Ledger INTEGRITY (validity, not arithmetic — see oracle layer 4) ----
     _reconcile_integrity(ev, res, facts, phase)
@@ -965,6 +1186,1322 @@ def reconcile(ev: C.Evidence, api: C.Api, db_path, label: str, *, valuation=True
             ev.check("instrument.asset_type_matches_symbol", sym, want, inst.asset_type, phase)
 
     return res
+
+
+# ---------------------------------------------------------------- settlement (PERF spec §18)
+#: Package G's read path and period routes (wave 3) are merged. ``run_phase1.py --wave2-only``
+#: clears it: every check that reads the STORE through the dashboard, ``/api/settlement/
+#: periods*`` or the past-month rows of ``/api/snapshots`` is skipped; the status / run checks
+#: and the month-end oracle against the LIVE KPI block still run. For a run before the wave-3
+#: merge ONLY — W4 and every later run keep it True.
+READ_PATH = True
+
+#: The app's business-day anchor (``shared/clock.py``: Asia/Taipei).
+TAIPEI = ZoneInfo("Asia/Taipei")
+#: How long one settlement may take before the harness stops waiting (child start included).
+SETTLE_TIMEOUT_S = 600.0
+_ACTIVE = ("preparing", "running")
+
+
+class SettleAbort(RuntimeError):
+    """A settlement did not end in time: the phase stops, with ONE clear failure, rather than
+    reconcile every later family against an unsettled store."""
+
+
+def server_today() -> date:
+    """The app's business day — the day ``live_from`` and the live window are anchored on."""
+    return datetime.now(TAIPEI).date()
+
+
+class _Checkpoint:
+    """The business day of the checkpoint being reconciled, read ONCE at its start: every W,
+    every "last month" and every current period of the checkpoint derives from it, so a
+    checkpoint that straddles Taipei midnight on the 1st never mixes two windows."""
+
+    today: date = date.min
+
+
+CHECKPOINT = _Checkpoint()
+
+
+def window_start(today: date) -> date:
+    """``W`` (spec §10 step 3): the 1st of the previous month. Transcribed, not imported."""
+    return date(today.year - 1, 12, 1) if today.month == 1 else date(
+        today.year, today.month - 1, 1)
+
+
+def _d(value) -> date | None:
+    return None if value in (None, "") else date.fromisoformat(str(value)[:10])
+
+
+def _iso(day: date | None) -> str | None:
+    return None if day is None else day.isoformat()
+
+
+@dataclass
+class _Settled:
+    """The INPUTS of the generation the harness's last settlement published — so a stale day
+    or a stale close can be checked against the PREVIOUS generation's values (PERF-D3)."""
+
+    facts: O.Facts
+    closes: O.Closes
+    fx_rows: O.FxRows
+    generation: int
+
+
+class _SettleState:
+    last: _Settled | None = None
+
+
+SETTLE = _SettleState()
+
+
+def reset_settlement() -> None:
+    """A fresh database: no generation has been seen yet, no series written."""
+    SETTLE.last = None
+    SEEDED_SERIES.clear()
+
+
+def _status(api: C.Api) -> dict:
+    r = api.get("/api/settlement/status")
+    if r.status_code != 200:
+        return {"_http": r.status_code}
+    body = r.json()
+    return body if isinstance(body, dict) else {"_http": r.status_code}
+
+
+def _ledger_symbols(facts: O.Facts) -> set[str]:
+    """The symbols the price trigger's gate admits (a ledger symbol: a trade, a dividend, an
+    opening, either side of a corporate action)."""
+    out = {t.symbol for t in facts.txs} | {dv.symbol for dv in facts.divs}
+    out |= {o.symbol for o in facts.openings}
+    out |= {a.from_symbol for a in facts.actions} | {a.to_symbol for a in facts.actions}
+    return out
+
+
+def _change_bound(prev: _Settled, facts: O.Facts, closes: O.Closes,
+                  fx_rows: O.FxRows) -> tuple[date | None, list[str]]:
+    """The earliest day whose value a write since the last settlement can have changed — and
+    what changed (for the evidence), derived from the fixture's rows before and after.
+
+    Each changed row counts from the EARLIER of its old and new day (a row moved to a later
+    date changes the old date's value too): a trade's date, a dividend's EFFECTIVE date (a
+    配股 with an ex-date from it), a conversion's / movement's / action's date, an opening's
+    build date; a price or rate from its own date. The prices of a symbol that became a
+    ledger symbol in between are left out: the trigger's symbol gate saw them while the
+    symbol was not one, and its own ledger rows bound the change anyway. A corporate action's
+    ``note`` is an exempt column (spec §7) and is not compared.
+    """
+    days: list[date] = []
+    what: list[str] = []
+
+    def diff(label: str, old: dict, new: dict, day_of) -> None:
+        for key in old.keys() | new.keys():
+            a, b = old.get(key), new.get(key)
+            if a == b:
+                continue
+            first = min(day_of(x) for x in (a, b) if x is not None)
+            days.append(first)
+            what.append(f"{label}:{key}@{first.isoformat()}")
+
+    diff("transactions", {t.id: t for t in prev.facts.txs}, {t.id: t for t in facts.txs},
+         lambda t: t.trade_date)
+    diff("dividends", {dv.id: dv for dv in prev.facts.divs}, {dv.id: dv for dv in facts.divs},
+         lambda dv: dv.effective)
+    diff("fx_conversions", {f.id: f for f in prev.facts.fxs}, {f.id: f for f in facts.fxs},
+         lambda f: f.d)
+    diff("cash_movements", {c.id: c for c in prev.facts.cash}, {c.id: c for c in facts.cash},
+         lambda c: c.d)
+    diff("opening_inventory", {(o.account_id, o.symbol): o for o in prev.facts.openings},
+         {(o.account_id, o.symbol): o for o in facts.openings}, lambda o: o.build_date)
+
+    def no_note(a: O.CorpFact) -> tuple:
+        return (a.id, a.account_id, a.d, a.kind, a.from_symbol, a.to_symbol, a.ratio_to,
+                a.ratio_from, a.cost_carry)
+
+    diff("corporate_actions", {a.id: (no_note(a), a.d) for a in prev.facts.actions},
+         {a.id: (no_note(a), a.d) for a in facts.actions}, lambda pair: pair[1])
+    for sym in sorted(_ledger_symbols(prev.facts) & _ledger_symbols(facts)):
+        old_c, new_c = dict(prev.closes.get(sym, [])), dict(closes.get(sym, []))
+        changed = [d for d in old_c.keys() | new_c.keys() if old_c.get(d) != new_c.get(d)]
+        if changed:
+            days.append(min(changed))
+            what.append(f"prices:{sym}@{min(changed).isoformat()}")
+    for pair in sorted(prev.fx_rows.keys() | fx_rows.keys()):
+        old_r, new_r = dict(prev.fx_rows.get(pair, [])), dict(fx_rows.get(pair, []))
+        changed = [d for d in old_r.keys() | new_r.keys() if old_r.get(d) != new_r.get(d)]
+        if changed:
+            days.append(min(changed))
+            what.append(f"fx_rates:{pair[0]}/{pair[1]}@{min(changed).isoformat()}")
+    return (min(days) if days else None), sorted(what)
+
+
+def settle(ev: C.Evidence, api: C.Api, db_path, label: str, raw: O.Facts | None = None):
+    """Assert the store's state for the writes since the last settlement, run a settlement,
+    wait for it, and assert the clean state it leaves (PERF spec §18 "Stress audit": "the
+    harness runs a settlement after its writes and also asserts the stale state before it").
+
+    BEFORE the run, from ``GET /api/settlement/status`` alone:
+
+    * the store is unusable before the first generation: nothing is stale, nothing is live
+      from a day (``live_from`` / ``stale_*`` null — every day is computed live, §10 step 2);
+    * a write since the last run marked the store dirty, and ``dirty_from`` is NOT LATER than
+      the earliest day the written rows can change (:func:`_change_bound`) — the prefix
+      property's safety half (§4, §18): over-firing is allowed, a day after the change is a
+      settled day that silently keeps a wrong value;
+    * ``live_from = min(S + 1, max(dirty_from, W))`` and the stale range is
+      ``[dirty_from, live_from − 1]`` when ``dirty_from`` lies before it (§10 step 3), the
+      prompt is due exactly when ``dirty_from < W`` (§14.3), and the chip reads 待結算.
+
+    With the read path (:data:`READ_PATH`), :func:`_reconcile_stale_serving` then proves the
+    stale days ARE the previous generation's values and the live days the new ones.
+
+    AFTER the run: the report ended 完成 (``published``), the store is clean (no dirty day,
+    no stale range), ``live_from = settled_through + 1`` and ``settled_through`` reached
+    ``final_through``. A run that does not end within :data:`SETTLE_TIMEOUT_S` raises
+    :class:`SettleAbort` after ONE failing assertion — nothing is reconciled against an
+    unsettled store.
+    """
+    phase = f"phase1:{label}"
+    if CHECKPOINT.today == date.min:
+        CHECKPOINT.today = server_today()
+    raw = raw if raw is not None else C.load_facts_from_db(db_path)
+    closes = fixture_closes(raw)
+    fx_rows = fixture_fx_rows()
+    st0 = _status(api)
+    ev.check("settle.status_route", label, 200, st0.get("_http", 200), phase)
+    if "_http" in st0:
+        return None
+    _check_pending_state(ev, api, label, st0, raw, closes, fx_rows, phase)
+
+    r = api.post("/api/settlement/run", {"scope": "dirty"})
+    if r.status_code == 409:
+        # A run is already active (a chained follow-up) — let it finish, then ask once more.
+        _wait_idle(api)
+        r = api.post("/api/settlement/run", {"scope": "dirty"})
+    body = _json(r)
+    ev.op(phase, "API", "settlement.run", {"scope": "dirty"},
+          {"status": r.status_code, "json": body})
+    ev.check("settle.run_accepted", label, 202, r.status_code, phase)
+    if r.status_code != 202 or not isinstance(body, dict) or "run_id" not in body:
+        return None
+    run_id = int(body["run_id"])
+    report, st1, ended = _wait_run(api, run_id)
+    if not ended:
+        ev.check("settle.run_finished_in_time", f"{label} #{run_id} within "
+                 f"{SETTLE_TIMEOUT_S:.0f}s", True, False, phase)
+        raise SettleAbort(f"settlement #{run_id} ({label}) did not end within "
+                          f"{SETTLE_TIMEOUT_S:.0f}s — phase 1 stops here")
+    summary = (report or {}).get("summary") or {}
+    ev.check("settle.run_published", f"{label} #{run_id}", "published", summary.get("status"),
+             phase)
+    if summary.get("status") != "published":
+        ev.op(phase, "API", "settlement.run_not_published", {"run_id": run_id},
+              {"summary": summary, "failure": (report or {}).get("failure")})
+    ev.check("settle.clean_after_run", label, ["clean", None, None, None],
+             [st1.get("state"), st1.get("dirty_from"), st1.get("stale_from"),
+              st1.get("stale_to")], phase)
+    settled = _d(st1.get("settled_through"))
+    final = _d(st1.get("final_through"))
+    ev.check("settle.live_from_after_run", label,
+             _iso(settled + timedelta(days=1)) if settled else None,
+             _iso(_d(st1.get("live_from"))), phase)
+    ev.check("settle.settled_through_reaches_final", f"{label}: {settled} >= {final}", True,
+             settled is not None and final is not None and settled >= final, phase)
+    gen0, gen1 = int(st0.get("generation") or 0), int(st1.get("generation") or 0)
+    ev.check("settle.generation_after_run", f"{label}: {gen0} -> {gen1}", True,
+             gen1 >= max(1, gen0), phase)
+    SETTLE.last = _Settled(raw, closes, fx_rows, gen1)
+    return report
+
+
+def _check_pending_state(ev, api, label, st0, raw, closes, fx_rows, phase) -> None:
+    """The BEFORE-a-run half of :func:`settle` (its docstring states the rules)."""
+    prev = SETTLE.last
+    live_from = _d(st0.get("live_from"))
+    if prev is None or live_from is None:
+        # No generation yet (or the store is unusable): every day is live, nothing is stale.
+        ev.check("settle.unusable_nothing_stale", label, [None, None],
+                 [st0.get("stale_from"), st0.get("stale_to")], phase)
+        if prev is None:
+            ev.check("settle.unusable_no_live_from", label, None, st0.get("live_from"), phase)
+        return
+    today = CHECKPOINT.today
+    w = window_start(today)
+    settled = _d(st0.get("settled_through"))
+    dirty = _d(st0.get("dirty_from"))
+    bound, what = _change_bound(prev, raw, closes, fx_rows)
+    ev.op(phase, "API", "settlement.status_before_run", {"label": label},
+          {k: st0.get(k) for k in ("state", "generation", "settled_through", "dirty_from",
+                                   "live_from", "stale_from", "stale_to", "needs_prompt")}
+          | {"earliest_change": _iso(bound), "changes": what[:40],
+             "changes_total": len(what)})
+    if bound is not None:
+        ev.check("settle.change_marks_dirty", f"{label}: earliest change {bound}", True,
+                 dirty is not None, phase)
+        if dirty is not None:
+            ev.check("settle.dirty_not_after_change",
+                     f"{label}: dirty_from {dirty} <= earliest change {bound}", True,
+                     dirty <= bound, phase)
+    if settled is None:
+        return
+    if server_today() != today:
+        # Taipei midnight passed since the checkpoint began: the server's W may already be
+        # the next month's. Nothing W-dependent is judged rather than judged against two days.
+        ev.op(phase, "ORACLE", "settle.midnight_straddle",
+              {"label": label, "checkpoint_day": today.isoformat()}, {})
+        return
+    if dirty is None:
+        ev.check("settle.clean_nothing_stale", label, [None, None],
+                 [st0.get("stale_from"), st0.get("stale_to")], phase)
+        ev.check("settle.live_from", label, _iso(settled + timedelta(days=1)), _iso(live_from),
+                 phase)
+        return
+    want_live = min(settled + timedelta(days=1), max(dirty, w))
+    ev.check("settle.live_from", f"{label}: min(S+1, max({dirty}, W={w}))", _iso(want_live),
+             _iso(live_from), phase)
+    stale = [_iso(dirty), _iso(want_live - timedelta(days=1))] if dirty < want_live else \
+        [None, None]
+    ev.check("settle.stale_range", label, stale, [st0.get("stale_from"), st0.get("stale_to")],
+             phase)
+    ev.check("settle.needs_prompt", f"{label}: dirty_from {dirty} < W {w}", dirty < w,
+             bool(st0.get("needs_prompt")), phase)
+    if dirty < w:
+        ev.check("settle.prompt_from", label, _iso(dirty),
+                 _iso(_d((st0.get("prompt") or {}).get("from"))), phase)
+    ev.check("settle.state_pending", label, "pending", st0.get("state"), phase)
+    if READ_PATH and dirty < want_live:
+        _reconcile_stale_serving(ev, api, prev, raw, closes, fx_rows, dirty, want_live, today,
+                                 phase)
+
+
+def _wait_idle(api: C.Api, timeout: float = SETTLE_TIMEOUT_S) -> dict:
+    deadline = time.monotonic() + timeout
+    st = _status(api)
+    while time.monotonic() < deadline:
+        if st.get("state") not in _ACTIVE and st.get("run") is None:
+            return st
+        time.sleep(0.5)
+        st = _status(api)
+    return st
+
+
+def _wait_run(api: C.Api, run_id: int,
+              timeout: float = SETTLE_TIMEOUT_S) -> tuple[dict | None, dict, bool]:
+    """Poll until no run is active AND run *run_id*'s report has ended (the task's rule): the
+    status alone could read idle in the instant before a chained follow-up starts. The last
+    element says whether it ended in time."""
+    deadline = time.monotonic() + timeout
+    report: dict | None = None
+    while time.monotonic() < deadline:
+        st = _status(api)
+        if st.get("state") not in _ACTIVE and st.get("run") is None:
+            rr = api.get(f"/api/settlement/runs/{run_id}")
+            if rr.status_code == 200:
+                report = rr.json()
+                if ((report or {}).get("summary") or {}).get("status") not in _ACTIVE:
+                    return report, st, True
+        time.sleep(0.5)
+    return report, _status(api), False
+
+
+def _twr_pending(start: date, day: date, stale: tuple[date, date] | None,
+                 live_from: date | None) -> bool:
+    """Spec §11.2: a period's TWR is 待結算 while history is stale, for any period whose
+    ``(previous end, D]`` — i.e. ``[start, D]`` — contains ``live_from`` or overlaps the stale
+    range (the join would book a back-dated position's whole gain as one day's return)."""
+    if stale is None:
+        return False
+    if start <= stale[1] and stale[0] <= day:
+        return True
+    return live_from is not None and start <= live_from <= day
+
+
+def _served_prefix(old_trend: _TrendOracle, new_first: date | None, status_live_from: date,
+                   stale: tuple[date, date], today: date
+                   ) -> tuple[date | None, tuple[date, date] | None]:
+    """Which days a reader is SERVED from the previous generation (spec §10 step 4: "points
+    before ``live_from`` from ``settled_day``"), and the stale part of them — ``(served
+    live_from, served stale range)``.
+
+    The stored rows serve CONTIGUOUSLY from the series' own first day, never a day the
+    generation does not hold and never a placeholder (W2-D: a placeholder carries no figure,
+    so from it on the reader values live). So the served prefix stops at the earliest of the
+    status's ``live_from`` (and tomorrow), the previous generation's first PLACEHOLDER day —
+    the first day its trend was unavailable on — and the generation's first day when the
+    series now starts EARLIER than it did (the first day is then a day nobody holds: nothing
+    is served from the store at all). The stale range the reader is served is the status's,
+    cut at that prefix — empty when the prefix ends before it begins.
+    """
+    if new_first is None:
+        return None, None
+    stop = min(status_live_from, today + timedelta(days=1))
+    if old_trend.first_unavailable is not None:
+        stop = min(stop, old_trend.first_unavailable)
+    if old_trend.first is None or new_first < old_trend.first:
+        served_live = new_first
+    else:
+        served_live = max(new_first, stop)
+    if stale[0] < served_live:
+        return served_live, (stale[0], min(stale[1], served_live - timedelta(days=1)))
+    return served_live, None
+
+
+def _reconcile_stale_serving(ev, api, prev: _Settled, raw, closes, fx_rows, stale_from: date,
+                             live_from: date, today: date, phase: str) -> None:
+    """PERF-D3 (spec §10 steps 3–4, §11.4), BEFORE the run: the days a reader is served from
+    the PREVIOUS generation (:func:`_served_prefix`) carry the oracle's values over the inputs
+    the last settlement saw (:class:`_Settled`), every later day the oracle's over today's.
+    The period rows served from the store and ending in the served stale range say so
+    (``stale: true``) with the previous generation's KPIs and no receivable (§11.2); every
+    period whose span meets that range or the served ``live_from`` shows its TWR as 待結算
+    (§11.2, fold verification #2). A close the store does not serve is computed live: not
+    stale, and today's values."""
+    old_trend = _TrendOracle(O.facts_valued_as_of(prev.facts, today), prev.closes,
+                             prev.fx_rows, today)
+    new_trend = _TrendOracle(O.facts_valued_as_of(raw, today), closes, fx_rows, today)
+    served_live, served_stale = _served_prefix(
+        old_trend, new_trend.first, live_from, (stale_from, live_from - timedelta(days=1)),
+        today)
+    ev.op(phase, "ORACLE", "stale.served_prefix",
+          {"status_stale": [_iso(stale_from), _iso(live_from - timedelta(days=1))]},
+          {"served_live_from": _iso(served_live),
+           "served_stale": None if served_stale is None else [_iso(d) for d in served_stale]})
+    dash = api.get("/api/dashboard").json()
+    pts = {p["date"]: p for p in ((dash.get("trend") or {}).get("points") or [])}
+    if served_stale is not None:
+        lo, hi = served_stale
+        sample = {lo, lo + timedelta(days=1), hi}
+        sample |= {e for e in _event_days(prev.facts) | _event_days(raw) if lo <= e <= hi}
+        for day in sorted(sample):
+            point = pts.get(day.isoformat())
+            want = old_trend.at(day) if point is not None and day <= hi else None
+            if want is not None:
+                _check_trend_point(ev, "stale.trend", day.isoformat(), want, point, phase)
+    if pts and served_live is not None:
+        for day in sorted({max(served_live, date.fromisoformat(min(pts))),
+                           date.fromisoformat(max(pts))}):
+            point = pts.get(day.isoformat())
+            want = new_trend.at(day) if point is not None else None
+            if want is not None:
+                _check_trend_point(ev, "stale.live_trend", day.isoformat(), want, point, phase)
+
+    first = O.first_ledger_day(raw)
+    code, rows, _total = _get_rows(api, "/api/settlement/periods", kind="M")
+    ev.check("stale.periods_route", "M", 200, code, phase)
+    for row in rows or []:
+        end = _d(row.get("end_day"))
+        if end is None or first is None:
+            continue
+        period = str(row.get("period"))
+        start = max(first, date.fromisoformat(f"{period}-01"))
+        scope = f"M {period}"
+        kpi = row.get("kpi") or {}
+        if _twr_pending(start, min(end, today), served_stale, served_live):
+            _check_reason_word(ev, "stale.period_twr_pending", scope, "待結算",
+                               kpi.get("period_twr_reason"), phase)
+            ev.check("stale.period_twr_pending_value", scope, None, kpi.get("period_twr"),
+                     phase)
+        if end >= today.replace(day=1):
+            continue
+        from_store = served_live is not None and end < served_live
+        in_range = (from_store and served_stale is not None
+                    and served_stale[0] <= end <= served_stale[1])
+        ev.check("stale.period_flag", scope, in_range, bool(row.get("stale")), phase)
+        ev.check("stale.period_source", scope, "store" if from_store else "live",
+                 row.get("source"), phase)
+        pe = (O.period_end(prev.facts, end, prev.closes, prev.fx_rows, REPORTING) if from_store
+              else O.period_end(raw, end, closes, fx_rows, REPORTING))
+        _check_kpi_values(ev, "stale.period", scope, pe, {
+            "total_market_value": kpi.get("total_market_value"),
+            "total_return": kpi.get("total_return"),
+            "total_return_rate": kpi.get("total_return_rate"),
+            "xirr": kpi.get("xirr"), "xirr_window_days": kpi.get("xirr_window_days"),
+        }, phase)
+        if in_range:
+            ev.check("stale.period_no_receivable", scope, None,
+                     (kpi.get("notes") or {}).get("dividends_receivable"), phase)
+    code, rows, _total = _get_rows(api, "/api/snapshots")
+    ev.check("stale.snapshots_route", "rows", 200, code, phase)
+    first_this = today.replace(day=1)
+    for row in rows or []:
+        end = O.month_end(date.fromisoformat(f"{row.get('month')}-01"))
+        if end >= first_this:
+            continue
+        from_store = served_live is not None and end < served_live
+        ev.check("stale.snapshot_flag", str(row.get("month")),
+                 bool(from_store and served_stale is not None
+                      and served_stale[0] <= end <= served_stale[1]),
+                 bool(row.get("stale")), phase)
+
+
+def _get_rows(api: C.Api, path: str, **params) -> tuple[int, list[dict] | None, int | None]:
+    """``{rows, total_count}`` of a list route, asking for as many rows as it allows."""
+    code = 0
+    for limit in (120, 36, 12):
+        r = api.get(path, limit=limit, **params)
+        code = r.status_code
+        if code == 200:
+            body = r.json()
+            return code, list(body.get("rows") or []), body.get("total_count")
+        if code not in (400, 422):
+            break
+    return code, None, None
+
+
+# ---------------------------------------------------------------- month-end values (§11.2)
+def _dec_map(m) -> dict[str, Decimal] | None:
+    if m is None:
+        return None
+    return {str(k): dec(v) for k, v in m.items() if v is not None}
+
+
+#: When ``xirr_window_days`` is asserted (manual §7.2.1: "reported in any case, the rate None
+#: included"): XIRR computed, withheld for the 30-day window, or uncomputable over a complete
+#: series (a missing price; no sign change). DISCLOSED (README §9): when XIRR is withheld
+#: because the LEDGER is 待釐清 — a 賣超, an unapplied action, a refused close, an orphan
+#: dividend — or a rate is missing, the app builds no flow series and reports no window. The
+#: manual's "any case" reads wider than that; the owner rules which is meant, and until then
+#: those cases are not asserted either way.
+_WINDOW_REPORTED = (None, "window", "missing_price", "unsolvable")
+
+
+def _check_kpi_values(ev, prefix: str, scope: str, pe: O.PeriodEnd, got: dict,
+                      phase: str) -> None:
+    """The money KPIs of one "as at D" block against :func:`oracle.period_end`.
+
+    *got* holds the app's values under the oracle's names; a key that is absent is not
+    compared (a surface that does not carry the field). Exact Decimal everywhere except the
+    two disclosed cases: XIRR (``check_close``, the solver) and the rate, a QUOTIENT of two
+    28-digit sums the app may assemble in another order (``check_rel``, association only).
+    A held 賣超 / unapplied action is not a reason to skip: its value is dropped and every
+    other figure judged (domain-ledger.md), and XIRR is withheld naming the row.
+    """
+    if "total_market_value" in got:
+        ev.check(f"{prefix}.total_market_value", scope, pe.total_market_value,
+                 got["total_market_value"], phase)
+    if "total_return" in got:
+        ev.check(f"{prefix}.total_return", scope, pe.total_return, got["total_return"], phase)
+    if "total_return_rate" in got:
+        ev.check_rel(f"{prefix}.total_return_rate", scope, pe.total_return_rate,
+                     got["total_return_rate"], phase)
+    if "by_currency_value" in got:
+        have = _dec_map(got["by_currency_value"])
+        want = dict(pe.by_currency_value)
+        ev.check(f"{prefix}.by_currency_value.keys", scope, sorted(want), sorted(have or {}),
+                 phase)
+        for ccy in sorted(want):
+            ev.check(f"{prefix}.by_currency_value", f"{scope} {ccy}", want[ccy],
+                     (have or {}).get(ccy), phase)
+    if ("xirr_window_days" in got and pe.xirr_window_days is not None
+            and pe.xirr_withheld in _WINDOW_REPORTED):
+        ev.check(f"{prefix}.xirr_window_days", scope, pe.xirr_window_days,
+                 got["xirr_window_days"], phase)
+    if "xirr" not in got:
+        return
+    withheld = pe.xirr_withheld
+    if withheld is None:
+        ev.check_close(f"{prefix}.xirr", scope, pe.xirr, got["xirr"], O.XIRR_TOL, phase)
+        return
+    ev.check(f"{prefix}.xirr_withheld", f"{scope} [{withheld}]", None, got["xirr"], phase)
+    if "xirr_reason" not in got:
+        return
+    reason = got["xirr_reason"] or ""
+    # "a blank XIRR or TWR always shows its reason" (spec §11.4).
+    ev.check(f"{prefix}.xirr_reason_present", f"{scope} [{withheld}]", True, bool(reason),
+             phase)
+    if withheld == "window":
+        ev.check(f"{prefix}.xirr_reason_names_window", f"{scope} {pe.xirr_window_days} days",
+                 True, str(pe.xirr_window_days) in reason, phase)
+    for acct, sym, on in pe.xirr_named:
+        if withheld == "refused_close":
+            # Options §4.4: the row is named by its CONTRACT — the OCC code or its display
+            # name — and its date (the live family's rule, xirr.refused_close_reason_names_row).
+            terms = O.parse_occ(sym)
+            named = ((sym in reason or (terms is not None and terms.name in reason))
+                     and (on is None or on.isoformat() in reason))
+        else:
+            named = (sym in reason and acct in reason
+                     and (on is None or on.isoformat() in reason))
+        ev.check(f"{prefix}.xirr_reason_names_row", f"{scope} [{withheld}] {acct}/{sym}@{on}",
+                 True, named, phase)
+
+
+def _reconcile_asof_identity(ev, dash, raw, closes, fx_rows, as_of: date, phase: str) -> None:
+    """The month-end oracle at D = TODAY against the LIVE KPI block (``month.asof.*``).
+
+    Spec §11.2: ``kpis_as_of`` is ONE function, called by the live dashboard with "latest
+    stored" sources and by the run with "on or before D" — and on or before today, the latest
+    stored row IS the row. So :func:`oracle.period_end` at today must equal the live KPIs:
+    總市值, 總報酬 (A), the blended rate, XIRR with its window and withholding reason, and the
+    currency view's native values — while a declared stock short is open, and while a 賣超 or
+    an unapplied action is held (its value dropped) too.
+    """
+    pe = O.period_end(raw, as_of, closes, fx_rows, REPORTING)
+    kpis = dash.get("kpis") or {}
+    cv = dash.get("currency_view") or {}
+    _check_kpi_values(ev, "month.asof", f"as at {as_of}", pe, {
+        "total_market_value": kpis.get("total_market_value"),
+        "total_return": kpis.get("total_return"),
+        "total_return_rate": kpis.get("total_return_rate"),
+        "xirr": kpis.get("xirr"),
+        "xirr_window_days": kpis.get("xirr_window_days"),
+        "xirr_reason": (dash.get("freshness") or {}).get("xirr_unavailable_reason"),
+        "by_currency_value": cv.get("by_currency_value"),
+    }, phase)
+
+
+def _pair_key(pair: str) -> frozenset[str]:
+    return frozenset(str(pair).split("/"))
+
+
+#: The zh reason words the app's ``period_twr_reason`` must carry for each oracle reason —
+#: any one of them, matched as substrings, so a re-worded sentence that keeps the meaning
+#: still passes. "No trend on D" may name the trend (走勢) or its cause, a missing rate (匯率).
+_TWR_REASON_WORDS: dict[str, tuple[str, ...]] = {
+    "unavailable": ("走勢", "匯率"), "no_anchor": ("尚無",), "end_incomplete": ("期末",),
+    "start_unavailable": ("期初",), "start_incomplete": ("期初",),
+}
+
+
+def _check_reason_word(ev, check: str, scope: str, words, reason, phase: str) -> None:
+    """A zh reason must carry one of *words* — the evidence keeps the actual sentence when it
+    does not, so a re-worded reason is triaged from the line, not from a re-run."""
+    words = (words,) if isinstance(words, str) else tuple(words)
+    text = str(reason or "")
+    want = "contains " + " or ".join(words)
+    ev.check(check, scope, want, want if any(w in text for w in words) else text, phase)
+
+
+class _Periods:
+    """One checkpoint's oracle values for every period end, computed once and shared by the
+    period list, the detail route, the store family, the year rows, the 月度成績 rows and the
+    tax tie-out."""
+
+    def __init__(self, raw: O.Facts, closes, fx_rows, today: date,
+                 trend: _TrendOracle) -> None:
+        self.raw = raw
+        self.closes = closes
+        self.fx_rows = fx_rows
+        self.today = today
+        self.trend_oracle = trend
+        self.first = O.first_ledger_day(raw)
+        self._pe: dict[date, O.PeriodEnd] = {}
+        self._opt: dict[tuple[date, date], bool] = {}
+        self._act: dict[tuple[date, date], O.Activity] = {}
+        self.index, self.anchor, self.incomplete, self.broken = trend.twr()
+
+    def at(self, day: date) -> O.PeriodEnd:
+        if day not in self._pe:
+            self._pe[day] = O.period_end(self.raw, day, self.closes, self.fx_rows, REPORTING)
+        return self._pe[day]
+
+    def trend(self, day: date) -> dict | None:
+        return self.trend_oracle.at(day)
+
+    def options_excluded(self, start: date, end: date) -> bool:
+        """``notes.options_value_excluded``: an option open at the close of some day of the
+        period ``(previous end, D]`` (spec §11.2, the OR of ``settled_day.options_open``)."""
+        if (start, end) not in self._opt:
+            self._opt[(start, end)] = O.trend_skips_an_option(self.trend_oracle.facts, start,
+                                                              end)
+        return self._opt[(start, end)]
+
+    def activity(self, start: date, end: date) -> O.Activity:
+        if (start, end) not in self._act:
+            self._act[(start, end)] = O.period_activity(self.raw, start, end, self.fx_rows,
+                                                        REPORTING)
+        return self._act[(start, end)]
+
+    def twr(self, start_end: date | None, end: date) -> tuple[Decimal | None, str | None]:
+        """``period_twr`` (spec §11.2), or ``("not_judged", …)`` past a refused action."""
+        if self.broken is not None and end >= self.broken:
+            return None, "not_judged"
+        return O.period_twr(self.index, self.anchor, self.incomplete, start_end=start_end,
+                            end=end)
+
+
+def _period_bounds(kind: str, period: str, ctx: _Periods) -> tuple[date, date, date | None]:
+    """``(first day counted, the day valued, the previous period's end | None)`` of a period:
+    a period starts at its first calendar day (or the ledger's first day), is valued as at its
+    end — today for the current one — and the first period has no previous end."""
+    if kind == "M":
+        first_day = date.fromisoformat(f"{period}-01")
+        end = O.month_end(first_day)
+    else:
+        first_day = date(int(period), 1, 1)
+        end = date(int(period), 12, 31)
+    prev_end = first_day - timedelta(days=1)
+    first = ctx.first or first_day
+    start = max(first_day, first)
+    previous = None if prev_end < first else prev_end
+    return start, min(end, ctx.today), previous
+
+
+def _fold_activity(app: dict) -> dict[str, dict]:
+    """The served activity lines folded onto the oracle's keys (``oracle.Activity``): the app
+    may split a key into several lines, and its order is its own."""
+    out: dict[str, dict] = {k: {} for k in ("realized", "dividends", "not_booked", "fees", "cash",
+                                             "fx", "fx_realized", "openings")}
+
+    def add(group: str, key: tuple, field_: str, money) -> None:
+        if money is None:
+            return
+        line = out[group].setdefault(key, {})
+        n, r = line.get(field_, (O.ZERO, O.ZERO))
+        rv = money.get("reporting")
+        line[field_] = (n + dec(money["native"]),
+                        None if r is None or rv is None else r + dec(rv))
+
+    def rows(group: str, key: tuple, count) -> None:
+        line = out[group].setdefault(key, {})
+        line["rows"] = int(line.get("rows", 0)) + int(count or 0)
+
+    for x in app.get("realized") or []:
+        key = (x["kind"], x["asset_type"], x["realized"]["ccy"])
+        rows("realized", key, x.get("rows"))
+        add("realized", key, "realized", x["realized"])
+        add("realized", key, "capital_gain", x.get("capital_gain"))
+    for x in app.get("dividends") or []:
+        money = x.get("net") or x.get("gross")
+        key = (str(x["type"]).upper(), x["account_id"], money["ccy"] if money else "-")
+        rows("dividends", key, x.get("rows"))
+        for f in ("gross", "withholding", "net"):
+            add("dividends", key, f, x.get(f))
+        for f in ("reinvested_shares", "stock_shares"):
+            if x.get(f) is not None:
+                line = out["dividends"][key]
+                line[f] = line.get(f, O.ZERO) + dec(x[f])
+    for x in app.get("dividends_not_booked") or []:
+        key = (x["net"]["ccy"],)
+        rows("not_booked", key, x.get("rows"))
+        add("not_booked", key, "net", x["net"])
+    for x in app.get("fees") or []:
+        key = (x["account_id"], x["fees"]["ccy"])
+        add("fees", key, "fees", x["fees"])
+        add("fees", key, "tax", x["tax"])
+    for x in app.get("cash_movements") or []:
+        key = (x["account_id"], str(x["kind"]).upper(), x["amount"]["ccy"])
+        rows("cash", key, x.get("rows"))
+        add("cash", key, "amount", x["amount"])
+    for x in app.get("fx_conversions") or []:
+        key = (x["account_id"], x["from_amount"]["ccy"], x["to_amount"]["ccy"])
+        rows("fx", key, x.get("rows"))
+        add("fx", key, "from", x["from_amount"])
+        add("fx", key, "to", x["to_amount"])
+    for x in app.get("fx_realized") or []:
+        key = (x["account_id"], x["realized"]["ccy"])
+        add("fx_realized", key, "realized", x["realized"])
+    for x in app.get("openings") or []:
+        key = (x["account_id"], x["symbol"])
+        line = out["openings"].setdefault(key, {})
+        line["shares"] = line.get("shares", O.ZERO) + dec(x["shares"])
+        add("openings", key, "original_cost_total", x["original_cost_total"])
+    return out
+
+
+def _oracle_activity(act: O.Activity) -> dict[str, dict]:
+    """``oracle.Activity`` under the fold's group names (a 配股 line has no currency: ``-``)."""
+    dividends = {}
+    for (t, a, ccy), line in act.dividends.items():
+        dividends[(t, a, "-" if t == "STOCK" else ccy)] = line
+    return {"realized": act.realized, "dividends": dividends,
+            "not_booked": {k: v for k, v in act.not_booked.items()}, "fees": act.fees,
+            "cash": act.cash, "fx": act.fx, "fx_realized": act.fx_realized,
+            "openings": act.openings}
+
+
+#: Activity fields whose native sums carry 28-digit quotients (a realized amount removes cost
+#: through an average): ``check_rel`` — association only. Every other native is exact.
+_QUOTIENT_FIELDS = {("realized", "realized"), ("realized", "capital_gain"),
+                    ("fx_realized", "realized")}
+
+
+def _check_activity(ev, prefix: str, scope: str, want: dict[str, dict], have: dict[str, dict],
+                    phase: str) -> None:
+    """Every activity line (§11.3) of a period: the key sets, the row counts, every native sum
+    and its reporting twin (each row at its own date's rate — ``check_rel``, a sum of
+    products)."""
+    for group in sorted(want):
+        w, h = want[group], have.get(group, {})
+        ev.check(f"{prefix}.activity.{group}.keys", scope, sorted(map(str, w)),
+                 sorted(map(str, h)), phase)
+        for key in sorted(w, key=str):
+            line, got = w[key], h.get(key, {})
+            for field_ in sorted(line):
+                exp = line[field_]
+                act = got.get(field_)
+                sc = f"{scope} {key} {field_}"
+                if isinstance(exp, tuple):
+                    act_n, act_r = act if isinstance(act, tuple) else (None, None)
+                    if (group, field_) in _QUOTIENT_FIELDS:
+                        ev.check_rel(f"{prefix}.activity.{group}", sc, exp[0], act_n, phase)
+                    else:
+                        ev.check(f"{prefix}.activity.{group}", sc, exp[0], act_n, phase)
+                    ev.check_rel(f"{prefix}.activity.{group}.reporting", sc, exp[1], act_r,
+                                 phase)
+                else:
+                    ev.check(f"{prefix}.activity.{group}", sc, exp, act, phase)
+
+
+def _check_period_row(ev, prefix: str, kind: str, row: dict, ctx: _Periods,
+                      live_from: date | None, phase: str, *, served: bool = True) -> None:
+    """One close against the oracle (spec §11.2–§11.4): its KPI block, the rates it used,
+    every ``notes`` field, the settled day's trend figures, its TWR and its activity lines.
+
+    *served* — the row came through ``/api/settlement/periods`` (package G): its ``source`` /
+    ``stale`` flags and the ``dividends_receivable`` computed when the close is READ are
+    asserted too. ``False`` for a row read straight from ``settled_period`` (the store family,
+    ``store_period.*``): those three exist only on the served row.
+    """
+    period = str(row.get("period"))
+    scope = f"{kind} {period}"
+    end = _d(row.get("end_day"))
+    if end is None:
+        ev.check(f"{prefix}.end_day_present", scope, True, False, phase)
+        return
+    start, day, previous = _period_bounds(kind, period, ctx)
+    today = ctx.today
+    if end < today.replace(day=1) or (kind == "Y" and end < today):
+        want_end = (O.month_end(date.fromisoformat(f"{period}-01")) if kind == "M"
+                    else date(int(period), 12, 31))
+        ev.check(f"{prefix}.end_day", scope, want_end.isoformat(), end.isoformat(), phase)
+        if served:
+            ev.check(f"{prefix}.source", scope,
+                     "store" if live_from is not None and end < live_from else "live",
+                     row.get("source"), phase)
+    if served:
+        ev.check(f"{prefix}.stale", scope, False, bool(row.get("stale")), phase)
+    kpi = row.get("kpi") or {}
+    ev.check(f"{prefix}.reporting_ccy", scope, REPORTING, kpi.get("reporting_ccy"), phase)
+    pe = ctx.at(day)
+    _check_kpi_values(ev, prefix, scope, pe, {
+        "total_market_value": kpi.get("total_market_value"),
+        "total_return": kpi.get("total_return"),
+        "total_return_rate": kpi.get("total_return_rate"),
+        "xirr": kpi.get("xirr"), "xirr_window_days": kpi.get("xirr_window_days"),
+        "xirr_reason": kpi.get("xirr_reason"),
+        "by_currency_value": kpi.get("by_currency_value"),
+    }, phase)
+
+    # The rates used and their dates (§11.2 "FX": the rates used and their dates are stored).
+    used = kpi.get("fx_used") or []
+    ev.check(f"{prefix}.fx_used.pairs", scope,
+             sorted("/".join(sorted(_pair_key(f"{c}/{REPORTING}"))) for c in pe.rates),
+             sorted("/".join(sorted(_pair_key(u.get("pair", "")))) for u in used), phase)
+    for u in used:
+        base, _sep, quote = str(u.get("pair", "")).partition("/")
+        want_rate = O.fx_rate_at(ctx.fx_rows, base, quote, day)
+        ev.check(f"{prefix}.fx_used.rate", f"{scope} {u.get('pair')}",
+                 None if want_rate is None else want_rate[0], u.get("rate"), phase)
+        ev.check(f"{prefix}.fx_used.as_of", f"{scope} {u.get('pair')}",
+                 None if want_rate is None else want_rate[1].isoformat(), u.get("as_of"), phase)
+
+    notes = kpi.get("notes") or {}
+    ev.check(f"{prefix}.notes.missing_prices", scope, sorted(pe.missing_prices),
+             sorted(notes.get("missing_prices") or []), phase)
+    ev.check(f"{prefix}.notes.stale_prices", scope,
+             sorted(f"{s}@{d.isoformat()}" for s, d in pe.stale_prices.items()),
+             sorted(f"{p.get('symbol')}@{p.get('price_date')}"
+                    for p in notes.get("stale_prices") or []), phase)
+    ev.check(f"{prefix}.notes.missing_fx", scope, sorted(pe.missing_fx),
+             sorted(notes.get("missing_fx") or []), phase)
+    ev.check(f"{prefix}.notes.stale_fx", scope,
+             sorted(f"{'/'.join(sorted(_pair_key(f'{c}/{REPORTING}')))}@{d.isoformat()}"
+                    for c, (_r, d) in pe.rates.items()
+                    if (day - d).days > O.STALE_AFTER_DAYS),
+             sorted(f"{'/'.join(sorted(_pair_key(p.get('pair', ''))))}@{p.get('rate_date')}"
+                    for p in notes.get("stale_fx") or []), phase)
+    # The scheduler is off on this instance: no quote run, so no close is ever unconfirmed.
+    ev.check(f"{prefix}.notes.unconfirmed_closes", scope, [],
+             list(notes.get("unconfirmed_closes") or []), phase)
+    ev.check(f"{prefix}.notes.pending_positions", scope,
+             sorted("|".join(p) for p in pe.pending),
+             sorted(f"{p.get('account_id')}|{p.get('symbol')}|{p.get('kind')}"
+                    for p in notes.get("pending_positions") or []), phase)
+    ev.check(f"{prefix}.notes.options_value_excluded", f"{scope} ({start}..{day})",
+             ctx.options_excluded(start, day), bool(notes.get("options_value_excluded")),
+             phase)
+    ev.check(f"{prefix}.notes.options_past_expiry", scope, pe.options_past_expiry,
+             sorted(notes.get("options_past_expiry") or []), phase)
+    if served:
+        got_recv = notes.get("dividends_receivable")
+        ev.check(f"{prefix}.notes.dividends_receivable", scope,
+                 sorted(f"{a}|{s}|{x.isoformat()}|{p.isoformat()}|{_cv(n)}"
+                        for a, s, x, p, n in pe.receivable),
+                 None if got_recv is None else sorted(
+                     f"{r.get('account_id')}|{r.get('symbol')}|{r.get('ex_date')}|"
+                     f"{r.get('pay_date')}|{_cv(dec(r.get('net')))}" for r in got_recv),
+                 phase)
+
+    # The period's TWR (§11.2): I(D) / I(previous end) − 1 on the oracle's own index.
+    twr, why = ctx.twr(previous, day)
+    if why != "not_judged":
+        got_twr = kpi.get("period_twr")
+        if twr is None or twr == O.ZERO:
+            ev.check(f"{prefix}.period_twr", scope, twr, got_twr, phase)
+        else:
+            ev.check_rel(f"{prefix}.period_twr", scope, twr, got_twr, phase)
+        if why is not None:
+            _check_reason_word(ev, f"{prefix}.period_twr_reason", f"{scope} [{why}]",
+                               _TWR_REASON_WORDS[why], kpi.get("period_twr_reason"), phase)
+
+    # The period's activity lines (§11.3), keyed so the app's grouping folds onto them.
+    _check_activity(ev, prefix, scope, _oracle_activity(ctx.activity(start, day)),
+                    _fold_activity(row.get("activity") or {}), phase)
+
+    # The settled day D's trend figures (stocks only; a partial sum on an incomplete day).
+    want = ctx.trend(day)
+    if want is None:
+        ev.check(f"{prefix}.trend_unavailable", scope, True,
+                 bool(notes.get("trend_unavailable")), phase)
+        # With no trend point the flag states the KPI block's OWN completeness (W2-D): a
+        # blank figure, a missing price or rate, or a 待釐清 position.
+        ev.check(f"{prefix}.notes.incomplete", f"{scope} (no trend point)",
+                 pe.total_market_value is None or pe.total_return is None
+                 or bool(pe.missing_prices or pe.missing_fx or pe.pending),
+                 bool(notes.get("incomplete")), phase)
+        return
+    ev.check(f"{prefix}.net_invested", scope, want["net_invested"], kpi.get("net_invested"),
+             phase)
+    if want.get("refused_action"):
+        return
+    ev.check(f"{prefix}.notes.incomplete", scope, want["incomplete"],
+             bool(notes.get("incomplete")), phase)
+    if "total_value" in want:
+        ev.check(f"{prefix}.trend_total_value", scope, want["total_value"],
+                 kpi.get("trend_total_value"), phase)
+        ev.check(f"{prefix}.net_worth", scope, want["net_worth"], kpi.get("net_worth"), phase)
+
+
+def _check_year_against_months(ev, prefix: str, year_row: dict, month_rows: dict[str, dict],
+                               ctx: _Periods, phase: str) -> None:
+    """Spec §18 "Period closes" on the app's own rows: a CLOSED year's KPIs ≡ its December
+    row's, and for every FLOW line the year's activity ≡ Σ its months (balances are not
+    summed). Realized sums are quotients: ``check_rel`` (Σ in another grouping, association
+    only)."""
+    year = str(year_row.get("period"))
+    dec_row = month_rows.get(f"{year}-12")
+    scope = f"Y {year}"
+    if dec_row is not None and date(int(year), 12, 31) < ctx.today:
+        ykpi, mkpi = year_row.get("kpi") or {}, dec_row.get("kpi") or {}
+        for field_ in ("total_market_value", "total_return", "total_return_rate", "xirr",
+                       "xirr_window_days", "net_invested", "trend_total_value", "net_worth"):
+            ev.check(f"{prefix}.year_equals_december", f"{scope} {field_}", mkpi.get(field_),
+                     ykpi.get(field_), phase)
+    months = [r for p, r in month_rows.items() if p.startswith(f"{year}-")]
+    if not months:
+        return
+    summed: dict[str, dict] = {}
+    for m in months:
+        for group, lines in _fold_activity(m.get("activity") or {}).items():
+            for key, line in lines.items():
+                acc = summed.setdefault(group, {}).setdefault(key, {})
+                for field_, value in line.items():
+                    if isinstance(value, tuple):
+                        n, r = acc.get(field_, (O.ZERO, O.ZERO))
+                        acc[field_] = (n + value[0],
+                                       None if r is None or value[1] is None else r + value[1])
+                    else:
+                        acc[field_] = acc.get(field_, 0) + value
+    yearly = _fold_activity(year_row.get("activity") or {})
+    for group in sorted(summed):
+        ev.check(f"{prefix}.year_sum_of_months.keys", f"{scope} {group}",
+                 sorted(map(str, summed[group])), sorted(map(str, yearly.get(group, {}))), phase)
+        for key, line in summed[group].items():
+            for field_, value in line.items():
+                got = yearly.get(group, {}).get(key, {}).get(field_)
+                sc = f"{scope} {group} {key} {field_}"
+                if isinstance(value, tuple):
+                    ev.check_rel(f"{prefix}.year_sum_of_months", sc, value[0],
+                                 got[0] if isinstance(got, tuple) else None, phase)
+                else:
+                    ev.check(f"{prefix}.year_sum_of_months", sc, value, got, phase)
+
+
+def _check_period_positions(ev, prefix: str, scope: str, ctx: _Periods, day: date,
+                            holdings: list[dict], cash_rows: list[dict], phase: str) -> None:
+    """Holdings and cash at D (spec §11.3 "Holdings at D" / "cash at D") against the oracle's
+    book at D: every position (stocks AND options, tagged ``asset_type``), its costs, flags and
+    — when it has an honest value — the price used, its date, market value and unrealized;
+    every cash pool's end-of-day balance (booked dividends only, ⑪) and its reporting value."""
+    pe = ctx.at(day)
+    have = {(h.get("account_id"), h.get("symbol")): h for h in holdings}
+    want = {k: h for k, h in pe.res.holdings.items() if h.shares != O.ZERO}
+    ev.check(f"{prefix}.holdings.keyset", scope, sorted("|".join(k) for k in want),
+             sorted(f"{a}|{s}" for a, s in have), phase)
+    for key, h in sorted(want.items()):
+        a = have.get(key)
+        if a is None:
+            continue
+        sc = f"{scope} {key[0]}|{key[1]}"
+        ev.check(f"{prefix}.asset_type", sc, "option" if O.is_option(key[1]) else "stock",
+                 a.get("asset_type"), phase)
+        ev.check(f"{prefix}.quote_ccy", sc, h.quote_ccy, a.get("quote_ccy"), phase)
+        ev.check(f"{prefix}.shares", sc, h.shares, a.get("shares"), phase)
+        ev.check(f"{prefix}.original_cost_total", sc, h.original_total,
+                 a.get("original_cost_total"), phase)
+        ev.check(f"{prefix}.adjusted_cost_total", sc, h.adjusted_total,
+                 a.get("adjusted_cost_total"), phase)
+        flags = a.get("flags") or {}
+        if isinstance(flags, str):
+            flags = json.loads(flags or "{}")
+        for flag in ("oversold", "short_open", "unbookable_dividend", "unbookable_action"):
+            ev.check(f"{prefix}.flags.{flag}", sc, getattr(h, flag), bool(flags.get(flag)),
+                     phase)
+        if key in pe.unvalued:
+            continue
+        px = pe.prices.get(key[1])
+        if px is None:
+            ev.check(f"{prefix}.unpriced", sc, [None, None],
+                     [a.get("price"), a.get("market_value")], phase)
+            continue
+        ev.check(f"{prefix}.price", sc, px[0], a.get("price"), phase)
+        ev.check(f"{prefix}.price_as_of", sc, px[1].isoformat(), a.get("price_as_of"), phase)
+        ev.check(f"{prefix}.market_value", sc, px[0] * h.shares, a.get("market_value"), phase)
+        ev.check_rel(f"{prefix}.unrealized", sc, (px[0] - h.adjusted_avg) * h.shares,
+                     a.get("unrealized"), phase)
+    cash = {(c.get("account_id"), c.get("ccy")): c for c in cash_rows}
+    for pool in sorted(set(pe.res.cash) | set(cash)):
+        balance = pe.res.cash.get(pool, O.ZERO)
+        got = cash.get(pool)
+        sc = f"{scope} {pool[0]}|{pool[1]}"
+        ev.check(f"{prefix}.cash.balance", sc, balance,
+                 dec(got.get("balance")) if got is not None else O.ZERO, phase)
+        if got is None:
+            continue
+        rate = O.fx_rate_at(ctx.fx_rows, pool[1], REPORTING, day)
+        # A zero pool is worth zero in any currency — it needs no rate.
+        want_rep = (O.ZERO if balance == O.ZERO else None if rate is None
+                    else balance * rate[0])
+        ev.check(f"{prefix}.cash.reporting_value", sc, want_rep, got.get("reporting_value"),
+                 phase)
+        if pool[1] != REPORTING and rate is not None:
+            ev.check(f"{prefix}.cash.fx", sc, [rate[0], rate[1].isoformat()],
+                     [dec(got.get("fx_rate")) if got.get("fx_rate") is not None else None,
+                      got.get("fx_as_of")], phase)
+
+
+def _check_period_detail(ev, api, period: str, ctx: _Periods, day: date, phase: str) -> None:
+    """``/api/settlement/periods/M/{period}``: holdings and cash at D against the oracle's
+    book at D (the route's one caller — the 月度成績 page reads the list only)."""
+    scope = f"M {period}"
+    r = api.get(f"/api/settlement/periods/M/{period}")
+    ev.check("period_detail.route", scope, 200, r.status_code, phase)
+    if r.status_code != 200:
+        return
+    body = r.json()
+    _check_period_positions(ev, "period_detail", scope, ctx, day, body.get("holdings") or [],
+                            body.get("cash") or [], phase)
+
+
+def _past_months(ctx: _Periods) -> list[date]:
+    if ctx.first is None:
+        return []
+    return O.month_ends(ctx.first, ctx.today.replace(day=1) - timedelta(days=1))
+
+
+def _reconcile_store_periods(ev, db_path, ctx: _Periods, phase: str) -> None:
+    """The PUBLISHED generation's closes, read straight from ``settled_period`` /
+    ``settled_period_holding`` / ``settled_period_cash`` (``store_period.*``), against the
+    oracle — package D's computation pinned on its own, whatever serves it. Runs on every
+    build (no route needed); the served rows (``period.*``, package G) are checked on top.
+    Read-only, on the harness's own phase-1 database, after the settlement published."""
+    if ctx.first is None:
+        return
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        meta = conn.execute("SELECT generation FROM settle_meta WHERE id = 1").fetchone()
+        if meta is None or not meta["generation"]:
+            return
+        gen = int(meta["generation"])
+        rows = [dict(r) for r in conn.execute(
+            "SELECT kind, period, end_day, kpi, activity FROM settled_period "
+            "WHERE generation = ? ORDER BY kind, period", (gen,))]
+        holdings = [dict(r) for r in conn.execute(
+            "SELECT * FROM settled_period_holding WHERE generation = ?", (gen,))]
+        cash = [dict(r) for r in conn.execute(
+            "SELECT * FROM settled_period_cash WHERE generation = ?", (gen,))]
+    finally:
+        conn.close()
+    past = _past_months(ctx)
+    ev.check("store_period.months", f"generation {gen}", [f"{d:%Y-%m}" for d in past],
+             [r["period"] for r in rows if r["kind"] == "M"], phase)
+    month_rows: dict[str, dict] = {}
+    for r in rows:
+        r["kpi"] = json.loads(r["kpi"] or "{}")
+        r["activity"] = json.loads(r["activity"] or "{}")
+        if r["kind"] == "M":
+            month_rows[r["period"]] = r
+    for d in past:
+        row = month_rows.get(f"{d:%Y-%m}")
+        if row is None:
+            continue
+        _check_period_row(ev, "store_period", "M", row, ctx, None, phase, served=False)
+        _check_period_positions(
+            ev, "store_period.position", f"M {row['period']}", ctx, d,
+            [h for h in holdings if h["kind"] == "M" and h["period"] == row["period"]],
+            [c for c in cash if c["kind"] == "M" and c["period"] == row["period"]], phase)
+    years = [r for r in rows if r["kind"] == "Y"]
+    ev.check("store_period.years", f"generation {gen}",
+             [str(y) for y in range(ctx.first.year, ctx.today.year)],
+             [r["period"] for r in years], phase)
+    for row in years:
+        _check_period_row(ev, "store_period", "Y", row, ctx, None, phase, served=False)
+        _check_year_against_months(ev, "store_period", row, month_rows, ctx, phase)
+
+
+def _reconcile_periods(ev, api, ctx: _Periods, phase: str) -> None:
+    """Every month and year close, and the 月度成績 rows, against the oracle (spec §11.2,
+    §11.4, §15; package G's routes). Runs on a SETTLED store, so every past close is the
+    store's (``source = store``), none is stale, and each equals the oracle as at its own end
+    day — the "independent 'as at D' computation" §18 asks the stress audit for."""
+    if ctx.first is None:
+        return
+    st = _status(api)
+    live_from = _d(st.get("live_from"))
+    today = ctx.today
+    first_this = today.replace(day=1)
+    past = _past_months(ctx)
+
+    code, rows, total = _get_rows(api, "/api/settlement/periods", kind="M")
+    ev.check("periods.route", "M", 200, code, phase)
+    month_rows: dict[str, dict] = {}
+    if rows is not None:
+        periods = [str(r.get("period")) for r in rows]
+        ev.check("periods.newest_first", "M", sorted(periods, reverse=True), periods, phase)
+        ev.check("periods.months", "M past months",
+                 [f"{d:%Y-%m}" for d in reversed(past)],
+                 [p for r, p in zip(rows, periods, strict=True)
+                  if (_d(r.get("end_day")) or today) < first_this], phase)
+        ev.check("periods.total_count", "M", True, (total or 0) >= len(past), phase)
+        month_rows = {str(r.get("period")): r for r in rows}
+        for d in past:
+            row = month_rows.get(f"{d:%Y-%m}")
+            if row is None:
+                continue
+            _check_period_row(ev, "period", "M", row, ctx, live_from, phase)
+            _check_period_detail(ev, api, f"{d:%Y-%m}", ctx, d, phase)
+        current = month_rows.get(f"{today:%Y-%m}")
+        if current is not None:
+            _check_period_row(ev, "period", "M", current, ctx, live_from, phase)
+
+    code, rows, _total = _get_rows(api, "/api/settlement/periods", kind="Y")
+    ev.check("periods.route", "Y", 200, code, phase)
+    ev.check("periods.years", "Y (newest first)",
+             [str(y) for y in range(today.year, ctx.first.year - 1, -1)],
+             [str(r.get("period")) for r in rows or []], phase)
+    for row in rows or []:
+        _check_period_row(ev, "period", "Y", row, ctx, live_from, phase)
+        _check_year_against_months(ev, "period", row, month_rows, ctx, phase)
+
+    _reconcile_snapshots(ev, api, ctx, past, phase)
+
+
+def _reconcile_snapshots(ev, api, ctx: _Periods, past: list[date], phase: str) -> None:
+    """``GET /api/snapshots`` (月度成績, PERF-D7, spec §11.4): its row fields unchanged, the
+    current month from the live KPIs (``as_of`` = now), every past month the close at its end
+    day D (``as_of`` = D) — so each row equals the oracle as at D, its TWR included."""
+    today = ctx.today
+    code, rows, _total = _get_rows(api, "/api/snapshots")
+    ev.check("snapshots.route", "rows", 200, code, phase)
+    if rows is None:
+        return
+    months = [str(r.get("month")) for r in rows]
+    want = [f"{today:%Y-%m}"] + [f"{d:%Y-%m}" for d in reversed(past)]
+    ev.check("snapshots.months", "rows (newest first)", want, months[:len(want)], phase)
+    first_this = today.replace(day=1)
+    for row in rows:
+        month = str(row.get("month"))
+        end = O.month_end(date.fromisoformat(f"{month}-01"))
+        if ctx.first is None or end < ctx.first:
+            continue
+        past_month = end < first_this
+        _start, day, previous = _period_bounds("M", month, ctx)
+        ev.check("snapshot.as_of", month, day.isoformat(), str(row.get("as_of"))[:10], phase)
+        ev.check("snapshot.reporting_ccy", month, REPORTING, row.get("reporting_ccy"), phase)
+        _check_kpi_values(ev, "snapshot", month, ctx.at(day), {
+            "total_market_value": row.get("total_value"),
+            "total_return": row.get("total_return"),
+            "total_return_rate": row.get("total_return_rate"),
+            "xirr": row.get("xirr"),
+            "xirr_reason": row.get("xirr_reason"),
+            "by_currency_value": row.get("by_currency"),
+        }, phase)
+        twr, why = ctx.twr(previous, day)
+        if why != "not_judged":
+            got_twr = row.get("period_twr")
+            if twr is None or twr == O.ZERO:
+                ev.check("snapshot.period_twr", month, twr, got_twr, phase)
+            else:
+                ev.check_rel("snapshot.period_twr", month, twr, got_twr, phase)
+            if why is not None:
+                ev.check("snapshot.period_twr_reason", f"{month} [{why}]", True,
+                         bool(row.get("period_twr_reason")), phase)
+        if past_month:
+            ev.check("snapshot.stale", month, False, bool(row.get("stale")), phase)
+            # 暫定 only when D is after final_through — every day qualifies with the
+            # scheduler off, so no past month of this instance is provisional (§11.4).
+            ev.check("snapshot.provisional", month, False, bool(row.get("provisional")), phase)
+
+
+def _strict_refusal(res: O.OracleResult) -> bool:
+    """Whether the tax package's STRICT replay refuses this ledger (§11.3: it raises on every
+    refusal and answers 422 — so there is no package to tie to): a refused dividend, a refused
+    close, an action it cannot apply, or a 賣超."""
+    return bool(res.refused_dividends or res.refused_closes or res.action_refusals
+                or res.oversold_keys)
+
+
+def _reconcile_tax_tieout(ev, api, db_path, ctx: _Periods, phase: str) -> None:
+    """Spec §11.3 / §18: the sheet-by-sheet tie-out with the tax package, for every year of
+    the ledger — ``realized_gains_<year>.csv`` ≡ the realized TRADE lines (the adjusted and the
+    original column), ``dividends_<year>.csv`` ≡ the booked CASH / NET / DRIP dividends,
+    ``fx_realized_<year>.csv`` ≡ realized FX — each against the oracle's own year activity;
+    on a ledger the strict replay refuses the package answers 422 instead (no package exists
+    to tie to)."""
+    if ctx.first is None:
+        return
+    strict = O.replay(O.facts_valued_as_of(ctx.raw, ctx.today))
+    for year in range(ctx.first.year, ctx.today.year + 1):
+        r = api.post("/api/export/tax-package", {"year": year})
+        scope = str(year)
+        if _strict_refusal(strict):
+            ev.check("tax.strict_replay_refuses", scope, 422, r.status_code, phase)
+            continue
+        ev.check("tax.package", scope, 200, r.status_code, phase)
+        if r.status_code != 200:
+            continue
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            sheets = {n: _parse_csv(z.read(n).decode("utf-8-sig")) for n in z.namelist()
+                      if n.endswith(".csv")}
+        start = max(ctx.first, date(year, 1, 1))
+        act = ctx.activity(start, min(date(year, 12, 31), ctx.today))
+        want_real: dict[str, list[Decimal]] = {}
+        for (kind, _atype, ccy), line in act.realized.items():
+            if kind != "trade":
+                continue
+            acc = want_real.setdefault(ccy, [O.ZERO, O.ZERO, 0])
+            acc[0] += line["realized"][0]
+            acc[1] += line["capital_gain"][0]
+            acc[2] += int(line["rows"])
+        have_real: dict[str, list[Decimal]] = {}
+        for row in sheets.get(f"realized_gains_{year}.csv", []):
+            acc = have_real.setdefault(row["quote_ccy"], [O.ZERO, O.ZERO, 0])
+            acc[0] += dec(row["realized_adjusted"])
+            acc[1] += dec(row["realized_original"])
+            acc[2] += 1
+        ev.check("tax.realized.currencies", scope, sorted(want_real), sorted(have_real), phase)
+        for ccy, (adj, orig, n) in sorted(want_real.items()):
+            got = have_real.get(ccy, [None, None, None])
+            ev.check_rel("tax.realized_adjusted", f"{scope} {ccy}", adj, got[0], phase)
+            ev.check_rel("tax.realized_original", f"{scope} {ccy}", orig, got[1], phase)
+            ev.check("tax.realized_rows", f"{scope} {ccy}", n, got[2], phase)
+        want_div: dict[str, list[Decimal]] = {}
+        for (dtype, _acct, ccy), line in act.dividends.items():
+            if dtype == "STOCK":
+                continue
+            acc = want_div.setdefault(ccy, [O.ZERO, O.ZERO, O.ZERO])
+            for i, f in enumerate(("gross", "withholding", "net")):
+                acc[i] += line[f][0]
+        have_div: dict[str, list[Decimal]] = {}
+        for row in sheets.get(f"dividends_{year}.csv", []):
+            if str(row["type"]).upper() == "STOCK":
+                continue
+            acc = have_div.setdefault(row["ccy"], [O.ZERO, O.ZERO, O.ZERO])
+            for i, f in enumerate(("gross", "withholding", "net")):
+                acc[i] += dec(row[f] or "0")
+        ev.check("tax.dividends.currencies", scope, sorted(want_div), sorted(have_div), phase)
+        for ccy, sums in sorted(want_div.items()):
+            ev.check("tax.dividends", f"{scope} {ccy} gross/withholding/net", sums,
+                     have_div.get(ccy), phase)
+        want_fx: dict[str, Decimal] = {}
+        for (_acct, home), line in act.fx_realized.items():
+            want_fx[home] = want_fx.get(home, O.ZERO) + line["realized"][0]
+        have_fx: dict[str, Decimal] = {}
+        for row in sheets.get(f"fx_realized_{year}.csv", []):
+            have_fx[row["home_ccy"]] = have_fx.get(row["home_ccy"], O.ZERO) + dec(row["realized"])
+        ev.check("tax.fx_realized.currencies", scope, sorted(want_fx), sorted(have_fx), phase)
+        for ccy, amount in sorted(want_fx.items()):
+            ev.check_rel("tax.fx_realized", f"{scope} {ccy}", amount, have_fx.get(ccy), phase)
+
+
+def check_live_window_row(ev: C.Evidence, api: C.Api, db_path, label: str,
+                          day: date) -> None:
+    """A change dated inside the live window (on or after ``W``) — WITHOUT a run (spec §10
+    step 3 "dirty inside the live window", §11.4 "a correction dated last month changes last
+    month's row at once (a test pins it)"):
+
+    * the status: ``dirty_from`` = the change's day, NO stale range, ``live_from`` =
+      ``min(S + 1, dirty_from)``, no prompt;
+    * (read path) last month's close is served LIVE (``source = live``, not stale) and already
+      equals the oracle over the CHANGED ledger, as does its 月度成績 row.
+    """
+    phase = f"phase1:{label}"
+    st = _status(api)
+    settled = _d(st.get("settled_through"))
+    ev.check("live_window.dirty_from", label, day.isoformat(), st.get("dirty_from"), phase)
+    ev.check("live_window.nothing_stale", label, [None, None],
+             [st.get("stale_from"), st.get("stale_to")], phase)
+    if settled is not None:
+        ev.check("live_window.live_from", label,
+                 min(settled + timedelta(days=1), day).isoformat(), st.get("live_from"), phase)
+    ev.check("live_window.no_prompt", label, False, bool(st.get("needs_prompt")), phase)
+    if not READ_PATH:
+        return
+    raw = C.load_facts_from_db(db_path)
+    today = CHECKPOINT.today if CHECKPOINT.today != date.min else server_today()
+    closes, fx_rows = fixture_closes(raw), fixture_fx_rows()
+    ctx = _Periods(raw, closes, fx_rows, today,
+                   _TrendOracle(O.facts_valued_as_of(raw, today), closes, fx_rows, today))
+    end = O.month_end(day)
+    period = f"{end:%Y-%m}"
+    code, rows, _total = _get_rows(api, "/api/settlement/periods", kind="M")
+    ev.check("live_window.periods_route", label, 200, code, phase)
+    row = next((r for r in rows or [] if str(r.get("period")) == period), None)
+    ev.check("live_window.row_present", f"{label} M {period}", True, row is not None, phase)
+    if row is not None:
+        ev.check("live_window.row_source", f"{label} M {period}", "live", row.get("source"),
+                 phase)
+        ev.check("live_window.row_not_stale", f"{label} M {period}", False,
+                 bool(row.get("stale")), phase)
+        kpi = row.get("kpi") or {}
+        _check_kpi_values(ev, "live_window.period", f"{label} M {period}", ctx.at(end), {
+            "total_market_value": kpi.get("total_market_value"),
+            "total_return": kpi.get("total_return"),
+            "total_return_rate": kpi.get("total_return_rate"),
+            "xirr": kpi.get("xirr"), "xirr_window_days": kpi.get("xirr_window_days"),
+            "by_currency_value": kpi.get("by_currency_value"),
+        }, phase)
+    code, rows, _total = _get_rows(api, "/api/snapshots")
+    snap = next((r for r in rows or [] if str(r.get("month")) == period), None)
+    ev.check("live_window.snapshot_present", f"{label} {period}", True, snap is not None, phase)
+    if snap is not None:
+        _check_kpi_values(ev, "live_window.snapshot", f"{label} {period}", ctx.at(end), {
+            "total_market_value": snap.get("total_value"),
+            "total_return": snap.get("total_return"),
+            "total_return_rate": snap.get("total_return_rate"),
+            "xirr": snap.get("xirr"),
+            "by_currency_value": snap.get("by_currency"),
+        }, phase)
+
+
+def period_kpi_of(api: C.Api, kind: str, period: str) -> dict | None:
+    """One close's KPI block from the list route (``None`` when absent) — for the scenario's
+    before / after literals."""
+    _code, rows, _total = _get_rows(api, "/api/settlement/periods", kind=kind)
+    row = next((r for r in rows or [] if str(r.get("period")) == period), None)
+    return None if row is None else (row.get("kpi") or {})
+
+
+def period_holding_of(api: C.Api, period: str, account_id: str, symbol: str) -> dict | None:
+    """One position of a month close (the detail route)."""
+    r = api.get(f"/api/settlement/periods/M/{period}")
+    if r.status_code != 200:
+        return None
+    return next((h for h in r.json().get("holdings") or []
+                 if h.get("account_id") == account_id and h.get("symbol") == symbol), None)
 
 
 def anchor(ev: C.Evidence, api: C.Api, check: str, account_id: str, symbol: str,
@@ -1038,7 +2575,7 @@ def _reconcile_cash_statement(ev, facts: O.Facts, res, app_bal, phase):
 # (account, symbol) pairs this scenario oversells ON PURPOSE with ack=True (run_phase1
 # proves the guard blocks it unacked first). A user-acknowledged oversell is a recorded
 # decision, not a control failure — see domain-ledger.md.
-ACKED_OVERSELLS = {("tw_broker", "0050")}
+ACKED_OVERSELLS = {("tw_broker", "0050"), ("tw_broker", "OVF")}
 
 
 def _reconcile_integrity(ev, res, facts, phase):
@@ -1142,7 +2679,7 @@ def _reconcile_fx_unrealized(ev, res, kpis, facts, prices, sp, phase):
                  kpis.get("fx_unrealized"), phase)
 
 
-def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
+def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase, closes, trend_oracle):
     kpis = dash["kpis"]
     realized_total = O.ZERO
     for ccy, amt in res.realized_by_ccy.items():
@@ -1165,7 +2702,14 @@ def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
     for ccy in set(res.realized_by_ccy) | set(unreal):
         part = res.realized_by_ccy.get(ccy, O.ZERO) + unreal.get(ccy, O.ZERO)
         tr += part if ccy == REPORTING else part * sp.rate(ccy, REPORTING)
-    ev.check("kpi.realized_total", "TWD", realized_total, kpis.get("realized_total"), phase)
+    # check_rel, not check (2026-10-19, PERF wave 3): the TWD realized total sums rows that
+    # carry 28-digit quotients (the 2609 cover, the 1/3 ratio sale), and a sum of those rounds
+    # in the 28th digit by ADDITION ORDER. It agreed exactly until the month-end block added
+    # three more TWD realized rows; from then the two orders landed 1 ULP apart (…396 vs
+    # …397) while every row compared exactly in `realized.*`. Association, not money — the
+    # rule `Evidence.check_rel` states.
+    ev.check_rel("kpi.realized_total", "TWD", realized_total, kpis.get("realized_total"),
+                 phase)
     ev.check("kpi.unrealized_total", "TWD", unreal_total, kpis.get("unrealized_total"), phase)
     ev.check("kpi.total_market_value", "TWD", mv_total, kpis.get("total_market_value"), phase)
     ev.check("kpi.total_return", "TWD", tr, kpis.get("total_return"), phase)
@@ -1183,7 +2727,13 @@ def _reconcile_kpis(ev, res, dash, facts, prices, sp, phase):
     as_of = date.fromisoformat(str(dash.get("as_of", ASOF.isoformat()))[:10])
     # Options spec §4.4: "XIRR and B are withheld whenever Book.refused_closes is non-empty —
     # the record, like orphan_dividends". A RECORD, so it holds on a flat carrier too.
-    b_withheld = _day_incomplete(res, as_of) or bool(res.refused_closes)
+    # B also needs a trend at all (every flow converted at its own date's rate), and it is a
+    # 待釐清 RECORD figure like XIRR: a 賣超 the book recorded — netted back to zero included
+    # (CR-11) — or an action it could not apply withholds it as well.
+    b_withheld = (not trend_oracle.available
+                  or _day_incomplete(res, as_of, closes, facts.actions)
+                  or bool(res.refused_closes) or bool(res.oversold_keys)
+                  or bool(res.action_refusals))
     ev.check("kpi.fx_complete_withheld", "TWD", b_withheld,
              kpis.get("total_return_fx_complete") is None, phase)
     ev.check("kpi.trading_financing_cost", "TWD",
@@ -1214,6 +2764,15 @@ def _reconcile_xirr(ev, res, dash, facts, prices, sp, phase):
     def fx_now(base, quote):
         return sp.rate(base, quote)
 
+    if res.oversold_keys:
+        # CR-01 / CR-11: a 賣超 the book recorded — a FLAT one included (its basis is gone for
+        # good, and the book keeps it) — withholds XIRR, and the reason names each position.
+        ev.check("xirr.withheld_for_oversold", "TWD", None, app_xirr, phase)
+        reason = (dash.get("freshness") or {}).get("xirr_unavailable_reason") or ""
+        for acct, sym in sorted(res.oversold_keys):
+            ev.check("xirr.oversold_reason_names_row", f"{acct}/{sym}", True,
+                     sym in reason and acct in reason, phase)
+        return
     if res.orphan_dividends:
         # CR-02 (domain-ledger.md): a dividend with no position is "named, and withholds
         # XIRR" — the ledger is missing the position that earned it. The oracle's OWN replay

@@ -80,19 +80,41 @@ def _held(conn: sqlite3.Connection, symbol: str, now: datetime,
     return holds_position(conn, symbol, today=now.date(), index=actions)
 
 
-def _board_wire(conn: sqlite3.Connection, inst: Instrument) -> str | None:
-    """TW + board_status='unresolved' -> null; otherwise the stored board string."""
-    row = conn.execute("SELECT board_status FROM instruments WHERE symbol=?",
-                       (inst.symbol,)).fetchone()
-    status = row["board_status"] if row is not None else "resolved"
+#: ``board_status`` per symbol, read once for a whole listing (``_board_statuses``).
+BoardStatuses = dict[str, str | None]
+
+
+def _board_statuses(conn: sqlite3.Connection) -> BoardStatuses:
+    """Every instrument's ``board_status`` in ONE read — the list route asked once per row
+    (PERF plan §7.2: on the demo corpus 10 of the route's 133 statements, one per
+    instrument). ``instruments`` is ``data_ingestion``'s table, read here by direct SQL as
+    :func:`_board_wire` always did."""
+    return {str(r["symbol"]): r["board_status"]
+            for r in conn.execute("SELECT symbol, board_status FROM instruments")}
+
+
+def _board_wire(conn: sqlite3.Connection, inst: Instrument,
+                statuses: BoardStatuses | None = None) -> str | None:
+    """TW + board_status='unresolved' -> null; otherwise the stored board string.
+
+    *statuses* is :func:`_board_statuses`' one read for a listing; without it the row's own
+    status is read (a single-row answer)."""
+    if statuses is not None:
+        status = statuses.get(inst.symbol, "resolved")
+    else:
+        row = conn.execute("SELECT board_status FROM instruments WHERE symbol=?",
+                           (inst.symbol,)).fetchone()
+        status = row["board_status"] if row is not None else "resolved"
     if inst.market.value == "TW" and status == "unresolved":
         return None
     return inst.board
 
 
 def _element(conn: sqlite3.Connection, inst: Instrument,
-             now: datetime, *, actions: ActionIndex) -> dict[str, Any]:
-    """One watchlist/registry row. ``actions`` is built ONCE by the caller (trap #21).
+             now: datetime, *, actions: ActionIndex,
+             statuses: BoardStatuses | None = None) -> dict[str, Any]:
+    """One watchlist/registry row. ``actions`` (and, for a listing, ``statuses``) are built
+    ONCE by the caller (trap #21).
 
     §5.1(d) / W6c: ``chg_pct`` divides two closes dated one session apart, so a split
     between them reports the ratio as a day move (a 7-for-1 as −86% in the watchlist). Both
@@ -121,7 +143,7 @@ def _element(conn: sqlite3.Connection, inst: Instrument,
         # Owner 2026-09-30, item 8: the other names a card may use for this instrument.
         "aliases": list(inst.aliases),
         "market": inst.market.value,
-        "board": _board_wire(conn, inst), "sector": inst.sector,
+        "board": _board_wire(conn, inst, statuses), "sector": inst.sector,
         "industry": inst.industry,  # R6: GICS industry passthrough (null until next-wave fill)
         "ccy": inst.quote_ccy.value, "held": _held(conn, inst.symbol, now, actions=actions),
         "last": last, "chg_pct": chg_pct,
@@ -144,14 +166,15 @@ def _element(conn: sqlite3.Connection, inst: Instrument,
 @router.get("/instruments")
 def list_all(
     include_options: bool = Query(False),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """The watchlist / registry list. Option contracts are hidden unless ``include_options=1``
     (options spec §6.2, 「顯示選擇權合約」): a contract is created by the trade door and lives in
     the 選擇權 section, so by default the watchlist stays the list of stocks it always was."""
     actions = load_action_index(conn)  # ONE per request, outside the loop (trap #21)
-    items = [_element(conn, inst, now, actions=actions)
+    statuses = _board_statuses(conn)  # likewise: one read, not one per row (PERF §7.2)
+    items = [_element(conn, inst, now, actions=actions, statuses=statuses)
              for inst in list_instruments(conn)
              if include_options or not inst.is_option]
     return {"as_of": now.isoformat(), "list": items}
@@ -179,7 +202,7 @@ def probe(body: ProbeBody) -> dict[str, Any]:
 def lookup(
     symbol: str = Query(...),
     market: Market = Query(...),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """FU-D23 fast identification for the quick-add dialog — name + suggested sector +
@@ -326,7 +349,7 @@ class AiInstrumentResolveReply(BaseModel):
 @router.post("/instruments/ai-resolve")
 def ai_resolve(
     body: AiResolveBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """Unified AI instrument-resolve (R6-B, 2026-07-19): ONE LLM call → local exchange code +
@@ -564,7 +587,7 @@ def _apply_extras(
 def register(
     body: RegisterBody,
     background_tasks: BackgroundTasks,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Classic (detail-form) registration: registers even when no quote is found.
@@ -656,7 +679,7 @@ _QUICK_BOARD_LABEL = {"TWSE": "TWSE 上市", "TPEx": "TPEx 上櫃", ".KL": "馬�
 @router.post("/instruments/quick", status_code=201)
 def quick(
     body: QuickBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """One-step add (2026-07-02): symbol -> probe + real quote + name + history.
@@ -690,7 +713,7 @@ def quick(
 def update(
     symbol: str,
     body: UpdateBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     existing = get_instrument(conn, symbol)
@@ -758,7 +781,7 @@ def archive(
     symbol: str,
     body: ArchiveBody,
     background_tasks: BackgroundTasks,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Set / clear a symbol's 封存 (stop-tracking) flag (FU-D13; restore backfill FU-D18).
@@ -787,7 +810,7 @@ def archive(
 @router.delete("/instruments/{symbol}")
 def remove(
     symbol: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """SOFT-delete (archive) any non-held symbol — accumulative watchlist (FU-D18).
@@ -827,7 +850,7 @@ _HAS_HISTORY_MSG = (
 @router.post("/instruments/{symbol}/purge")
 def purge(
     symbol: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """HARD-delete (永久移除) a never-traded watch symbol + all its personal artifacts (FU-D32).

@@ -130,7 +130,8 @@ class Overlay(NamedTuple):
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """Create the overlay table if absent (idempotent). Called by the WRITE paths only."""
+    """Create the overlay table if absent (idempotent): at boot (``api/app.py``, so no CREATE
+    moves ``schema_version`` after the settlement store recorded it), and by the write paths."""
     conn.execute(_DDL)
     conn.commit()
 

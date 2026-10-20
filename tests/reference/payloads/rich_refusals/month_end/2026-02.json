@@ -1,0 +1,770 @@
+{
+ "as_of": "2026-02-28T23:59:00+08:00",
+ "reporting_currency": "USD",
+ "kpis": {
+  "reporting_currency": "USD",
+  "total_market_value": "60787.63183626257528423364072",
+  "total_return": "8602.505432732838260314699309",
+  "total_return_rate": "0.1453472016714971220202459588",
+  "realized_total": "787.5222291797119599248591109",
+  "unrealized_total": "7814.983203553126300389840198",
+  "total_return_fx_complete": null,
+  "principal_fx_effect": null,
+  "trading_financing_cost": null,
+  "fx_complete_reason": "帳本中有賣超部位待釐清，含匯兌總損益暫不計算（不以較早日期替代，否則與上方資產損益不同日，兩者的差額會失去意義）",
+  "xirr": null,
+  "xirr_window_days": null,
+  "fx_realized": "0.00000000000000000000000000000",
+  "fx_unrealized": "5.271960366043798772095425018"
+ },
+ "holdings": [
+  {
+   "account_id": "tw_broker",
+   "account_name": "{account:tw_broker}",
+   "symbol": "2330",
+   "name": "2330 Corp",
+   "market": "TW",
+   "sector": "Tech",
+   "board": "TWSE",
+   "quote_ccy": "TWD",
+   "shares": "2700",
+   "original_avg": "468.573",
+   "adjusted_avg": "464.073",
+   "original_cost_total": "1265147.1",
+   "adjusted_cost_total": "1252997.1",
+   "dividend_portion": "12150.0",
+   "payback_ratio": "0.009603626329301944414210806000",
+   "market_price": "553.5",
+   "market_value": "1494450.0",
+   "unrealized_pnl": "241452.900",
+   "capital_gain": "229302.900",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "0.7671931343212653955019838974",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "0.1908496648334411073621399440"
+  },
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "AAPL",
+   "name": "AAPL Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "13",
+   "original_avg": "200.7946153846153846153846154",
+   "adjusted_avg": "200.7946153846153846153846154",
+   "original_cost_total": "2610.33",
+   "adjusted_cost_total": "2610.33",
+   "dividend_portion": "0.00",
+   "payback_ratio": "0",
+   "market_price": "210.33",
+   "market_value": "2734.29",
+   "unrealized_pnl": "123.9599999999999999999999998",
+   "capital_gain": "123.9599999999999999999999998",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "0.04483351652907141135471363943",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "0.04748824861224442886531587952"
+  },
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "OLDCO",
+   "name": "OLDCO Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "100",
+   "original_avg": "30.06",
+   "adjusted_avg": "30.06",
+   "original_cost_total": "3006.00",
+   "adjusted_cost_total": "3006.00",
+   "dividend_portion": "0.00",
+   "payback_ratio": "0",
+   "market_price": "30.05",
+   "market_value": "3005.00",
+   "unrealized_pnl": "-1.00",
+   "capital_gain": "-1.00",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "0.04927228537201964353485346708",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "-0.0003326679973386560212907518297"
+  },
+  {
+   "account_id": "moomoo_my",
+   "account_name": "{account:moomoo_my}",
+   "symbol": "1155",
+   "name": "1155 Corp",
+   "market": "MY",
+   "sector": "Tech",
+   "board": ".KL",
+   "quote_ccy": "MYR",
+   "shares": "300",
+   "original_avg": "9.997833333333333333333333333",
+   "adjusted_avg": "9.997833333333333333333333333",
+   "original_cost_total": "2999.350",
+   "adjusted_cost_total": "2999.350",
+   "dividend_portion": "0.000",
+   "payback_ratio": "0",
+   "market_price": "9.987",
+   "market_value": "2996.100",
+   "unrealized_pnl": "-3.249999999999999999999999900",
+   "capital_gain": "-3.249999999999999999999999900",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "0.01113471308797124571730513157",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "-0.001083568106423058329304682648"
+  },
+  {
+   "account_id": "moomoo_my",
+   "account_name": "{account:moomoo_my}",
+   "symbol": "XYZ",
+   "name": "XYZ Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "100",
+   "original_avg": "50.12",
+   "adjusted_avg": "50.12",
+   "original_cost_total": "5012.00",
+   "adjusted_cost_total": "5012.00",
+   "dividend_portion": "0.00",
+   "payback_ratio": "0",
+   "market_price": "51.4",
+   "market_value": "5140.0",
+   "unrealized_pnl": "128.00",
+   "capital_gain": "128.00",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "0.08427938329856271805961624651",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "0.02553870710295291300877893057"
+  },
+  {
+   "account_id": "tw_broker",
+   "account_name": "{account:tw_broker}",
+   "symbol": "0056",
+   "name": "0056 Corp",
+   "market": "TW",
+   "sector": "Tech",
+   "board": "TWSE",
+   "quote_ccy": "TWD",
+   "shares": "3333",
+   "original_avg": "35.19951995199519951995199520",
+   "adjusted_avg": "35.19951995199519951995199520",
+   "original_cost_total": "117320",
+   "adjusted_cost_total": "117320",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": "35.15",
+   "market_value": "117154.95",
+   "unrealized_pnl": "-165.0500000000000000000000016",
+   "capital_gain": "-165.0500000000000000000000016",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "0.06014284405082212944345086714",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "-0.001406836004091374019774974443"
+  },
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "NOPX",
+   "name": "NOPX Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "7",
+   "original_avg": "12.48285714285714285714285714",
+   "adjusted_avg": "12.48285714285714285714285714",
+   "original_cost_total": "87.38",
+   "adjusted_cost_total": "87.38",
+   "dividend_portion": "0.00",
+   "payback_ratio": "0",
+   "market_price": null,
+   "market_value": null,
+   "unrealized_pnl": null,
+   "capital_gain": null,
+   "price_stale": true,
+   "price_as_of": null,
+   "weight": null,
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": null
+  },
+  {
+   "account_id": "moomoo_my",
+   "account_name": "{account:moomoo_my}",
+   "symbol": "AAPL",
+   "name": "AAPL Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "-5",
+   "original_avg": "-0",
+   "adjusted_avg": "-0",
+   "original_cost_total": "0",
+   "adjusted_cost_total": "0",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": "210.33",
+   "market_value": null,
+   "unrealized_pnl": null,
+   "capital_gain": null,
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": null,
+   "oversold": true,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": null
+  },
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "XYZ",
+   "name": "XYZ Corp",
+   "market": "US",
+   "sector": "Tech",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "-20",
+   "original_avg": "51.95",
+   "adjusted_avg": "51.95",
+   "original_cost_total": "-1039.00",
+   "adjusted_cost_total": "-1039.00",
+   "dividend_portion": "0.00",
+   "payback_ratio": "0",
+   "market_price": "51.4",
+   "market_value": "-1028.0",
+   "unrealized_pnl": "11.00",
+   "capital_gain": "11.00",
+   "price_stale": false,
+   "price_as_of": "2026-02-27",
+   "weight": "-0.01685587665971254361192324930",
+   "oversold": false,
+   "short_open": true,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "0.01058710298363811357074109721"
+  }
+ ],
+ "holdings_subtotals": [
+  {
+   "account_id": null,
+   "market": null,
+   "total_market_value": "60987.63183626257528423364072",
+   "unrealized_total": "7815.633203553126300389840198"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": null,
+   "total_market_value": "50457.26205385097056981840952",
+   "unrealized_total": "7554.409830932999373825923607"
+  },
+  {
+   "account_id": "schwab",
+   "market": null,
+   "total_market_value": "4711.29",
+   "unrealized_total": "133.9599999999999999999999998"
+  },
+  {
+   "account_id": "moomoo_my",
+   "market": null,
+   "total_market_value": "5819.079782411604714415231188",
+   "unrealized_total": "127.2633726201269265639165911"
+  },
+  {
+   "account_id": null,
+   "market": "TW",
+   "total_market_value": "50457.26205385097056981840952",
+   "unrealized_total": "7554.409830932999373825923607"
+  },
+  {
+   "account_id": null,
+   "market": "US",
+   "total_market_value": "9851.29",
+   "unrealized_total": "261.9599999999999999999999998"
+  },
+  {
+   "account_id": null,
+   "market": "MY",
+   "total_market_value": "679.0797824116047144152311876",
+   "unrealized_total": "-0.7366273798730734360834088622"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": "TW",
+   "total_market_value": "50457.26205385097056981840952",
+   "unrealized_total": "7554.409830932999373825923607"
+  },
+  {
+   "account_id": "schwab",
+   "market": "US",
+   "total_market_value": "4711.29",
+   "unrealized_total": "133.9599999999999999999999998"
+  },
+  {
+   "account_id": "moomoo_my",
+   "market": "MY",
+   "total_market_value": "679.0797824116047144152311876",
+   "unrealized_total": "-0.7366273798730734360834088622"
+  },
+  {
+   "account_id": "moomoo_my",
+   "market": "US",
+   "total_market_value": "5140.0",
+   "unrealized_total": "128.00"
+  }
+ ],
+ "realized": {
+  "rows": [
+   {
+    "account_id": "tw_broker",
+    "symbol": "2330",
+    "quote_ccy": "TWD",
+    "sell_date": "2026-02-10",
+    "shares_sold": "300",
+    "proceeds_net": "167761",
+    "original_cost_removed": "140571.9",
+    "adjusted_cost_removed": "139221.9",
+    "realized": "28539.1",
+    "kind": "sale"
+   }
+  ],
+  "by_currency": {
+   "TWD": "28539.1"
+  }
+ },
+ "returns": {
+  "by_currency": {
+   "MYR": {
+    "realized": "0",
+    "unrealized": "-3.249999999999999999999999900",
+    "total_return": "-3.249999999999999999999999900",
+    "gross_invested": "2999.350",
+    "rate": "-0.001083568106423058329304682648"
+   },
+   "TWD": {
+    "realized": "28539.1",
+    "unrealized": "241287.8500000000000000000000",
+    "total_return": "269826.9500000000000000000000",
+    "gross_invested": "1523039",
+    "rate": "0.1771635197785480214229576524"
+   },
+   "USD": {
+    "realized": "-106.00",
+    "unrealized": "261.3099999999999999999999998",
+    "total_return": "155.3099999999999999999999998",
+    "gross_invested": "10821.71",
+    "rate": "0.01435170596883486990503349284"
+   }
+  },
+  "reporting_currency": "USD",
+  "reporting_total_return": "8602.505432732838260314699309",
+  "xirr": null
+ },
+ "allocation": {
+  "by_sector": {
+   "Information Technology": "60987.63183626257528423364072"
+  },
+  "weights": {
+   "Information Technology": "1"
+  },
+  "reporting_currency": "USD"
+ },
+ "currency_view": {
+  "by_currency_value": {
+   "TWD": "1611604.95",
+   "USD": "9851.29",
+   "MYR": "2996.100"
+  },
+  "by_currency_reporting": {
+   "TWD": "50457.26205385097056981840952",
+   "USD": "9851.29",
+   "MYR": "679.0797824116047144152311876"
+  },
+  "reporting_total_value": "60987.63183626257528423364072",
+  "reporting_currency": "USD"
+ },
+ "fx": {
+  "by_account": {
+   "moomoo_my": {
+    "account_id": "moomoo_my",
+    "home_ccy": "MYR",
+    "foreign_ccy": "USD",
+    "avg_rate": "4.41",
+    "current_spot": "4.412",
+    "foreign_cash": "1012.00",
+    "foreign_stock_value": "5140.0",
+    "realized_fx": "0",
+    "unrealized_fx_stocks": "10.2800",
+    "unrealized_fx_cash": "2.02400",
+    "unrealized_fx_total": "12.30400",
+    "spot_delta": "0.002",
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   },
+   "schwab": {
+    "account_id": "schwab",
+    "home_ccy": "TWD",
+    "foreign_ccy": "USD",
+    "avg_rate": "31.92857142857142857142857143",
+    "current_spot": "31.94",
+    "foreign_cash": "2428.64",
+    "foreign_stock_value": "4511.29",
+    "realized_fx": "0",
+    "unrealized_fx_stocks": "51.55759999999999999999999356",
+    "unrealized_fx_cash": "27.75588571428571428571428224",
+    "unrealized_fx_total": "79.31348571428571428571427580",
+    "spot_delta": "0.01142857142857142857142857",
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   }
+  },
+  "reporting_currency": "USD",
+  "reporting_realized_fx": "0.00000000000000000000000000000",
+  "reporting_unrealized_fx": "5.271960366043798772095425018",
+  "excluded_accounts": [],
+  "reporting_unavailable_reason": null
+ },
+ "dividends": {
+  "by_year": [
+   {
+    "year": 2026,
+    "by_currency": {
+     "TWD": "13500"
+    }
+   }
+  ],
+  "total_by_currency": {
+   "TWD": "13500"
+  },
+  "ttm_net": {
+   "TWD": "13500"
+  }
+ },
+ "ex_dividend_calendar": [],
+ "trend": {
+  "points": [
+   {
+    "date": "2026-02-28",
+    "total_value": "60987.63183626257528423364072",
+    "net_invested": "51310.20785198597050980725600",
+    "incomplete": true,
+    "net_worth": "112332.5133637526390994901478"
+   }
+  ],
+  "reporting_currency": "USD",
+  "available": true
+ },
+ "benchmark": {
+  "available": true,
+  "reason": null,
+  "terminal_value": "61018.12678841771235233091937",
+  "net_invested": "51310.20785198597050980725600",
+  "benchmark_return": "9707.91893643174184252366337",
+  "excess": null,
+  "uncovered_markets": [],
+  "uncovered_ratio": "0",
+  "by_market": [
+   {
+    "market": "MY",
+    "label": "富時大馬 KLCI",
+    "terminal_value": "683.6254131886463613439764755",
+    "net_invested": "679.5083824195740824648844586"
+   },
+   {
+    "market": "TW",
+    "label": "元大台灣50",
+    "terminal_value": "51639.76143038424388723354125",
+    "net_invested": "42071.33946956639642734237154"
+   },
+   {
+    "market": "US",
+    "label": "S&P 500",
+    "terminal_value": "8694.739944844822103753401641",
+    "net_invested": "8559.36"
+   }
+  ]
+ },
+ "freshness": {
+  "prices": [
+   {
+    "symbol": "0056",
+    "as_of": "2026-02-27",
+    "stale": false
+   },
+   {
+    "symbol": "1155",
+    "as_of": "2026-02-27",
+    "stale": false
+   },
+   {
+    "symbol": "2330",
+    "as_of": "2026-02-27",
+    "stale": false
+   },
+   {
+    "symbol": "AAPL",
+    "as_of": "2026-02-27",
+    "stale": false
+   },
+   {
+    "symbol": "NOPX",
+    "as_of": null,
+    "stale": true
+   },
+   {
+    "symbol": "OLDCO",
+    "as_of": "2026-02-27",
+    "stale": false
+   },
+   {
+    "symbol": "XYZ",
+    "as_of": "2026-02-27",
+    "stale": false
+   }
+  ],
+  "fx": [
+   {
+    "base": "MYR",
+    "quote": "USD",
+    "as_of": "2026-02-27",
+    "stale": false,
+    "source": "test"
+   },
+   {
+    "base": "TWD",
+    "quote": "USD",
+    "as_of": "2026-02-27",
+    "stale": false,
+    "source": "test"
+   },
+   {
+    "base": "USD",
+    "quote": "MYR",
+    "as_of": "2026-02-27",
+    "stale": false,
+    "source": "test"
+   },
+   {
+    "base": "USD",
+    "quote": "TWD",
+    "as_of": "2026-02-27",
+    "stale": false,
+    "source": "test"
+   }
+  ],
+  "any_stale": true,
+  "missing_prices": [
+   "NOPX"
+  ],
+  "missing_fx": [],
+  "xirr_unavailable_reason": "帳本中有賣超部位待釐清：AAPL（{account:moomoo_my}・2026-01-12） — 成本基礎已捨棄、該筆賣出沒有已實現損益，無法計算 XIRR",
+  "trend_unavailable_reason": null,
+  "fx_unavailable_reason": null,
+  "unregistered_symbols": [],
+  "last_backup_at": null,
+  "fx_triangulation": [],
+  "scheduler_running": false
+ },
+ "dividend_projection": {
+  "year": 2026,
+  "by_currency": {},
+  "basis": "declared_only"
+ },
+ "unapplied_actions": [],
+ "options": {
+  "open": [
+   {
+    "account_id": "schwab",
+    "symbol": "XYZ261218P00050000",
+    "contract": "XYZ 2026-12-18 50 Put",
+    "underlying": "XYZ",
+    "expiry": "2026-12-18",
+    "days_to_expiry": 293,
+    "strike": "50",
+    "right": "P",
+    "direction": "short",
+    "contracts": "1",
+    "share_equivalents": "-100",
+    "average_premium": "1.9935",
+    "premium_total": "199.3500",
+    "last_price": "2.00",
+    "last_price_date": "2026-01-20",
+    "market_value": "-200.00",
+    "unrealized": "-0.6500",
+    "obligation": "5000",
+    "underlying_price": "51.4",
+    "underlying_price_date": "2026-02-27",
+    "past_expiry": false,
+    "unbookable_close": false,
+    "oversold": false
+   }
+  ],
+  "obligation_subtotals": [
+   {
+    "account_id": "schwab",
+    "ccy": "USD",
+    "amount": "5000"
+   }
+  ],
+  "market_value": {
+   "by_currency": {
+    "USD": "-200.00"
+   },
+   "reporting": "-200.00"
+  },
+  "unrealized": {
+   "by_currency": {
+    "USD": "-0.6500"
+   },
+   "reporting": "-0.6500"
+  },
+  "refused_closes": [
+   {
+    "txn_id": 17,
+    "account_id": "moomoo_my",
+    "symbol": "XYZ260116P00045000",
+    "date": "2026-01-16",
+    "side": "BUY",
+    "quantity": "100",
+    "close_reason": "expired",
+    "reason": "XYZ 2026-01-16 45 Put（{account:moomoo_my}）於 2026-01-16 的到期作廢列沒有對應的部位 — 平倉列只能結清既有部位，入帳會開立或擴大部位，無法入帳。請刪除該筆到期作廢／被指派／履約列，或補回被刪除的交易",
+    "remedy": "刪除該筆到期作廢／被指派／履約列，或補回被刪除的交易"
+   }
+  ],
+  "realized": {
+   "rows": [
+    {
+     "account_id": "schwab",
+     "symbol": "XYZ260116P00045000",
+     "quote_ccy": "USD",
+     "sell_date": "2026-01-16",
+     "shares_sold": "100",
+     "proceeds_net": "0",
+     "original_cost_removed": "106.00",
+     "adjusted_cost_removed": "106.00",
+     "realized": "-106.00",
+     "kind": "sale",
+     "close_reason": "expired",
+     "contract": "XYZ 2026-01-16 45 Put"
+    }
+   ],
+   "by_contract": [
+    {
+     "account_id": "schwab",
+     "symbol": "XYZ260116P00045000",
+     "contract": "XYZ 2026-01-16 45 Put",
+     "ccy": "USD",
+     "opened": "2025-12-10",
+     "closed": "2026-01-16",
+     "close_reason": "expired",
+     "closed_how": "到期作廢",
+     "premium_in": "0",
+     "premium_out": "106.00",
+     "realized": "-106.00"
+    }
+   ],
+   "by_year": [
+    {
+     "year": 2026,
+     "by_currency": {
+      "USD": "-106.00"
+     },
+     "reporting": "-106.00"
+    }
+   ],
+   "by_underlying": [
+    {
+     "underlying": "XYZ",
+     "by_currency": {
+      "USD": "-106.00"
+     },
+     "reporting": "-106.00"
+    }
+   ],
+   "realized_total": {
+    "by_currency": {
+     "USD": "-106.00"
+    },
+    "reporting": "-106.00"
+   }
+  },
+  "trend_excludes_value": true,
+  "note": "走勢不含未平倉選擇權的市值；權利金已計入現金，未平倉期間淨值高估（賣方）或低估（買方）該部位市值",
+  "principal_fx_note": "有未平倉選擇權時，含匯兌總損益不含其市值而資產損益含其未實現，兩者相減無法拆出本金匯率效果；平倉或到期後恢復顯示"
+ }
+}

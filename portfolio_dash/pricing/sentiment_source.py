@@ -16,7 +16,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import requests
-import yfinance as yf
 
 _CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 _CNN_TIMEOUT_S = 10
@@ -42,6 +41,7 @@ def _to_decimal(value: object) -> Decimal | None:
 
 def _vix_last_close() -> float | None:
     """The ^VIX last available close from yfinance (None when empty)."""
+    import yfinance as yf  # lazy, never at module import (PERF spec §16)
     df = yf.Ticker("^VIX").history(period="5d", auto_adjust=False)
     if df is None or df.empty:
         return None

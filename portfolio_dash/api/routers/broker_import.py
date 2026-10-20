@@ -302,7 +302,9 @@ def _conversion_wire(
 
 
 @router.get("/broker/adapters")
-def broker_adapters(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def broker_adapters(
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> dict[str, Any]:
     """Which brokers this build can convert, and which ACCOUNTS each one's statements
     belong to. The page renders both pickers from this, so adding an adapter to
     ``registry.py`` (plus its ``ACCOUNT_BROKERS`` line) is the whole change — there is no
@@ -365,7 +367,7 @@ def _broker_mismatch(broker: str, account: Account) -> dict[str, Any] | None:
 
 @router.post("/broker/convert")
 def broker_convert(
-    body: BrokerConvertBody, conn: sqlite3.Connection = Depends(get_conn)
+    body: BrokerConvertBody, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> Any:
     if body.broker not in BROKER_IDS:
         return JSONResponse(status_code=400, content=error_body(

@@ -11,6 +11,7 @@ data with a clear staleness indicator, never crash, never fabricate.
 """
 
 import sqlite3
+from bisect import bisect_left, bisect_right
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
@@ -340,6 +341,55 @@ def get_price_history(
     ]
 
 
+def get_price_on_or_before(
+    conn: sqlite3.Connection,
+    instrument: str,
+    *,
+    on: date,
+    max_age_days: int = _DEFAULT_MAX_AGE,
+) -> PriceRead | None:
+    """The latest stored price for ``instrument`` dated on or before *on*, or ``None``.
+
+    :func:`get_latest_price` as at a past day (PERF spec §11.2): the row a period close at
+    *on* values a holding at, and ``stale`` measured against *on* — exactly what
+    ``get_latest_price`` answers on a database holding no row after *on*, at a clock on *on*.
+    """
+    row = conn.execute(
+        "SELECT close, as_of_date, source FROM prices WHERE instrument=? AND as_of_date<=? "
+        "ORDER BY as_of_date DESC LIMIT 1",
+        (instrument, on.isoformat()),
+    ).fetchone()
+    if row is None:
+        return None
+    as_of = date.fromisoformat(row["as_of_date"])
+    return PriceRead(
+        value=from_db(row["close"]),
+        as_of=as_of,
+        source=row["source"],
+        stale=(on - as_of).days > max_age_days,
+    )
+
+
+def get_close_series(
+    conn: sqlite3.Connection, instrument: str, start: date, end: date,
+) -> list[tuple[date, Decimal]]:
+    """``(as_of_date, close)`` ascending, for a carry-forward reader of ``[start, end]``.
+
+    A light read (PERF spec §8.5): no :class:`PriceRead` per row. It starts at the LAST row
+    on or before *start* — not at *start* — because every reader takes the latest close on or
+    before its day: a series cut at *start* would lose the value carried into a first day that
+    falls on a weekend, a holiday or a suspension. Rows after *end* are not read. The values
+    are :func:`get_price_history`'s for the same rows.
+    """
+    rows = conn.execute(
+        "SELECT as_of_date, close FROM prices WHERE instrument=? AND as_of_date<=? "
+        "AND as_of_date>=COALESCE((SELECT MAX(as_of_date) FROM prices WHERE instrument=? "
+        "AND as_of_date<=?), ?) ORDER BY as_of_date ASC",
+        (instrument, end.isoformat(), instrument, start.isoformat(), start.isoformat()),
+    ).fetchall()
+    return [(date.fromisoformat(r[0]), from_db(r[1])) for r in rows]
+
+
 def price_dates(conn: sqlite3.Connection, instrument: str) -> list[date]:
     """All stored ``as_of_date``s for ``instrument``, ascending — date-only read.
 
@@ -474,6 +524,90 @@ def get_fx_history(
                source=r["source"], stale=False)
         for r in rows
     ]
+
+
+def get_fx_series(
+    conn: sqlite3.Connection, base: Currency, quote: Currency, start: date, end: date,
+) -> list[tuple[date, Decimal]]:
+    """``(as_of_date, rate)`` ascending for a carry-forward reader of ``[start, end]`` — the
+    FX twin of :func:`get_close_series`: from the last row on or before *start*, through
+    *end*, with :func:`get_fx_history`'s values for the same rows."""
+    rows = conn.execute(
+        "SELECT as_of_date, rate FROM fx_rates WHERE base=? AND quote=? AND as_of_date<=? "
+        "AND as_of_date>=COALESCE((SELECT MAX(as_of_date) FROM fx_rates WHERE base=? "
+        "AND quote=? AND as_of_date<=?), ?) ORDER BY as_of_date ASC",
+        (base.value, quote.value, end.isoformat(), base.value, quote.value,
+         start.isoformat(), start.isoformat()),
+    ).fetchall()
+    return [(date.fromisoformat(r[0]), from_db(r[1])) for r in rows]
+
+
+class FxSeriesCache:
+    """Every stored rate of a pair, read ONCE per pair, for one build (PERF spec §8.5).
+
+    A dashboard build asked ``fx_rates`` over a thousand times (measured: 1,059) — the
+    latest rate per pair, the rate on or before every XIRR flow, and a whole history per
+    consumer. Each of those is a function of the pair's stored rows, so this reads the rows of
+    each DIRECTED pair the first time it is asked for, in one query, and answers every later
+    question from memory: :func:`get_fx`, :func:`get_fx_on` and :func:`get_fx_history`
+    semantics, row for row (the dates are unique per pair, the order ascending). A build that
+    reads a pair in both directions therefore issues two queries for it.
+
+    It holds no state beyond the rows, so it lives exactly as long as the build that made it:
+    a later write is seen by the next build's cache, never by this one.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._rows: dict[tuple[Currency, Currency], list[FxRead]] = {}
+        self._dates: dict[tuple[Currency, Currency], list[date]] = {}
+
+    def _series(self, base: Currency, quote: Currency) -> tuple[list[FxRead], list[date]]:
+        key = (base, quote)
+        if key not in self._rows:
+            rows = self._conn.execute(
+                "SELECT rate, as_of_date, source FROM fx_rates WHERE base=? AND quote=? "
+                "ORDER BY as_of_date ASC",
+                (base.value, quote.value),
+            ).fetchall()
+            reads = [FxRead(rate=from_db(r["rate"]), as_of=date.fromisoformat(r["as_of_date"]),
+                            source=r["source"], stale=False) for r in rows]
+            self._rows[key] = reads
+            self._dates[key] = [r.as_of for r in reads]
+        return self._rows[key], self._dates[key]
+
+    def latest(self, base: Currency, quote: Currency, *, now: datetime,
+               max_age_days: int = _DEFAULT_MAX_AGE) -> FxRead | None:
+        """:func:`get_fx`: the most recent stored rate, ``stale`` against *now*'s date."""
+        rows, _dates = self._series(base, quote)
+        if not rows:
+            return None
+        last = rows[-1]
+        return FxRead(rate=last.rate, as_of=last.as_of, source=last.source,
+                      stale=(now.date() - last.as_of).days > max_age_days)
+
+    def latest_as_of(self, base: Currency, quote: Currency, on: date, *,
+                     max_age_days: int = _DEFAULT_MAX_AGE) -> FxRead | None:
+        """:meth:`latest` as at a past day *on*: the most recent rate dated on or before it,
+        ``stale`` against *on* — :func:`get_fx` on a world holding no row after *on*, at a
+        clock on *on* (the FX twin of :func:`get_price_on_or_before`)."""
+        read = self.on_or_before(base, quote, on)
+        if read is None:
+            return None
+        return FxRead(rate=read.rate, as_of=read.as_of, source=read.source,
+                      stale=(on - read.as_of).days > max_age_days)
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        """:func:`get_fx_on`: the most recent rate dated on or before *on* (``stale`` False)."""
+        rows, dates = self._series(base, quote)
+        i = bisect_right(dates, on)
+        return rows[i - 1] if i else None
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        """:func:`get_fx_history`: the rates dated in ``[start, end]``, ascending."""
+        rows, dates = self._series(base, quote)
+        return rows[bisect_left(dates, start):bisect_right(dates, end)]
 
 
 def upsert_dividend_events(

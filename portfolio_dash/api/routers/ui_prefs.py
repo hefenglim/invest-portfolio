@@ -32,14 +32,14 @@ class UiPrefsBody(BaseModel):
 
 
 @router.get("/ui-prefs")
-def read_ui_prefs(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def read_ui_prefs(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     return get_ui_prefs(conn)
 
 
 @router.put("/ui-prefs")
 def write_ui_prefs(
     body: UiPrefsBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if body.page_size is None and body.auto_ai_resolve is None:

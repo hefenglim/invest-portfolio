@@ -483,10 +483,15 @@ def _new_weight(
         return None, None, None
     quote_ccy: Currency = inst.quote_ccy  # type: ignore[attr-defined]
 
+    # ONE build and ONE resolver per 試算 (PERF spec §12.2): the build is the dashboard's own
+    # (``build_dashboard`` is the cached read once the result cache is wired, so the drawer's
+    # automatic first 試算 costs a copy, not a replay), and both rate reads below go through
+    # one ``RateResolver`` — the second is answered from its memo, the same Decimal object.
     dash = build_dashboard(conn, now=now, reporting=reporting)
     current_total = stock_market_value(dash)
     if current_total is None:
         return None, None, None
+    resolver = RateResolver(conn, now=now)
 
     # Current price of the symbol in its quote ccy (from any valued dashboard holding row).
     current_price: Decimal | None = None
@@ -498,8 +503,7 @@ def _new_weight(
                 old_position_reporting_value_q = h.market_value
                 try:
                     old_position_reporting_value = convert(
-                        old_position_reporting_value_q,
-                        RateResolver(conn, now=now).rate(quote_ccy, reporting))
+                        old_position_reporting_value_q, resolver.rate(quote_ccy, reporting))
                 except KeyError:
                     return None, None, current_price
     if current_price is None:
@@ -509,7 +513,7 @@ def _new_weight(
         None if current_total == _ZERO
         else str(old_position_reporting_value / current_total))
     try:
-        rate = RateResolver(conn, now=now).rate(quote_ccy, reporting)
+        rate = resolver.rate(quote_ccy, reporting)
     except KeyError:
         return None, old_weight, current_price
     new_position_value_quote = result_shares * current_price

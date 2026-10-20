@@ -3,28 +3,40 @@
 Drives the REAL stack (uvicorn subprocess + on-disk SQLite + StaticFiles web/) against a
 guest DB seeded with golden holdings. Verifies the 排程中心 needs-七 loop end-to-end:
   * every jobs-table row renders a 狀態 chip (idle rows show — via .run-status),
-  * clicking 立即執行 on a NETWORK-FREE job (``snapshot_monthly`` — writes the current-month
-    KPI snapshot from the DB, no provider calls) advances that row's chip to a terminal
-    成功 WITHOUT a page reload (the poll → 執行中 → 成功 loop), and the run button re-enables,
+  * clicking 立即執行 on a NETWORK-FREE job (``backup_daily`` — a backup of the flow server's
+    own database into its temp folder plus an integrity check, no provider calls) advances
+    that row's chip to a terminal 成功 WITHOUT a page reload (the poll → 執行中 → 成功 loop),
+    and the run button re-enables,
   * FU-D46: the completed chip is clickable → the detail modal renders the run's meta
     (status pill / 開始 / 結束 / 耗時) + detail text, and closes on BOTH Esc and ✕,
   * ZERO console errors + ZERO uncaught page errors throughout.
 
-snapshot_monthly is chosen because run-now executes on the flow server via a daemon thread
-even with the scheduler disabled (PD_DISABLE_SCHEDULER=1), and its runner reads only the DB
-— so the outcome is deterministic and needs no network (which the digest/news flows show the
-subprocess technically has, but we avoid for determinism).
+``backup_daily`` replaced ``snapshot_monthly`` here (PERF plan P11): the retired job is no
+longer listed on the 排程中心. Run-now executes on the flow server via a daemon thread even
+with the scheduler disabled (PD_DISABLE_SCHEDULER=1), and the backup reads and writes only
+the flow server's own folder — deterministic, no network.
+
+PERF spec §16 — a run that waits for the one-heavy-process gate reads 已排入 with the server's
+sentence under it: rendered from a stubbed status (the frontend's half), and on the real
+backend with job workers on (``PD_JOB_MODE=child``) while this test holds the gate's lock.
 """
 
+import json
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
-from playwright.sync_api import ConsoleMessage, Page
+from playwright.sync_api import ConsoleMessage, Page, Route
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
+from portfolio_dash.scheduler.jobs import QUEUED_BEHIND_GATE
+from portfolio_dash.shared import proc_lock
 from tests.conftest import _seed_golden
 from tests.e2e.conftest import FlowServerFactory
+
+_JOB = "backup_daily"
+_REPO = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(autouse=True)
@@ -37,16 +49,16 @@ def _loopback_sockets() -> Iterator[None]:
 
 
 def _seed_scheduler(conn: sqlite3.Connection) -> None:
-    """Golden holdings so the snapshot job has a portfolio to snapshot. Scheduler job rows
-    are seeded by the app's own lifespan on boot (ensure_scheduler_seeded)."""
+    """Golden holdings so the backup has a ledger to copy. Scheduler job rows are seeded
+    by the app's own lifespan on boot (ensure_scheduler_seeded)."""
     _seed_golden(conn)
 
 
 _ROW_STATUS_JS = """
-(want) => {
+([job, want]) => {
     for (const tr of document.querySelectorAll('#jobs-body tr')) {
         const code = tr.querySelector('.cron-code');
-        if (code && code.textContent.trim() === 'snapshot_monthly') {
+        if (code && code.textContent.trim() === job) {
             const s = tr.querySelector('.run-status');
             const txt = (s && s.textContent) || '';
             return want === 'terminal' ? /成功|失敗/.test(txt) : txt.indexOf(want) !== -1;
@@ -56,13 +68,21 @@ _ROW_STATUS_JS = """
 }
 """
 
+_RUN_BUTTON_ENABLED_JS = """
+(job) => {
+    for (const tr of document.querySelectorAll('#jobs-body tr')) {
+        const code = tr.querySelector('.cron-code');
+        if (code && code.textContent.trim() === job) {
+            const b = tr.querySelector('button.btn');
+            return !!b && !b.disabled;
+        }
+    }
+    return false;
+}
+"""
 
-def test_run_now_status_advances_to_success_inplace(
-    flow_server: FlowServerFactory, fresh_page: Page
-) -> None:
-    base_url = flow_server(_seed_scheduler)  # guest mode (no users)
-    page = fresh_page
 
+def _watch_errors(page: Page) -> tuple[list[str], list[str]]:
     console_errors: list[str] = []
     page_errors: list[str] = []
 
@@ -75,51 +95,53 @@ def test_run_now_status_advances_to_success_inplace(
 
     page.on("console", _on_console)
     page.on("pageerror", _on_pageerror)
+    return console_errors, page_errors
 
+
+def _open_scheduler(page: Page, base_url: str) -> None:
     page.goto(base_url + "/settings.html#scheduler", wait_until="load")
     page.wait_for_selector("#jobs-body tr")
 
-    # The snapshot_monthly row renders a status slot; idle (never run) → em-dash chip.
-    row = page.locator("#jobs-body tr").filter(has_text="snapshot_monthly")
+
+def test_run_now_status_advances_to_success_inplace(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    base_url = flow_server(_seed_scheduler)  # guest mode (no users)
+    page = fresh_page
+    console_errors, page_errors = _watch_errors(page)
+    _open_scheduler(page, base_url)
+
+    # The backup_daily row renders a status slot; idle (never run) → em-dash chip.
+    row = page.locator("#jobs-body tr").filter(has_text=_JOB)
     row.wait_for(state="attached")
     assert row.locator(".run-status").count() == 1, "row missing its 狀態 slot"
+    # The retired job is not listed at all (plan P11).
+    assert page.locator("#jobs-body tr").filter(has_text="snapshot_monthly").count() == 0
 
     # Trigger the run; the row must advance to a terminal state (成功) without a reload.
     row.get_by_role("button", name="立即執行").click()
-    page.wait_for_function(_ROW_STATUS_JS, arg="terminal", timeout=30_000)
+    page.wait_for_function(_ROW_STATUS_JS, arg=[_JOB, "terminal"], timeout=30_000)
 
     final = row.locator(".run-status").inner_text()
-    assert "成功" in final, f"snapshot_monthly run-now expected 成功, got {final!r}"
+    assert "成功" in final, f"{_JOB} run-now expected 成功, got {final!r}"
 
     # Polling stops when idle → the run button is re-enabled (never left stuck disabled).
-    page.wait_for_function(
-        """() => {
-            for (const tr of document.querySelectorAll('#jobs-body tr')) {
-                const code = tr.querySelector('.cron-code');
-                if (code && code.textContent.trim() === 'snapshot_monthly') {
-                    const b = tr.querySelector('button.btn');
-                    return !!b && !b.disabled;
-                }
-            }
-            return false;
-        }""",
-        timeout=30_000,
-    )
+    page.wait_for_function(_RUN_BUTTON_ENABLED_JS, arg=_JOB, timeout=30_000)
 
     # ---- FU-D46: the completed chip is clickable → detail modal → Esc closes it ----
     # Small settle so the post-stop refreshJobs re-render finishes before we click (the
     # table is rebuilt once when polling stops; clicking mid-swap would race detach).
     page.wait_for_timeout(500)
-    row = page.locator("#jobs-body tr").filter(has_text="snapshot_monthly")
+    row = page.locator("#jobs-body tr").filter(has_text=_JOB)
     row.locator(".run-status").click()
     modal = page.locator(".modal-backdrop .modal")
     modal.wait_for(state="visible", timeout=10_000)
     title = modal.locator(".modal-title").inner_text()
-    assert "執行結果" in title and "快照" in title, f"unexpected modal title {title!r}"
+    assert "執行結果" in title and "備份" in title, f"unexpected modal title {title!r}"
     body_txt = modal.locator(".modal-body").inner_text()
     assert "開始" in body_txt and "耗時" in body_txt, f"modal body missing meta: {body_txt!r}"
-    # 成功 pill rendered inside the modal too.
-    assert "成功" in body_txt
+    # 成功 pill rendered inside the modal too, with the job's own sentence.
+    assert "成功" in body_txt and "備份完成" in body_txt
     page.keyboard.press("Escape")
     page.wait_for_selector(".modal-backdrop", state="detached", timeout=10_000)
 
@@ -134,3 +156,123 @@ def test_run_now_status_advances_to_success_inplace(
         f"scheduler run-now status: console errors={console_errors!r}; "
         f"page errors={page_errors!r}"
     )
+
+
+def test_a_queued_run_shows_the_servers_sentence_under_its_chip(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """The frontend's half: a queued entry that carries a ``progress`` sentence renders it
+    under 已排入 (and the run button stays disabled); the status is stubbed, the page real."""
+    base_url = flow_server(_seed_scheduler)
+    page = fresh_page
+    console_errors, page_errors = _watch_errors(page)
+    pattern = "**/api/scheduler/status*"
+    body = json.dumps({"active": True, "jobs": {_JOB: {
+        "running": False, "queued": True, "progress": QUEUED_BEHIND_GATE, "last_run": None}}},
+        ensure_ascii=False)
+
+    def handle(route: Route) -> None:
+        route.fulfill(status=200, content_type="application/json", body=body)
+
+    page.route(pattern, handle)
+    try:
+        _open_scheduler(page, base_url)
+        page.wait_for_function(_ROW_STATUS_JS, arg=[_JOB, QUEUED_BEHIND_GATE],
+                               timeout=30_000)
+        row = page.locator("#jobs-body tr").filter(has_text=_JOB)
+        chip = row.locator(".run-status").inner_text()
+        assert "已排入" in chip and "執行中" not in chip, chip
+        assert row.get_by_role("button", name="立即執行").is_disabled()
+    finally:
+        page.unroute(pattern, handle)
+    assert not console_errors and not page_errors, (console_errors, page_errors)
+
+
+def test_the_digest_card_follows_a_queued_run_instead_of_timing_out(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """The 今日摘要 card's 立即產生 follows the RUN (package H review #7): while the job waits
+    for the heavy gate the card shows the server's queued sentence and keeps polling — it used
+    to give up after 90 s with 「產生逾時」 — and once the run ends without a digest it says why
+    in the run's own words. The run door and the status are stubbed; the card and the page are
+    real (no digest exists on the flow database, so /latest answers null throughout)."""
+    base_url = flow_server(_seed_scheduler)
+    page = fresh_page
+    console_errors, page_errors = _watch_errors(page)
+    phase = {"now": "queued"}
+    failure = "執行失敗：RuntimeError：推播通道無回應"
+
+    def run(route: Route) -> None:
+        route.fulfill(status=202, content_type="application/json",
+                      body=json.dumps({"run_id": 7, "kind": "daily"}))
+
+    def status(route: Route) -> None:
+        if phase["now"] == "queued":
+            job = {"running": False, "queued": True, "progress": QUEUED_BEHIND_GATE,
+                   "last_run": None}
+        else:
+            job = {"running": False, "queued": False, "progress": None, "last_run": {
+                "status": "error", "ok": False, "message": failure,
+                "started_at": "2026-06-11T14:30:00+08:00",
+                "finished_at": "2026-06-11T14:30:05+08:00", "duration_seconds": 5.0,
+                "cost": None}}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"active": phase["now"] == "queued", "jobs": {"digest_daily": job}},
+            ensure_ascii=False))
+
+    page.route("**/api/digest/run", run)
+    page.route("**/api/scheduler/status*", status)
+    try:
+        page.goto(base_url + "/index.html", wait_until="load")
+        panel = page.locator("#digest-daily-panel")
+        button = panel.locator(".digest-gen-btn")
+        button.wait_for(state="visible", timeout=30_000)
+        button.click()
+        panel.locator(".digest-run-note").filter(has_text=QUEUED_BEHIND_GATE).wait_for(
+            state="visible", timeout=30_000)
+        assert button.inner_text() == "已排入" and button.is_disabled()
+        page.wait_for_timeout(5_000)  # still following the queued run, not giving up
+        assert panel.locator(".digest-run-note").count() == 1
+        assert page.locator(".toast").filter(has_text="產生逾時").count() == 0
+        phase["now"] = "failed"
+        page.locator(".toast").filter(has_text=failure).wait_for(state="visible",
+                                                                  timeout=30_000)
+        panel.locator(".digest-gen-btn").filter(has_text="立即產生").wait_for(
+            state="visible", timeout=10_000)
+        assert panel.locator(".digest-run-note").count() == 0
+    finally:
+        page.unroute("**/api/digest/run", run)
+        page.unroute("**/api/scheduler/status*", status)
+    assert not console_errors and not page_errors, (console_errors, page_errors)
+
+
+def test_a_run_behind_the_heavy_gate_reads_queued_then_succeeds_in_a_worker(
+    flow_server: FlowServerFactory, fresh_page: Page, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real backend with job workers on: while another heavy process holds the gate
+    (this test holds its lock), the run reads 已排入 with the server's sentence; once the
+    gate is free the worker runs it and the row reaches 成功."""
+    data: list[Path] = []
+
+    def seed(conn: sqlite3.Connection) -> None:
+        _seed_golden(conn)
+        data.append(Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent)
+
+    monkeypatch.setenv("PD_JOB_MODE", "child")
+    base_url = flow_server(seed)
+    page = fresh_page
+    console_errors, page_errors = _watch_errors(page)
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(data[0]), timeout=5)
+    try:
+        _open_scheduler(page, base_url)
+        row = page.locator("#jobs-body tr").filter(has_text=_JOB)
+        row.get_by_role("button", name="立即執行").click()
+        page.wait_for_function(_ROW_STATUS_JS, arg=[_JOB, QUEUED_BEHIND_GATE],
+                               timeout=30_000)
+        assert "已排入" in row.locator(".run-status").inner_text()
+    finally:
+        gate.release()
+    page.wait_for_function(_ROW_STATUS_JS, arg=[_JOB, "terminal"], timeout=60_000)
+    assert "成功" in page.locator("#jobs-body tr").filter(
+        has_text=_JOB).locator(".run-status").inner_text()
+    assert not console_errors and not page_errors, (console_errors, page_errors)

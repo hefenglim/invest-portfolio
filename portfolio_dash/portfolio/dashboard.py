@@ -9,12 +9,14 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 2026-06-10 dashboard-combiner spec); forex imports only ``shared``, so no cycle.
 """
 
+import json
 import sqlite3
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Protocol
 
 from portfolio_dash.data_ingestion.store import (
     list_accounts,
@@ -26,10 +28,17 @@ from portfolio_dash.data_ingestion.store import (
 )
 from portfolio_dash.forex.fx_pnl import compute_fx_summary
 from portfolio_dash.forex.results import FXSummary
+from portfolio_dash.portfolio import settlement_store
 from portfolio_dash.portfolio.allocation import combined_view, sector_allocation
-from portfolio_dash.portfolio.benchmark_counterfactual import counterfactual
+from portfolio_dash.portfolio.benchmark_counterfactual import (
+    BenchState,
+    Counterfactual,
+    ReportingFlow,
+    counterfactual,
+    finish,
+)
 from portfolio_dash.portfolio.cash import cash_balances
-from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book
+from portfolio_dash.portfolio.cost_basis import UnbookableLedgerError, build_book, iter_books
 from portfolio_dash.portfolio.dashboard_models import (
     BenchmarkComparison,
     BenchmarkMarketLeg,
@@ -41,16 +50,19 @@ from portfolio_dash.portfolio.dashboard_models import (
     FreshnessReport,
     FxFreshness,
     FxTriangle,
+    HistoryState,
     HoldingRow,
     HoldingSubtotal,
     KpiSummary,
     OptionsBlock,
     PriceFreshness,
+    TrendPoint,
     TrendSeries,
 )
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.options import (
+    LastTrade,
     has_open_option,
     last_trade_prices,
     ledger_has_options,
@@ -60,10 +72,11 @@ from portfolio_dash.portfolio.options import (
     stock_realized,
 )
 from portfolio_dash.portfolio.pnl import value_holdings
-from portfolio_dash.portfolio.price_basis import price_in, series_in
+from portfolio_dash.portfolio.price_basis import price_in
 from portfolio_dash.portfolio.results import (
     Book,
     CombinedView,
+    Holding,
     OversoldPosition,
     RefusedClose,
     ReturnSummary,
@@ -83,24 +96,25 @@ from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
     build_reporting_flows,
-    daily_value_series,
     trading_financing_cost,
+    trend_book_days,
+    trend_start,
+    value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes
 from portfolio_dash.pricing.benchmarks import benchmark_for_market
 from portfolio_dash.pricing.results import FxRead, PriceRead
 from portfolio_dash.pricing.store import (
+    FxSeriesCache,
+    get_close_series,
     get_dividend_events,
-    get_fx,
-    get_fx_history,
-    get_fx_on,
     get_latest_price,
-    get_price_history,
+    get_price_on_or_before,
 )
+from portfolio_dash.shared import flags, result_cache
 from portfolio_dash.shared.account_ref import account_ref
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
-from portfolio_dash.shared.flight import coalesce, write_generation
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType
@@ -130,25 +144,108 @@ _EPOCH = date(1900, 1, 1)
 _XIRR_MIN_WINDOW_DAYS = 30
 
 
+class PriceSource(Protocol):
+    """Where a valuation reads a held stock's price (PERF spec §11.2)."""
+
+    def price(self, symbol: str) -> PriceRead | None:
+        """The price a holding is valued at, ``stale`` against the valuation clock."""
+        ...
+
+
+class FxSource(Protocol):
+    """Where a valuation reads FX (PERF spec §11.2): the "current" rate, the rate on or
+    before a flow's day (XIRR), and a pair's stored rows (the triangulation)."""
+
+    def latest(self, base: Currency, quote: Currency) -> FxRead | None:
+        """The current rate of *base*/*quote* as stored — direct pair only, no inversion."""
+        ...
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        """The stored rate dated on or before *on* (``get_fx_on``)."""
+        ...
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        """The stored rates dated in ``[start, end]`` (``get_fx_history``)."""
+        ...
+
+
+class LatestStored:
+    """Today's sources: :func:`get_latest_price` and :func:`get_fx` — the most recent stored
+    row, whatever its date, ``stale`` against *now* — and FX through one
+    :class:`~portfolio_dash.pricing.store.FxSeriesCache` (one query per directed pair)."""
+
+    def __init__(self, conn: sqlite3.Connection, *, now: datetime,
+                 fx_cache: FxSeriesCache | None = None) -> None:
+        self._conn = conn
+        self._now = now
+        self.fx_cache = fx_cache if fx_cache is not None else FxSeriesCache(conn)
+
+    def price(self, symbol: str) -> PriceRead | None:
+        return get_latest_price(self._conn, symbol, now=self._now)
+
+    def latest(self, base: Currency, quote: Currency) -> FxRead | None:
+        return self.fx_cache.latest(base, quote, now=self._now)
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        return self.fx_cache.on_or_before(base, quote, on)
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        return self.fx_cache.history(base, quote, start, end)
+
+
+class OnOrBefore:
+    """The sources of a valuation AS AT day D (PERF spec §11.2, PERF-S7): the latest stored
+    row dated on or before D, ``stale`` against D — what :class:`LatestStored` answers on a
+    database holding no price or FX row after D, at a clock on D. A rate read for a later day
+    is the rate at D (nothing after D exists in this world)."""
+
+    def __init__(self, conn: sqlite3.Connection, day: date, *,
+                 fx_cache: FxSeriesCache | None = None) -> None:
+        self._conn = conn
+        self.day = day
+        self.fx_cache = fx_cache if fx_cache is not None else FxSeriesCache(conn)
+
+    def price(self, symbol: str) -> PriceRead | None:
+        return get_price_on_or_before(self._conn, symbol, on=self.day)
+
+    def latest(self, base: Currency, quote: Currency) -> FxRead | None:
+        return self.fx_cache.latest_as_of(base, quote, self.day)
+
+    def on_or_before(self, base: Currency, quote: Currency, on: date) -> FxRead | None:
+        return self.fx_cache.on_or_before(base, quote, min(on, self.day))
+
+    def history(self, base: Currency, quote: Currency, start: date, end: date
+                ) -> list[FxRead]:
+        return self.fx_cache.history(base, quote, start, min(end, self.day))
+
+
 class RateResolver:
     """Current-FX lookup: identity -> direct pair -> inverted pair -> KeyError.
 
-    Records every requested pair (found or not) for the freshness report.
+    Records every requested pair (found or not) for the freshness report. Reads its rates
+    from *fx* — :class:`LatestStored` over *conn* unless another source is given (a period
+    close passes :class:`OnOrBefore`).
     """
 
-    def __init__(self, conn: sqlite3.Connection, *, now: datetime) -> None:
-        self._conn = conn
-        self._now = now
+    def __init__(self, conn: sqlite3.Connection | None = None, *, now: datetime | None = None,
+                 fx: FxSource | None = None) -> None:
+        if fx is None:
+            if conn is None or now is None:
+                raise TypeError("RateResolver needs a connection and a clock, or a source")
+            fx = LatestStored(conn, now=now)
+        self._fx: FxSource = fx
         self.reads: dict[tuple[Currency, Currency], FxRead | None] = {}
         # Pairs `_read` answered from the INVERSE stored pair — so `history` reads the series
         # in the same direction the rate was resolved (one owner of the direction rule).
         self._inverted: set[tuple[Currency, Currency]] = set()
 
     def _read(self, base: Currency, quote: Currency) -> FxRead | None:
-        direct = get_fx(self._conn, base, quote, now=self._now)
+        direct = self._fx.latest(base, quote)
         if direct is not None:
             return direct
-        inverse = get_fx(self._conn, quote, base, now=self._now)
+        inverse = self._fx.latest(quote, base)
         if inverse is not None:
             self._inverted.add((base, quote))
             return FxRead(rate=_ONE / inverse.rate, as_of=inverse.as_of,
@@ -166,10 +263,10 @@ class RateResolver:
         zero stored rate is skipped (a rate of 0 is not a rate).
         """
         if (base, quote) not in self._inverted:
-            return get_fx_history(self._conn, base, quote, start, end)
+            return self._fx.history(base, quote, start, end)
         return [
             FxRead(rate=_ONE / r.rate, as_of=r.as_of, source=r.source, stale=False)
-            for r in get_fx_history(self._conn, quote, base, start, end)
+            for r in self._fx.history(quote, base, start, end)
             if r.rate != _ZERO
         ]
 
@@ -570,6 +667,23 @@ def fx_complete_return(
 _BENCH_EPOCH = date(1990, 1, 1)  # benchmark closes may predate the first ledger event
 
 
+def bounded_closes(
+    conn: sqlite3.Connection, symbol: str, boundary: date, end: date, *, floor: date,
+) -> list[tuple[date, Decimal]]:
+    """The closes a carry-forward reader of ``[boundary, end]`` needs, never one before *floor*.
+
+    v0.1.31 read every close ``BETWEEN floor AND end`` (the trend and the performance route
+    from 1900, the benchmark from 1990). The light read (PERF spec §8.5) starts at the last
+    close on or before ``max(boundary, floor)`` instead — so a first day on a weekend, a
+    holiday or in a suspension keeps its carried-forward value — and drops whatever predates
+    *floor*. Every lookup on a day from *boundary* on therefore finds exactly the close the
+    full v0.1.31 read gave it, including "none" for a day before the first close on or after
+    *floor* (a 1988 flow is uncovered by a benchmark history stored from 1987, as before).
+    """
+    return [row for row in get_close_series(conn, symbol, max(boundary, floor), end)
+            if row[0] >= floor]
+
+
 def _benchmark_comparison(
     conn: sqlite3.Connection,
     bundle: LedgerBundle,
@@ -581,6 +695,7 @@ def _benchmark_comparison(
     fx_complete: Decimal | None,
     cash_movements: Sequence[CashMovementFlow],
     refused_dividends: Iterable[DividendIdentity],
+    stored: tuple[BenchState, date] | None = None,
 ) -> BenchmarkComparison:
     """R4 / AI-D43 — spend the portfolio's own flows on each market's index instead.
 
@@ -597,6 +712,14 @@ def _benchmark_comparison(
     records its splits, making the call a structural no-op today — wired anyway because it
     is correct the moment such an action IS recorded, and because one raw series read is how
     the next reader concludes the re-expression rule is optional.
+
+    *stored* (PERF spec §4 "Decimal order", §10 step 5) is the settlement store's accumulated
+    state and the day it was accumulated through (``settled_through``), handed in only while
+    nothing is pending or claimed by a run and no corporate action on a benchmark storage key
+    is dated after that day (:func:`_stored_bench`). It is used iff, in addition, no flow is
+    dated after that day — then the flows spent are exactly the ones it accumulated, in the
+    same order — and finished with TODAY's last close (:func:`_finish_stored`). Otherwise the
+    counterfactual is computed live, in reference order.
     """
     # K2: the stream B is built from — a payout the replay refused is no flow on either leg.
     flows = build_reporting_flows(bundle, fx_history, reporting,
@@ -607,31 +730,15 @@ def _benchmark_comparison(
             available=False,
             reason="部分投入流量缺少當日匯率，無法換算成報告幣，基準對照暫不可用",
         )
-    closes_by_market: dict[Market, list[tuple[date, Decimal]]] = {}
-    labels: dict[Market, str] = {}
-    # AI-D49: a cash-movement flow has no market and buys no index, so it contributes no
-    # benchmark series to load. `counterfactual` excludes it from both legs; this loop must
-    # not ask for 「the index of None」.
-    for market in {f.market for f in flows if f.market is not None}:
-        bench = benchmark_for_market(market)
-        if bench is None:
-            # No market is unmapped today (MY gained KLCI 2026-08-27), but a market
-            # added later would land here — uncovered and NAMED, never dropped.
-            continue
-        raw = [
-            (p.as_of, p.value)
-            for p in series_in(
-                actions, bench.storage_key,
-                get_price_history(conn, bench.storage_key, _BENCH_EPOCH, as_of),
-                valued_on=as_of,
-            )
-        ]
-        converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
-        if converted:
-            closes_by_market[market] = converted
-            labels[market] = bench.label
-
-    result = counterfactual(flows, closes_by_market)
+    finished = None
+    if stored is not None and all(f.on <= stored[1] for f in flows):
+        finished = _finish_stored(conn, stored[0], fx_history, reporting, as_of=as_of,
+                                  actions=actions)
+    if finished is not None:
+        result, labels = finished
+    else:
+        result, labels = _live_counterfactual(conn, flows, fx_history, reporting,
+                                              as_of=as_of, actions=actions)
     excess = (
         None if not result.available or fx_complete is None or result.benchmark_return is None
         else fx_complete - result.benchmark_return
@@ -655,88 +762,248 @@ def _benchmark_comparison(
     )
 
 
-def build_dashboard(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
-) -> DashboardData:
-    """Assemble the complete dashboard data model from SQLite (read-only).
+def _live_counterfactual(
+    conn: sqlite3.Connection, flows: Sequence[ReportingFlow], fx_history: FxHistory,
+    reporting: Currency, *, as_of: date, actions: ActionIndex,
+) -> tuple[Counterfactual, dict[Market, str]]:
+    """The counterfactual over *flows*, every index level read live (v0.1.31's order)."""
+    closes_by_market: dict[Market, list[tuple[date, Decimal]]] = {}
+    labels: dict[Market, str] = {}
+    # AI-D49: a cash-movement flow has no market and buys no index, so it contributes no
+    # benchmark series to load. `counterfactual` excludes it from both legs; this loop must
+    # not ask for 「the index of None」.
+    # PERF spec §8.5: each market's closes are read from the last close on or before that
+    # market's FIRST flow — the earliest day `counterfactual` looks a level up for — and
+    # never from before 1990 (v0.1.31's floor, `bounded_closes`); its terminal value is the
+    # last close, which the bounded read keeps too.
+    first_flow: dict[Market, date] = {}
+    for f in flows:
+        if f.market is not None and (f.market not in first_flow or f.on < first_flow[f.market]):
+            first_flow[f.market] = f.on
+    for market in {f.market for f in flows if f.market is not None}:
+        bench = benchmark_for_market(market)
+        if bench is None:
+            # No market is unmapped today (MY gained KLCI 2026-08-27), but a market
+            # added later would land here — uncovered and NAMED, never dropped.
+            continue
+        raw = closes_in(
+            actions, bench.storage_key,
+            bounded_closes(conn, bench.storage_key, first_flow[market], as_of,
+                           floor=_BENCH_EPOCH),
+            valued_on=as_of,
+        )
+        converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
+        if converted:
+            closes_by_market[market] = converted
+            labels[market] = bench.label
+    return counterfactual(flows, closes_by_market), labels
 
-    Concurrent identical builds are shared (2026-10-13, ``shared/flight.py``): a caller that
-    arrives while the same build is RUNNING — same database file, same day, same reporting
-    currency, no write since it started — waits for it and receives its own deep copy.
-    Nothing is kept once the build returns.
+
+def _finish_stored(
+    conn: sqlite3.Connection, state: BenchState, fx_history: FxHistory, reporting: Currency,
+    *, as_of: date, actions: ActionIndex,
+) -> tuple[Counterfactual, dict[Market, str]] | None:
+    """Finish the store's accumulated *state* with TODAY's last close of each placed market
+    (PERF spec §8.4: ``finish`` reads only each series' last element). Each close is read,
+    re-expressed and converted exactly as :func:`_live_counterfactual` reads the last element
+    of its series: the last close on or before *as_of* (never before 1990), in *as_of*'s
+    share terms, at its own date's rate. ``None`` — compute live — when a placed market has no
+    benchmark or no convertible close (a state the live path could not have produced)."""
+    closes_by_market: dict[Market, list[tuple[date, Decimal]]] = {}
+    labels: dict[Market, str] = {}
+    for market in state.units:
+        bench = benchmark_for_market(market)
+        if bench is None:
+            return None
+        raw = closes_in(
+            actions, bench.storage_key,
+            bounded_closes(conn, bench.storage_key, as_of, as_of, floor=_BENCH_EPOCH),
+            valued_on=as_of,
+        )
+        converted = convert_closes(raw, fx_history, bench.quote_ccy, reporting)
+        if not converted:
+            return None
+        closes_by_market[market] = converted
+        labels[market] = bench.label
+    return finish(state, closes_by_market), labels
+
+
+def _stored_bench(state: settlement_store.StoreState | None,
+                  bundle: LedgerBundle) -> tuple[BenchState, date] | None:
+    """The store's benchmark state and its day ``S``, under the conditions of PERF spec §10
+    step 5 that do not need the flows (:func:`_benchmark_comparison` checks the last one — no
+    flow dated after ``S``): a usable store, nothing pending and nothing claimed by a run
+    (``Dd`` is ∞), a state that was published (a partial publish stores none), and no
+    corporate action on a benchmark storage key dated after ``S`` — ``series_in``
+    re-expresses every level into the valuation day's terms, and ``0050`` is both a benchmark
+    and a stock the owner can hold. *bundle* is the build's registered ledger cut at today
+    (its actions are the ``ActionIndex`` the live read re-expresses through)."""
+    if (state is None or state.claimed_day is not None or state.bench_state is None
+            or state.settled_through is None):
+        return None
+    through = state.settled_through
+    keys = set(settlement_store.default_benchmark_keys())
+    if any(a.date > through and (a.from_symbol in keys or a.to_symbol in keys)
+           for a in bundle.actions):
+        return None
+    try:
+        return BenchState.from_json(json.loads(state.bench_state)), through
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def closes_in(
+    index: ActionIndex,
+    symbol: str,
+    closes: list[tuple[date, Decimal]],
+    *,
+    valued_on: date,
+) -> list[tuple[date, Decimal]]:
+    """:func:`~portfolio_dash.portfolio.price_basis.series_in` for ``(date, close)`` pairs
+    (``pricing.store.get_close_series``): every close in *valued_on*'s share terms through
+    :func:`price_in`, and — the same structural short-circuit — the pairs untouched when no
+    SPLIT is recorded on *symbol*."""
+    if not index.splits_on(symbol):
+        return closes
+    return [(d, price_in(index, symbol, v, priced_on=d, valued_on=valued_on))
+            for d, v in closes]
+
+
+@dataclass(frozen=True)
+class KpiBlock:
+    """What :func:`kpis_as_of` answers (PERF spec §11.2) — its return set is fixed.
+
+    * the KPI fields: KPI 總市值 through :meth:`market_value_with` (the stock grand subtotal
+      ``stock_market_value`` plus the options block's own market value, all-or-nothing on FX),
+      ``total_return`` (A) and its rate, the realized / unrealized split, ``xirr`` with its
+      window and reason, ``by_currency_value``;
+    * the rates used and the missing / stale facts: ``price_reads`` (each held stock's price
+      read, ``None`` = missing; ``stale`` per row) and ``fx_reads`` (each pair the KPIs asked
+      for, ``None`` = missing, with its date and ``stale``) — a snapshot taken when the KPIs
+      were done, so the pairs a later step reads are not in it;
+    * the intermediates ``_build_dashboard`` goes on with: the valued bundle, the book, the
+      valuation, the returns, the currency view, the resolver (whose ``reads`` keep growing)
+      and the cut cash movements.
+
+    The 選擇權 block is assembled by :func:`options_block_of` from these intermediates — once —
+    and KPI 總市值 is read from it, exactly as v0.1.31 read it.
     """
-    def build() -> DashboardData:
-        return _build_dashboard(conn, now=now, reporting=reporting)
 
-    return coalesce(_flight_key(conn, now, reporting), build, copy=_own_copy)
+    as_of: date
+    reporting: Currency
+    total_return: Decimal | None
+    total_return_rate: Decimal | None
+    realized_total: Decimal | None
+    unrealized_total: Decimal | None
+    xirr: Decimal | None
+    xirr_window_days: int | None
+    xirr_reason: str | None
+    by_currency_value: dict[Currency, Decimal] | None
+    price_reads: dict[str, PriceRead | None]
+    fx_reads: dict[tuple[Currency, Currency], FxRead | None]
+    bundle: LedgerBundle
+    has_options: bool
+    option_symbols: frozenset[str]
+    book: Book
+    actions: ActionIndex
+    price_map: dict[str, Decimal]
+    last_trades: dict[str, LastTrade]
+    valued: list[Holding]
+    valued_stocks: list[Holding]
+    returns: ReturnSummary | None
+    view: CombinedView | None
+    stock_market_value: Decimal | None
+    resolver: RateResolver
+    cash_movements: list[CashMovementFlow]
+
+    def market_value_with(self, options: OptionsBlock | None) -> Decimal | None:
+        """KPI 總市值 (OPT-D5): the stock grand subtotal plus *options*' own reporting market
+        value — the block :func:`options_block_of` assembled, never a second computation. The
+        addition is SKIPPED (not ``+ 0``) on a ledger without an option, and the figure
+        degrades to ``None`` when either half cannot be formed (the all-or-nothing FX rule).
+
+        Refuses the wrong block shape loudly: an options ledger without its block (the
+        figure would silently drop every contract) or a block on a stock ledger.
+        """
+        if not self.has_options:
+            if options is not None:
+                raise ValueError("an options block for a ledger without an option")
+            return self.stock_market_value
+        if options is None:
+            raise ValueError("KPI 總市值 of an options ledger needs its options block")
+        option_mv = options.market_value.reporting
+        if self.stock_market_value is None or option_mv is None:
+            return None
+        return self.stock_market_value + option_mv
+
+    @property
+    def held_symbols(self) -> list[str]:
+        """The held stock symbols, sorted — the keys of ``price_reads``."""
+        return list(self.price_reads)
+
+    @property
+    def missing_prices(self) -> list[str]:
+        return [sym for sym, pr in self.price_reads.items() if pr is None]
+
+    @property
+    def missing_fx(self) -> list[str]:
+        return [f"{b.value}/{q.value}" for (b, q), read in
+                sorted(self.fx_reads.items(), key=lambda kv: (kv[0][0].value, kv[0][1].value))
+                if read is None]
 
 
-def _own_copy(data: DashboardData) -> DashboardData:
-    return data.model_copy(deep=True)
+def options_block_of(
+    kpi: KpiBlock, prices: PriceSource, *, trend_excludes_value: bool,
+) -> OptionsBlock | None:
+    """The 選擇權 block (options spec §7.1) from *kpi*'s ONE replay and ONE valuation, or
+    ``None`` on a ledger without an option. The underlyings' prices come from *prices* — the
+    same source the valuation read (:class:`LatestStored` live, :class:`OnOrBefore` for a
+    period close); *trend_excludes_value* is the trend's own flag. KPI 總市值 reads this
+    block's market value (:meth:`KpiBlock.market_value_with`)."""
+    if not kpi.has_options:
+        return None
+    return option_summary(
+        book=kpi.book, valued=kpi.valued, bundle=kpi.bundle, last_trades=kpi.last_trades,
+        underlying_prices=_underlying_prices(prices, kpi.book, kpi.option_symbols,
+                                             kpi.bundle.instruments, kpi.actions,
+                                             as_of=kpi.as_of),
+        fx_rate=kpi.resolver.rate, reporting=kpi.reporting, as_of=kpi.as_of,
+        trend_excludes_value=trend_excludes_value)
 
 
-def _flight_key(
-    conn: sqlite3.Connection, now: datetime, reporting: Currency
-) -> tuple[str, str, int, date, Currency] | None:
-    """Which running build this caller may share, or ``None`` to build alone.
+def kpis_as_of(
+    bundle: LedgerBundle,
+    *,
+    book: Book | None,
+    cash_movements: Sequence[CashMovementFlow],
+    prices: PriceSource,
+    fx: FxSource,
+    as_of: date,
+    reporting: Currency,
+) -> KpiBlock:
+    """The KPI computation of the dashboard as at *as_of* (PERF spec §11.2): book, prices,
+    valuation, returns, XIRR, the KPI blend and the currency view.
 
-    Alone when the caller's connection holds uncommitted changes (its own writes must be in
-    its answer), while a write is in progress (:func:`write_generation` is ``None``), and for
-    a database with no file (an in-memory test database is private to its connection).
+    The live dashboard calls it with :class:`LatestStored` (its payload is unchanged); a
+    period close calls it with :class:`OnOrBefore` and a book its one replay already holds,
+    so no replay runs per period end.
+
+    * *bundle* — the ledger with every unregistered row dropped, NOT cut: whether the 選擇權
+      block exists is decided on the whole ledger (options spec §7.1); the valuation cut
+      ``bundle.valued_as_of(as_of)`` is taken here;
+    * *book* — the dashboard-path replay of that cut (``iter_books`` yields it), or ``None``
+      to replay here;
+    * *cash_movements* — already cut at *as_of* (``valued_rows_as_of``, step 1);
+    * *prices* / *fx* — where the held prices, the current rates and XIRR's per-flow rates
+      come from.
     """
-    if conn.in_transaction:
-        return None
-    generation = write_generation()
-    if generation is None:
-        return None
-    row = conn.execute("PRAGMA database_list").fetchone()
-    path = str(row[2]) if row is not None and row[2] else ""
-    if not path:
-        return None
-    return ("dashboard", path, generation, now.date(), reporting)
-
-
-def _build_dashboard(
-    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
-) -> DashboardData:
-    """The build itself — :func:`build_dashboard` decides whether it is shared."""
-    as_of = now.date()
-
-    # 1. Ledgers and reference data. One bundle, one loader (Stored* -> ledger models).
-    bundle = load_ledger_bundle(conn)
-    instruments = bundle.instruments
-    # DEF-056 (owner ruling 2026-09-24): FX conversions and cash movements count from their
-    # own date like every other ledger — the SAME predicate as step 1c's bundle cut. The FX
-    # pool and the cash series already bounded themselves by `as_of`; XIRR's three cost
-    # kinds (AI-D42) and 交易與融資成本 (the B − A split) did not, so a future-dated fee or
-    # rebate was a flow dated after XIRR's own terminal value. Cut ONCE, here, at the load.
-    convs = [
-        FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
-                     from_amount=s.from_amount, to_ccy=s.to_ccy, to_amount=s.to_amount)
-        for s in valued_rows_as_of(list_fx_conversions(conn), as_of)
-    ]
-    accounts = {a.account_id: a for a in list_accounts(conn)}
-    # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
-    # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
-    # Loaded once here so the two views can never read different rows.
-    cash_movements = valued_rows_as_of(list_cash_movements(conn), as_of)
-
-    # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
-    # Instrument row has no quote currency — it cannot be booked, valued, or priced.
-    # NEVER crash the dashboard over it: exclude those events from ALL computation
-    # (book, XIRR, trend, dividends — consistently) and surface the symbols in
-    # freshness.unregistered_symbols so the UI can tell the user exactly how to fix it
-    # (register the symbol, then the next build includes the rows). Same degradation
-    # philosophy as the oversold (賣超) path.
-    unregistered = bundle.unregistered_symbols
-    if unregistered:
-        bundle = bundle.without_unregistered()
     # Options spec §7.1: the 選擇權 block exists iff the UNCUT ledger carries a trade or an
     # action on an option contract — decided BEFORE the valuation cut below, so a contract
     # traded after the valuation day still shows its (empty) section. On every other ledger
     # `has_options` is False and every option branch below is skipped outright (invariant 1:
     # no `+ Decimal(0)`, the stock path runs untouched).
     has_options = ledger_has_options(bundle)
+    instruments = bundle.instruments
     # 1c. Every row counts from its OWN date (DEF-016 for dividends, widened to trades,
     # openings, FX conversions and corporate actions by DEF-056 — owner rulings 2026-09-24).
     # A confirmed payout is stored on its payment date and a trade may be entered ahead of
@@ -751,37 +1018,38 @@ def _build_dashboard(
 
     # 2. Book and valuation. allow_oversell: an acked oversell must not crash the
     # dashboard — it degrades to a flagged 賣超 holding (待釐清) instead (see build_book).
-    try:
-        book = build_book(bundle, allow_oversell=True)
-    except ArithmeticError as exc:
-        # ⚠ NOT THE OWNER any more (2026-08-29). ``cost_basis.build_book`` re-types every
-        # ``ArithmeticError`` out of the replay into an ``UnbookableLedgerError`` naming the
-        # offending row, so this arm no longer fires for a ledger fault — go THERE to change
-        # the behaviour or the wording. The re-typing moved because this was the ONLY call
-        # site that had it: the same row that degraded here answered 500 on 重算, the tax
-        # package and 試算, and fixing it at four sites is four chances to miss one.
-        #
-        # Kept, deliberately, as a floor rather than deleted: the guarantee this file owes its
-        # caller is "``build_dashboard`` does not raise a raw decimal fault", and that must
-        # hold even if the replay is swapped, patched or extended. It is pinned as a CHANNEL
-        # by ``tests/portfolio/test_r8_decimal_fault_degrades.py``, which injects the fault
-        # rather than provoking it, precisely so the guarantee survives its current cause.
-        #
-        # The arm catches the CLASS, not one cause: ``decimal.DivisionByZero`` and
-        # ``decimal.Overflow`` are SIBLINGS of ``InvalidOperation``, not subclasses (this arm
-        # said ``InvalidOperation`` until wave 3 and both walked straight past it), and
-        # ``ZeroDivisionError`` is in the class too.
-        raise UnbookableLedgerError(
-            "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
-            "請於交易帳本修正該列後重試"
-        ) from exc
+    if book is None:
+        try:
+            book = build_book(bundle, allow_oversell=True)
+        except ArithmeticError as exc:
+            # ⚠ NOT THE OWNER any more (2026-08-29). ``cost_basis.build_book`` re-types every
+            # ``ArithmeticError`` out of the replay into an ``UnbookableLedgerError`` naming
+            # the offending row, so this arm no longer fires for a ledger fault — go THERE to
+            # change the behaviour or the wording. The re-typing moved because this was the
+            # ONLY call site that had it: the same row that degraded here answered 500 on 重算,
+            # the tax package and 試算, and fixing it at four sites is four chances to miss one.
+            #
+            # Kept, deliberately, as a floor rather than deleted: the guarantee this file owes
+            # its caller is "``build_dashboard`` does not raise a raw decimal fault", and that
+            # must hold even if the replay is swapped, patched or extended. It is pinned as a
+            # CHANNEL by ``tests/portfolio/test_r8_decimal_fault_degrades.py``, which injects
+            # the fault rather than provoking it, precisely so the guarantee survives its
+            # current cause.
+            #
+            # The arm catches the CLASS, not one cause: ``decimal.DivisionByZero`` and
+            # ``decimal.Overflow`` are SIBLINGS of ``InvalidOperation``, not subclasses (this
+            # arm said ``InvalidOperation`` until wave 3 and both walked straight past it), and
+            # ``ZeroDivisionError`` is in the class too.
+            raise UnbookableLedgerError(
+                "帳本中有一列的數值無法計算（例如股數為 0 或數值過大的交易），"
+                "請於交易帳本修正該列後重試"
+            ) from exc
     # Read off the BOOK, not off the holdings (CR-01 / CR-11, 2026-10-04): a 賣超 that a later
     # buy of the same size netted back to exactly zero shares has no holding to inspect —
     # `any(h.oversold ...)` was False there, and XIRR came out as a confident −67.8% over a
     # discarded basis (measured on the review's probe). `Book.oversold_positions` lists every
     # 賣超 position, so this is a strict superset of the old test.
     oversold_positions = book.oversold_positions
-    has_oversold = bool(oversold_positions)
     # CR-02: dividends the replay refused because the account never held the symbol by their
     # date. No position carries a flag for them, so the book's list is the only record.
     orphan_dividends = book.orphan_dividends
@@ -796,9 +1064,7 @@ def _build_dashboard(
     # calendar below (OPT-D10). Empty without an option, so `held_symbols` is unchanged.
     opt_syms = option_symbols(instruments) if has_options else frozenset()
     held_symbols = sorted({h.symbol for h in book.holdings if h.symbol not in opt_syms})
-    price_reads: dict[str, PriceRead | None] = {
-        sym: get_latest_price(conn, sym, now=now) for sym in held_symbols
-    }
+    price_reads: dict[str, PriceRead | None] = {sym: prices.price(sym) for sym in held_symbols}
     # §5.1(d), applied HERE and not inside `value_holdings` (trap #3). A stored close is
     # as traded on its own date, but the book's share count is already in today's terms, so
     # a price carried forward across a split must be re-expressed — divided by the splits
@@ -833,7 +1099,7 @@ def _build_dashboard(
     # the stock list IS `valued` — the same object, not an equal copy.
     valued_stocks = split_holdings(valued, opt_syms)[0] if has_options else valued
 
-    resolver = RateResolver(conn, now=now)
+    resolver = RateResolver(fx=fx)
 
     # 3. Core summaries — each degrades to None on a missing current rate.
     returns: ReturnSummary | None
@@ -841,26 +1107,6 @@ def _build_dashboard(
         returns = total_return(book, valued, resolver.rate, reporting)
     except KeyError:
         returns = None
-    allocation: SectorAllocation | None
-    # FU-D31 (P1①) / R6 (2026-07-19): canonicalize sectors at the donut GROUPING seam. Stored
-    # instrument rows ARE now migrated once at the schema/boot seam (R6,
-    # store.migrate_instrument_sectors), so most stored values are already canonical here; this
-    # read-time canonicalization is KEPT as defense-in-depth — a provider- or CSV-supplied
-    # synonym (or a value stored between boots) still groups correctly before the next boot
-    # migrates it. Both the sector-allocation donut AND the sector_weight alert group on THIS
-    # SectorAllocation (strategy/alerts.py reads data.allocation.weights), so this ONE
-    # canonicalization fixes both — verified single seam. Holding ROWS keep their (now usually
-    # already-canonical) stored sector, section 8 below; only the grouping is normalized.
-    # Canonical keys are English; zh display is deferred (see shared/sectors.py).
-    alloc_instruments = {
-        sym: inst.model_copy(update={"sector": canonical_sector(inst.sector)})
-        for sym, inst in instruments.items()
-    }
-    try:
-        allocation = sector_allocation(valued_stocks, alloc_instruments, resolver.rate,
-                                       reporting)
-    except KeyError:
-        allocation = None
     view: CombinedView | None
     try:
         view = combined_view(valued_stocks, resolver.rate, reporting)
@@ -871,10 +1117,10 @@ def _build_dashboard(
     def fx_at(d: date, base: Currency, quote: Currency) -> Decimal:
         if base == quote:
             return _ONE
-        direct = get_fx_on(conn, base, quote, on=d)
+        direct = fx.on_or_before(base, quote, d)
         if direct is not None:
             return direct.rate
-        inverse = get_fx_on(conn, quote, base, on=d)
+        inverse = fx.on_or_before(quote, base, d)
         if inverse is not None:
             return _ONE / inverse.rate
         # Same: rendered in the XIRR badge. Keeps the pair + the date, because those two
@@ -886,7 +1132,7 @@ def _build_dashboard(
     xirr_value: Decimal | None = None
     xirr_window_days: int | None = None
     xirr_reason: str | None = None
-    if has_oversold:
+    if oversold_positions:
         # An oversold (賣超) position has no honest terminal value -> XIRR is not computable.
         # Named per position since CR-01 (2026-10-04): a 賣超 netted back to zero shares has no
         # holdings row to find, so the reason is the one place that says which row broke.
@@ -946,6 +1192,193 @@ def _build_dashboard(
             xirr_reason = str(exc).strip("'\"")
     if xirr_value is None and xirr_reason is None:
         xirr_reason = "無法計算（缺少現價、現金流無正負變化，或迭代未收斂）"
+
+    # 10. KPIs — blended; None whenever the blend cannot be formed honestly.
+    total_return_blended: Decimal | None = None
+    total_return_rate: Decimal | None = None
+    realized_total: Decimal | None = None
+    unrealized_total: Decimal | None = None
+    if returns is not None:
+        total_return_blended = returns.reporting_total_return
+        gross_rep = _ZERO
+        realized_rep = _ZERO
+        unrealized_rep = _ZERO
+        for ccy, cr in returns.by_currency.items():
+            rate = resolver.rate(ccy, reporting)  # cached: already resolved above
+            gross_rep += convert(cr.gross_invested, rate)
+            realized_rep += convert(cr.realized, rate)
+            unrealized_rep += convert(cr.unrealized, rate)
+        realized_total = realized_rep
+        unrealized_total = unrealized_rep
+        if gross_rep != _ZERO:
+            total_return_rate = total_return_blended / gross_rep
+    # KPI 總市值's stock half; the options' half is the 選擇權 block's own market value
+    # (`KpiBlock.market_value_with`).
+    total_value = view.reporting_total_value if view is not None else None
+
+    return KpiBlock(
+        as_of=as_of, reporting=reporting, total_return=total_return_blended,
+        total_return_rate=total_return_rate, realized_total=realized_total,
+        unrealized_total=unrealized_total, xirr=xirr_value,
+        xirr_window_days=xirr_window_days, xirr_reason=xirr_reason,
+        by_currency_value=view.by_currency_value if view is not None else None,
+        price_reads=price_reads, fx_reads=dict(resolver.reads),
+        bundle=bundle, has_options=has_options, option_symbols=opt_syms, book=book,
+        actions=actions, price_map=price_map, last_trades=last_trades, valued=valued,
+        valued_stocks=valued_stocks, returns=returns, view=view,
+        stock_market_value=total_value, resolver=resolver,
+        cash_movements=list(cash_movements),
+    )
+
+
+def build_dashboard(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+) -> DashboardData:
+    """Assemble the complete dashboard data model from SQLite (read-only).
+
+    Served through the result cache (PERF spec 2026-10-18 §12.1, ``shared/result_cache.py``,
+    which replaced the in-flight-only sharing of 2026-10-13): one entry per database file,
+    ``data_version``, write generation, DAY and reporting currency, so any commit — this
+    process, another one, the settlement child — makes the next read build afresh, and
+    identical builds that run at the same time still run once. Nothing is cached while a
+    write is in progress, inside a transaction, or for a database with no file. Every reader
+    receives its own deep copy with the fields that depend on *now* beyond its date
+    (:data:`SUB_DAY_FIELDS`) set to its own clock.
+
+    **The settlement store** (PERF spec §10): the days before the store's ``live_from`` are
+    read from the published generation, the rest valued live, all inside ONE read
+    transaction opened after the cache key (PERF-S12). With the store clean, or dirty only
+    inside the live window, the payload is byte-identical to a full live build; while history
+    is stale the days ``[Dd, live_from)`` are the previous generation's and
+    ``DashboardData.history_state`` says so. ``PD_SETTLE=off`` or an unusable store: every
+    day is live.
+    """
+    return build_dashboard_keyed(conn, now=now, reporting=reporting)[0]
+
+
+def build_dashboard_keyed(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+) -> tuple[DashboardData, result_cache.CacheKey | None]:
+    """:func:`build_dashboard` plus the cache key it was served under (``None`` when built
+    uncached) — for a caller that derives a second cached result from this build, which may
+    be filed under its own key only when both describe the same state
+    (``result_cache.same_state``; ``api/alert_inputs.compute_alerts_full``'s ``data_key``)."""
+    def build() -> DashboardData:
+        # PERF-S12: ONE read transaction, opened after the key (the cache opens it on a miss;
+        # an uncached build — another file, a caller inside a transaction — opens it here).
+        with result_cache.read_snapshot(conn):
+            return _build_dashboard(conn, now=now, reporting=reporting)
+
+    def stamp(data: DashboardData) -> DashboardData:
+        for name in SUB_DAY_FIELDS:
+            setattr(data, name, now)
+        return data
+
+    # The kill switch is part of the key: with history stale, a build with the store and a
+    # full live build differ on the stale days (§10), and a flag flipped between two reads of
+    # one state must not be answered from the other's entry.
+    return result_cache.cached_keyed(
+        conn, name="dashboard", now=now, reporting=reporting, compute=build,
+        copy=_own_copy, restamp=stamp, extra=(flags.settle_enabled(),),
+    )
+
+
+#: Every ``DashboardData`` field that depends on ``now`` beyond its date — re-stamped on each
+#: reader's copy of a cached build. ``tests/shared/test_result_cache_dashboard.py`` proves the
+#: list complete (two clocks on one day, every corpus).
+SUB_DAY_FIELDS: tuple[str, ...] = ("as_of",)
+
+
+def _own_copy(data: DashboardData) -> DashboardData:
+    return data.model_copy(deep=True)
+
+
+def _build_dashboard(
+    conn: sqlite3.Connection, *, now: datetime, reporting: Currency
+) -> DashboardData:
+    """The build itself — :func:`build_dashboard` decides whether it is shared."""
+    as_of = now.date()
+
+    # 1. Ledgers and reference data. One bundle, one loader (Stored* -> ledger models).
+    bundle = load_ledger_bundle(conn)
+    instruments = bundle.instruments
+    # DEF-056 (owner ruling 2026-09-24): FX conversions and cash movements count from their
+    # own date like every other ledger — the SAME predicate as step 1c's bundle cut. The FX
+    # pool and the cash series already bounded themselves by `as_of`; XIRR's three cost
+    # kinds (AI-D42) and 交易與融資成本 (the B − A split) did not, so a future-dated fee or
+    # rebate was a flow dated after XIRR's own terminal value. Cut ONCE, here, at the load.
+    convs = [
+        FXConversion(account_id=s.account_id, date=s.date, from_ccy=s.from_ccy,
+                     from_amount=s.from_amount, to_ccy=s.to_ccy, to_amount=s.to_amount)
+        for s in valued_rows_as_of(list_fx_conversions(conn), as_of)
+    ]
+    accounts = {a.account_id: a for a in list_accounts(conn)}
+    # Cash movements feed BOTH the FX pool (step 5 — a foreign deposit/opening now funds the
+    # pool and carries its cost basis, spec 2026-07-30) and the net-worth cash series (9b).
+    # Loaded once here so the two views can never read different rows.
+    cash_movements = valued_rows_as_of(list_cash_movements(conn), as_of)
+
+    # 1b. Unregistered-symbol guard (2026-07-02): a ledger row whose symbol has no
+    # Instrument row has no quote currency — it cannot be booked, valued, or priced.
+    # NEVER crash the dashboard over it: exclude those events from ALL computation
+    # (book, XIRR, trend, dividends — consistently) and surface the symbols in
+    # freshness.unregistered_symbols so the UI can tell the user exactly how to fix it
+    # (register the symbol, then the next build includes the rows). Same degradation
+    # philosophy as the oversold (賣超) path.
+    unregistered = bundle.unregistered_symbols
+    if unregistered:
+        bundle = bundle.without_unregistered()
+
+    # PERF spec §8.5: every FX read of this build — the current rates, XIRR's rate per flow,
+    # the trend's, the cash series' and the triangulation's histories — goes through ONE cache
+    # (one query per directed pair; measured before: 1,059 `fx_rates` queries per build).
+    source = LatestStored(conn, now=now, fx_cache=FxSeriesCache(conn))
+
+    # 1c, 2, 3 and 4: the valuation cut, the book, the valuation, the returns, XIRR and the
+    # KPI blend — the ONE computation a period close repeats as at its own day (§11.2).
+    kpi = kpis_as_of(bundle, book=None, cash_movements=cash_movements, prices=source,
+                     fx=source, as_of=as_of, reporting=reporting)
+    has_options = kpi.has_options
+    bundle = kpi.bundle
+    # Read-only local views of the (now filtered) bundle, for the steps below.
+    txs, divs, opening = bundle.transactions, bundle.dividends, bundle.opening
+    book = kpi.book
+    oversold_positions = book.oversold_positions
+    has_oversold = bool(oversold_positions)
+    orphan_dividends = book.orphan_dividends
+    unapplied_actions = book.unapplied_actions
+    opt_syms = kpi.option_symbols
+    held_symbols = kpi.held_symbols
+    price_reads = kpi.price_reads
+    actions = kpi.actions
+    valued = kpi.valued
+    valued_stocks = kpi.valued_stocks
+    resolver = kpi.resolver
+    returns = kpi.returns
+    view = kpi.view
+    allocation: SectorAllocation | None
+    # FU-D31 (P1①) / R6 (2026-07-19): canonicalize sectors at the donut GROUPING seam. Stored
+    # instrument rows ARE now migrated once at the schema/boot seam (R6,
+    # store.migrate_instrument_sectors), so most stored values are already canonical here; this
+    # read-time canonicalization is KEPT as defense-in-depth — a provider- or CSV-supplied
+    # synonym (or a value stored between boots) still groups correctly before the next boot
+    # migrates it. Both the sector-allocation donut AND the sector_weight alert group on THIS
+    # SectorAllocation (strategy/alerts.py reads data.allocation.weights), so this ONE
+    # canonicalization fixes both — verified single seam. Holding ROWS keep their (now usually
+    # already-canonical) stored sector, section 8 below; only the grouping is normalized.
+    # Canonical keys are English; zh display is deferred (see shared/sectors.py).
+    alloc_instruments = {
+        sym: inst.model_copy(update={"sector": canonical_sector(inst.sector)})
+        for sym, inst in instruments.items()
+    }
+    try:
+        allocation = sector_allocation(valued_stocks, alloc_instruments, resolver.rate,
+                                       reporting)
+    except KeyError:
+        allocation = None
+    xirr_value = kpi.xirr
+    xirr_window_days = kpi.xirr_window_days
+    xirr_reason = kpi.xirr_reason
 
     # 5. FX P&L — settlement != funding accounts; cold-start KeyError -> None.
     # The exposure figure is the market value of equity holdings quoted in the account's
@@ -1099,12 +1532,17 @@ def _build_dashboard(
         )
         holding_rows.append(HoldingRow(**data))
 
-    # 9. Trend — bulk-load histories, then the pure daily replay.
+    # 9. Trend — bulk-load histories, then the ONE-pass daily replay (PERF spec §8).
     trend_reason: str | None = None
     # Declared OUT here (empty by default) because step 10's benchmark counterfactual reads
     # it as well, and on a ledger with no events the trend branch below never runs. Empty is
     # the honest value there: no flows to convert, so the counterfactual refuses.
     trend_fx_history: FxHistory = {}
+    # PERF spec §10 steps 2–3: the settlement store, when it may be read (``None`` = every day
+    # live — ``PD_SETTLE=off``, or a store not usable for this reporting currency and code).
+    store = _usable_store(conn, reporting)
+    # The days served from the store (step 4), decided in the trend branch below.
+    prefix: settlement_store.SettledPrefix | None = None
     if txs or divs or opening:
         # BOTH ends of every corporate action (audit F-50): a SPINOFF child appears in no
         # other ledger, so omitting it loaded no price history for a position the replay
@@ -1116,13 +1554,27 @@ def _build_dashboard(
                                 | {o.symbol for o in opening}
                                 | {a.from_symbol for a in bundle.actions}
                                 | {a.to_symbol for a in bundle.actions})
+        first_day = trend_start(bundle)
+        assert first_day is not None  # the ledger has a trade, a dividend or an opening
+        # PERF spec §10 step 4: the days before `live` come from the store (contiguous from
+        # the series' own first day, never a placeholder — `settled_prefix`); `live` is the
+        # first day valued here. Without a usable store it is the first day: all live.
+        if store is not None:
+            prefix = settlement_store.settled_prefix(conn, store, first_day=first_day,
+                                                     today=as_of)
+        live = first_day if prefix is None else prefix.live_from
         # RAW on purpose (W6c): this is the ONE series read that must NOT be re-expressed
         # here. Its consumer is `daily_value_series`, which values a DIFFERENT day on every
         # iteration and therefore applies §5.1(d) itself, per point, at its `_entry_at_or_
         # before` lookup — with `valued_on=day`, which is exactly the factor a precomputed
         # re-expression could not know. Correcting it twice would divide by the ratio twice.
+        # PERF spec §8.5: read from the last close on or before the FIRST VALUED day — the
+        # trend's first day, or the store's `live_from` — the earliest day a price is looked
+        # up for, and never from before 1900, v0.1.31's floor (`bounded_closes`; the light
+        # read). A first live day on a weekend, a holiday or in a suspension keeps the close
+        # it carries forward.
         price_history: PriceHistory = {
-            sym: [(p.as_of, p.value) for p in get_price_history(conn, sym, _EPOCH, as_of)]
+            sym: bounded_closes(conn, sym, live, as_of, floor=_EPOCH)
             for sym in ledger_symbols
         }
         # (``trend_fx_history`` is declared before this branch so step 10's benchmark
@@ -1133,11 +1585,24 @@ def _build_dashboard(
             if ccy == reporting:
                 continue
             for base, quote in ((ccy, reporting), (reporting, ccy)):
-                rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
+                rows = source.fx_cache.history(base, quote, _EPOCH, as_of)
                 if rows:
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
-        trend = daily_value_series(bundle, price_history, fx_history, reporting,
-                                   end=as_of, cash_movements=cash_movements)
+        # ONE replay feeds every day (PERF spec §8.1): `iter_books` yields the book of each
+        # day a row counts from, and the payouts the flows leave out are this request's
+        # book's refusals — the same rows a second whole-bundle replay would refuse.
+        # `available` is decided over EVERY flow whatever the start (§4: a series-level
+        # aggregate, never settled). The options flag of the days before `live` is the
+        # store's per day (`options_open`, §10 step 4 — never a series-level stored flag);
+        # with no day before the start there is none.
+        options_before = (prefix is not None and live > first_day
+                          and any(d.options_open for d in prefix.days))
+        book_days = trend_book_days(bundle, start=live, end=as_of)
+        trend = value_series(
+            bundle, price_history, fx_history, reporting, start=live, end=as_of,
+            cash_movements=cash_movements, refused_dividends=book.refused_dividends,
+            books=zip(book_days, iter_books(bundle, book_days), strict=True),
+            options_open_before=options_before)
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
@@ -1162,36 +1627,28 @@ def _build_dashboard(
                 if ccy == reporting:
                     continue
                 for base, quote in ((ccy, reporting), (reporting, ccy)):
-                    rows = get_fx_history(conn, base, quote, _EPOCH, as_of)
+                    rows = source.fx_cache.history(base, quote, _EPOCH, as_of)
                     if rows:
                         cash_fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
+            # PERF spec §10 step 4: only the LIVE points are composed with cash — a cash
+            # map that starts at `live` would read every stored day's cash as 0
+            # (`networth.py`); a stored day carries its own stored `net_worth`.
             cash_by_date = daily_cash_series(
                 cash_movements, cash_convs, cash_txs, cash_divs, instruments,
-                cash_fx_history, reporting, end=as_of)
+                cash_fx_history, reporting, end=as_of,
+                start=None if prefix is None else live)
             trend = compose_net_worth(trend, cash_by_date)
+            if prefix is not None and prefix.days:
+                trend = trend.model_copy(update={
+                    "points": [_stored_point(d) for d in prefix.days] + trend.points})
     else:
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
         trend_reason = "尚無任何帳本紀錄"
+    history = _history_state(store, prefix if trend.available else None, today=as_of)
 
-    # 10. KPIs — blended; None whenever the blend cannot be formed honestly.
-    total_return_blended: Decimal | None = None
-    total_return_rate: Decimal | None = None
-    realized_total: Decimal | None = None
-    unrealized_total: Decimal | None = None
-    if returns is not None:
-        total_return_blended = returns.reporting_total_return
-        gross_rep = _ZERO
-        realized_rep = _ZERO
-        unrealized_rep = _ZERO
-        for ccy, cr in returns.by_currency.items():
-            rate = resolver.rate(ccy, reporting)  # cached: already resolved above
-            gross_rep += convert(cr.gross_invested, rate)
-            realized_rep += convert(cr.realized, rate)
-            unrealized_rep += convert(cr.unrealized, rate)
-        realized_total = realized_rep
-        unrealized_total = unrealized_rep
-        if gross_rep != _ZERO:
-            total_return_rate = total_return_blended / gross_rep
+    # 10. KPIs — blended by kpis_as_of (None whenever the blend cannot be formed honestly);
+    # what depends on the trend or the connection is assembled here.
+    total_return_blended = kpi.total_return
     # AI-D41: B and B − A ride beside A. Computed HERE because this is the only layer
     # holding both the ReturnSummary and the TrendSeries; neither module can see the
     # other's figure, which is precisely why the discrepancy went unnoticed.
@@ -1216,22 +1673,8 @@ def _build_dashboard(
         else fx_complete - total_return_blended - trading_cost
     )
     # Options spec §7.1: the block, from this request's ONE replay and ONE valuation.
-    options_block: OptionsBlock | None = None
-    if has_options:
-        options_block = option_summary(
-            book=book, valued=valued, bundle=bundle, last_trades=last_trades,
-            underlying_prices=_underlying_prices(conn, book, opt_syms, instruments, actions,
-                                                 now=now, as_of=as_of),
-            fx_rate=resolver.rate, reporting=reporting, as_of=as_of,
-            trend_excludes_value=trend.options_value_excluded)
-    # KPI 總市值 (OPT-D5): the stock grand subtotal plus the options' reporting value — the
-    # addition is SKIPPED (not `+ 0`) on a ledger without an option, and degrades to None when
-    # either half cannot be formed (the all-or-nothing FX rule).
-    kpi_market_value = total_value
-    if options_block is not None:
-        option_mv = options_block.market_value.reporting
-        kpi_market_value = (None if total_value is None or option_mv is None
-                            else total_value + option_mv)
+    options_block = options_block_of(kpi, source,
+                                     trend_excludes_value=trend.options_value_excluded)
     # R4 / AI-D43: the index counterfactual rides beside B, measured on the same ruler.
     benchmark = _benchmark_comparison(
         conn, bundle, trend_fx_history, reporting,
@@ -1241,18 +1684,22 @@ def _build_dashboard(
         # only — one stream, one place that decides what can be spent on an index.
         cash_movements=cash_movements,
         refused_dividends=book.refused_dividends,
+        # PERF spec §10 step 5: the store's accumulated state, only while it describes these
+        # exact flows; its terminal value is always today's close.
+        stored=_stored_bench(store, bundle),
     )
     kpis = KpiSummary(
         reporting_currency=reporting,
-        total_market_value=kpi_market_value,
+        # KPI 總市值 (OPT-D5): the stock grand subtotal plus the block's own market value.
+        total_market_value=kpi.market_value_with(options_block),
         total_return=total_return_blended,
         total_return_fx_complete=fx_complete,
         principal_fx_effect=principal_fx,
         trading_financing_cost=None if fx_complete is None else trading_cost,
         fx_complete_reason=fx_outcome.reason,
-        total_return_rate=total_return_rate,
-        realized_total=realized_total,
-        unrealized_total=unrealized_total,
+        total_return_rate=kpi.total_return_rate,
+        realized_total=kpi.realized_total,
+        unrealized_total=kpi.unrealized_total,
         xirr=xirr_value,
         xirr_window_days=xirr_window_days,
         fx_realized=fx_summary.reporting_realized_fx if fx_summary is not None else None,
@@ -1340,17 +1787,61 @@ def _build_dashboard(
         opened_positions=book.opened_positions,
         unbookable_dividends=book.unbookable_dividends,
         options=options_block,
+        history_state=history,
     )
 
 
+def _usable_store(conn: sqlite3.Connection,
+                  reporting: Currency) -> settlement_store.StoreState | None:
+    """The settlement store's state when a build may read it (PERF spec §10 step 2): the
+    switch on (``PD_SETTLE``) and the store usable — a published generation, this code's
+    calc version, this reporting currency, a verified trigger set. ``None``: every day live
+    (§11.4 — slower, never stale, never missing). Reads only."""
+    if not flags.settle_enabled():
+        return None
+    state = settlement_store.store_state(conn, reporting=reporting)
+    return state if state.usable else None
+
+
+def _stored_point(day: settlement_store.SettledDay) -> TrendPoint:
+    """A settled day as the trend point it was settled from, with its stored ``net_worth``."""
+    return TrendPoint(date=day.day, total_value=day.total_value,
+                      net_invested=day.net_invested, incomplete=day.incomplete,
+                      net_worth=day.net_worth)
+
+
+def _history_state(store: settlement_store.StoreState | None,
+                   prefix: settlement_store.SettledPrefix | None, *,
+                   today: date) -> HistoryState:
+    """``DashboardData.history_state`` (PERF spec §10 step 6).
+
+    With days served from the store (*prefix*), the first live day and the stale days are
+    the ones this build served. Without them — no usable store, or a trend that is
+    unavailable (nothing of it served) — a usable store's own ``live_from`` and stale range
+    stand, which is what a period close is read by (``api/snapshots.py``)."""
+    if store is None:
+        return HistoryState()
+    if prefix is not None:
+        first_live, stale = prefix.live_from, prefix.stale
+    else:
+        first_live = min(settlement_store.live_from(store, today), today + timedelta(days=1))
+        stale = settlement_store.stale_range(store, today)
+    return HistoryState(
+        live_from=first_live, stale_from=None if stale is None else stale[0],
+        stale_to=None if stale is None else stale[1], generation=store.generation,
+        settled_through=store.settled_through, held_through=store.held_through,
+        dirty_day=store.dirty_day, seq=store.seq)
+
+
 def _underlying_prices(
-    conn: sqlite3.Connection, book: Book, opt_syms: frozenset[str],
-    instruments: dict[str, Instrument], actions: ActionIndex, *, now: datetime, as_of: date,
+    prices: PriceSource, book: Book, opt_syms: frozenset[str],
+    instruments: dict[str, Instrument], actions: ActionIndex, *, as_of: date,
 ) -> dict[str, tuple[Decimal, date]]:
     """OPT-D17: the latest stored price of every REGISTERED underlying of an open contract —
-    ONE read per distinct underlying, re-expressed across splits like every held price
-    (``price_in``), and never added to ``price_reads`` (so never in freshness). An unregistered
-    or unpriced underlying is simply absent (the block omits the two keys)."""
+    ONE read per distinct underlying (through *prices*, the valuation's own source),
+    re-expressed across splits like every held price (``price_in``), and never added to
+    ``price_reads`` (so never in freshness). An unregistered or unpriced underlying is simply
+    absent (the block omits the two keys)."""
     out: dict[str, tuple[Decimal, date]] = {}
     seen: set[str] = set()
     for h in book.holdings:
@@ -1363,7 +1854,7 @@ def _underlying_prices(
         und = instruments.get(terms.underlying)
         if und is None or und.is_option:
             continue
-        pr = get_latest_price(conn, terms.underlying, now=now)
+        pr = prices.price(terms.underlying)
         if pr is not None:
             out[terms.underlying] = (
                 price_in(actions, terms.underlying, pr.value, priced_on=pr.as_of,

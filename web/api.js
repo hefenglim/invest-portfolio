@@ -105,24 +105,93 @@
 
   /* ---- global network-activity tracking (Progress system, 2026-07-02) ----
      Every pdApi call increments/decrements one in-flight counter and dispatches a
-     `pd-net` CustomEvent on document with {pending}. shell.js renders the global
+     `pd-net` CustomEvent on document with {pending, slow}. shell.js renders the global
      top progress bar off these events, so EVERY network wait in the app gets a
      visible indicator with no per-page wiring. Decrement runs on settle (success,
-     HTTP error, network error, abort alike). */
+     HTTP error, network error, abort alike).
+
+     PERF spec 2026-10-18 §13 (a) and (c):
+     - `{background: true}` keeps a request OUT of the counter. The bell, status polls and
+       pre-fetches use it, so the top bar tracks only the page's own content — a 1 s
+       settlement poll would otherwise keep the bar moving for the whole run.
+     - A tracked request still pending after 15 s raises `slow` (the shell shows
+       「仍在計算中…」 in the top bar). Nothing is aborted: a slow answer is still the answer.
+       The timer needs both `setTimeout` and `clearTimeout`; a host without them (the node
+       harnesses of the contract tests) simply never raises it. */
+  const SLOW_MS = 15000;
+  const _setT = typeof setTimeout === 'function' ? setTimeout : null;
+  const _clearT = typeof clearTimeout === 'function' ? clearTimeout : null;
   let _pending = 0;
+  let _slow = 0;
   function _netEvent() {
     try {
-      document.dispatchEvent(new CustomEvent('pd-net', { detail: { pending: _pending } }));
+      document.dispatchEvent(new CustomEvent('pd-net',
+        { detail: { pending: _pending, slow: _slow > 0 } }));
     } catch (e) { /* dispatch must never break a request */ }
   }
-  function _track(p) {
+  function _track(p, opts) {
+    if (opts && opts.background) return p;
     _pending += 1;
+    let slowNow = false;
+    let timer = null;
+    if (_setT && _clearT) {
+      timer = _setT(function () {
+        timer = null;
+        slowNow = true;
+        _slow += 1;
+        _netEvent();
+      }, SLOW_MS);
+    }
     _netEvent();
-    const dec = function () { _pending = Math.max(0, _pending - 1); _netEvent(); };
+    const dec = function () {
+      if (timer !== null) { _clearT(timer); timer = null; }
+      if (slowNow) { _slow = Math.max(0, _slow - 1); slowNow = false; }
+      _pending = Math.max(0, _pending - 1);
+      _netEvent();
+    };
     return p.then(
       function (v) { dec(); return v; },
       function (e) { dec(); throw e; }
     );
+  }
+
+  /* PERF spec §13 (d): every successful non-GET announces itself as `pd-mutated` on
+     document ({method, path}). It is the ONE seam the settlement prompt listens to — no path
+     list, so a new mutating door can never be forgotten. Downloads (exports) are reads and
+     do not announce. */
+  function _mutated(method, path) {
+    try {
+      document.dispatchEvent(new CustomEvent('pd-mutated',
+        { detail: { method: method, path: path } }));
+    } catch (e) { /* dispatch must never break a request */ }
+  }
+
+  /* PERF spec §13 (b): identical concurrent GETs share ONE request. The share is the
+     transport only — the body TEXT is read once and every caller parses its own copy, so no
+     caller can mutate another's object. A request with an abort signal never joins or
+     seeds a share (aborting it must not abort a stranger's). Any non-GET closes the
+     current shares at its start, so a GET issued after a mutation never receives an
+     answer computed before it. */
+  const _inflight = new Map();
+  function _raw(url, init) {
+    return fetch(url, init).then(function (resp) {
+      return resp.text().then(function (text) {
+        return { ok: resp.ok, status: resp.status, statusText: resp.statusText || '',
+                 text: text };
+      });
+    });
+  }
+  function _sharedRaw(url, init, opts) {
+    if (opts && opts.signal) return _raw(url, init);
+    let p = _inflight.get(url);
+    if (!p) {
+      p = _raw(url, init);
+      const shared = p;
+      const forget = function () { if (_inflight.get(url) === shared) _inflight.delete(url); };
+      p.then(forget, forget);
+      _inflight.set(url, p);
+    }
+    return p;
   }
 
   /** Normalize a path to a single leading slash; used verbatim (no /api prefix). */
@@ -169,6 +238,14 @@
       diagnostics (web/detail.js's comment already names it as such). It is simply not a
       sentence anyone should be shown. */
   async function _toError(resp) {
+    let text = '';
+    try { text = await resp.text(); } catch (e) { text = ''; }
+    return _errorFrom(resp.status, resp.statusText, text);
+  }
+
+  /** The PdApiError of a non-2xx answer, from its status and body TEXT (the shared-GET
+      path reads the body once, as text, for every caller). */
+  function _errorFrom(status, statusText, text) {
     let code = 'error';
     let message;                       // stays undefined unless the envelope supplies one
     let field;
@@ -176,7 +253,7 @@
     let reason;
     let line;
     try {
-      const body = await resp.json();
+      const body = JSON.parse(text);
       const err = body && body.error;
       if (err && typeof err === 'object') {
         if (err.code) code = err.code;
@@ -194,24 +271,25 @@
     // The error path resolves account tokens too: a 4xx `message` is toasted verbatim and
     // its `issues[].text` are rendered as the form's findings.
     const out = new PdApiError(
-      resp.status, code, _resolveRefs(message), field, _resolveRefs(issues));
-    out.statusText = resp.statusText || '';   // diagnostics only — never toasted
+      status, code, _resolveRefs(message), field, _resolveRefs(issues));
+    out.statusText = statusText || '';   // diagnostics only — never toasted
     if (reason !== undefined && reason !== null) out.reason = reason;
     if (line !== undefined && line !== null) out.line = line;
     return out;
   }
 
-  /** Shared response handler: 2xx → parsed-untouched JSON (or null); else throw. */
-  async function _handle(resp) {
-    if (resp.ok) {
-      if (resp.status === 204) return null;
-      const text = await resp.text();
+  /** Shared response handler over a raw answer {ok, status, statusText, text}:
+      2xx → parsed-untouched JSON (or null); else throw. Each caller parses its OWN copy. */
+  function _handle(raw) {
+    if (raw.ok) {
+      if (raw.status === 204) return null;
+      const text = raw.text;
       if (!text) return null;
       // strings stay strings — NO coercion; only account tokens inside them are resolved
       return _resolveRefs(JSON.parse(text));
     }
-    const err = await _toError(resp);
-    if (resp.status === 401 && !window.location.pathname.endsWith('login.html')) {
+    const err = _errorFrom(raw.status, raw.statusText, raw.text);
+    if (raw.status === 401 && !window.location.pathname.endsWith('login.html')) {
       // The ONE place the login redirect lives — but NOT when we are already on the
       // login page (a wrong-password POST /api/auth/login returns 401; redirecting
       // there would self-reload and swallow the error the form needs to show).
@@ -221,21 +299,60 @@
     throw err;
   }
 
+  /** `opts`: { signal?, background? } — see the tracking and sharing notes above. */
   function get(path, params, opts) {
     const url = _withParams(_normPath(path), params);
-    return _track(fetch(url, _jsonInit('GET', undefined, opts)).then(_handle));
+    return _track(_sharedRaw(url, _jsonInit('GET', undefined, opts), opts).then(_handle), opts);
   }
 
-  function post(path, body, opts) {
-    return _track(fetch(_normPath(path), _jsonInit('POST', body, opts)).then(_handle));
+  /* The read-only POSTs (api/read_only.py::READ_ONLY_POSTS, PERF plan P2): they send a body
+     only because their input does not fit a query string, and write nothing — so they
+     neither close the GET shares nor announce `pd-mutated` (the settlement prompt would
+     re-read the status after every 試算). Pinned equal to the Python set by
+     tests/contract/test_perf_web_transport.py. */
+  const READ_ONLY_POSTS = ['/api/whatif', '/api/rebalance/preview', '/api/prompts/preview'];
+  function _readOnly(method, p) {
+    return method === 'POST'
+      && READ_ONLY_POSTS.indexOf(p.split('?')[0].replace(/\/+$/, '')) >= 0;
   }
 
-  function put(path, body, opts) {
-    return _track(fetch(_normPath(path), _jsonInit('PUT', body, opts)).then(_handle));
+  function _write(method, path, body, opts) {
+    const p = _normPath(path);
+    const ro = _readOnly(method, p);
+    if (!ro) _inflight.clear();   // a GET issued from here on must not join an answer from before
+    /* …and again once the write has answered: a GET started WHILE the write was in flight
+       seeded a new share whose body may predate the commit, and a read issued after this
+       answer (a page's refresh after its save, the prompt's status read) must not join it. */
+    const settled = function () { if (!ro) _inflight.clear(); };
+    return _track(_raw(p, _jsonInit(method, body, opts)).then(
+      function (raw) { settled(); return _handle(raw); },
+      function (e) { settled(); throw e; }
+    ).then(function (v) {
+      if (!ro) _mutated(method, p);
+      return v;
+    }), opts);
   }
 
-  function del(path, opts) {
-    return _track(fetch(_normPath(path), _jsonInit('DELETE', undefined, opts)).then(_handle));
+  function post(path, body, opts) { return _write('POST', path, body, opts); }
+
+  function put(path, body, opts) { return _write('PUT', path, body, opts); }
+
+  function del(path, opts) { return _write('DELETE', path, undefined, opts); }
+
+  /** held(promise) → a function returning that promise, for a request started EARLY and
+      awaited LATER (the parallel boot chains, PERF spec §13). A rejection is parked until
+      the function is called, so an early failure is never an unhandled rejection; calling
+      it rethrows the original error exactly where the old sequential `await` stood. */
+  function held(promise) {
+    const settled = Promise.resolve(promise).then(
+      function (v) { return { ok: true, v: v }; },
+      function (e) { return { ok: false, e: e }; });
+    return function () {
+      return settled.then(function (r) {
+        if (r.ok) return r.v;
+        throw r.e;
+      });
+    };
   }
 
   /** Derive a download filename from Content-Disposition, else a fallback. */
@@ -255,7 +372,7 @@
       on 2xx read a Blob, name it from Content-Disposition, and trigger a browser
       download via a temporary <a download>. Resolves when the click is issued. */
   async function download(path, body, opts) {
-    return _track(_download(path, body, opts));
+    return _track(_download(path, body, opts), opts);
   }
 
   /* I-10: a downloaded file is the one response no page renders — a print report is SAVED
@@ -322,6 +439,7 @@
     del: del,
     download: download,
     abortable: abortable,
+    held: held,
     pending: function () { return _pending; }
   };
 })();

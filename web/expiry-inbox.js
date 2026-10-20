@@ -221,9 +221,12 @@
       render();
       renderSkipped([]);
       section.hidden = true;
+      if (window.pdReportInboxCount) window.pdReportInboxCount('expiry', null);
       return;
     }
     items = (resp && resp.items) || [];
+    /* PERF §13: the badge's 「待確認到期」 share is this list's length (the same detection). */
+    if (window.pdReportInboxCount) window.pdReportInboxCount('expiry', items.length);
     const sk = (skipped && skipped.items) || [];
     /* The panel exists only where it has something to say — a ledger with no expired
        contract (every stock-only ledger) keeps the inbox page exactly as it was. */

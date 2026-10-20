@@ -18,6 +18,7 @@ The read window is bounded (400 calendar days covers the 252-session 52-week hig
 consensus ④ (an entry signal is the flip side of a risk signal); vol_spike ② is held-only.
 """
 
+import copy
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -25,12 +26,13 @@ from decimal import Decimal
 
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import list_instruments
-from portfolio_dash.portfolio.dashboard import build_dashboard
+from portfolio_dash.portfolio.dashboard import build_dashboard, build_dashboard_keyed
 from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.price_basis import price_in, series_in
 from portfolio_dash.portfolio.technicals import annualized_volatility, week52_position
 from portfolio_dash.pricing import consensus_source, snapshots_store
 from portfolio_dash.pricing.store import get_latest_price, get_price_history
+from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.corporate_actions import CorporateActionKind
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.instrument_scope import tracked_symbols
@@ -214,27 +216,70 @@ def assemble(
 
 def compute_alerts_full(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency,
-    calib_gap: Decimal | None = None,
+    calib_gap: Decimal | None = None, data: DashboardData | None = None,
+    data_key: result_cache.CacheKey | None = None,
 ) -> list[Alert]:
     """Build the dashboard, assemble the fed inputs, and run the FULL P3 rule engine.
 
-    The single entry point for ``GET /api/alerts`` / ``PUT /api/alert-rules`` and (via
-    :func:`scan_alert_compute`) the scheduler scan. ``calib_gap`` is fed by the caller
-    (``api.insight_service.calibration_gap``) — strategy/ never imports llm_insight.
+    The single entry point for ``GET /api/alerts`` / ``PUT /api/alert-rules`` / the dashboard
+    route's embed and (via :func:`scan_alert_compute`) the scheduler scan. ``calib_gap`` is
+    fed by the caller (``api.insight_service.calibration_gap``) — strategy/ never imports
+    llm_insight.
+
+    **Cached** (PERF spec §12.1, ``shared/result_cache.py``): the result — including the
+    400-day price reads, the consensus snapshots and the target config :func:`assemble` feeds
+    in — is kept as the latest ``"alerts"`` entry until the database changes, the day turns or
+    a write window opens; ``calib_gap`` is part of the key (as its exact ``str``). Every
+    answer is a deep copy. Alerts depend on ``now`` only through its date
+    (``compute_alerts_from`` reads ``data.as_of.date()``), so nothing is re-stamped.
+
+    **Which dashboard.** The alerts key is taken FIRST. Without *data*, a miss reads the
+    dashboard through ``build_dashboard`` (cached) — a build never older than the key, since
+    its own key is taken later. A caller that already holds this request's build passes it
+    as *data* with the key it was served under (*data_key*,
+    ``dashboard.build_dashboard_keyed``); it feeds the cached path only when that key
+    describes the SAME state as the alerts key (``result_cache.same_state``). Otherwise — a
+    commit landed between the build and this call, or the build was uncached — the alerts are
+    computed from *data* for this caller alone: never looked up, never stored. Filing them
+    under the alerts key would serve alerts of the pre-commit data under the post-commit
+    version (review 2026-10-19: 「AAPL 報價過期」 beside a freshness block that reported nothing
+    stale), and recomputing them from a fresh build would make this response's alerts
+    disagree with the dashboard it embeds them in.
+
+    Everything this function reads itself runs inside ONE read transaction (PERF-S12),
+    opened after the dashboard is in hand: a key taken inside a transaction is ``None``, so
+    reading the dashboard inside it would rebuild it on every miss.
     """
-    data = build_dashboard(conn, now=now, reporting=reporting)
-    inputs = assemble(conn, data, now=now)
-    return compute_alerts_from(
-        data, get_alert_rules(conn),
-        quota_remaining=budget_remaining(conn),
-        quota_threshold=get_alert_threshold(conn),
-        ai_active=ai_active(conn),
-        calib_gap=calib_gap,
-        symbol_metrics=inputs.symbol_metrics,
-        target_weights=inputs.target_weights,
-        consensus_deltas=inputs.consensus_deltas,
-        target_levels=inputs.target_levels,
-    )
+    gap_key = None if calib_gap is None else str(calib_gap)
+
+    def evaluate(built: DashboardData) -> list[Alert]:
+        with result_cache.read_snapshot(conn):
+            inputs = assemble(conn, built, now=now)
+            return compute_alerts_from(
+                built, get_alert_rules(conn),
+                quota_remaining=budget_remaining(conn),
+                quota_threshold=get_alert_threshold(conn),
+                ai_active=ai_active(conn),
+                calib_gap=calib_gap,
+                symbol_metrics=inputs.symbol_metrics,
+                target_weights=inputs.target_weights,
+                consensus_deltas=inputs.consensus_deltas,
+                target_levels=inputs.target_levels,
+            )
+
+    key = result_cache.key_for(conn, name="alerts", now=now, reporting=reporting,
+                               extra=(gap_key,))
+    if data is not None and not result_cache.same_state(key, data_key):
+        result_cache.note_uncached("alerts")
+        return evaluate(data)
+
+    def compute() -> list[Alert]:
+        built = data if data is not None else build_dashboard(
+            conn, now=now, reporting=reporting)
+        return evaluate(built)
+
+    return result_cache.serve(conn, key, name="alerts", compute=compute,
+                              copy=copy.deepcopy, snapshot=False)
 
 
 def scan_alert_compute(conn: sqlite3.Connection, *, now: datetime) -> list[Alert]:
@@ -244,3 +289,27 @@ def scan_alert_compute(conn: sqlite3.Connection, *, now: datetime) -> list[Alert
     calib_gap rule is a dashboard/settings surface, not a scan trigger.
     """
     return compute_alerts_full(conn, now=now, reporting=Currency.TWD, calib_gap=None)
+
+
+def prewarm_today() -> None:
+    """Compute today's dashboard and alerts into the result cache (PERF spec §12.1 pre-warm).
+
+    The ``fn`` of ``result_cache.schedule_prewarm``: scheduled 1 s after a settlement run
+    (``settlement_service._schedule_prewarm``) and 3 s after the last write window
+    (``api/app.py``'s middleware); both share one debounced timer. It reads exactly what a
+    request would — the clock and reporting currency of ``api/deps.py``, its own
+    ``shared.db.session`` — and the alerts carry the same
+    ``calib_gap`` as ``GET /api/alerts`` and reuse the build only under the same state
+    (``data_key``), so both entries are the ones the next request asks for. Reads only; a
+    failure is logged by ``schedule_prewarm``.
+    """
+    from portfolio_dash.api import deps
+    from portfolio_dash.api.insight_service import calibration_gap  # local: a heavy module
+    from portfolio_dash.shared.db import session
+
+    now = deps.get_now()
+    reporting = deps.get_reporting()
+    with session() as conn:
+        data, data_key = build_dashboard_keyed(conn, now=now, reporting=reporting)
+        compute_alerts_full(conn, now=now, reporting=reporting,
+                            calib_gap=calibration_gap(conn), data=data, data_key=data_key)

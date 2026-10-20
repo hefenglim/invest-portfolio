@@ -1,0 +1,311 @@
+{
+ "about": "v0.1.31 reference payloads (PERF plan W0.2); see README.md beside this file",
+ "source": "473fe5a28052647472b45a124f8d78a143052254",
+ "generator": "scripts/perf/make_reference_payloads.py",
+ "corpora": {
+  "golden": {
+   "now": "2026-06-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "tests/conftest.py::_seed_golden over init_golden_base",
+   "fingerprint": "3a2d6f9668e6124af39cb19e485665c445816d9ff89409305f934bb15fe7ec97",
+   "first_ledger_date": "2026-01-05",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "d208465308b11f8f522dfa44806a285a98fd7fe61d96f6226a774b47649baa37",
+    "month_end/2026-01.json": "4985b0dfbe3d8c80832f4f236286480ff214e162d9d0be5eb01cb6c83690f36a",
+    "month_end/2026-02.json": "c3eb9d17baa93324bf99829acd774953a06177c785b7ea57162f402a0948f46e",
+    "month_end/2026-03.json": "6d7d259c9a8f838cdfbda6c890a85b290a3e98765e93a7b04245e2b835c9e9de",
+    "month_end/2026-04.json": "6d11749bf9d605abe874ddabf5c74500d83c4ddef92f1c4f658a25730f4717a4",
+    "month_end/2026-05.json": "eab110d5f0f0c6b8d717e99859a33f310ba9ff06a0aefc6fb02c8b55da908885",
+    "tax_2026/dividends_2026.csv": "1500b37003ca3b3710d0e1eb4b828ae585f8b8cb58af76aa4384d8dd87b7bf1a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "2e7f7ef67f9564d51cc2d223cd97dbc118b89b5d4e678e2c749878a79d19300d"
+   }
+  },
+  "demo": {
+   "now": "2026-08-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "scripts/seed_demo.py::seed over init_golden_base, clock pinned",
+   "fingerprint": "3862ccbb26462723c1aa7f53fe0ac94386ae187c06699fcb2db8e5f041ecb614",
+   "first_ledger_date": "2026-01-02",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31",
+    "2026-06-30",
+    "2026-07-31"
+   ],
+   "files": {
+    "dashboard.json": "7bc607e00e4b238ee334d5a74a62dac4a94ab21231f22372549fc381f2438776",
+    "month_end/2026-01.json": "87b71ea84a0854b07440441fcd28a1a8c445f311489a8b0c2c597827168005a1",
+    "month_end/2026-02.json": "1e9b54badb8f4d134b287a02be39585867826800c174e6c6b196e6ccdc4a856a",
+    "month_end/2026-03.json": "02249761675bc322414fcc3a0bf17fe44a0be8452060b55366fcedc26a0e611e",
+    "month_end/2026-04.json": "030af8c6e4afe86a9be11856d1e554af54b732abc734c0c6b64a59b9651b8165",
+    "month_end/2026-05.json": "cd51881195b261eac907744174d9ae768c61c5a4ccc92fdd0faa939e0b495dab",
+    "month_end/2026-06.json": "2ae6f6cb0a67c4361423dca1ec9c7696d5bf9255f0eac13f5c74d28bc2f07067",
+    "month_end/2026-07.json": "269289913e1d9339a20393b07f5a4d1770b289d38141d216b72ec2e23509a7f8",
+    "tax_2026/dividends_2026.csv": "24084a3e77ca67a867a3307d63a6cca3dabf2dd8128c31eaac962c6e4b4f0bca",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "78fc59fabed97ebde10ec5d880e92bacc284e0cab054923460eef12820e4ca8b"
+   }
+  },
+  "doubled_demo": {
+   "now": "2026-08-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "demo + every transaction and dividend before now repeated at +1 day",
+   "fingerprint": "933d0712474b78b168eb1619be33022960b3a6ecbfcadf6c5be65ebdf290d745",
+   "first_ledger_date": "2026-01-02",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31",
+    "2026-06-30",
+    "2026-07-31"
+   ],
+   "files": {
+    "dashboard.json": "0477b069a07263824de658a379cc3d58471547488b2421bad5ae91db8983a52e",
+    "month_end/2026-01.json": "b1d0a66266fbc5ede99843b2e41cd5a988379efc16b1ffa01e4ec86e767a19de",
+    "month_end/2026-02.json": "a673066f79fdddff10afcbff63fa944d2a4877f541f1d5b17023430fcc5efbd2",
+    "month_end/2026-03.json": "fb042d194997914a2903c0d04bc35c6e995f0daf6553f34e2595b548eb1d2706",
+    "month_end/2026-04.json": "605241ce055e5809eac83de8ed0ae9f0f9dd72a914ab7c51ccb193c40c750ac5",
+    "month_end/2026-05.json": "1a50b8fa21ac32fd4b01ab889c998ca26f9f8b28e9607896bd5362e56ac4b4e7",
+    "month_end/2026-06.json": "d04a3ff8c6a752e3b24c57562e46521ce2efa2849bb53b4e8d4cae38857b0f5c",
+    "month_end/2026-07.json": "009f9ca4862d6af69d8f66700d3b1943923c38beeec7957ce71e20626765073e",
+    "tax_2026/dividends_2026.csv": "f8aec4efd4d31f2fdd6891d85c1d41965780ffeb186ab14d695cbac002411408",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "b2a8a82b6f5685c5f54147d4dfe43fca6ab15c6aacbbec912b910bba9f133e15"
+   }
+  },
+  "usd_reporting": {
+   "now": "2026-06-11T14:30:00+08:00",
+   "reporting": "USD",
+   "summary": "golden + one earlier USD/TWD rate, reporting currency USD",
+   "fingerprint": "6eca3c7488a4c9418b62c3c4f834fe647627d16f8cf3faccba26bc7eb9b2a2ad",
+   "first_ledger_date": "2026-01-05",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "2e3f24af9a4995424fac0feb22e476643e7bb26788d25b71b7e9d8293f18bb33",
+    "month_end/2026-01.json": "e71d5d519600ae84920be0917eb0b80ab3621a4253e4fe866ea1792913c0ef18",
+    "month_end/2026-02.json": "ba032fc40d2f600bf27c14a08db1a31a379aa6703e33499ba22bca4ba68308d9",
+    "month_end/2026-03.json": "0105585a2895d5dca6f603383f867b56ef5bcba4b9304c3d41f84c927fb9d93b",
+    "month_end/2026-04.json": "19d204b0cdc6dbfa48bd9284fb9ba6741044d8900a6eb8470b9613e42469a50a",
+    "month_end/2026-05.json": "53c6e0bcd55d0c94e4b8a9e939aba6a914bd3dcb675224ba15ee5b1abe4ef46c",
+    "tax_2026/dividends_2026.csv": "1500b37003ca3b3710d0e1eb4b828ae585f8b8cb58af76aa4384d8dd87b7bf1a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "2e7f7ef67f9564d51cc2d223cd97dbc118b89b5d4e678e2c749878a79d19300d"
+   }
+  },
+  "unquoted_ccy_cash": {
+   "now": "2026-06-11T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "golden + MYR/TWD rate + a MYR REBATE (PERF-F2)",
+   "fingerprint": "dd4355780087ddcde856f81ed4a71c20c05f8634027999395c1b99cd77b86841",
+   "first_ledger_date": "2026-01-05",
+   "tax_years": [
+    2026
+   ],
+   "month_ends": [
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "678e52912f8b61de187466d54e05e1988c08e095dc8d8f389015848795954390",
+    "month_end/2026-01.json": "4985b0dfbe3d8c80832f4f236286480ff214e162d9d0be5eb01cb6c83690f36a",
+    "month_end/2026-02.json": "c3eb9d17baa93324bf99829acd774953a06177c785b7ea57162f402a0948f46e",
+    "month_end/2026-03.json": "a75a9cca38a7d6d86273e1b5c2411c3809ddcd38d9b64be282cd83c10c8cd55b",
+    "month_end/2026-04.json": "0449e52b0432c1e9ea2a6f59def2e73f386a9b49d234d22def8fdb5e982d121c",
+    "month_end/2026-05.json": "2fed08f61e94ed9ae1ee0c9b077ea05af90841b3d43388a600b1ed9419306b54",
+    "tax_2026/dividends_2026.csv": "1500b37003ca3b3710d0e1eb4b828ae585f8b8cb58af76aa4384d8dd87b7bf1a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_2026/summary.md": "2e7f7ef67f9564d51cc2d223cd97dbc118b89b5d4e678e2c749878a79d19300d"
+   }
+  },
+  "rich": {
+   "now": "2026-06-10T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "short sale, options (sell-to-open, adjust, buy-to-close, expiry), DRIP, 配股, SPLIT + EXCHANGE + SPINOFF, future rows, an FX gap, a stale price",
+   "fingerprint": "3bba35fa8702b1c2442e2bf9eac268fc19270bcafb28300cb95ebd733b3d6335",
+   "first_ledger_date": "2025-10-01",
+   "tax_years": [
+    2025,
+    2026
+   ],
+   "month_ends": [
+    "2025-10-31",
+    "2025-11-30",
+    "2025-12-31",
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "849366d2050347f78a0e19c125a620bf0dc03657ca63b187e57595905376ebf9",
+    "month_end/2025-10.json": "70d39314176601972f75afde755035c8cb71b8af48bdd6234033fcabe3e949d1",
+    "month_end/2025-11.json": "a8ca1dfe2f577aa72ac1f5a2816299c900d2282b51e53781fedb34171f1ed975",
+    "month_end/2025-12.json": "7799bfb6a6a933e01cbcaf3b2ac5ac10b5ad7c2c17dbac4fc11268a0151be3c9",
+    "month_end/2026-01.json": "4b012aa4ac34be66ff00a60ff2627e6c53c8914f34fe6e7ed5012a29cdbcfee4",
+    "month_end/2026-02.json": "01f4f0f718b75d446b2d60c75833f12f9e1148f3bb46b908763a1cb94536f629",
+    "month_end/2026-03.json": "0a26e64a289e05124d4154b6c97283e5ce5b53ff58ffa1d3cf6a81bcbd8aacfd",
+    "month_end/2026-04.json": "43964a7f26342a91f209e1dbe02954f56e340a91b65ba0229d44b2f17b0717ab",
+    "month_end/2026-05.json": "bb75f3504b1600fd60e14aa4e01a12276a5c7a921c7d4c3875a2e9f83f5dfa4f",
+    "tax_2025/dividends_2025.csv": "00ace329f2f517c8b266007ec1f6b8cb5c3244e6ec40750471edf70ddd491b05",
+    "tax_2025/fx_realized_2025.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2025/realized_gains_2025.csv": "39a45f1a861a6051360781baefee722277d7841f755812d9515f93f062e08a33",
+    "tax_2025/summary.md": "c49be86559316d6ed14500fdfa2a90977d9d7064c026ce69d343fbc3d83907cf",
+    "tax_2026/dividends_2026.csv": "a20f8757ba82e0ddb0e7223710fdf842a77739983811bae75d792d2f8f2be02a",
+    "tax_2026/fx_realized_2026.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_2026/realized_gains_2026.csv": "5065e5427f3e9d81af5af64a5e0d23af7591fd15e3019dbaf337a8c004d76f1a",
+    "tax_2026/summary.md": "8d3a2f7afd8705fee05b03e32c7c2ad07c64d1e87c46a8d9ef98e828787023a0"
+   }
+  },
+  "rich_refusals": {
+   "now": "2026-06-10T14:30:00+08:00",
+   "reporting": "USD",
+   "summary": "rich + 賣超, orphan / short dividends, a refused close, refused and unreadable actions, an unpriced holding; reporting USD",
+   "fingerprint": "a1f6643c69a778bb2f2dc43ec95583a7fa7b9f53aa6db2d4ac01cfa3d5dfd9ef",
+   "first_ledger_date": "2025-10-01",
+   "tax_years": [
+    2025,
+    2026
+   ],
+   "month_ends": [
+    "2025-10-31",
+    "2025-11-30",
+    "2025-12-31",
+    "2026-01-31",
+    "2026-02-28",
+    "2026-03-31",
+    "2026-04-30",
+    "2026-05-31"
+   ],
+   "files": {
+    "dashboard.json": "10df00ce4a7e0de87742be3fb7c8d57d8ba9ceba591c491ed79ed217e9fe809c",
+    "month_end/2025-10.json": "7d665560aa191adc7311a01a6dcb9e9f8644abc8b8f9662ab2930b79770c120c",
+    "month_end/2025-11.json": "13f4b02364c8b6517da177c12ac52739e0b5c15e2abaa947fb232a714e7c8a93",
+    "month_end/2025-12.json": "0aff52955d2b1a548321246bd5065b316eeb40d490f0d78902181db436f6e666",
+    "month_end/2026-01.json": "40bbaa272bc095fe36d4781fcefa5727072187d3d984d1e46b82cbabe1ea9183",
+    "month_end/2026-02.json": "e366cf49dc0c763dba0672c1da2d4c8f62f4c82fba610de427017ba99e18252b",
+    "month_end/2026-03.json": "c46de189907e73cee3b452d30438ea62ab2a66cbebc2ad17300059c5d26ada29",
+    "month_end/2026-04.json": "9ad9a79c2cf3522c23b824264ba2bf7fb67b1d28ce30891d78ff1c609323dc47",
+    "month_end/2026-05.json": "a65c6dcf796fc7a0693db35992ec00f9a4cf889dd36671302f8111778d5ed13a",
+    "tax_2025/response.json": "c2d904939507a5e1db18470fe73f2d5a7e9ccade793700294cc3e265194e54bd",
+    "tax_2026/response.json": "c2d904939507a5e1db18470fe73f2d5a7e9ccade793700294cc3e265194e54bd"
+   }
+  },
+  "epoch1990": {
+   "now": "1990-03-15T14:30:00+08:00",
+   "reporting": "TWD",
+   "summary": "an opening built 1988, index closes from 1987, one 1987 rate",
+   "fingerprint": "2ac563e1104cecb22ce2fb6b561d91f3454a4712a321eaa6e387843785acbd32",
+   "first_ledger_date": "1988-03-01",
+   "tax_years": [
+    1988,
+    1989,
+    1990
+   ],
+   "month_ends": [
+    "1988-03-31",
+    "1988-04-30",
+    "1988-05-31",
+    "1988-06-30",
+    "1988-07-31",
+    "1988-08-31",
+    "1988-09-30",
+    "1988-10-31",
+    "1988-11-30",
+    "1988-12-31",
+    "1989-01-31",
+    "1989-02-28",
+    "1989-03-31",
+    "1989-04-30",
+    "1989-05-31",
+    "1989-06-30",
+    "1989-07-31",
+    "1989-08-31",
+    "1989-09-30",
+    "1989-10-31",
+    "1989-11-30",
+    "1989-12-31",
+    "1990-01-31",
+    "1990-02-28"
+   ],
+   "files": {
+    "dashboard.json": "aa9696fb539d0147b77f50db0615094843a149bc407a56c720eb4c237db0e90f",
+    "month_end/1988-03.json": "3a2472906392669ddb469af9b0d4841f1f221bee549696149e000f815227da7d",
+    "month_end/1988-04.json": "5dda6ea6b4b83750284834e0ecee243f0f09bf35e96813c2f2b3191771bdfec1",
+    "month_end/1988-05.json": "f1032dfa28ad21554eac56d8359ecb0e4925486e8afbea24d041d9f1c8cc80ad",
+    "month_end/1988-06.json": "b6ab48a2ef2c259bd4d10765ad1707ba272d6b442e418360ec45532a6ea4239e",
+    "month_end/1988-07.json": "ffdf7f540b109e51d18806b7fb4692f2d48ae8517974bc9eeac49b5ad3e9b31a",
+    "month_end/1988-08.json": "7bfac83e2e48d31dbbe282dead1d9898b7792e14eb99801ad33b83f9511fb839",
+    "month_end/1988-09.json": "7e0332a96c1da41e49ce084090a277455fb9ed3d80f6a1adc32749dd081da97f",
+    "month_end/1988-10.json": "1dbf1a31829daa33119fec365389d6af3eb5ff6ad6f5a30f2d3e9902b5b09b76",
+    "month_end/1988-11.json": "f3bbf3516c7db15b38bf3d85b3f604d59587cc3f3bc1a58eea60aaff222802f1",
+    "month_end/1988-12.json": "624ee52a732b8c627b837a753c4086556b128eafb0ab0f924dff9e8b12d95754",
+    "month_end/1989-01.json": "87ee22ad110a399d5dc4c375f1529d850fac19b535cbffc3abdc0507c0d25424",
+    "month_end/1989-02.json": "982c7647f3d093f8c35aa501b73c906d2f4b26989a7a0b6f6786f7f9f7f70f85",
+    "month_end/1989-03.json": "f87e9dc8f22e9b5794da9a2d3ba9fe262507e7d5e67bd994329a728d564d8d77",
+    "month_end/1989-04.json": "66471e493eb4e0188d27b680c78022aa1f56e3073a9a03547c6dccc036176aaf",
+    "month_end/1989-05.json": "421b22f84fe1d53d0e3d8dd2d26d03dec07bd517d5b5f67a5bccefa0f0fe6c67",
+    "month_end/1989-06.json": "5162239393d07b0102b83622b9c0d45ce81f56e31665c3417673a2d65c180670",
+    "month_end/1989-07.json": "60792b452add932ced7bd853116b7c7fb2ecbbdea76ff6976fafaec5ffce5ee6",
+    "month_end/1989-08.json": "21a5cb24f67ed3dc37e224a45de71836f59bdaf570ecc69aef266023146d6e1d",
+    "month_end/1989-09.json": "9f229e557d4aabd34a5c93642ec798b965c863c060e2bd67ea1d953f8cf97a31",
+    "month_end/1989-10.json": "7f5b16e339846a098ffe89366f0f74fa78ed94105fc1e493167e80f3b436e8c8",
+    "month_end/1989-11.json": "8737ca15c031bca4f323d3ed7b36e8bb4b98d37140433d75e45ec2729c14cb11",
+    "month_end/1989-12.json": "e0d7f4c68e154e43286a661a79e1cdc0b53870abf401af876056f9f2846ecb72",
+    "month_end/1990-01.json": "0cc2cd7886b5a27d68186bb383e386884d27cde318221074f3ae31b56e6a2dca",
+    "month_end/1990-02.json": "561b1a61b0f009664978a547d2e3d86d57ac775e8b4cd692d0fa986a75767943",
+    "tax_1988/dividends_1988.csv": "00ace329f2f517c8b266007ec1f6b8cb5c3244e6ec40750471edf70ddd491b05",
+    "tax_1988/fx_realized_1988.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_1988/realized_gains_1988.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_1988/summary.md": "60bbb5893361a4eaea72eee95525e19801a79f07f5a742352bea16e8f880208a",
+    "tax_1989/dividends_1989.csv": "00ace329f2f517c8b266007ec1f6b8cb5c3244e6ec40750471edf70ddd491b05",
+    "tax_1989/fx_realized_1989.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_1989/realized_gains_1989.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_1989/summary.md": "6740b8578baf615e3d29bdf089967868bb79127cf057ea380a3934e3bd4c3a71",
+    "tax_1990/dividends_1990.csv": "00ace329f2f517c8b266007ec1f6b8cb5c3244e6ec40750471edf70ddd491b05",
+    "tax_1990/fx_realized_1990.csv": "348932d4c576de3f22ee4360cb78ce56656ef6f65e0b9e7fe58daa9ec282ce02",
+    "tax_1990/realized_gains_1990.csv": "e7233347e5fffcbb68ce3ffa444f51b9736fc61fd02f7f60a32f4268cc18b109",
+    "tax_1990/summary.md": "7066f4a9733eeffe9acfbf8552bea711a30fb10e0098303c1bfe6e0a93359bca"
+   }
+  }
+ }
+}

@@ -66,6 +66,80 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.32 (the settlement store: history settled ahead, pages from the cache) -------
+    Feature(
+        version="0.1.32",
+        id="settled-history-fast-pages",
+        title="首頁與各頁面更快打開：歷史走勢每晚先結算好，同一份資料只算一次",
+        desc="帳本很長時，以前每次打開首頁都要把整本帳從頭重算一遍。現在歷史每天的數字會在每晚"
+        "（或你改帳之後）在背景先結算好存起來，打開頁面時只即時計算最近幾天；同一份資料被好幾個"
+        "區塊同時需要時也只算一次，按下儲存後會在背景先把首頁準備好。所有數字都和以前完全相同",
+        href="index.html",
+        area="儀表板",
+        target="#trend-chart",
+    ),
+    Feature(
+        version="0.1.32",
+        id="settlement-chip-panel",
+        title="右上角新增「結算」狀態：看得到歷史資料是否最新，點開可看每一次結算的完整報告",
+        desc="頂端列多了一個結算狀態標籤：已結算、待結算、結算中、準備中、結算失敗、自檢發現差異。"
+        "點開會看到這次結算的進度與預估時間，以及每一次結算的完整報告——起因、範圍、處理了哪些"
+        "變更（交易、股利、價格、匯率⋯⋯）、帳本檢查、各步驟耗時、歷史走勢與月結年結的變動；"
+        "上一次與更早的結算紀錄都留著，隨時可以翻看",
+        href="index.html",
+        area="頂端列 → 結算狀態",
+        target="#settle-chip",
+    ),
+    Feature(
+        version="0.1.32",
+        id="resettle-prompt",
+        title="改到較早日期的帳時，會先問你要不要重新結算",
+        desc="更正或補登一筆幾天前以上的交易、股利、換匯或現金紀錄後，歷史走勢需要重新結算。"
+        "系統會先告訴你要重算多少天、大約多久，由你選「立即重新結算」或「稍後」；選稍後，"
+        "走勢與月度成績會標「更新前版本」，直到每晚的結算或你手動重新結算為止。"
+        "選單的「重算」改名為「重新結算（驗證並重建歷史）」：在背景重播全部帳本、列出待釐清項目，"
+        "並重建歷史走勢與月度成績，不用等它跑完就能繼續操作",
+        href="index.html",
+        area="頂端列 → 結算狀態／選單",
+        target="#settle-chip",
+    ),
+    Feature(
+        version="0.1.32",
+        id="monthly-closes",
+        title="月度成績改為月底結算值，並可切換年度成績",
+        desc="過去的月份不再是每晚 23:50 拍下的快照，而是依月底當天的價格與匯率結算的月結值："
+        "上個月的帳本、價格或匯率更正後，會跟著重新結算；本月仍是即時值。可切換「月／年」查看"
+        "年度成績。月底收盤價尚未確定的月份標「暫定」，缺價、缺匯率、待釐清部位或已除息未入帳"
+        "的股利會以 ⚠ 說明；數字因更正而改變時標「已重述」，滑過可看原本的數字、時間與原因"
+        "（第一次上線時，舊快照與月結值的差異會標「上線重述」）",
+        href="index.html",
+        area="儀表板 → 月度成績",
+        target="#snapshots-panel",
+    ),
+    Feature(
+        version="0.1.32",
+        id="settlement-failed-push",
+        title="自動結算失敗時可以推播通知你",
+        desc="通知中心的規則訂閱多了「重新結算失敗」：每晚結算或每週自檢失敗時推播給你，說明在哪"
+        "一步停下、原因，以及目前顯示的是哪一個版本；靜音時段內失敗的，會在靜音時段結束後補發"
+        "一次。你手動按的重新結算失敗時，會直接在畫面上告訴你，不另外推播",
+        href="settings.html#notify",
+        area="設定 → 通知中心 → 規則訂閱",
+        target="#nt-subs",
+    ),
+    Feature(
+        version="0.1.32",
+        id="jobs-in-background-process",
+        title="背景排程工作改在獨立程序執行，網頁不再被拖慢",
+        desc="報價更新、AI 洞察、新聞整理等排程工作，現在各自在獨立的背景程序裡執行，跑完就釋放"
+        "記憶體，網頁本身不會因為它們而變慢；同一時間只跑一個較重的工作，其餘依序排隊，排程中心"
+        "會顯示「已排入」。每個工作最多執行 60 分鐘，超過會中止並記為失敗。因為要先啟動程序，"
+        "手動按「立即執行」會比以前多等幾秒。更新後第一次啟動時，過去一直卡在「執行中」的排程"
+        "紀錄會改記為失敗（系統重新啟動時此工作尚未完成）",
+        href="settings.html#scheduler",
+        area="設定 → 排程中心",
+        target="#jobs-body",
+    ),
     # --- v0.1.31 (dashboard speed on a long ledger) — shipped 2026-10-14 -------------------
     Feature(
         version="0.1.31",
@@ -2005,6 +2079,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.32": "2026-10-20",
     "0.1.31": "2026-10-14",
     "0.1.30": "2026-10-11",
     "0.1.29": "2026-10-10",

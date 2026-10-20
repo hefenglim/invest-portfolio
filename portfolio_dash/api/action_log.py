@@ -81,6 +81,10 @@ _LABELS: list[tuple[str, str, str]] = [
     ("DELETE", "/api/ledgers/", "帳本刪除"),
     ("POST", "/api/actions/refresh-quotes", "手動更新報價"),
     ("POST", "/api/actions/recompute", "重算（重建統計）"),
+    # The settlement (PERF spec 2026-10-18 §15). Its GET routes (status, runs, changes) are
+    # never logged; ``/api/settlement/run`` matches no ``/runs`` GET by method.
+    ("POST", "/api/settlement/run", "重新結算"),
+    ("POST", "/api/settlement/cancel", "取消重新結算"),
     ("POST", "/api/actions/backfill-history", "歷史報價回補"),
     ("POST", "/api/scheduler/jobs", "排程手動執行"),
     ("PUT", "/api/scheduler/jobs", "排程設定變更"),

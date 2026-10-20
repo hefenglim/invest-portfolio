@@ -99,9 +99,12 @@ def test_runs_endpoint_passes_partial_through(
 
 def test_app_wires_the_held_symbols_seam() -> None:
     """D39's lesson: a seam nobody registers is a seam nobody notices — and unregistered,
-    the verdict over-reports (every instrument counts). Pin the wiring line."""
+    the verdict over-reports (every instrument counts). Pin the wiring line: the seams are
+    bound in ``api/composition.bind_runtime`` (PERF §16, shared with the job-worker child),
+    which the lifespan calls."""
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[2]
-           / "portfolio_dash" / "api" / "app.py").read_text(encoding="utf-8")
+    api = Path(__file__).resolve().parents[2] / "portfolio_dash" / "api"
+    src = (api / "composition.py").read_text(encoding="utf-8")
     assert "register_held_symbols_fn(actions.held_symbols)" in src
+    assert "bind_runtime()" in (api / "app.py").read_text(encoding="utf-8")

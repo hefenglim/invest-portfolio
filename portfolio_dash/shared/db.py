@@ -3,6 +3,7 @@
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 from .config import get_settings
 from .flight import begin_write, end_write, note_write
@@ -16,14 +17,37 @@ def get_connection() -> sqlite3.Connection:
     """
     settings = get_settings()
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    return connect_path(settings.db_path)
+
+
+def connect_path(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
+    """THE one raw open of the personal database file (``tests/architecture/
+    test_db_open_surface.py`` pins it): ``Row`` rows, foreign keys, WAL.
+
+    :func:`get_connection` opens the configured file through it; the result cache's dedicated
+    connection and the settlement worker (which receives the path, not the settings) open
+    theirs through it too (PERF, 2026-10-18), so every connection to the file is configured
+    alike.
+
+    ``read_only=True`` opens the file through a ``mode=ro`` URI and sets NO pragma: such a
+    connection can neither write nor change the file. ``PRAGMA journal_mode = WAL`` on a
+    rollback-journal file is itself a write — it converts the file — so a reader that must
+    leave the file as it found it (the result cache's version connection) never issues it.
+    """
     # check_same_thread=False: FastAPI runs the sync `get_conn` dependency in an anyio
     # threadpool, so a connection may be created on one worker thread and closed on
     # another (session() ENTER vs. finally: close() can straddle threads). Each request
     # gets its OWN connection — never shared or used concurrently across threads — so
     # only the create-vs-close thread can differ, with no concurrent access. Disabling
     # the same-thread guard is therefore safe and necessary here.
-    conn = sqlite3.connect(settings.db_path, check_same_thread=False)
+    if read_only:
+        target, uri = f"{Path(path).resolve().as_uri()}?mode=ro", True
+    else:
+        target, uri = str(path), False
+    conn = sqlite3.connect(target, uri=uri, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    if read_only:
+        return conn
     conn.execute("PRAGMA foreign_keys = ON")  # must be set per connection
     # WAL persists per database file; re-setting it per connection is harmless. It
     # falls back to 'memory' journaling for an in-memory db, which is fine in tests.
@@ -31,9 +55,57 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+#: The settlement store's change trail (``portfolio/settlement_store.py`` owns the table; this
+#: module may not import it, so the name is spelled here once).
+_TRAIL_TABLE = "settle_change_log"
+_ACTOR_FUNCTION = "pd_actor"
+#: The TEMP trigger that stamps a trail row with the connection's actor (spec 2026-10-18 §7).
+#: The table name in the body is UNQUALIFIED: SQLite 3.49 refuses a ``main.``-qualified name
+#: inside a trigger body (3.53 accepts it); unqualified works on both (measured, plan W0.1).
+_ACTOR_TRIGGER = (
+    f"CREATE TEMP TRIGGER IF NOT EXISTS settle_actor AFTER INSERT ON {_TRAIL_TABLE}\n"
+    "WHEN NEW.actor IS NULL\n"
+    "BEGIN\n"
+    f"    UPDATE {_TRAIL_TABLE} SET actor = {_ACTOR_FUNCTION}() WHERE id = NEW.id;\n"
+    "END"
+)
+
+
+def job_actor(job_id: str) -> str:
+    """The change actor of a scheduled or manually run job: ``job:<id>`` (plan P14; the
+    vocabulary and its zh rendering are ``portfolio/settlement_models.py``'s ``ACTOR_*``)."""
+    return f"job:{job_id}"
+
+
+def install_actor(conn: sqlite3.Connection, actor: str) -> bool:
+    """Stamp every trail row this connection writes with *actor* (spec §7 "Who made the
+    change"): a connection-local application function plus a TEMP trigger that fills a
+    NULL ``actor`` on insert. Returns ``False`` (a no-op) when the trail table does not exist
+    yet — ``CREATE TEMP TRIGGER`` on a missing table raises, and a job would then swallow the
+    error and leave its run ``running``.
+
+    The function is registered BEFORE the trigger, every time, on the same connection: a TEMP
+    trigger whose function is missing makes the WRITE fail ("no such function"). Installing
+    again replaces the actor. Creating a TEMP trigger moves no main ``schema_version`` and
+    counts no change. Never on a GET or read-only connection (DEF-065, ``api/deps.py``); a
+    writer the application did not open keeps ``actor = NULL`` (外部程式／腳本).
+    """
+    present = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?", (_TRAIL_TABLE,)
+    ).fetchone()
+    if present is None:
+        return False
+    conn.create_function(_ACTOR_FUNCTION, 0, lambda: actor)
+    conn.execute(_ACTOR_TRIGGER)
+    return True
+
+
 @contextmanager
-def session() -> Iterator[sqlite3.Connection]:
+def session(actor: str | None = None) -> Iterator[sqlite3.Connection]:
     """Yield a connection that commits on success, rolls back on error, always closes.
+
+    *actor* (``job:<id>``, ``system:boot``, ``user:<login>``) is installed on the connection
+    (:func:`install_actor`), so the settlement store's trail names who wrote each change.
 
     Note: Python's sqlite3 legacy transaction model (``isolation_level=""``) runs
     standalone DDL (CREATE/DROP TABLE, etc.) outside any transaction, so a
@@ -44,12 +116,14 @@ def session() -> Iterator[sqlite3.Connection]:
     """
     conn = get_connection()
     try:
+        if actor is not None:
+            install_actor(conn, actor)
         yield conn
         if conn.total_changes:
-            # The commit runs inside a write window (`shared/flight.py`): a request's
-            # `get_conn` commits AFTER `api/app.py`'s window has closed (FastAPI runs a yield
-            # dependency's exit once the response has started), so without this a caller
-            # arriving just after the commit could still join a build started before it.
+            # The commit runs inside a write window (`shared/flight.py`), so a caller arriving
+            # just after the commit cannot join a build started before it. A request's
+            # `get_conn` commits inside `api/app.py`'s window since PERF-S10 (function scope);
+            # this window covers every session opened outside a request (threads, jobs).
             begin_write()
             try:
                 conn.commit()

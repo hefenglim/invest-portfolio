@@ -303,6 +303,9 @@ _NO_WORK_CLOSERS = {
     # was the runner's own and is gone with the raise; the calls stay in llm_usage, so in
     # the quota and the per-agent totals
     ("scheduler/jobs.py", "_record_insight_failure"): 1,
+    # a run nobody will finish (a dead job-worker child, a restart): its tally lived in the
+    # gone process, so the spend stays NULL; its calls stay in llm_usage (PERF §16)
+    ("scheduler/jobs.py", "_close_abandoned"): 1,
 }
 
 

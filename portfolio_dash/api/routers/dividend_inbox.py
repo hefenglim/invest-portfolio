@@ -21,7 +21,7 @@ router = APIRouter()
 @router.get("/dividend-inbox")
 def list_inbox(
     refresh: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     # DEF-015: the refresh travels as DATA — which symbols failed and why — plus the one
@@ -47,7 +47,7 @@ def list_inbox(
 
 @router.get("/dividend-inbox/count")
 def inbox_count(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, int]:
     """Pending-count for the sidebar badge (R6 item 4) — detection on read."""
@@ -61,7 +61,7 @@ class FingerprintsBody(BaseModel):
 @router.post("/dividend-inbox/confirm")
 def confirm(
     body: FingerprintsBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     written = inbox.confirm(conn, body.fingerprints, now=now)
@@ -71,7 +71,7 @@ def confirm(
 @router.post("/dividend-inbox/skip")
 def skip(
     body: FingerprintsBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     for fp in body.fingerprints:
@@ -81,7 +81,7 @@ def skip(
 
 @router.get("/dividend-inbox/skipped")
 def list_skipped(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     """The 「已忽略」 list (3E): skipped fingerprints + reconstructable detail (or fp+date)."""
@@ -95,7 +95,7 @@ def list_skipped(
 @router.post("/dividend-inbox/unskip")
 def unskip(
     body: FingerprintsBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     """Un-skip fingerprints so they re-surface in the inbox (3E). Mirrors skip/confirm —
     no guest is_protected gate (the dividend inbox is a core ledger surface, open in guest

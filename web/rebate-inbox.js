@@ -349,10 +349,16 @@
       render([]);
       renderAccruing([]);
       renderSkipped([]);
+      if (window.pdReportInboxCount) window.pdReportInboxCount('rebates', null);
       if (window.toast) {
         window.toast('待確認退款載入失敗', 'fail', (err && err.message) || undefined);
       }
       return;
+    }
+    /* PERF §13: the badge counts the DEFAULT window's pending months — exactly this list
+       unless 「顯示較舊月份」 widened it, in which case the badge asks /api/rebates/count. */
+    if (window.pdReportInboxCount) {
+      window.pdReportInboxCount('rebates', showOlder ? null : ((resp && resp.rows) || []).length);
     }
     render((resp && resp.rows) || []);
     renderOlderNotice(resp, !!showOlder);

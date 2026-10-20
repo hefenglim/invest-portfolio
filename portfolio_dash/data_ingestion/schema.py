@@ -119,7 +119,29 @@ def _drop_column_if_present(
     only fires for a legacy DB migrating in."""
     cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column in cols:
+        _drop_settle_triggers_on(conn, table)
         conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+
+def _drop_settle_triggers_on(conn: sqlite3.Connection, table: str) -> None:
+    """Drop the settlement store's triggers that read *table* before a column of it is dropped.
+
+    ``portfolio/settlement_store.py`` owns them (every name starts ``settle_trg_``; they are
+    read here by direct SQL from ``sqlite_master``, never imported — ``data_ingestion`` may not
+    import ``portfolio`` for this). Each UPDATE / REPLACE trigger names every watched column of
+    its table, and several read other ledgers too (the price gate, an instrument's first day),
+    so ``ALTER TABLE … DROP COLUMN`` would abort boot with "error in trigger … no such column".
+    Dropped are the triggers ON the table and those whose text names it. Boot's
+    ``install_or_verify`` recreates them from the new columns and marks the store dirty, so no
+    change made in between is lost.
+    """
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND substr(name, 1, 11) = 'settle_trg_' AND (tbl_name = ? OR instr(sql, ?) > 0)",
+        (table, table),
+    ).fetchall()
+    for row in rows:
+        conn.execute(f'DROP TRIGGER IF EXISTS "{row[0]}"')
 
 
 #: The note fingerprint the rebate inbox's confirm writes (``api/rebates.py::month_tag``).
@@ -276,6 +298,21 @@ def create_tables(conn: sqlite3.Connection) -> None:
             f"CREATE INDEX IF NOT EXISTS idx_{_ledger}_batch "
             f"ON {_ledger}(import_batch_id)"
         )
+    # Symbol lookups (PERF, spec 2026-10-18 §6). The settlement store's `prices` trigger asks
+    # "does this symbol appear in a ledger?" on every price write (a 5-year backfill fires it
+    # ~100,000 times), and the per-symbol reads of the instrument / input pages ask the same
+    # by account (performance audit 2026-10-16, P6). Indexes only: no row and no query result
+    # changes.
+    for _name, _table, _cols in (
+        ("idx_transactions_symbol", "transactions", "symbol"),
+        ("idx_dividends_symbol", "dividends", "symbol"),
+        ("idx_opening_inventory_symbol", "opening_inventory", "symbol"),
+        ("idx_corporate_actions_from_symbol", "corporate_actions", "from_symbol"),
+        ("idx_corporate_actions_to_symbol", "corporate_actions", "to_symbol"),
+        ("idx_transactions_account_symbol", "transactions", "account_id, symbol"),
+        ("idx_dividends_account_symbol", "dividends", "account_id, symbol"),
+    ):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {_name} ON {_table}({_cols})")
     # child_seed_json (DEF-040 R4, 2026-09-25): what a SPINOFF's save wrote into `prices` for
     # its child — the slot and the typed close, or "nothing" — so the delete takes back
     # exactly that and never a row that was there before the save (a provider's quote, or an

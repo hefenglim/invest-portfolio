@@ -2,8 +2,6 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-import yfinance as yf
-
 from portfolio_dash.pricing.enums import DataType
 from portfolio_dash.pricing.providers.base import ProviderBase
 from portfolio_dash.pricing.refs import FxPair, InstrumentRef
@@ -83,6 +81,7 @@ class YFinanceProvider(ProviderBase):
         return rows
 
     def fetch_quote_latest(self, instruments: list[InstrumentRef]) -> list[PriceRow]:
+        import yfinance as yf  # lazy, never at module import (PERF spec §16)
         out: list[PriceRow] = []
         for ref in instruments:
             df = yf.Ticker(yf_symbol(ref)).history(period="5d", auto_adjust=False)
@@ -101,6 +100,7 @@ class YFinanceProvider(ProviderBase):
         return out
 
     def fetch_quote_history(self, instrument: InstrumentRef, start: date) -> list[PriceRow]:
+        import yfinance as yf  # lazy, never at module import (PERF spec §16)
         df = yf.Ticker(yf_symbol(instrument)).history(start=start.isoformat(), auto_adjust=False)
         if df is None or df.empty:
             return []
@@ -117,6 +117,7 @@ class YFinanceProvider(ProviderBase):
         return rows
 
     def fetch_fx(self, pairs: list[FxPair]) -> list[FxRow]:
+        import yfinance as yf  # lazy, never at module import (PERF spec §16)
         out: list[FxRow] = []
         for p in pairs:
             df = yf.Ticker(f"{p.base.value}{p.quote.value}=X").history(
@@ -132,6 +133,7 @@ class YFinanceProvider(ProviderBase):
         return out
 
     def fetch_fx_history(self, pair: FxPair, start: date) -> list[FxRow]:
+        import yfinance as yf  # lazy, never at module import (PERF spec §16)
         df = yf.Ticker(f"{pair.base.value}{pair.quote.value}=X").history(
             start=start.isoformat(), auto_adjust=False)
         if df is None or df.empty:
@@ -147,6 +149,7 @@ class YFinanceProvider(ProviderBase):
         return rows
 
     def fetch_dividends(self, instruments: list[InstrumentRef]) -> list[DividendEvent]:
+        import yfinance as yf  # lazy, never at module import (PERF spec §16)
         out: list[DividendEvent] = []
         for ref in instruments:
             series = yf.Ticker(yf_symbol(ref)).dividends

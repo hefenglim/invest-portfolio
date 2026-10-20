@@ -32,7 +32,7 @@ class ItemKey(BaseModel):
 
 @router.get("/option-expiry")
 def list_items(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     return {"items": [to_wire(i.model_dump()) for i in inbox.detect(conn, now=now)]}
@@ -40,7 +40,7 @@ def list_items(
 
 @router.get("/option-expiry/count")
 def count(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, int]:
     """The sidebar badge's share (added to the other inboxes' counts by the shell)."""
@@ -50,7 +50,7 @@ def count(
 @router.post("/option-expiry/confirm")
 def confirm(
     body: ItemKey,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     try:
@@ -63,7 +63,7 @@ def confirm(
 
 @router.post("/option-expiry/confirm-all")
 def confirm_all(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     results = inbox.confirm_all(conn, now=now)
@@ -82,7 +82,7 @@ def confirm_all(
 @router.post("/option-expiry/skip")
 def skip(
     body: ItemKey,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     try:
@@ -96,7 +96,7 @@ def skip(
 @router.post("/option-expiry/unskip")
 def unskip(
     body: ItemKey,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, bool]:
     inbox.unskip(conn, body.account_id, body.symbol)
     return {"ok": True}
@@ -104,6 +104,6 @@ def unskip(
 
 @router.get("/option-expiry/skipped")
 def list_skipped(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, Any]:
     return {"items": [to_wire(s.model_dump()) for s in inbox.list_skipped(conn)]}

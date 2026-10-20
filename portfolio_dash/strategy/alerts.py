@@ -11,6 +11,7 @@ pp, so the comparison is pp-vs-pp. None means "below the global min_samples gate
 rule degrades silently. ``calibration_regression`` (spec 04c) is a separate EVENT in
 ``alert_events``; it is intentionally NOT a rule here."""
 
+import logging
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.llm_config import ai_active, budget_remaining, get_alert_threshold
 from portfolio_dash.shared.money import usd_display
 from portfolio_dash.strategy.rules_config import AlertRules, get_alert_rules
+
+logger = logging.getLogger(__name__)
 
 Severity = Literal["risk", "warn", "info"]
 _ZERO = Decimal("0")
@@ -523,8 +526,19 @@ def compute_alerts_from(
     # warn at half) so the two rules read alike where they genuinely are alike. Computed from
     # the trend the dashboard already built; `max_drawdown` skips `incomplete` days, so a
     # missing quote can never be reported as a crash.
+    # PERF spec §10 step 6: while the history is STALE (days served from the previous
+    # generation of the settlement store, PERF-D3) the peak may be a pre-correction day — a
+    # back-dated change not yet re-settled — and this rule pushes. It is skipped, with a note
+    # in the log, until a run re-settles those days; the trend chart says 更新前版本 meanwhile.
+    stale_history = data.history_state.stale
     if (rules.portfolio_drawdown.enabled
-            and rules.portfolio_drawdown.value is not None and data.trend.available):
+            and rules.portfolio_drawdown.value is not None and data.trend.available
+            and stale_history):
+        logger.info("portfolio_drawdown skipped: history stale %s..%s until re-settled",
+                    data.history_state.stale_from, data.history_state.stale_to)
+    if (rules.portfolio_drawdown.enabled
+            and rules.portfolio_drawdown.value is not None and data.trend.available
+            and not stale_history):
         # ⚠ NOT named `dd`: the per-symbol drawdown rule above already binds that name to a
         # Decimal in this same function scope, and mypy caught the collision. Two different
         # kinds of drawdown sharing one variable name is how the next reader misreads which

@@ -84,6 +84,21 @@
      so the page still renders (never an unhandled rejection — the e2e smoke asserts ZERO
      console errors). Everything below runs inside boot() so V.CATEGORIES is populated. ===== */
   async function boot() {
+    /* PERF spec §13 "parallel chains": the page's six reads — the variable registry, the
+       system prompt, the strategy prompts, the template library, the news-organizer prompt
+       and the evolution settings — were awaited one after another. None needs another's
+       answer to be ASKED, so all six leave now; each is still AWAITED where it was (inside
+       its own try, with its own toast), so the build order and every failure branch are
+       unchanged. `api.held` parks an early failure until that point. */
+    const early = {
+      vars: api.held(V.load()),
+      system: api.held(api.get('/api/system-prompt')),
+      strategies: api.held(api.get('/api/strategy-prompts')),
+      library: api.held(api.get('/api/prompt-templates')),
+      news: document.getElementById('news-prompt')
+        ? api.held(api.get('/api/news-prompt')) : null,
+      evolution: api.held(api.get('/api/evolution-config')),
+    };
     /* item 14a: the 代入標的 registry read runs in PARALLEL with the loads below and is
        awaited before the cards render; a failure is ONE toast and an empty picker. */
     const pickReady = (async () => {
@@ -96,14 +111,14 @@
       }
     })();
     try {
-      await V.load();              // populates V.CATEGORIES / index from /api/prompt-vars
+      await early.vars();          // populates V.CATEGORIES / index from /api/prompt-vars
     } catch (err) {
       _toast('變數總表載入失敗', 'fail', (err && err.message) || undefined);
     }
 
   /* ================= 系統提示詞 (GET /api/system-prompt) ================= */
   try {
-    const sp = await api.get('/api/system-prompt');
+    const sp = await early.system();
     D.system_prompt = (sp && sp.body) || '';
     D.system_updated_at = (sp && sp.updated_at) || '';
     D.system_version = sp && sp.current_version != null ? sp.current_version : null;
@@ -111,14 +126,14 @@
     _toast('系統提示詞載入失敗', 'fail', (err && err.message) || undefined);
   }
   try {
-    D.strategies = (await api.get('/api/strategy-prompts')) || [];
+    D.strategies = (await early.strategies()) || [];
   } catch (err) {
     _toast('策略提示詞載入失敗', 'fail', (err && err.message) || undefined);
   }
   /* W7 (AI-D37): the library rides boot (the from-library modal fetches lazily, but the
      per-strategy 同步官方 button renders on boot) — a failed fetch just hides the button. */
   try {
-    const lib0 = await api.get('/api/prompt-templates');
+    const lib0 = await early.library();
     D.library = (lib0 && lib0.strategies) || [];
   } catch (err) {
     D.library = [];
@@ -904,7 +919,7 @@
       newsSchemaCheck(N.body);
     };
     try {
-      newsApply(await api.get('/api/news-prompt'));
+      newsApply(await (early.news ? early.news() : api.get('/api/news-prompt')));
     } catch (err) {
       _toast('新聞整理提示詞載入失敗', 'fail', (err && err.message) || undefined);
       newsBadgeSet('載入失敗', false);
@@ -1130,7 +1145,7 @@
     const cfg = { auto_promote: false, shadow_batches: 5, min_samples: 8, max_shadows: 2, gap_alert_pp: '15' };
     let serverCfg = {};
     try {
-      const got = await api.get('/api/evolution-config');
+      const got = await early.evolution();
       if (got && typeof got === 'object') {
         serverCfg = got;
         Object.assign(cfg, got);

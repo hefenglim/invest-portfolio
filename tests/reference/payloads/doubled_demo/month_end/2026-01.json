@@ -1,0 +1,328 @@
+{
+ "as_of": "2026-01-31T23:59:00+08:00",
+ "reporting_currency": "TWD",
+ "kpis": {
+  "reporting_currency": "TWD",
+  "total_market_value": "2782400.0",
+  "total_return": "-49942.0000",
+  "total_return_rate": "-0.01763275762602115140050177556",
+  "realized_total": "0.0",
+  "unrealized_total": "-49942.0000",
+  "total_return_fx_complete": "-49942.0",
+  "principal_fx_effect": "0.0000",
+  "trading_financing_cost": "0",
+  "fx_complete_reason": null,
+  "xirr": null,
+  "xirr_window_days": 25,
+  "fx_realized": "0",
+  "fx_unrealized": "0.0"
+ },
+ "holdings": [
+  {
+   "account_id": "tw_broker",
+   "account_name": "{account:tw_broker}",
+   "symbol": "2330",
+   "name": "台積電 (DEMO)",
+   "market": "TW",
+   "sector": "Information Technology",
+   "board": "TWSE",
+   "quote_ccy": "TWD",
+   "shares": "4000",
+   "original_avg": "600.0855",
+   "adjusted_avg": "600.0855",
+   "original_cost_total": "2400342",
+   "adjusted_cost_total": "2400342",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": "590",
+   "market_value": "2360000",
+   "unrealized_pnl": "-40342.0000",
+   "capital_gain": "-40342.0000",
+   "price_stale": true,
+   "price_as_of": "2026-01-01",
+   "weight": "0.8481886141460609545715928695",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "-0.01680677170169917453429552955"
+  },
+  {
+   "account_id": "schwab",
+   "account_name": "{account:schwab}",
+   "symbol": "AAPL",
+   "name": "Apple (DEMO)",
+   "market": "US",
+   "sector": "Information Technology",
+   "board": "",
+   "quote_ccy": "USD",
+   "shares": "60",
+   "original_avg": "225",
+   "adjusted_avg": "225",
+   "original_cost_total": "13500",
+   "adjusted_cost_total": "13500",
+   "dividend_portion": "0",
+   "payback_ratio": "0",
+   "market_price": "220",
+   "market_value": "13200",
+   "unrealized_pnl": "-300",
+   "capital_gain": "-300",
+   "price_stale": true,
+   "price_as_of": "2026-01-01",
+   "weight": "0.1518113858539390454284071305",
+   "oversold": false,
+   "short_open": false,
+   "unbookable_dividend": false,
+   "unbookable_action": false,
+   "revived_by_dividend": false,
+   "payback_from_symbol": null,
+   "payback_carried_dividends": null,
+   "payback_own_dividends": null,
+   "unrealized_pct": "-0.02222222222222222222222222222"
+  }
+ ],
+ "holdings_subtotals": [
+  {
+   "account_id": null,
+   "market": null,
+   "total_market_value": "2782400.0",
+   "unrealized_total": "-49942.0000"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": null,
+   "total_market_value": "2360000",
+   "unrealized_total": "-40342.0000"
+  },
+  {
+   "account_id": "schwab",
+   "market": null,
+   "total_market_value": "422400.0",
+   "unrealized_total": "-9600.0"
+  },
+  {
+   "account_id": null,
+   "market": "TW",
+   "total_market_value": "2360000",
+   "unrealized_total": "-40342.0000"
+  },
+  {
+   "account_id": null,
+   "market": "US",
+   "total_market_value": "422400.0",
+   "unrealized_total": "-9600.0"
+  },
+  {
+   "account_id": "tw_broker",
+   "market": "TW",
+   "total_market_value": "2360000",
+   "unrealized_total": "-40342.0000"
+  },
+  {
+   "account_id": "schwab",
+   "market": "US",
+   "total_market_value": "422400.0",
+   "unrealized_total": "-9600.0"
+  }
+ ],
+ "realized": {
+  "rows": [],
+  "by_currency": {}
+ },
+ "returns": {
+  "by_currency": {
+   "TWD": {
+    "realized": "0",
+    "unrealized": "-40342.0000",
+    "total_return": "-40342.0000",
+    "gross_invested": "2400342",
+    "rate": "-0.01680677170169917453429552955"
+   },
+   "USD": {
+    "realized": "0",
+    "unrealized": "-300",
+    "total_return": "-300",
+    "gross_invested": "13500",
+    "rate": "-0.02222222222222222222222222222"
+   }
+  },
+  "reporting_currency": "TWD",
+  "reporting_total_return": "-49942.0000",
+  "xirr": null
+ },
+ "allocation": {
+  "by_sector": {
+   "Information Technology": "2782400.0"
+  },
+  "weights": {
+   "Information Technology": "1"
+  },
+  "reporting_currency": "TWD"
+ },
+ "currency_view": {
+  "by_currency_value": {
+   "TWD": "2360000",
+   "USD": "13200"
+  },
+  "by_currency_reporting": {
+   "TWD": "2360000",
+   "USD": "422400.0"
+  },
+  "reporting_total_value": "2782400.0",
+  "reporting_currency": "TWD"
+ },
+ "fx": {
+  "by_account": {
+   "moomoo_my": {
+    "account_id": "moomoo_my",
+    "home_ccy": "MYR",
+    "foreign_ccy": "USD",
+    "avg_rate": null,
+    "current_spot": "4.60",
+    "foreign_cash": "0",
+    "foreign_stock_value": "0",
+    "realized_fx": null,
+    "unrealized_fx_stocks": null,
+    "unrealized_fx_cash": null,
+    "unrealized_fx_total": null,
+    "spot_delta": null,
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   },
+   "schwab": {
+    "account_id": "schwab",
+    "home_ccy": "TWD",
+    "foreign_ccy": "USD",
+    "avg_rate": "32",
+    "current_spot": "32.0",
+    "foreign_cash": "3000",
+    "foreign_stock_value": "13200",
+    "realized_fx": "0",
+    "unrealized_fx_stocks": "0.0",
+    "unrealized_fx_cash": "0.0",
+    "unrealized_fx_total": "0.0",
+    "spot_delta": "0.0",
+    "covered_ratio": "1",
+    "fx_basis_gap": "0",
+    "fx_basis_incomplete": false,
+    "foreign_cash_negative": false
+   }
+  },
+  "reporting_currency": "TWD",
+  "reporting_realized_fx": "0",
+  "reporting_unrealized_fx": "0.0",
+  "excluded_accounts": [],
+  "reporting_unavailable_reason": null
+ },
+ "dividends": {
+  "by_year": [],
+  "total_by_currency": {},
+  "ttm_net": {}
+ },
+ "ex_dividend_calendar": [],
+ "trend": {
+  "points": [
+   {
+    "date": "2026-01-31",
+    "total_value": "2782400.0",
+    "net_invested": "2832342.0",
+    "incomplete": false,
+    "net_worth": "2468058.00"
+   }
+  ],
+  "reporting_currency": "TWD",
+  "available": true
+ },
+ "benchmark": {
+  "available": false,
+  "reason": "所有投入流量都落在基準指數的歷史之外或缺少基準，無法計算基準對照",
+  "terminal_value": null,
+  "net_invested": null,
+  "benchmark_return": null,
+  "excess": null,
+  "uncovered_markets": [
+   "TW",
+   "US"
+  ],
+  "uncovered_ratio": "1",
+  "by_market": []
+ },
+ "freshness": {
+  "prices": [
+   {
+    "symbol": "2330",
+    "as_of": "2026-01-01",
+    "stale": true
+   },
+   {
+    "symbol": "AAPL",
+    "as_of": "2026-01-01",
+    "stale": true
+   }
+  ],
+  "fx": [
+   {
+    "base": "MYR",
+    "quote": "TWD",
+    "as_of": "2026-01-01",
+    "stale": true,
+    "source": "demo"
+   },
+   {
+    "base": "USD",
+    "quote": "MYR",
+    "as_of": "2026-01-01",
+    "stale": true,
+    "source": "demo"
+   },
+   {
+    "base": "USD",
+    "quote": "TWD",
+    "as_of": "2026-01-01",
+    "stale": true,
+    "source": "demo"
+   }
+  ],
+  "any_stale": true,
+  "missing_prices": [],
+  "missing_fx": [],
+  "xirr_unavailable_reason": "觀察期 25 天・不足以年化（需 ≥30 天）",
+  "trend_unavailable_reason": null,
+  "fx_unavailable_reason": null,
+  "unregistered_symbols": [],
+  "last_backup_at": null,
+  "fx_triangulation": [
+   {
+    "via": "USD/MYR × MYR/TWD",
+    "pair": "USD/TWD",
+    "implied": "32.016000",
+    "direct": "32.000000",
+    "gap_pct": "0.0500",
+    "ok": true,
+    "as_of": "2026-01-01",
+    "stale": true,
+    "compared_on": "2026-01-01",
+    "dates_differ": false,
+    "leg_dates": {
+     "USD/MYR": "2026-01-01",
+     "MYR/TWD": "2026-01-01",
+     "USD/TWD": "2026-01-01"
+    },
+    "reason": null
+   }
+  ],
+  "scheduler_running": false
+ },
+ "dividend_projection": {
+  "year": 2026,
+  "by_currency": {},
+  "basis": "declared_only"
+ },
+ "unapplied_actions": []
+}

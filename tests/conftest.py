@@ -34,11 +34,13 @@ from portfolio_dash.llm_insight.composer_store import ensure_seeded as ensure_co
 from portfolio_dash.llm_insight.evaluations_store import ensure_tables as ensure_evaluations_tables
 from portfolio_dash.llm_insight.insights_store import ensure_tables as ensure_insights_tables
 from portfolio_dash.llm_insight.system_prompt import ensure_system_prompt_seeded
+from portfolio_dash.portfolio.settlement_store import create_tables as create_settle_tables
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
-from portfolio_dash.scheduler.jobs import create_scheduler_tables
+from portfolio_dash.scheduler.jobs import create_scheduler_tables, migrate_job_runs_results
+from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -58,9 +60,29 @@ def _safe_db(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     so any code path that opens the real connection cannot touch data/portfolio.db."""
     os.environ["PD_DISABLE_SCHEDULER"] = "1"
     os.environ["DB_PATH"] = str(tmp_path_factory.mktemp("db") / "test.db")
+    # Settlement flags (PERF plan P5): the store on, every run and job in-process and
+    # SYNCHRONOUS, no pre-warm. A test that needs another mode sets it with monkeypatch; the
+    # e2e servers override PD_SETTLE (tests/e2e/conftest.py).
+    os.environ["PD_SETTLE"] = "on"
+    os.environ["PD_SETTLE_MODE"] = "inline"
+    os.environ["PD_JOB_MODE"] = "inline"
+    os.environ["PD_PREWARM"] = "0"
+    # LiteLLM is imported on first use (PERF, spec §16), now inside a test with sockets banned
+    # instead of at collection: read its bundled model-cost map, never the remote one.
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_result_cache() -> Iterator[None]:
+    """Every test starts and ends with an empty result cache (``shared/result_cache.py``):
+    an entry must never leak into the next test, and the cache's version connections must
+    not keep a test's temporary database (and its ``-wal``) open on Windows."""
+    result_cache.reset()
+    yield
+    result_cache.reset()
 
 
 def _seed_golden(conn: sqlite3.Connection) -> None:
@@ -160,6 +182,8 @@ def init_golden_base(conn: sqlite3.Connection) -> None:
     ensure_evaluations_tables(conn)  # insight_evaluations: created EMPTY (spec 04c)
     ensure_signal_states_table(conn)  # signal_states derived cache: created EMPTY (P2 batch 2)
     ensure_signal_history_table(conn)  # signal_history per-day states: created EMPTY (W6)
+    create_settle_tables(conn)  # the settlement store (PERF): created EMPTY, as at boot
+    migrate_job_runs_results(conn)  # job_runs.results (PERF P3): the boot migration
 
 
 @pytest.fixture

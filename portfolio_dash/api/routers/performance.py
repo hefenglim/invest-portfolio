@@ -12,8 +12,15 @@ This is an ANALYSIS metric, not money-of-record: every number is a Decimal STRIN
 missing benchmark / price / FX degrades to ``available=false`` + a zh reason — it never
 500s. Session-gating is the app-global ``require_session`` (open in guest mode), same as
 every other read endpoint.
+
+**Cached** (PERF spec §12.1 / §12.2): the portfolio series is the dashboard's CACHED build
+(the settlement store's days before ``live_from``, live after), and the whole answer is kept
+per ``(benchmark, window)`` — one ``shared/result_cache`` entry each, ``"twr:<key>:<window>"``
+— until the database changes or the day turns. Its own reads (the benchmark closes and their
+FX) run in ONE read transaction opened after the dashboard is in hand (PERF-S12).
 """
 
+import copy
 import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -23,12 +30,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
 from portfolio_dash.data_ingestion.holdings import load_action_index
-from portfolio_dash.portfolio.dashboard import build_dashboard
-from portfolio_dash.portfolio.price_basis import series_in
+from portfolio_dash.portfolio.dashboard import bounded_closes, build_dashboard, closes_in
 from portfolio_dash.portfolio.timeseries import FxHistory
 from portfolio_dash.portfolio.twr import build_overlay, convert_closes, twr_index
-from portfolio_dash.pricing.benchmarks import get_benchmark
-from portfolio_dash.pricing.store import get_fx_history, get_price_history
+from portfolio_dash.pricing.benchmarks import Benchmark, get_benchmark
+from portfolio_dash.pricing.store import get_fx_series
+from portfolio_dash.shared import flags, result_cache
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.wire import decimal_str
 
@@ -52,16 +59,19 @@ def _wire4(value: Decimal) -> str:
 
 
 def _load_fx_history(
-    conn: sqlite3.Connection, quote: Currency, reporting: Currency, as_of: date
+    conn: sqlite3.Connection, quote: Currency, reporting: Currency, start: date, as_of: date
 ) -> FxHistory:
-    """Both directions of the ``quote``/``reporting`` pair for carry-forward conversion."""
+    """Both directions of the ``quote``/``reporting`` pair for carry-forward conversion of
+    closes dated from *start* — each read from its last rate on or before *start*, and never
+    from before 1900 (v0.1.31 read ``BETWEEN _EPOCH AND as_of``)."""
     history: FxHistory = {}
     if quote == reporting:
         return history
     for base, other in ((quote, reporting), (reporting, quote)):
-        rows = get_fx_history(conn, base, other, _EPOCH, as_of)
+        rows = [r for r in get_fx_series(conn, base, other, max(start, _EPOCH), as_of)
+                if r[0] >= _EPOCH]
         if rows:
-            history[(base, other)] = [(r.as_of, r.rate) for r in rows]
+            history[(base, other)] = rows
     return history
 
 
@@ -69,7 +79,7 @@ def _load_fx_history(
 def performance_twr(
     benchmark: str = Query("0050"),
     window: str = Query("1y"),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
     reporting: Currency = Depends(get_reporting),
 ) -> dict[str, Any]:
@@ -80,6 +90,20 @@ def performance_twr(
     if window not in _WINDOWS:
         raise HTTPException(status_code=400, detail=f"未知的時間範圍：{window}")
 
+    def compute() -> dict[str, Any]:
+        return _overlay(conn, bench, window, now=now, reporting=reporting)
+
+    # The answer depends on `now` only through its date (`as_of`), which the key carries.
+    answer: dict[str, Any] = result_cache.cached(
+        conn, name=f"twr:{bench.key}:{window}", now=now, reporting=reporting,
+        extra=(flags.settle_enabled(),), compute=compute, copy=copy.deepcopy,
+        snapshot=False)
+    return answer
+
+
+def _overlay(conn: sqlite3.Connection, bench: Benchmark, window: str, *, now: datetime,
+             reporting: Currency) -> dict[str, Any]:
+    """The answer of :func:`performance_twr` for a validated benchmark and window."""
     as_of = now.date()
     base: dict[str, Any] = {
         "as_of": as_of.isoformat(),
@@ -88,7 +112,9 @@ def performance_twr(
         "basis_notes": _BASIS_NOTES,
     }
 
-    # Portfolio TWR from the same daily NAV series the dashboard trend card uses.
+    # Portfolio TWR from the same daily NAV series the dashboard trend card uses — the cached
+    # build, read BEFORE this answer's own read transaction opens (a key taken inside a
+    # transaction is None, so reading it inside would rebuild it on every miss).
     data = build_dashboard(conn, now=now, reporting=reporting)
     # Options spec §5 / R3: that series leaves out an open contract's value, so the TWR built
     # on it does too — said with the dashboard's own note, on every answer (available or not).
@@ -123,16 +149,21 @@ def performance_twr(
     # The call is wired anyway because it is correct the moment such an action IS recorded,
     # and because leaving one series read raw is how the next reader concludes the rule is
     # optional.
-    actions = load_action_index(conn)
-    closes = [
-        (p.as_of, p.value)
-        for p in series_in(
+    #
+    # PERF spec §8.5 — a BOUNDED load. Every point the overlay reads is a carry-forward
+    # lookup on a day in ``[window_start, as_of]``, so the closes are read from the last close
+    # on or before ``window_start`` (``bounded_closes``), and the FX from the last rate on
+    # or before that first close, both never from before v0.1.31's 1900 floor (``_EPOCH``).
+    # A first day on a weekend, a holiday or a suspension keeps the value it carries forward.
+    with result_cache.read_snapshot(conn):
+        actions = load_action_index(conn)
+        closes = closes_in(
             actions, bench.storage_key,
-            get_price_history(conn, bench.storage_key, _EPOCH, as_of),
+            bounded_closes(conn, bench.storage_key, window_start, as_of, floor=_EPOCH),
             valued_on=as_of,
         )
-    ]
-    fx_history = _load_fx_history(conn, bench.quote_ccy, reporting, as_of)
+        fx_history = _load_fx_history(conn, bench.quote_ccy, reporting,
+                                      closes[0][0] if closes else window_start, as_of)
     bench_reporting = convert_closes(closes, fx_history, bench.quote_ccy, reporting)
 
     overlay = build_overlay(

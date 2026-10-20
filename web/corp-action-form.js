@@ -690,16 +690,20 @@
       composeAdjDest();
     }
     fAdjSrc.addEventListener('change', () => { composeAdjDest(); schedule(); });
-    /* The source contract's terms — the drawer wire's `options.contract`, parsed from the
-       symbol on the server (OPT-D22). */
+    /* The source contract's terms, parsed from the symbol on the server (OPT-D22). PERF spec
+       §12.2: ONE read of the compose endpoint's recognition form (`text=`, which answers the
+       underlying, right, expiry and strike), never the whole symbol drawer
+       (/api/symbol/{s}/detail — a dashboard build, signals and prices for four terms). */
     async function loadAdjSource() {
       const sym = fromSymbol().toUpperCase();
       if (!sym || adj.srcFor === sym) return adj.src;
       adj.srcFor = sym;
       adj.src = null;
       try {
-        const d = await api().get('/api/symbol/' + encodeURIComponent(sym) + '/detail');
-        adj.src = (d && d.options && d.options.contract) || null;
+        const r = await api().get('/api/input/option-symbol', { text: sym });
+        adj.src = r && r.symbol
+          ? { underlying: r.underlying, expiry: r.expiry, right: r.right, strike: r.strike }
+          : null;
       } catch (e) { adj.src = null; }
       if (adj.src) window.pdField.autoFill(fAdjUnd, adj.src.underlying);
       return adj.src;

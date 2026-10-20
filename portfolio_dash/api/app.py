@@ -9,30 +9,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.staticfiles import StaticFiles
-from starlette.types import Scope
 
-from portfolio_dash.api import action_log
-from portfolio_dash.api.alert_inputs import scan_alert_compute
+from portfolio_dash.api import action_log, alert_inputs, settlement_service
 from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
+from portfolio_dash.api.composition import bind_runtime
 from portfolio_dash.api.deps import get_conn
-from portfolio_dash.api.digest_service import run_digest
 from portfolio_dash.api.dividend_inbox import ensure_tables as ensure_dividend_inbox_tables
-from portfolio_dash.api.dividend_inbox import scan_job as dividend_scan_job
 from portfolio_dash.api.errors import register_error_handlers
-from portfolio_dash.api.fundamentals_service import run_fundamentals_av
-from portfolio_dash.api.insight_service import (
-    evaluate_due as insight_evaluate_due,
-)
-from portfolio_dash.api.insight_service import (
-    generate_calibrations_for_all as insight_generate_calibrations,
-)
-from portfolio_dash.api.insight_service import (
-    held_symbols_for_alerts as insight_held_symbols_for_alerts,
-)
-from portfolio_dash.api.insight_service import run_for_id as insight_run_for_id
-from portfolio_dash.api.news_service import run_news_daily
+from portfolio_dash.api.gzip import GZipMiddleware
 from portfolio_dash.api.option_expiry import ensure_tables as ensure_option_expiry_tables
+from portfolio_dash.api.read_only import is_read_only
 from portfolio_dash.api.rebates import ensure_tables as ensure_rebate_tables
 from portfolio_dash.api.routers import (
     accounts,
@@ -62,6 +48,7 @@ from portfolio_dash.api.routers import (
     prompts,
     rebates,
     scheduler,
+    settlement,
     signals,
     snapshots_router,
     strategy,
@@ -71,11 +58,13 @@ from portfolio_dash.api.routers import (
     users,
     whatsnew,
 )
-from portfolio_dash.api.signals_service import scan_signals as signal_scan_runner
-from portfolio_dash.api.snapshots import ensure_table as ensure_snapshots_table
-from portfolio_dash.api.snapshots import snapshot_job
+from portfolio_dash.api.settlement_service import on_boot as settlement_on_boot
+from portfolio_dash.api.static_cache import StaticCacheFiles
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
+from portfolio_dash.data_ingestion.fee_overrides import (
+    ensure_tables as ensure_fee_override_tables,
+)
 from portfolio_dash.data_ingestion.moomoo_merge import (
     migrate_moomoo_accounts,
     needs_moomoo_merge,
@@ -91,26 +80,21 @@ from portfolio_dash.news.store import get_news_connection
 from portfolio_dash.ops import digest as digest_ops
 from portfolio_dash.ops import notify as notify_ops
 from portfolio_dash.ops.backup import pre_write_snapshot
+from portfolio_dash.portfolio import settlement_store
+from portfolio_dash.portfolio.settlement_models import ACTOR_BOOT
+from portfolio_dash.portfolio.settlement_store import create_tables as create_settle_tables
 from portfolio_dash.pricing import datasources_store, snapshots_store
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.scheduler.jobs import (
+    close_abandoned_runs,
     ensure_scheduler_seeded,
-    register_alert_compute_runner,
-    register_alert_held_fn,
-    register_calibration_runner,
-    register_digest_runner,
-    register_dividend_scan_runner,
-    register_evaluation_runner,
-    register_fundamentals_runner,
-    register_held_symbols_fn,
-    register_insight_runner,
-    register_news_runner,
-    register_signal_scan_runner,
-    register_snapshot_runner,
+    migrate_job_runs_results,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
+from portfolio_dash.shared import flags, result_cache
 from portfolio_dash.shared.clock import app_now
-from portfolio_dash.shared.db import session
+from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.db import install_actor, session
 from portfolio_dash.shared.flight import begin_write, end_write
 from portfolio_dash.shared.llm_fail_log import (
     ensure_table as ensure_llm_fail_log_table,
@@ -126,31 +110,8 @@ from portfolio_dash.strategy.signal_states import ensure_table as ensure_signal_
 from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
-
-
-class _NoCacheStaticFiles(StaticFiles):
-    """StaticFiles that adds ``Cache-Control: no-cache`` to every response (2026-07-07).
-
-    Bare StaticFiles sends only ETag/Last-Modified — NO Cache-Control — so browsers fall
-    back to HEURISTIC freshness (~10% of the asset's age since Last-Modified) and can keep
-    serving a cached ``web/*.js`` for days without ever revalidating. After a deploy that
-    ships an HTML page together with a new helper it calls (e.g. insights.html →
-    ``fmt.aiAttrib``), a returning browser then mixes the fresh HTML with a STALE cached
-    script and the page dies client-side (live incident 2026-07-07: insights/news/index
-    lost every AI card to a swallowed ``f.aiAttrib is not a function``).
-
-    ``no-cache`` keeps caching but forces conditional revalidation on every use: an ETag
-    304 while unchanged, the new body immediately after every future deploy. This is the
-    class fix that fits the no-build-step rule (there is no bundler to fingerprint
-    filenames); the ``?v=<version>`` query on the HTML tags (see web/*.html + the
-    ``test_static_cache_discipline`` contract tests) additionally flushes clients that
-    cached assets BEFORE this header existed.
-    """
-
-    async def get_response(self, path: str, scope: Scope) -> Response:
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
+#: Seconds after the last write window closes before today's result is pre-warmed (plan W4).
+WRITE_PREWARM_DELAY_S = 3.0
 
 
 @asynccontextmanager
@@ -159,7 +120,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # In lifespan (not create_app) so hermetic TestClient(app) tests — which skip
     # lifespan — never write log files.
     configure_logging()
-    with session() as conn:
+    # The PD_* flags (shared/flags.py) are read per call; read them all once here so a bad
+    # value stops the boot with its own message instead of answering 500 on each request.
+    flags.current()
+    # Every boot write is stamped `system:boot` in the settlement store's change trail
+    # (spec §7 "Who made the change"): a no-op on a fresh database until the trail exists,
+    # installed again right after the settle DDL below.
+    with session(actor=ACTOR_BOOT) as conn:
         # First-run bootstrap: create EVERY table the running app reads + seed config, so a
         # fresh 0-byte DB is usable out of the box (guarded by tests/contract/
         # test_first_run_bootstrap.py — an empty DB hid the missing `prices` table until the
@@ -214,50 +181,61 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_dividend_inbox_tables(conn)  # pending_dividend_skips
         ensure_rebate_tables(conn)  # rebate_skips
         ensure_option_expiry_tables(conn)  # option_expiry_skips (options spec §7.2)
-        ensure_snapshots_table(conn)  # portfolio_snapshots (月度快照)
         action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
+        # fee_rule_overrides was created by its first write: a CREATE after boot moves
+        # schema_version past the recorded trigger version and the store is unusable until
+        # the next run's claim (final senior review, 2026-10-20). Every table exists at boot.
+        ensure_fee_override_tables(conn)
+        # The settlement store (PERF spec 2026-10-18 §6, §7), after every table it borrows.
+        # Order matters (plan W0.6): (1) every step above; (2) the settle DDL and the
+        # job_runs.results migration (P3); (3) the trigger set, verified or recreated, on this
+        # `system:boot` session — after every migration, since the ledgers' columns decide each
+        # trigger's text; (4) the settlement's boot hook; (5) LAST, record
+        # `trigger_schema_version` — no boot DDL may move `schema_version` after it, or every
+        # read would find the store unverified.
+        create_settle_tables(conn)
+        migrate_job_runs_results(conn)
+        close_abandoned_runs(conn, now=app_now())  # job rows left by a gone process
+        install_actor(conn, ACTOR_BOOT)
+        trigger_check = settlement_store.install_or_verify(
+            conn,
+            calc_version_changed=not settlement_store.store_state(
+                conn, reporting=get_settings().reporting_currency).calc_ok,
+        )
+        settlement_plan = settlement_on_boot(conn, trigger_check=trigger_check)
+        settlement_store.record_schema_version(conn)
+    # What the boot's trigger check found (read by tests and diagnostics; never by a route).
+    app.state.settle_trigger_check = trigger_check
     # The news library lives in its own file (news/store.py); its first open creates and
     # migrates it, so open it once here rather than inside the first GET /api/news.
     get_news_connection().close()
-    # Wire the kind=insight scheduler dispatch + manual-run daemon to the api service seam
-    # (scheduler triggers only; it never imports api — spec 04.2 / architecture.md).
-    register_insight_runner(insight_run_for_id)
-    # DEF-041: the on_alert 持倉提點 card is dispatched only for HELD symbols; "held" is the
-    # computed book's answer, which scheduler/ cannot replay — bound here, next to the runner.
-    register_alert_held_fn(insight_held_symbols_for_alerts)
-    # Wire the Loop-2/3 evolution runners (price-/master-bearing reads live in the api seam).
-    register_evaluation_runner(insight_evaluate_due)
-    register_calibration_runner(insight_generate_calibrations)
-    # 待確認匯入 daily scan (R5): full scan (events + pending count) via the api seam.
-    register_dividend_scan_runner(dividend_scan_job)
-    # 月度快照 (R6 item 8): nightly current-month KPI upsert via the api seam.
-    register_snapshot_runner(snapshot_job)
-    # News pipeline (batch ④): nightly fetch + AI-organize into the separate news DB.
-    register_news_runner(run_news_daily)
-    # Digests (P3 batch 3): daily close summary + weekly action list (assemble + store + push).
-    register_digest_runner(run_digest)
-    # Rule-signal scan (P2 batch 2): held-symbol signal evaluation + transition events.
-    register_signal_scan_runner(signal_scan_runner)
-    # Alert-compute (P3 batch 2): the FULL rule set (market-risk rules need pricing/consensus
-    # reads that live in the api seam) — the scheduler's alert_scan runs through this.
-    register_alert_compute_runner(scan_alert_compute)
-    # Fundamentals AV leg (W3, AI-D16): the Saturday job covers HELD symbols only; the
-    # held set is computed here (scheduler/ + pricing/ cannot replay the book).
-    register_fundamentals_runner(run_fundamentals_av)
-    # Quote-job partial threshold (M10-02): "did a HELD instrument fail?" — the held set is
-    # computed here for the same reason as the line above. Unregistered, the verdict counts
-    # every lost instrument (over-reports, never hides).
-    register_held_symbols_fn(actions.held_symbols)
+    # Every scheduler seam (the twelve runners + the settlement's two + the job worker),
+    # bound in ONE place shared with the job worker child (PERF spec §16).
+    bind_runtime()
     scheduler = None
     if os.environ.get("PD_DISABLE_SCHEDULER") != "1":
         scheduler = build_scheduler()
         scheduler.start()
     app.state.scheduler = scheduler
+    # A push held through quiet hours is sent by a one-shot job on the live scheduler.
+    settlement_service.bind_scheduler(scheduler)
+    # The boot run starts only now, after the boot session COMMITTED: the child reads its
+    # request from its own connection (inline mode runs it here, synchronously).
+    settlement_service.start_after_boot(settlement_plan)
     try:
         yield
     finally:
+        settlement_service.shutdown()
         if scheduler is not None:
             scheduler.shutdown(wait=False)
+        # The result cache holds a READ-ONLY connection per database for the life of the
+        # process, and a read-only connection cannot checkpoint: left open, the last close no
+        # longer folds the WAL back and deletes it. Close them, then checkpoint, so a clean
+        # stop leaves the database in one file (a backup restored by file copy must never meet
+        # a stale `-wal`; fold verification 2026-10-19).
+        result_cache.reset()
+        with session() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 def create_app() -> FastAPI:
@@ -305,24 +283,31 @@ def create_app() -> FastAPI:
             pass
         return response
 
-    # Shared builds (`shared/flight.py`, 2026-10-13): no request joins a dashboard build
-    # while a mutating request runs, and none joins one that started before it — so a page
-    # reloaded right after 儲存 never receives an answer computed before the save. Every
-    # method but GET / HEAD / OPTIONS counts, read-only POSTs (preview, 試算) included: a
-    # needless window only costs one build that is not shared. This window covers the route
-    # body only — `get_conn`'s commit runs after it closes (a yield dependency exits once the
-    # response has started), so `shared/db.session()` brackets that commit in its own window.
+    # Shared builds and the result cache (`shared/flight.py` 2026-10-13, `shared/
+    # result_cache.py` PERF 2026-10-18): no request joins or caches a dashboard build while a
+    # mutating request runs, and none joins one that started before it — so a page reloaded
+    # right after 儲存 never receives an answer computed before the save. Every method but
+    # GET / HEAD / OPTIONS counts, except the declared read-only POSTs (`api/read_only.py`:
+    # 試算, rebalance preview, prompt preview), which write nothing and so share like a GET.
+    # Since PERF-S10 (2026-10-18) `get_conn` is function-scoped, so the request's commit runs
+    # before the response starts, inside this window; `shared/db.session()` still brackets its
+    # own commit in a window, which covers the sessions opened outside a request (threads,
+    # jobs).
     @app.middleware("http")
     async def _write_window_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.method in ("GET", "HEAD", "OPTIONS"):
+        if is_read_only(request.method, request.url.path):
             return await call_next(request)
         begin_write()
         try:
             return await call_next(request)
         finally:
             end_write()
+            # PERF spec §12.1: pre-warm today's dashboard and alerts once the LAST write of a
+            # burst has closed (debounced; off unless PD_PREWARM=1), so the page the owner
+            # opens after 儲存 is a cache hit rather than a fresh build.
+            result_cache.schedule_prewarm(alert_inputs.prewarm_today, WRITE_PREWARM_DELAY_S)
 
     app.include_router(auth.router, prefix="/api")
     app.include_router(users.router, prefix="/api")
@@ -345,6 +330,7 @@ def create_app() -> FastAPI:
     app.include_router(symbol.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
     app.include_router(scheduler.router, prefix="/api")
+    app.include_router(settlement.router, prefix="/api")
     app.include_router(signals.router, prefix="/api")
     app.include_router(llm_fail_log.router, prefix="/api")
     app.include_router(system_log.router, prefix="/api")
@@ -360,5 +346,10 @@ def create_app() -> FastAPI:
     app.include_router(digest.router, prefix="/api")
     app.include_router(whatsnew.router, prefix="/api")
     if _WEB_DIR.is_dir():
-        app.mount("/", _NoCacheStaticFiles(directory=_WEB_DIR, html=True), name="web")
+        # `no-cache` for pages and unversioned files, `immutable` for an asset requested with
+        # the current `?v=` stamp (`api/static_cache.py`, PERF spec §13).
+        app.mount("/", StaticCacheFiles(directory=_WEB_DIR, html=True), name="web")
+    # Outermost layer: compresses every JSON / text response >= 1 KiB, never a ZIP
+    # (`api/gzip.py`, PERF spec §13).
+    app.add_middleware(GZipMiddleware)
     return app

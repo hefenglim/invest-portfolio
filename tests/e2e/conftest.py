@@ -43,6 +43,8 @@ from playwright.sync_api import BrowserContext, Page, Route, sync_playwright
 from pytest_socket import disable_socket, enable_socket, socket_allow_hosts
 
 from portfolio_dash.api.auth_store import create_user
+from portfolio_dash.portfolio.settlement_store import create_tables as create_settle_tables
+from portfolio_dash.scheduler.jobs import migrate_job_runs_results
 
 # Reuse the spec-17 golden-DB seed sequence verbatim (DRY) — see tests/conftest.py.
 from tests.conftest import (
@@ -296,6 +298,8 @@ def _build_golden_db(path: Path) -> None:
         ensure_insights_tables(conn)
         ensure_alert_events_tables(conn)
         ensure_evaluations_tables(conn)
+        create_settle_tables(conn)
+        migrate_job_runs_results(conn)
         _seed_golden(conn)  # commits internally
         conn.commit()
     finally:
@@ -358,6 +362,9 @@ def live_server(_e2e_loopback_socket: None) -> Iterator[str]:
         **os.environ,
         "DB_PATH": str(db_path),
         "PD_DISABLE_SCHEDULER": "1",  # no APScheduler / background external calls
+        # PERF plan P5: the shared server runs without the settlement store — today's live
+        # builds, no boot run, no prompt. Settlement flows use flow_server(settle=True).
+        "PD_SETTLE": "off",
     }
     stderr_file = stderr_path.open("wb")
     proc = subprocess.Popen(
@@ -513,8 +520,9 @@ def _terminate(proc: "subprocess.Popen[bytes]") -> None:
 def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
     """Factory: spawn an ISOLATED uvicorn subprocess against a fresh on-disk DB seeded
     by `seed`. Optional `users=[(username, password), ...]` makes the DB protected
-    (spec-09) for the login flow. Returns the base URL. All spawns are torn down at the
-    end of the test."""
+    (spec-09) for the login flow. ``settle=True`` runs the server with the settlement store
+    on and its runs in child processes (PERF plan P5; off by default). Returns the base URL.
+    All spawns are torn down at the end of the test."""
     procs: list[subprocess.Popen[bytes]] = []
     handles: list[object] = []
     tmp_dirs: list[Path] = []
@@ -524,6 +532,7 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
         seed: SeedFn,
         *,
         users: list[tuple[str, str]] | None = None,
+        settle: bool = False,
     ) -> str:
         _assert_loopback_window()  # ordering-proof: a prior module may have re-banned
         tmp_dir = Path(tempfile.mkdtemp(prefix="pd_flow_"))
@@ -544,6 +553,13 @@ def flow_server(_e2e_loopback_socket: None) -> Iterator[FlowServerFactory]:
             conn.close()
 
         env = {**os.environ, "DB_PATH": str(db_path), "PD_DISABLE_SCHEDULER": "1"}
+        # PERF plan P5: the store is off unless the flow opts in; an opted-in flow runs the
+        # settlement in a real child process, as prod does. Off keeps every other flow on
+        # today's live builds: golden's rows lie before the live window at the real clock, so
+        # with the store on every edit flow would meet the re-settle prompt.
+        env["PD_SETTLE"] = "on" if settle else "off"
+        if settle:
+            env["PD_SETTLE_MODE"] = "child"
         # Spawn-retry-on-early-exit: _free_port binds→releases→returns, so between release
         # and uvicorn's bind the ephemeral port can be taken (a TOCTOU race amplified by
         # spawning a fresh server PER flow test) — uvicorn then exits early on a bind

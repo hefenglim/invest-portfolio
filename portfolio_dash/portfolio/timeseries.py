@@ -26,9 +26,9 @@ defect this one was: fixed once, believed general.
 """
 
 from bisect import bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal, getcontext
 
 from portfolio_dash.portfolio.benchmark_counterfactual import ReportingFlow
 from portfolio_dash.portfolio.cost_basis import (
@@ -53,6 +53,7 @@ from portfolio_dash.shared.cash_kinds import movement_sign
 from portfolio_dash.shared.corporate_actions import ActionIndex
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.fx import convert
+from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import CASH_DIVIDEND_TYPES, Side
 from portfolio_dash.shared.models.ledger import LedgerBundle, counts_by
 from portfolio_dash.shared.money import settled_notional
@@ -105,6 +106,164 @@ def _fx_at(history: FxHistory, on: date, base: Currency, quote: Currency) -> Dec
         if rate is not None:
             return _ONE / rate
     return None
+
+
+class _Cursor:
+    """:func:`_entry_at_or_before` over one ascending series for NON-DECREASING days, by a
+    moving index (PERF spec §8.2): the same entry — the last one dated on or before the day —
+    at amortised constant cost instead of a bisect from the start on every call."""
+
+    __slots__ = ("_i", "_series")
+
+    def __init__(self, series: list[tuple[date, Decimal]]) -> None:
+        self._series = series
+        self._i = -1  # index of the last entry dated on or before the latest day asked
+
+    def at(self, on: date) -> tuple[date, Decimal] | None:
+        series, i = self._series, self._i
+        while i + 1 < len(series) and series[i + 1][0] <= on:
+            i += 1
+        self._i = i
+        return series[i] if i >= 0 else None
+
+
+class _FxCarry:
+    """:func:`_fx_at` into one quote currency for NON-DECREASING days, by a moving index per
+    stored pair: identity → direct pair → inverted pair → ``None``, with the same arithmetic
+    (``_ONE / rate`` on the inverse) and the same "a pair whose series has no row on or before
+    the day falls through to its inverse"."""
+
+    def __init__(self, history: FxHistory, quote: Currency) -> None:
+        self._history = history
+        self._quote = quote
+        self._cursors: dict[tuple[Currency, Currency], _Cursor | None] = {}
+
+    def _cursor(self, pair: tuple[Currency, Currency]) -> _Cursor | None:
+        if pair not in self._cursors:
+            series = self._history.get(pair)
+            self._cursors[pair] = None if series is None else _Cursor(series)
+        return self._cursors[pair]
+
+    def rate(self, on: date, base: Currency) -> Decimal | None:
+        quote = self._quote
+        if base == quote:
+            return _ONE
+        direct = self._cursor((base, quote))
+        if direct is not None:
+            entry = direct.at(on)
+            if entry is not None:
+                return entry[1]
+        inverse = self._cursor((quote, base))
+        if inverse is not None:
+            entry = inverse.at(on)
+            if entry is not None:
+                return _ONE / entry[1]
+        return None
+
+
+def _running_sum_is_exact(amounts: Sequence[Decimal]) -> bool:
+    """Whether summing *amounts* (and the reference's starting ``Decimal("0")``) is exact in
+    EVERY order and for every subset, in the current context (PERF spec §4 "Decimal order").
+
+    The order-independent bound: with *e* the smallest exponent among the amounts and the
+    starting zero, every partial sum is a multiple of ``10^e`` no larger than ``Σ|amount|``;
+    when that is below ``10^(prec + e)`` its coefficient has fewer than ``prec`` digits, so no
+    addition rounds — and an exact Decimal sum's value AND exponent (the minimum of the
+    operands') do not depend on the order. ``ROUND_FLOOR`` is refused outright: it is the one
+    rounding mode under which an exact zero's SIGN depends on the operands' order. Trapping
+    ``Inexact`` on the date-ordered sum alone would not prove the list-ordered one exact.
+    """
+    ctx = getcontext()
+    if ctx.rounding == ROUND_FLOOR:
+        return False
+    exponents = [0]
+    for amount in amounts:
+        exponent = amount.as_tuple().exponent
+        if not isinstance(exponent, int):  # NaN / Infinity
+            return False
+        exponents.append(exponent)
+    e = min(exponents)
+    total = 0
+    for amount in amounts:
+        _sign, digits, exponent = amount.as_tuple()
+        assert isinstance(exponent, int)
+        if len(digits) + exponent - e > ctx.prec:
+            return False
+        total += int("".join(map(str, digits)) or "0") * 10 ** (exponent - e)
+    limit: int = 10 ** ctx.prec
+    return total < limit
+
+
+def _reference_net_invested(converted: Sequence[tuple[date, Decimal]], day: date) -> Decimal:
+    """``net_invested`` on *day* exactly as v0.1.31 summed it: from ``Decimal("0")``, in the
+    flow list's own order (not date order), every flow that counts by *day*."""
+    net_invested = _ZERO
+    for d, amt in converted:
+        if counts_by(d, day):
+            net_invested += amt
+    return net_invested
+
+
+class _NetInvested:
+    """``net_invested`` for NON-DECREASING days, equal to :func:`_reference_net_invested`.
+
+    A running sum in date order when :func:`_running_sum_is_exact` holds for the flow list
+    (then no partial sum in either order rounds, so the two agree digit for digit and
+    exponent for exponent); otherwise the reference sum itself, recomputed only on the first
+    day asked and on a day some flow starts counting — between two such days the set of
+    counted flows, and therefore the sum, is unchanged.
+    """
+
+    def __init__(self, converted: Sequence[tuple[date, Decimal]]) -> None:
+        self._converted = converted
+        self.exact = _running_sum_is_exact([amt for _d, amt in converted])
+        self._ordered = sorted(converted, key=lambda flow: flow[0])
+        self._next = 0
+        # The fallback's clock: the latest flow day on or before the day asked.
+        self._flow_days = _Cursor([(d, _ZERO) for d in sorted({d for d, _a in converted})])
+        self._counted_through: date | None = None
+        self._value = _ZERO
+        self._started = False
+
+    def __call__(self, day: date) -> Decimal:
+        if self.exact:
+            ordered = self._ordered
+            while self._next < len(ordered) and counts_by(ordered[self._next][0], day):
+                self._value += ordered[self._next][1]
+                self._next += 1
+            return self._value
+        latest = self._flow_days.at(day)
+        latest_day = None if latest is None else latest[0]
+        if not self._started or latest_day != self._counted_through:
+            self._value = _reference_net_invested(self._converted, day)
+            self._counted_through = latest_day
+            self._started = True
+        return self._value
+
+
+class _GivenBooks:
+    """The book each valued day reads from caller-supplied ``(day, book)`` pairs, ascending:
+    the latest one on or before the day. A pair list that skips a day some row counts from
+    (*rebuild_on*) — so a stale book would be read — is refused, never served."""
+
+    def __init__(self, books: Iterable[tuple[date, Book]], rebuild_on: set[date]) -> None:
+        self._books = iter(books)
+        self._next: tuple[date, Book] | None = next(self._books, None)
+        self._current: tuple[date, Book] | None = None
+        self._event_days = _Cursor([(d, _ZERO) for d in sorted(rebuild_on)])
+
+    def at(self, day: date) -> Book:
+        while self._next is not None and self._next[0] <= day:
+            if self._current is not None and self._next[0] < self._current[0]:
+                raise ValueError("books must be in ascending day order")
+            self._current = self._next
+            self._next = next(self._books, None)
+        latest_event = self._event_days.at(day)
+        if self._current is None or (latest_event is not None
+                                     and self._current[0] < latest_event[0]):
+            raise ValueError(f"no book for {day}: the books must include every day a row "
+                             "counts from (trend_book_days)")
+        return self._current[1]
 
 
 def build_reporting_flows(
@@ -280,6 +439,90 @@ def trading_financing_cost(
         raise UnbookableLedgerError(_uncomputable_message(booking)) from exc
 
 
+def trend_start(bundle: LedgerBundle) -> date | None:
+    """The trend's first day: the earliest trade, dividend (``effective_date``) or opening
+    date — ``None`` on a ledger with none of them (no trend). A corporate action does not
+    start it: an action before the first position is replayed into the first day's book."""
+    # R6: `effective_date`, matching `LedgerBundle.through` and `build_book`'s ordering.
+    # Latent rather than live — a 配股's ex-date cannot precede the position that earns it,
+    # so no real ledger starts on one — but three date filters spelling the rule three ways
+    # is how two of them drift, and this was the third.
+    event_dates = (
+        [t.trade_date for t in bundle.transactions]
+        + [d.effective_date for d in bundle.dividends]
+        + [o.build_date for o in bundle.opening]
+    )
+    return min(event_dates) if event_dates else None
+
+
+def trend_book_days(bundle: LedgerBundle, *, start: date, end: date) -> list[date]:
+    """The days to ask :func:`~portfolio_dash.portfolio.cost_basis.iter_books` for, so that
+    :func:`value_series` over ``[start, end]`` has every book it reads: the latest day on or
+    before the first valued day on which some row counts, then every such day up to *end*
+    (``LedgerBundle.counts_on_dates`` — the days the per-day cut changes). Empty when there is
+    no trend or no day to value."""
+    first = trend_start(bundle)
+    if first is None:
+        return []
+    begin = max(start, first)
+    if end < begin:
+        return []
+    days = sorted(bundle.counts_on_dates())
+    lead = [d for d in days if d <= begin]
+    return lead[-1:] + [d for d in days if begin < d <= end]
+
+
+def holds_open_option(book: Book, instruments: Mapping[str, Instrument]) -> bool:
+    """Whether *book* holds an open option contract — the per-day test behind
+    ``TrendSeries.options_value_excluded`` (options spec §5 / R3): a non-zero holding of an
+    instrument registered as an option. The settlement stores it per day (``options_open``)."""
+    for h in book.holdings:
+        if h.shares == _ZERO:
+            continue
+        inst = instruments.get(h.symbol)
+        if inst is not None and inst.is_option:
+            return True
+    return False
+
+
+def value_series(
+    bundle: LedgerBundle,
+    price_history: PriceHistory,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    start: date,
+    end: date,
+    cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
+    books: Iterable[tuple[date, Book]],
+    options_open_before: bool,
+) -> TrendSeries:
+    """The trend over ``[start, end]`` from precomputed books (PERF spec §8.2).
+
+    *books* is ``(day, book)`` ascending, each book the dashboard-path replay through its
+    day — ``zip(days, iter_books(bundle, days))`` with ``days = trend_book_days(...)``; it is
+    read lazily. *refused_dividends* is the whole bundle's replay refusals (the book a caller
+    already holds: ``Book.refused_dividends``) — the payouts the flows leave out. A day before
+    the trend's own first day is never valued, and ``available`` is decided over EVERY flow,
+    whatever *start* is. Arithmetic, order and refusals are :func:`daily_value_series`'s —
+    this is its precomputed-books form.
+
+    *options_open_before* — REQUIRED, no default: whether any day from the trend's first day
+    up to the day before the first valued day held an open option contract
+    (:func:`holds_open_option` on that day's book; the store keeps it per day as
+    ``options_open``). ``TrendSeries.options_value_excluded`` is defined over EVERY day of the
+    trend (spec §4) while this function sees only the valued ones, so the caller states the
+    rest and the flag is their OR — the series a later start returns carries the same flag as
+    the full one. With *start* on or before the trend's first day there is no such day: pass
+    ``False`` (``True`` is refused).
+    """
+    return daily_value_series(bundle, price_history, fx_history, reporting, end=end,
+                              cash_movements=cash_movements, start=start, books=books,
+                              refused_dividends=refused_dividends,
+                              options_open_before=options_open_before)
+
+
 def daily_value_series(
     bundle: LedgerBundle,
     price_history: PriceHistory,
@@ -288,6 +531,10 @@ def daily_value_series(
     *,
     end: date,
     cash_movements: Sequence[CashMovementFlow],
+    start: date | None = None,
+    books: Iterable[tuple[date, Book]] | None = None,
+    refused_dividends: Iterable[DividendIdentity] | None = None,
+    options_open_before: bool | None = None,
 ) -> TrendSeries:
     """Replay the ledgers day by day from the first event to ``end``.
 
@@ -296,6 +543,24 @@ def daily_value_series(
 
     Raises :class:`~portfolio_dash.portfolio.cost_basis.UnbookableLedgerError` (never a raw
     ``ArithmeticError``) when a day cannot be valued at all — see :func:`build_reporting_flows`.
+
+    The optional arguments are :func:`value_series`' (PERF spec §8.2). Left out, this is
+    v0.1.31's function: the book rebuilt from ``bundle.through(day)`` on every day a row counts
+    from, the refusals from one whole-bundle replay, every day from the first:
+
+    * *start* — value only the days from ``max(start, trend_start(bundle))``; a point's values
+      do not depend on it. A start after the trend's first day REQUIRES
+      *options_open_before* (``TypeError`` without it — see :func:`value_series`), so the
+      series flag stays the OR over every day;
+    * *books* — ``(day, book)`` ascending, read instead of the per-day rebuild: a valued day
+      reads the latest book on or before it, and a book missing for a day some row counts
+      from is refused (``ValueError``) rather than reused stale;
+    * *refused_dividends* — the whole bundle's replay refusals, instead of replaying for them.
+
+    Two lookups are cheaper than before and give the same answers: FX by a moving index per
+    pair (:class:`_FxCarry` — the days ascend), and ``net_invested`` from a running sum when
+    :func:`_running_sum_is_exact` proves no partial sum rounds in ANY order — otherwise the
+    reference per-day sum, recomputed only on a day some flow starts counting.
     """
     # R-1: every arithmetic site in this module refuses the same way. The operands HERE are a
     # stored PRICE and a share count (``price * h.shares``), not one ledger line, so the
@@ -305,18 +570,16 @@ def daily_value_series(
     # ALREADY an ``UnbookableLedgerError`` (a ``ValueError``) and passes straight through this
     # arm with its row-naming sentence intact — a second wrap must not flatten it.
     try:
-        # R6: `effective_date`, matching `LedgerBundle.through` and `build_book`'s ordering.
-        # Latent rather than live — a 配股's ex-date cannot precede the position that earns it,
-        # so no real ledger starts on one — but three date filters spelling the rule three ways
-        # is how two of them drift, and this was the third.
-        event_dates = (
-            [t.trade_date for t in bundle.transactions]
-            + [d.effective_date for d in bundle.dividends]
-            + [o.build_date for o in bundle.opening]
-        )
-        if not event_dates:
+        first_day = trend_start(bundle)
+        if first_day is None:
             return TrendSeries(points=[], reporting_currency=reporting, available=False)
-        start = min(event_dates)
+        begin = first_day if start is None else max(start, first_day)
+        if begin > first_day and options_open_before is None:
+            raise TypeError("a trend starting after its first day needs options_open_before: "
+                            "whether a day before the start held an open option contract")
+        if begin == first_day and options_open_before:
+            raise ValueError("options_open_before=True, but no day precedes the trend's "
+                             "first day")
 
         # ONE ActionIndex for the whole replay (trap #21) — never one per day and never one per
         # lookup. Built from the FULL action list rather than per-day: `split_factor`'s window
@@ -329,18 +592,23 @@ def daily_value_series(
         # signature (and every caller's) is unchanged; it costs one replay beside the
         # per-day ones below. A refusal is decided from the events BEFORE the dividend, so the
         # whole bundle refuses exactly the rows each day's `bundle.through(day)` refuses.
-        reporting_flows = build_reporting_flows(bundle, fx_history, reporting,
-                                                cash_movements=cash_movements,
-                                                refused_dividends=replay_refusals(bundle))
+        # (PERF: a caller holding the whole bundle's book passes its refusals instead.)
+        reporting_flows = build_reporting_flows(
+            bundle, fx_history, reporting, cash_movements=cash_movements,
+            refused_dividends=(replay_refusals(bundle) if refused_dividends is None
+                               else refused_dividends))
         if reporting_flows is None:
             return TrendSeries(points=[], reporting_currency=reporting, available=False)
         converted: list[tuple[date, Decimal]] = [(f.on, f.amount) for f in reporting_flows]
+        net_invested_on = _NetInvested(converted)
+        fx_carry = _FxCarry(fx_history, reporting)
 
         points: list[TrendPoint] = []
         # Options spec §5 / R3: an open contract has no daily price series (R2 values it at its
         # last trade, a point-in-time figure), so its value is left OUT of every day — without
         # marking the day incomplete — and the series says so once.
-        options_excluded = False
+        # The days before the first valued one are the caller's to state (`value_series`).
+        options_excluded = bool(options_open_before)
         # The book changes only on a day some row counts from (2026-10-13). `through(day)` is a
         # date-PREFIX cut, so between two such days it holds the same rows and `build_book`, a
         # pure function of the bundle, returns the same book: replay on those days and reuse
@@ -350,15 +618,20 @@ def daily_value_series(
         # minutes per page on the prod VM. The loop below only READS `book`; anything that
         # starts mutating it must rebuild every day instead.
         rebuild_on = bundle.counts_on_dates()
+        given = None if books is None else _GivenBooks(books, rebuild_on)
         book: Book | None = None
-        day = start
+        day = begin
         while day <= end:
             # allow_oversell (2026-07-02): an acked-oversold ledger must NEVER 500 the
             # dashboard through the trend replay either — mirror the main book's
             # degradation. An oversold (negative-share) day has no honest value, so it
             # marks the point incomplete instead of contributing a fabricated number.
-            if book is None or day in rebuild_on:
+            if given is not None:
+                book = given.at(day)
+            elif book is None or day in rebuild_on:
                 book = build_book(bundle.through(day), allow_oversell=True)
+            # The day's rate per quote currency, looked up once (PERF spec §8.2).
+            rates: dict[Currency, Decimal | None] = {}
             total = _ZERO
             incomplete = False
             # Read the BOOK, and BEFORE the holdings loop, because that loop structurally
@@ -450,17 +723,16 @@ def daily_value_series(
                 priced_on, as_traded = entry
                 price = price_in(actions, h.symbol, as_traded,
                                  priced_on=priced_on, valued_on=day)
-                rate = _fx_at(fx_history, day, h.quote_ccy, reporting)
+                # `_fx_at(fx_history, day, h.quote_ccy, reporting)`, by a moving index.
+                if h.quote_ccy not in rates:
+                    rates[h.quote_ccy] = fx_carry.rate(day, h.quote_ccy)
+                rate = rates[h.quote_ccy]
                 if rate is None:
                     incomplete = True
                     continue
                 total += convert(price * h.shares, rate)
-            net_invested = _ZERO
-            for d, amt in converted:
-                if counts_by(d, day):
-                    net_invested += amt
             points.append(TrendPoint(date=day, total_value=total,
-                                     net_invested=net_invested, incomplete=incomplete))
+                                     net_invested=net_invested_on(day), incomplete=incomplete))
             day += timedelta(days=1)
 
         return TrendSeries(points=points, reporting_currency=reporting, available=True,

@@ -28,7 +28,7 @@ _MAX_LIMIT = 500
 def list_ledger_audit(
     limit: int = Query(50, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> dict[str, object]:
     """One page of the audit trail, newest first, with the trail's total size."""
     entries, total = list_entries(conn, limit=limit, offset=offset)

@@ -1,0 +1,3 @@
+﻿date,account_id,symbol,type,gross,withholding,net,ccy
+2026-04-20,tw_broker,0056,cash,6000,0,6000,TWD
+2026-05-08,moomoo_my,KEMB,net,1500,0,1500,MYR

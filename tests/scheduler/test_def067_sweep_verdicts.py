@@ -38,8 +38,8 @@ def _hermetic(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         jobs, "default_registry", lambda conn=None: Registry(providers={}, order={})
     )
     for name in ("_DIVIDEND_SCAN_RUNNER", "_NEWS_RUNNER", "_DIGEST_RUNNER",
-                 "_INSIGHT_RUNNER", "_SNAPSHOT_RUNNER", "_SIGNAL_SCAN_RUNNER",
-                 "_FUNDAMENTALS_RUNNER"):
+                 "_INSIGHT_RUNNER", "_SIGNAL_SCAN_RUNNER",
+                 "_FUNDAMENTALS_RUNNER", "_SETTLEMENT_RUNNER", "_AFTER_JOB_HOOK"):
         monkeypatch.setattr(jobs, name, None)
     jobs._INFLIGHT_JOBS.clear()
     yield
@@ -333,8 +333,32 @@ def test_digest_push_that_reached_no_channel_is_partial(
 
 def test_a_job_with_no_runner_says_so_in_chinese(golden_db: sqlite3.Connection) -> None:
     """A scheduler-only process has no runner: a safe no-op (``ok``, as before), in zh."""
-    for job_id in ("digest_daily", "digest_weekly", "snapshot_monthly", "signal_scan",
-                   "news_daily", "fundamentals_av_weekly"):
+    for job_id in ("digest_daily", "digest_weekly", "signal_scan",
+                   "news_daily", "fundamentals_av_weekly", "settlement_nightly",
+                   "settlement_selfcheck"):
         status, detail, _ = _status(golden_db, job_id)
         assert status == "ok", job_id
         assert detail.endswith("執行器未接線，未執行"), detail
+
+
+# --- the settlement trigger jobs (PERF plan §6.2): the verdict of what they STARTED ----------
+
+
+def test_a_settlement_job_passes_its_runs_verdict_through(
+    golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trigger job's own row carries the started run's verdict when it ran inline (a
+    failed run is the job's ``error``), and ``ok`` when it started a child or queued."""
+    from portfolio_dash.api import settlement_service as service
+
+    ended = service.RunEnd(run_id=7, status="failed", job_status="error",
+                           detail="重新結算失敗（逐日估值）：記憶體不足", reason="nightly",
+                           scope="nightly")
+    outcomes = {"nightly": service.AutoStart(run_id=7, ended=ended),
+                "selfcheck": service.AutoStart(queued_behind=6)}
+    monkeypatch.setattr(jobs, "_SETTLEMENT_RUNNER", lambda conn, scope, *, now:
+                        service.trigger_outcome(service._JOB_LABEL[scope], outcomes[scope]))
+    status, detail, _ = _status(golden_db, "settlement_nightly")
+    assert (status, detail) == ("error", "每晚例行結算 #7：重新結算失敗（逐日估值）：記憶體不足")
+    status, detail, _ = _status(golden_db, "settlement_selfcheck")
+    assert (status, detail) == ("ok", "重新結算 #6 正在進行，每週自檢排在其後")

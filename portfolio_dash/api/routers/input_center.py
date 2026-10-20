@@ -161,8 +161,23 @@ _ZERO = Decimal("0")
 _BOM = "\ufeff"
 
 
+def _share_bearing_pairs(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every (account, symbol) with a row in a ledger ``current_shares`` reads its shares
+    from — ``opening_inventory``, ``transactions``, ``dividends`` (``data_ingestion``'s
+    tables, read by direct SQL: the cross-layer table-read convention), in ONE statement.
+
+    A pair outside this set and named by no corporate action has no share event at all, so
+    ``current_shares`` would answer 0 for it (its short-circuit path sums three empty
+    reads): skipping it changes no answer. Every dividend row counts, not only the
+    share-adding ones — a superset only keeps a pair that then reads 0, as before."""
+    return {(str(r[0]), str(r[1])) for r in conn.execute(
+        "SELECT account_id, symbol FROM opening_inventory "
+        "UNION SELECT account_id, symbol FROM transactions "
+        "UNION SELECT account_id, symbol FROM dividends")}
+
+
 @router.get("/input/context")
-def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def context(conn: sqlite3.Connection = Depends(get_conn, scope="function")) -> dict[str, Any]:
     rows = conn.execute(
         "SELECT account_id, fee_rule_set, dividend_model FROM accounts ORDER BY account_id"
     ).fetchall()
@@ -211,11 +226,19 @@ def context(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
         for i in insts
     ]
     holdings: dict[str, dict[str, str]] = {}
+    # PERF plan §7.2: ONE action index for the request (trap #21) — every `current_shares`
+    # call read the whole corporate-action ledger again — and only the positions a share can
+    # come from are asked at all. Measured on the demo corpus (3 accounts × 10 instruments):
+    # 137 statements before, 30 of them full reads of `corporate_actions`.
+    actions = load_action_index(conn)
+    bearing = _share_bearing_pairs(conn)
     for a in accts:
         per = {
             inst.symbol: decimal_str(sh)
             for inst in insts
-            if (sh := current_shares(conn, a.account_id, inst.symbol)) != 0
+            if ((a.account_id, inst.symbol) in bearing
+                or actions.for_symbol(a.account_id, inst.symbol))
+            and (sh := current_shares(conn, a.account_id, inst.symbol, index=actions)) != 0
         }
         if per:
             holdings[a.account_id] = per
@@ -234,7 +257,9 @@ def _recognise_contract(conn: sqlite3.Connection, text: str) -> dict[str, Any]:
     """Owner ruling 2026-10-10: is *text* — whatever was typed or pasted into the manual form's
     代號 box — an option contract? An OCC symbol in any case, padded or not, or a broker
     statement's contract string (``XYZ 12/18/2026 50.00 P``) → the canonical OCC symbol, its
-    display name and the two terms the form's 轉倉 reuses; anything else → ``{"symbol": None}``.
+    display name, the two terms the form's 轉倉 reuses, and the contract's ``expiry`` / ``strike``
+    (PERF spec §12.2: the corporate-action form's 選擇權調整 composes its successor from them
+    instead of reading the whole symbol drawer); anything else → ``{"symbol": None}``.
 
     Never a 4xx: the page asks this for every ticker its own list does not know, and an error
     status is a console error in the browser. The shape is parsed HERE (``shared/options.py``),
@@ -251,14 +276,15 @@ def _recognise_contract(conn: sqlite3.Connection, text: str) -> dict[str, Any]:
     if registered is not None and registered.market is not Market.US:
         return {"symbol": None}
     return {"symbol": symbol, "name": contract_name(symbol),
-            "underlying": terms.underlying, "right": terms.right}
+            "underlying": terms.underlying, "right": terms.right,
+            "expiry": terms.expiry.isoformat(), "strike": decimal_str(terms.strike)}
 
 
 @router.get("/input/option-symbol")
 def compose_option_symbol(
     underlying: str = "", expiry: str = "", strike: str = "", right: str = "",
     text: str | None = None,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
 ) -> Any:
     """The compose endpoint (options spec §8): 標的／到期日／履約價／買權｜賣權 → the OCC
     symbol and its display name, through ``shared.options.option_symbol`` — the ONLY composer
@@ -429,7 +455,7 @@ def _adjusted_avg_by_position(
 
 @router.get("/input/holdings")
 def input_holdings(
-    account: str, conn: sqlite3.Connection = Depends(get_conn),
+    account: str, conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Per-account held / closed symbols: 股利 picker (FU-D35) + sell-entry hints (FU-D44).
@@ -1266,7 +1292,7 @@ def _charged_discount(
 @router.post("/input/manual/preview")
 def manual_preview(
     body: ManualBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     replacing: StoredTransaction | None = None
@@ -1459,7 +1485,7 @@ def _pair_preview(conn: sqlite3.Connection, body: ManualBody, *, now: datetime) 
 @router.post("/input/manual/commit", status_code=201)
 def manual_commit(
     body: ManualBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     today = now.date()
@@ -1889,7 +1915,10 @@ class ImportPreviewBody(BaseModel):
 
 
 @router.post("/import/preview")
-def import_preview(body: ImportPreviewBody, conn: sqlite3.Connection = Depends(get_conn)) -> Any:
+def import_preview(
+    body: ImportPreviewBody,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+) -> Any:
     if body.kind not in _BUILDERS:
         return JSONResponse(status_code=400, content=error_body(
             "validation_error", f"未知 kind: {body.kind}", field="kind"))
@@ -1983,7 +2012,7 @@ def _oversell_rows_response(rows: list[PreviewRow]) -> JSONResponse:
 @router.post("/import/commit")
 def import_commit(
     body: ImportCommitBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     bind_writer = _WRITERS.get(body.kind)
@@ -2194,7 +2223,7 @@ def import_commit(
 
 @router.get("/import/batches")
 def import_batches(
-    limit: int = 50, conn: sqlite3.Connection = Depends(get_conn)
+    limit: int = 50, conn: sqlite3.Connection = Depends(get_conn, scope="function")
 ) -> dict[str, Any]:
     """The import history, newest first — what came in, from which file, and how much of it.
 
@@ -2222,7 +2251,7 @@ _UNDO_REFUSED_ZH = {
 def import_batch_delete(
     batch_id: int, request: Request,
     ack_oversell: bool = False, ack_negative: bool = False,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     """Undo one import: delete exactly the ledger rows that batch wrote, and the batch.
@@ -2401,7 +2430,7 @@ class AiBody(BaseModel):
 @router.post("/input/ai/preview")
 def ai_preview(
     body: AiBody,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> Any:
     if body.drafts is not None:

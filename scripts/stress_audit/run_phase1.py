@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import io
 import sqlite3
 import sys
+import zipfile
+from datetime import timedelta
 
 import common as C
 import oracle as O
 import phase1 as P1
+from common import dec
 from phase1 import Ops, _json, reconcile
 
 
@@ -73,6 +77,10 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("BME", "moomoo_my", "0800EA", "2026-02-08", 1000, "1.15")
 
     reconcile(ev, api, db_path, "checkpoint1", valuation=True)
+    # PERF spec §18: a back-dated edit on a SETTLED store -> the stale range asserted -> a run.
+    run_backdated_edit(ev, api, db_path, op, tid)
+    # PERF §18: a CLOSED prior year (Y ≡ December, Σ months ≡ year ≡ its tax package).
+    run_prior_year(ev, api, db_path, op, buy, sell)
 
     # ---- SELL wave + special shapes ----
     sell("S1", "tw_broker", "2330", "2026-03-20", 300, 700, via_ui=True)   # partial
@@ -247,8 +255,17 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("SC1", "tw_broker", "2609", "2026-07-01", 800, 95)
     buy("SC2", "tw_broker", "2609", "2026-07-06", 1200, 98)
 
+    # PERF spec §11.2 / §18 "Period closes": a split the first trading day after a month end,
+    # a split ON a weekend month end, a held stock with no close at a month end, a cash
+    # dividend between its ex-date and its pay date across a month end.
+    run_month_end(ev, api, db_path, op, buy, sell)
+    # CR-11: a 賣超 netted back to zero still withholds XIRR, named, until resolved.
+    run_flat_oversell(ev, api, db_path, op, buy, sell)
     run_corporate_actions(ev, api, db_path, op, buy, sell)
     run_batch_import(ev, api, db_path, op)
+    # PERF spec §11.4: a correction dated LAST MONTH changes last month's row at once. Placed
+    # right after a checkpoint, so the store is clean and the correction is the only change.
+    run_live_window(ev, api, db_path, op)
     # Options run BEFORE the refused-dividend block on purpose: that block leaves two refused
     # payouts in the ledger until `final`, which marks every later trend day incomplete and
     # withholds B — and would mask exactly what the options checkpoints must see (R3: an open
@@ -256,8 +273,279 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     # a refused close and by nothing else the options block does).
     run_options(ev, api, db_path, op)
     run_refused_dividends(ev, api, db_path, op, buy, sell)
+    # Spec §11.2 "FX": a month end with no rate for a held currency (temporary checkpoint).
+    run_missing_fx(ev, api, db_path, op)
 
     reconcile(ev, api, db_path, "final", valuation=True, reports=True)
+
+
+def run_backdated_edit(ev: C.Evidence, api: C.Api, db_path, op: Ops, tid: dict[str, int]):
+    """PERF spec §18 "Stress audit": a back-dated edit -> the stale range asserted -> ``POST
+    /api/settlement/run`` -> wait -> reconciled.
+
+    The store is clean here (``checkpoint1`` just settled), so ONE transaction moved two days
+    EARLIER is the only change, and the trigger's day can be pinned, not merely bounded: a row
+    moved to another date marks from the earlier of its two days (spec §7) — 2026-03-18. That
+    day lies before the live window, so the days ``[2026-03-18, W − 1]`` are the previous
+    generation's (stale, PERF-D3) and the prompt is due from that day until a run settles them.
+    ``reconcile`` then re-asserts the same through its generic rules (and, with the read path,
+    that the stale days ARE the previous generation's), runs the settlement and reconciles.
+    """
+    ph = "phase1:backdated_edit"
+    txn = tid["B21"]                      # schwab AAPL buy 25 @185, 2026-03-20
+    fee, tax = C.read_fee_tax_from_db(db_path, txn)
+    r = op.edit_tx(txn, "schwab", "AAPL", "buy", "2026-03-18", 25, 185, fee, tax)
+    ev.check("backdated_edit.accepted", "B21 2026-03-20 -> 2026-03-18", True,
+             r.get("status") in (200, 201), ph)
+    st = P1._status(api)
+    w = P1.window_start(P1.server_today())
+    ev.check("backdated_edit.dirty_from", "B21 2026-03-20 -> 2026-03-18", "2026-03-18",
+             st.get("dirty_from"), ph)
+    ev.check("backdated_edit.stale_range", f"[2026-03-18, W - 1] with W = {w}",
+             ["2026-03-18", (w - timedelta(days=1)).isoformat()],
+             [st.get("stale_from"), st.get("stale_to")], ph)
+    ev.check("backdated_edit.live_from", f"W = {w}", w.isoformat(), st.get("live_from"), ph)
+    ev.check("backdated_edit.prompt", "due from the edited day", [True, "2026-03-18"],
+             [bool(st.get("needs_prompt")), (st.get("prompt") or {}).get("from")], ph)
+    ev.check("backdated_edit.state", "待結算 until a run", "pending", st.get("state"), ph)
+    reconcile(ev, api, db_path, "backdated_edit", valuation=True)
+
+
+def _seed_month_end_series(ev: C.Evidence, db_path, phase: str, symbols) -> None:
+    """The fixed weekday closes of *symbols* (``phase1.MONTH_END_SERIES``) — written AFTER
+    their trades: the price trigger admits only ledger symbols (spec §7), and these rows must
+    count as changes the settlement takes. Recorded in ``phase1.SEEDED_SERIES``, the fixture's
+    own account of what it wrote."""
+    rows: dict = {}
+    for sym in symbols:
+        market = P1.MONTH_END_SERIES[sym][0]
+        for day, close in P1.month_end_series(sym).items():
+            rows.setdefault(day, []).append((sym, market, close))
+    n = C.seed_prices_daily(db_path, rows, source="stress-fixture-month-end")
+    P1.SEEDED_SERIES.update(symbols)
+    ev.op(phase, "DB", "prices.month_end_series", {"symbols": sorted(symbols)}, {"rows": n})
+
+
+def _holding_literal(h: dict | None) -> list:
+    h = h or {}
+    return [P1._cv(dec(h[k])) if h.get(k) is not None else None
+            for k in ("shares", "price")] + [h.get("price_as_of"),
+                                             P1._cv(dec(h["market_value"]))
+                                             if h.get("market_value") is not None else None]
+
+
+def run_prior_year(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """PERF spec §18 "Period closes" — a CLOSED year. Rows in 2025 (TWD only: the fixture has
+    no FX row before 2026 on purpose) make the ledger span two years like prod's: a Y 2025 row
+    whose KPIs ≡ the December 2025 row's, whose flow activity ≡ Σ its two months, and which ties
+    out sheet by sheet with the 2025 tax package (realized, dividends). Placed after the first
+    checkpoints, so the whole 2025 history arrives as a back-dated change on a settled store.
+    """
+    ph = "phase1:prior_year"
+    op.cash_move("tw_broker", "deposit", "TWD", "2025-11-03", 500000)
+    buy("YRAB", "tw_broker", "YRA", "2025-11-04", 1000, 120)
+    op.dividend("tw_broker", "YRA", "2025-12-10", "CASH", 3000)
+    sell("YRAS1", "tw_broker", "YRA", "2025-12-16", 400, 125)
+    sell("YRAS2", "tw_broker", "YRA", "2026-02-17", 600, 121)
+    _seed_month_end_series(ev, db_path, ph, ("YRA",))
+    reconcile(ev, api, db_path, "prior_year", valuation=True)
+    if P1.READ_PATH:
+        years = [str(r.get("period")) for r in
+                 (P1._get_rows(api, "/api/settlement/periods", kind="Y")[1] or [])]
+        ev.check("prior_year.anchor.closed_year_row", "Y rows include 2025", True,
+                 "2025" in years, ph)
+    r = api.post("/api/export/tax-package", {"year": 2025})
+    sheets = {}
+    if r.status_code == 200:
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            sheets = {n: P1._parse_csv(z.read(n).decode("utf-8-sig")) for n in z.namelist()
+                      if n.endswith(".csv")}
+    ev.check("prior_year.anchor.tax_2025", "realized rows / dividend rows (YRA)",
+             [["YRA"], ["YRA"]],
+             [[x["symbol"] for x in sheets.get("realized_gains_2025.csv", [])],
+              [x["symbol"] for x in sheets.get("dividends_2025.csv", [])]], ph)
+
+
+def run_flat_oversell(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """CR-11: a 賣超 netted back to EXACTLY zero. The position is flat — no holdings row — but
+    the BOOK records it (its basis is gone for good), so XIRR stays withheld with the position
+    named, live and in every close from the oversell's day, until the oversell is resolved
+    (here: the acknowledged sell deleted, the owner's real remedy)."""
+    ph = "phase1:flat_oversell"
+    buy("OVFB", "tw_broker", "OVF", "2026-02-02", 100, 33)
+    r = op.trade("tw_broker", "OVF", "sell", "2026-02-09", 150, 34, ack=True,
+                 expect_status=201, fee_check=False)
+    j = r.get("json")
+    oversell_id = j.get("txn_id") if isinstance(j, dict) else None
+    ev.check("flat_oversell.acked_sell_written", "tw_broker/OVF sell 150 > held 100", 201,
+             r.get("status"), ph)
+    buy("OVFC", "tw_broker", "OVF", "2026-02-16", 50, "33.5")
+    res = reconcile(ev, api, db_path, "flat_oversell", valuation=True)
+    ev.check("flat_oversell.oracle_records_it", "the book keeps a flat 賣超",
+             ["tw_broker|OVF"], sorted("|".join(k) for k in res.oversold_keys), ph)
+    ev.check("flat_oversell.flat", "no holdings row", False,
+             ("tw_broker", "OVF") in res.holdings, ph)
+    if oversell_id is not None:
+        op.delete_tx(oversell_id, ack=True)
+
+
+def run_month_end(ev: C.Evidence, api: C.Api, db_path, op: Ops, buy, sell):
+    """PERF spec §11.2 / §18 "Period closes" — the month-end edges, through the real doors.
+
+    * ``MPX`` is held across month end 2026-02-28 with no close before 2026-03-02: the
+      February close lists it in ``notes.missing_prices``, leaves it out of 總市值 while its
+      cost stays in the rate's denominator, and withholds XIRR (all-or-nothing).
+    * ``SPA`` splits 2-for-1 on Mon 2026-06-01, the first trading day after month end
+      2026-05-31; ``SPB`` splits 2-for-1 ON that month end, a Sunday. Both series are AS
+      TRADED (``phase1.MONTH_END_SERIES``), so entering either split must leave the May close
+      exactly where it was — SPA because the split is after D, SPB because the read divides
+      Friday's pre-split close by the split dated on D (§11.2 "a non-trading D carries the last
+      close forward"). Pinned as a before / after equality and as hand-computed literals.
+    * ``SPD`` splits 2-for-1 on Tue 2026-03-31, a TRADING-DAY month end with its own
+      post-split close: 200 @ 30.0725 at D.
+    * ``SPE`` is held in schwab AND moomoo_my; its 2-for-1 dated Sat 2026-02-28 (a weekend
+      month end) is recorded in both — 2:1 and 4:2. One market event: Friday's 40.265 reads
+      20.1325 at D, re-expressed ONCE (the reduced-ratio dedupe). SPD and SPE are split and
+      sold BEFORE the first checkpoint, so between the two checkpoints only SPA's and SPB's
+      splits change and "the May close is unchanged" isolates them.
+    * a 2330 CASH dividend with its ex-date in April and its pay date in May: the April close
+      shows it in ``notes.dividends_receivable`` — shown, never counted.
+    * ``STL``'s closes have a hole before each of two month ends: 6 days old at 2026-04-30
+      (``notes.stale_prices``) and exactly 4 days old at 2026-05-31 (NOT stale: "more than 4
+      days") — the boundary itself, which no daily-seeded symbol can reach.
+
+    Every series DRIFTS 0.005 a calendar day, so a close read off the wrong day moves money.
+    """
+    ph = "phase1:month_end"
+    op.cash_move("tw_broker", "deposit", "TWD", "2026-02-02", 200000)
+    buy("MPXB", "tw_broker", "MPX", "2026-02-16", 100, 50)
+    sell("MPXS", "tw_broker", "MPX", "2026-03-16", 100, 55)
+    buy("SPAB", "tw_broker", "SPA", "2026-05-04", 1000, 100)
+    buy("SPBB", "tw_broker", "SPB", "2026-05-05", 500, 80)
+    buy("STLB", "tw_broker", "STL", "2026-04-01", 300, 60)
+    buy("SPDB", "schwab", "SPD", "2026-03-02", 100, 60)
+    buy("SPEB", "schwab", "SPE", "2026-01-12", 100, 40)
+    buy("SPEM", "moomoo_my", "SPE", "2026-01-13", 50, 40)
+    op.dividend("tw_broker", "2330", "2026-05-15", "CASH", 1500, ex_date="2026-04-28")
+    _seed_month_end_series(ev, db_path, ph, ("SPA", "SPB", "MPX", "STL", "SPD", "SPE"))
+    # SPD and SPE complete their life here — the splits, then the sales — so that between
+    # the two checkpoints below ONLY SPA's and SPB's splits change, and "the May close is
+    # unchanged" isolates them.
+    op.corporate_action("schwab", "SPLIT", "2026-03-31", "SPD", "SPD", 2, 1,
+                        note="2-for-1 ON month end 2026-03-31, a trading day")
+    op.corporate_action("schwab", "SPLIT", "2026-02-28", "SPE", "SPE", 2, 1,
+                        note="2-for-1 ON month end 2026-02-28 (Sat), schwab's record")
+    op.corporate_action("moomoo_my", "SPLIT", "2026-02-28", "SPE", "SPE", 4, 2,
+                        note="the SAME 2-for-1, moomoo_my's record, unreduced 4:2")
+    sell("SPES", "schwab", "SPE", "2026-03-16", 200, 20)
+    sell("SPEN", "moomoo_my", "SPE", "2026-03-16", 100, 20)
+    sell("SPDS", "schwab", "SPD", "2026-04-15", 200, 30)
+    reconcile(ev, api, db_path, "month_end_unsplit", valuation=True)
+    before = {"2026-05": P1.period_kpi_of(api, "M", "2026-05")} if P1.READ_PATH else {}
+    if P1.READ_PATH:
+        feb = P1.period_kpi_of(api, "M", "2026-02") or {}
+        ev.check("month_end.anchor.missing_price", "2026-02 notes.missing_prices", ["MPX"],
+                 sorted((feb.get("notes") or {}).get("missing_prices") or []), ph)
+        ev.check("month_end.anchor.missing_price_withholds_xirr", "2026-02 xirr", None,
+                 feb.get("xirr"), ph)
+        apr = P1.period_kpi_of(api, "M", "2026-04") or {}
+        recv = (apr.get("notes") or {}).get("dividends_receivable") or []
+        ev.check("month_end.anchor.receivable", "2026-04 dividends_receivable",
+                 ["tw_broker|2330|2026-04-28|2026-05-15"],
+                 sorted(f"{r.get('account_id')}|{r.get('symbol')}|{r.get('ex_date')}|"
+                        f"{r.get('pay_date')}" for r in recv), ph)
+        for period, kpi, want in (("2026-04", apr, ["STL@2026-04-24"]),
+                                  ("2026-05", before["2026-05"], [])):
+            stale = sorted(f"{p.get('symbol')}@{p.get('price_date')}"
+                           for p in ((kpi or {}).get("notes") or {}).get("stale_prices") or []
+                           if p.get("symbol") == "STL")
+            ev.check("month_end.anchor.stale_boundary", f"{period} STL", want, stale, ph)
+        # Before SPA's and SPB's splits are entered: Friday 05-29's close, pre-split counts.
+        # SPE (ON a Saturday D, recorded in two accounts — re-expressed ONCE) and SPD (ON a
+        # Tuesday D, with D's own post-split close) are already split.
+        for period, acct, sym, want in (
+                ("2026-05", "tw_broker", "SPA", ["1000", "100.72", "2026-05-29", "100720"]),
+                ("2026-05", "tw_broker", "SPB", ["500", "80.72", "2026-05-29", "40360"]),
+                ("2026-02", "schwab", "SPE", ["200", "20.1325", "2026-02-27", "4026.5"]),
+                ("2026-02", "moomoo_my", "SPE", ["100", "20.1325", "2026-02-27", "2013.25"]),
+                ("2026-03", "schwab", "SPD", ["200", "30.0725", "2026-03-31", "6014.5"])):
+            ev.check("month_end.anchor.split", f"{period} {acct}/{sym}", want,
+                     _holding_literal(P1.period_holding_of(api, period, acct, sym)), ph)
+    op.corporate_action("tw_broker", "SPLIT", "2026-06-01", "SPA", "SPA", 2, 1,
+                        note="2-for-1 the first trading day after month end 2026-05-31")
+    op.corporate_action("tw_broker", "SPLIT", "2026-05-31", "SPB", "SPB", 2, 1,
+                        note="2-for-1 ON month end 2026-05-31, a Sunday")
+    reconcile(ev, api, db_path, "month_end_splits", valuation=True)
+    if P1.READ_PATH:
+        after = P1.period_kpi_of(api, "M", "2026-05") or {}
+        for field in ("total_market_value", "total_return", "total_return_rate", "xirr"):
+            ev.check("month_end.split_leaves_close_unchanged", f"2026-05 {field}",
+                     (before.get("2026-05") or {}).get(field), after.get(field), ph)
+        # SPA: the split is after D — nothing about the position at D moved. SPB: ON D (a
+        # Sunday) — twice the shares at half Friday's close.
+        for period, acct, sym, want in (
+                ("2026-05", "tw_broker", "SPA", ["1000", "100.72", "2026-05-29", "100720"]),
+                ("2026-05", "tw_broker", "SPB", ["1000", "40.36", "2026-05-29", "40360"])):
+            ev.check("month_end.anchor.split", f"{period} {acct}/{sym}", want,
+                     _holding_literal(P1.period_holding_of(api, period, acct, sym)), ph)
+    sell("SPAS", "tw_broker", "SPA", "2026-06-15", 2000, 50)
+    sell("SPBS", "tw_broker", "SPB", "2026-06-15", 1000, 40)
+    sell("STLS", "tw_broker", "STL", "2026-06-15", 300, 60)
+
+
+def run_live_window(ev: C.Evidence, api: C.Api, db_path, op: Ops):
+    """PERF spec §11.4: "a correction dated last month changes last month's row at once (a test
+    pins it)". The month is the SERVER's last month (the live window is anchored on today), so
+    the date moves with the clock; everything asserted is derived from it.
+
+    A missed trade entered on the 15th of last month, then corrected (shares 10 -> 12): after
+    each, WITHOUT a run, the status shows the change inside the live window (dirty from that
+    day, nothing stale, no prompt) and last month's close and 月度成績 row already equal the
+    oracle over the changed ledger (``phase1.check_live_window_row``). Then a checkpoint.
+    """
+    today = P1.server_today()
+    P1.CHECKPOINT.today = today
+    day = (today.replace(day=1) - timedelta(days=1)).replace(day=15)
+    r = op.trade("schwab", "AAPL", "buy", day.isoformat(), 10, 205)
+    txn = (r.get("json") or {}).get("txn_id") if isinstance(r.get("json"), dict) else None
+    ev.check("live_window.entry_written", f"schwab AAPL 10 @205 on {day}", 201,
+             r.get("status"), "phase1:live_window")
+    P1.check_live_window_row(ev, api, db_path, "live_window_entry", day)
+    if txn is None:
+        return
+    fee, tax = C.read_fee_tax_from_db(db_path, txn)
+    r = op.edit_tx(txn, "schwab", "AAPL", "buy", day.isoformat(), 12, 205, fee, tax)
+    ev.check("live_window.correction_written", f"id={txn} shares 10 -> 12", True,
+             r.get("status") in (200, 201), "phase1:live_window")
+    P1.check_live_window_row(ev, api, db_path, "live_window_correction", day)
+    reconcile(ev, api, db_path, "live_window", valuation=True)
+
+
+def run_missing_fx(ev: C.Evidence, api: C.Api, db_path, op: Ops):
+    """Spec §11.2 "FX": a currency with NO rate on or before a month end. A Malaysian buy dated
+    2025-12-15 (the fixture's first MYR/TWD row is 2026-01-01): the December 2025 close has
+    no MYR/TWD rate, so 總市值, 總報酬 and the rate are blank and the pair is named in
+    ``notes.missing_fx``; the flow itself has no rate either, so the whole trend is
+    unavailable (and with it B, every trend figure and every period TWR) and XIRR has no
+    series. Reconciled in that state, then removed — a temporary checkpoint, so the rest of the
+    scenario keeps its trend."""
+    ph = "phase1:missing_fx"
+    r = op.trade("moomoo_my", "1155", "buy", "2025-12-15", 100, "9.00")
+    j = r.get("json")
+    txn = j.get("txn_id") if isinstance(j, dict) else None
+    ev.check("missing_fx.row_written", "moomoo_my 1155 100 @9.00 on 2025-12-15", 201,
+             r.get("status"), ph)
+    reconcile(ev, api, db_path, "missing_fx", valuation=True)
+    if P1.READ_PATH:
+        dec25 = P1.period_kpi_of(api, "M", "2025-12") or {}
+        notes = dec25.get("notes") or {}
+        ev.check("missing_fx.anchor", "2025-12: 總市值 / 總報酬 / rate blank, MYR/TWD missing",
+                 [None, None, None, ["MYR/TWD"], True],
+                 [dec25.get("total_market_value"), dec25.get("total_return"),
+                  dec25.get("total_return_rate"), sorted(notes.get("missing_fx") or []),
+                  bool(notes.get("trend_unavailable"))], ph)
+    if txn is not None:
+        op.delete_tx(txn)
 
 
 def run_options(ev: C.Evidence, api: C.Api, db_path, op: Ops):
@@ -979,7 +1267,14 @@ def main():
     ap.add_argument("--keep-data", action=argparse.BooleanOptionalAction, default=True,
                     help="keep the fresh phase-1 DB under evidence/ after the run "
                          "(gitignored; always rebuilt clean at the next start)")
+    ap.add_argument("--wave2-only", action="store_true",
+                    help="PERF plan: skip every check that needs package G (the store read "
+                         "path through the dashboard, /api/settlement/periods*, the period "
+                         "rows of /api/snapshots). ONLY for a run before the wave-3 merge; "
+                         "the gate (W4 and later) runs without it.")
     args = ap.parse_args()
+    P1.READ_PATH = not args.wave2_only
+    P1.reset_settlement()
 
     db_path = C.EVIDENCE / "phase1.db"
     for p in (db_path, db_path.with_suffix(".uvicorn.log")):
@@ -992,14 +1287,20 @@ def main():
     print("server:", base)
     api = C.Api(base, verify=False)
     ui = None
+    aborted: str | None = None
     try:
         P1.seed_all(db_path)
         if args.ui:
             import ui as UI
             ui = UI.UiDriver(base)
             ui.start()
-        run_scenario(ev, api, db_path, ui=ui)
-        if ui is not None:
+        try:
+            run_scenario(ev, api, db_path, ui=ui)
+        except P1.SettleAbort as exc:
+            # One clear failure is already recorded (settle.run_finished_in_time); nothing is
+            # reconciled against an unsettled store.
+            aborted = str(exc)
+        if ui is not None and aborted is None:
             import ui as UI
             UI.dom_readback(ui, ev, api)
     finally:
@@ -1014,6 +1315,8 @@ def main():
                 p.unlink()
 
     print(f"ops={ev.op_n} pass={ev.n_pass} fail={ev.n_fail}")
+    if aborted is not None:
+        print(f"ABORTED: {aborted}")
     for f in ev.fails[:60]:
         # ``scope`` is free text and many of them are Traditional Chinese, so on a cp1252
         # console this line RAISED — and only ever on a run that had a failure to report,
@@ -1024,6 +1327,10 @@ def main():
                 f"exp= {f['expected']} got= {f['actual']}")
         print(line.encode(sys.stdout.encoding or "utf-8", "replace")
                   .decode(sys.stdout.encoding or "utf-8", "replace"))
+    # A gate that reads the exit code, never the ``fail=`` line, must see a failing run as
+    # failed (fold verification I, 2026-10-20: every mutation run exited 0).
+    if aborted is not None or ev.n_fail:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

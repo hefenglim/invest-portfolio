@@ -9,6 +9,94 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.32] - 2026-10-20
+
+The settlement store: history is settled ahead of time and served from it, results are kept in a
+cache, scheduled jobs and the settlement run in short-lived child processes (spec
+`docs/spec/2026-10-18-settlement-store.md`, plan `docs/superpowers/plans/2026-10-18-settlement-store.md`
+§14 for the execution notes). Every number a v0.1.31 surface shows is unchanged: the dashboard
+payload is byte-identical to v0.1.31's code on eight reference corpora, and so is the tax package.
+
+### Owner sign-off
+
+- **PERF-D1..D10 (2026-10-18)**: 「我決定的三件事 1同意修改原則，2可跳提示後再開始，3改由結算資料提供。
+  其餘決策按照建議」. PERF-D1 approves the settlement store and the result cache and **changes the
+  `shared/flight.py` principle "keeps nothing once the computation returns"**: results are now kept
+  (`shared/result_cache.py`), keyed so a write or a new day never serves an old answer. PERF-D7
+  moves 月度成績 onto the store: past months are month-end closes restated from today's ledger;
+  `portfolio_snapshots` is no longer written and stays read-only for reference.
+- **Q-P1 (2026-10-18) = (a)**: a failed automatic settlement push held by quiet hours is sent once
+  when they end.
+- **PERF-F2 and the price-basis split edge (2026-10-19)**: both pre-existing in v0.1.31, both
+  confirmed (`xfail(strict=True)` tests), fixed as separate changes AFTER this release so v0.1.32
+  stays byte-identical. PERF-F2: an XIRR-kind cash movement in a currency no holding is quoted in
+  leaves the trend, B, B−A and the benchmark unavailable although its rate is stored. The split
+  edge: a US quote fetched on a split's ex-date (Taipei) before the New York open stores the
+  previous close multiplied by the ratio for that one day; the next fetch heals it.
+- **W4 items (2026-10-20)**: `xirr_window_days` stays null while XIRR is withheld (v0.1.31
+  behaviour; manual §7.2.1 amended); the job-child spawn cost is accepted; a job child runs at most
+  **60 minutes**; the first boot closes stuck job rows.
+
+### Added
+
+- **Settlement store** (`portfolio/settlement_store.py`, `settle_worker.py`, `period_close.py`,
+  `ledger_findings.py`; `api/settlement_service.py`, `api/routers/settlement.py`): eleven derived
+  tables (`settle_*`, `settled_*`), triggers on every ledger and price/FX table that mark the
+  earliest day a write changes (installed and verified at boot), a change trail with its actor
+  (user, job, boot, or 外部程式／腳本), generations published in one swap, nightly and weekly
+  self-check jobs (`settlement_nightly`, `settlement_selfcheck`), run reports kept with their
+  history, month and year closes with holdings and cash at each period end, restatements
+  (已重述; 上線重述 at go-live). Routes: `GET /api/settlement/status`, `/runs`, `/runs/{id}`,
+  `/runs/{id}/diff`, `/changes`, `/periods`, `/periods/{kind}/{period}`; `POST /api/settlement/run`,
+  `/cancel`.
+- **Frontend**: the 結算 status chip and its detail panel (live progress, the full report of every
+  run), the re-settle prompt (立即重新結算／稍後), the 更新前版本 banner on the history panels,
+  月度成績 with the 月／年 toggle, ⚠ notes, 暫定 and 已重述.
+- **Result cache** (`shared/result_cache.py`): dashboard, alerts, snapshots and the TWR overlay
+  are served from it for one state (write generation + `PRAGMA data_version` + day + reporting
+  currency); today's result is pre-warmed 3 s after the last write (`PD_PREWARM`).
+- **Job workers** (`api/job_worker.py`, `api/composition.bind_runtime`): scheduled jobs run in a
+  child process behind one heavy gate (`PD_JOB_MODE`), queued runs read 已排入, a child that dies
+  or runs past 60 minutes is recorded 失敗.
+- **Transport**: gzip on JSON and static files, read-only POSTs marked (`api/read_only.py`),
+  immutable static caching on prod (`PD_STATIC_IMMUTABLE=1`, never on the demo), shared boot reads.
+- **Flags** (`shared/flags.py`, validated at boot): `PD_SETTLE`, `PD_SETTLE_MODE`, `PD_JOB_MODE`,
+  `PD_PREWARM`, `PD_STATIC_IMMUTABLE`.
+- **Push**: the 重新結算失敗 subscription (`settlement_failed`).
+- **Stress audit**: a month-end oracle (closes, `period_twr`, activity lines, the tax tie-out,
+  stored prices against the fixture's own); phase 1 now settles at every checkpoint and exits 1
+  on any failure.
+
+### Changed
+
+- **The engine replays once per build** (`iter_books`, `value_series`): one pass for all days,
+  an FX lookup per pair instead of per day, bounded price loads keeping v0.1.31's 1990 / 1900
+  floors. Results are byte-identical.
+- **`get_conn` commits before the response starts** (`Depends(get_conn, scope="function")`,
+  PERF-S10): the next request always reads the write. **A dependency teardown failure now answers
+  500 instead of a silent 200.** FastAPI floor `fastapi>=0.121.1`.
+- **The 23:50 月度快照 job is retired** (`snapshot_monthly`): its schedule row and history stay;
+  月度成績 serves month closes.
+- 選單的「重算」 is now 「重新結算（驗證並重建歷史）」: a full settlement run in the background.
+- Three medium routes read less (statement counts before → after): `/api/input/context` 137 → 55,
+  `/api/instruments` 133 → 124, `/api/dividend-inbox` 459 → 366; their bodies are byte-identical.
+- The corporate-action form recognises an option contract in one request
+  (`_recognise_contract` returns `expiry` and `strike`).
+
+### Behaviour changes to know
+
+- **The first boot of v0.1.32** creates the store, runs a full settlement in the background, and
+  closes every `job_runs` row a gone process left `running` as error
+  「系統重新啟動時此工作尚未完成」 (money figures are untouched).
+- A manual 立即執行 waits for its child to start (about 6–15 s on the VM); the digest card's
+  立即產生 follows a queued run instead of timing out.
+- While a settlement is pending, the history panels read 更新前版本; a re-settle of an old edit is
+  asked first (PERF-D2).
+- **Restore after a crash**: a file-copy restore must delete `-wal` / `-shm` first; a clean stop
+  checkpoints and leaves one file.
+- Job children append to `app.log` without rotating it; on a Windows dev machine a rollover during
+  a job drops web log records (POSIX hosts are unaffected).
+
 ## [v0.1.31] - 2026-10-14
 
 Prod performance after the owner's real ledger went in (owner report 2026-10-13: 「prod site 為何

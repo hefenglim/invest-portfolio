@@ -526,6 +526,51 @@ class OptionsBlock(BaseModel):
     principal_fx_note: str | None = None
 
 
+class HistoryState(BaseModel):
+    """Where this build's history came from (PERF spec 2026-10-18 §10 step 6) — internal.
+
+    ``DashboardData.history_state`` is ``exclude=True``: never on the wire, so the dashboard
+    payload stays byte-identical (PERF-D5); the browser reads the same facts from
+    ``GET /api/settlement/status``. The in-process readers of history read it here:
+
+    * ``strategy/alerts.py``'s ``portfolio_drawdown`` (a peak over the whole series, which
+      pushes) is skipped while the history is stale;
+    * ``api/insight_service.py::_portfolio_return`` defers (``pending_data``) when a card's
+      ``[created, due]`` overlaps the stale range;
+    * ``api/snapshots.py`` serves a period close from the store exactly when its end day lies
+      before ``live_from`` — the day this build's trend starts its live part — so a 月度成績
+      row and the trend never disagree about which version of a day they show.
+
+    ``live_from`` ``None`` means every day of the build is live: ``PD_SETTLE=off``, an
+    unusable store, an empty ledger. ``stale_from`` / ``stale_to`` are the days served from the
+    PREVIOUS generation although a change dated on them is pending (PERF-D3), already clipped
+    to the days this build served from the store. The last four fields are the store state the
+    build read, so a second reader in another read snapshot can tell whether it reads the same
+    one (``api/snapshots.py``).
+    """
+
+    live_from: date | None = None
+    stale_from: date | None = None
+    stale_to: date | None = None
+    generation: int = 0
+    settled_through: date | None = None
+    held_through: date | None = None
+    dirty_day: date | None = None
+    seq: int | None = None
+
+    @property
+    def stale(self) -> bool:
+        """Some served day is the previous generation's (更新前版本)."""
+        return self.stale_from is not None
+
+    def overlaps_stale(self, start: date, end: date) -> bool:
+        """Whether ``[start, end]`` (either order) shares a day with the stale range."""
+        if self.stale_from is None or self.stale_to is None:
+            return False
+        lo, hi = min(start, end), max(start, end)
+        return lo <= self.stale_to and self.stale_from <= hi
+
+
 class DashboardData(BaseModel):
     """One complete dashboard data model — the contract the UI binds to."""
 
@@ -594,3 +639,6 @@ class DashboardData(BaseModel):
     # The 選擇權 section (options spec §7.1). ``None`` on a ledger with no option, and the
     # dashboard router REMOVES the key then — so the golden payload is unchanged (invariant 1).
     options: OptionsBlock | None = None
+    # PERF spec §10 step 6: which days came from the settlement store and which are stale
+    # (:class:`HistoryState`). ``exclude=True`` — never on the wire (PERF-D5).
+    history_state: HistoryState = Field(default_factory=HistoryState, exclude=True)

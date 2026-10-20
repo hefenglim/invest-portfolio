@@ -1027,9 +1027,11 @@
     const asel = $('#bk-account');
     if (!bsel || !asel) return;
     try {
+      /* PERF §13 "Duplicates": input.js's boot read of the context is reused when it exists
+         (this runs at DOMContentLoaded, after input.js has started it). */
       const [b, ctx] = await Promise.all([
         api.get('/api/broker/adapters'),
-        api.get('/api/input/context'),
+        window.pdInputContext || api.get('/api/input/context'),
       ]);
       /* M5-b (demo audit, second full re-verification 2026-09-22): both pickers take their
          labels from web/names.js. They were the last surface rendering the context list's

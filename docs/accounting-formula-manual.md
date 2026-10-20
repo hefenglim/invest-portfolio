@@ -1,6 +1,6 @@
 # 投資組合會計公式手冊（Accounting-Formula Manual）
 
-> **版本**：`v1.12`（2026-10-10）
+> **版本**：`v1.13`（2026-10-20）
 > **程式碼基線**：`v0.1.28 + feat/corporate-actions`（公司行動 SPLIT／EXCHANGE／SPINOFF；含
 > 2026-08-13 之**現金收支七種 kind／兩軸表**與**美股現金股利 P1b**）
 > **仲裁狀態**：**已由 owner 正式簽署（2026-07-15）**，自版本 **v0.1.19** 起正式生效為站上任何
@@ -1327,7 +1327,7 @@ $$\text{total\_return\_rate} = \frac{\text{reporting\_total\_return}}{\displayst
 
 其中 `gross_invested`（`cost_basis.build_book` 之 `gross_invested`）= 各幣別**累計買入 all-in 原始成本**。上表 `realized_total` / `unrealized_total` 即此混合值（錨點 `kpi.realized_total` / `kpi.unrealized_total`）。
 
-**月度快照（月度快照）**：`api/snapshots.py::write_snapshot` 每晚以**同一 combiner** 將當月 `total_market_value / total_return / total_return_rate / xirr / by_currency`（by_currency 見 §7.3 幣別視圖）**存為月末記錄**（月結時最後上升值即月末值，upsert-by-month）。快照僅**持久化**本節與 §7.3 之 KPI，**不引入新公式**；缺價／缺匯之選填 KPI 存 NULL（誠實退化）。裁定月末歷史金額時，以快照列所存值 = 當時 combiner 依本手冊公式之輸出為準。
+**月度快照（已退役，2026-10-20）**：原本 `api/snapshots.py::write_snapshot` 每晚 23:50 以**同一 combiner** 將當月 `total_market_value / total_return / total_return_rate / xirr / by_currency` upsert 為「月末記錄」，月底最後一晚寫入之值即定格為該月——但那一刻美股當日收盤尚未存在，且其後從不更正。自 v0.1.32 起該工作（`snapshot_monthly`）退役、`portfolio_snapshots` **不再寫入**（既有資料庫保留舊表，僅作為上線重述之舊值，§7.1b(l)），月末與年末記錄改為 **§7.1b 月結與年結**。**裁定月末（年末）歷史金額時，以 §7.1b 之定義為準**；舊快照列之值不再是裁定依據。
 
 ### 7.1a 哪一個數字真的含匯兌 —— A · B · B−A（AI-D41，owner 裁示 2026-08-24）
 
@@ -1362,6 +1362,166 @@ $(\text{MV}-\text{C})(\text{spot}-\text{acq})$——那正是 I5 禁止的事，
 > `total_return` 的**定義未變**（golden payload、oracle、所有匯出的歷史比對因此完好）；改變的是
 > 它的**標籤**，以及 B 與 B−A 並列於其旁。實作：`portfolio/dashboard.py`（同時握有 `ReturnSummary`
 > 與 `TrendSeries` 的那一層）。
+
+### 7.1b 月結與年結（月度成績；PERF-D7，2026-10-20 取代月度快照）
+
+實作：`portfolio/period_close.py`（KPI、期間活動、期末持倉與現金）、`portfolio/settle_worker.py`
+（逐期結算並存入結算庫）、`api/snapshots.py`（月度成績與期間路由）。月結（`M`，`YYYY-MM`）與年結
+（`Y`，`YYYY`）**不引入新的金額公式**：它們是本手冊既有公式於「期末日 D」之取值，加上一組期間活動列
+與一個期間報酬。結算庫只是**保存**它們；它們與其他報表一樣自帳本重建（§1.4）。
+
+**(a) 期末日與「於 D」之來源。** D = 期間最後一個**日曆日**（週末、假日亦然；價格沿用最後收盤，如
+所有圖表）。KPI 區塊即儀表板同一個計算 `dashboard.kpis_as_of`，只把來源換成「D 當日（含）以前」：
+
+| 項目 | 於 D 之定義 |
+| --- | --- |
+| 帳本 | `bundle.valued_as_of(D)` 之儀表板路徑重播；現金收支與換匯以 `valued_rows_as_of(…, D)` 截切——每一列自其自身日期起計入 |
+| 持有股票之價格 | `as_of_date ≤ D` 之最新已存收盤，經 `price_in` 依 `(價格日, D]` 間之分割再表述（§4.4.7） |
+| 無此價格之持股 | 與即時規則完全相同（§5.3）：市值 `None`，排除於總市值與總報酬之未實現，成本仍在分母；XIRR all-or-nothing → `None`；並於 `notes.missing_prices` 指名 |
+| 選擇權合約 | D 當日（含）以前最後一筆一般成交價（§4.5） |
+| 匯率 | D 當日（含）以前最新匯率（直接對，否則反轉對）；所用匯率與其日期存於 `fx_used` |
+
+**(b) KPI 皆為「自開始累計」、於 D**：`total_market_value`（總市值 = 股票小計 + 選擇權）、
+`total_return`（累計總報酬 A，§7.1a）、`total_return_rate`（累計報酬率）、`xirr` 與
+`xirr_window_days`／`xirr_reason`（累計 XIRR，閘門同 §7.2／§7.2.1）、`by_currency_value`（§7.3）。
+**沒有一個是該期間自己的報酬**——年結列絕不可讀為「該年之報酬」。
+
+**(c) 當期報酬（TWR）**：
+
+$$\text{period\_twr} = \frac{I(D)}{I(\text{前一期末})} - 1$$
+
+$I$ 為 `/api/performance/twr` 所用之同一條全序列 TWR 指數（取自 §7.5 走勢，故**不含選擇權價值**，
+R3）。第一個期間自指數錨點（100）起算；任一端點日估值不完整或無走勢點 → `None` 並附原因。歷史尚待
+重新結算時，若 `(前一期末, D]` 含 `live_from` 或與待更新區間重疊 → `None`，原因
+「待結算：此期間包含尚未重新結算的日子，當期報酬暫不計算」——跨越新舊兩版之接縫，會把一個回溯
+部位的全部損益記成一天的報酬。
+
+**(d) 走勢欄位**：`trend_total_value`（證券市值，僅股票；不完整日為部分和）、`net_invested`、
+`net_worth`，取自 D 日之結算走勢點（§7.5／§7.6），與 KPI 總市值（含選擇權、匯率 all-or-nothing）
+**分名、不可混讀**。**換匯損益（§8）於 D 不在本版月結內**——缺席不等於 0。
+
+**(e) `notes`（每一個空白或未確認之原因）**：
+- `incomplete`；`missing_prices`；`stale_prices`（價格日早於 D 超過 4 天，同即時之 4 天門檻）；
+- `unconfirmed_closes`：依 4 天規則結算、但未經 `ok` 報價工作確認之收盤；以**價格日**比對（週六月底
+  帶週五之部分失敗）；
+- `missing_fx`／`stale_fx`；`pending_positions`（D 時帳上之待釐清：賣超、未能套用之公司行動、被拒股利、
+  被拒平倉列）；`options_value_excluded`、`options_past_expiry`；
+- `trend_unavailable`：D 無走勢點——部分投入流量缺少當日（含以前）匯率（「部分投入流量缺少當日匯率，
+  該日沒有走勢資料」），或走勢尚未開始（「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」）；
+- `missing_cash_fx`：D 時非空之現金池缺至報告幣之匯率；
+- `dividends_receivable`：**讀取時計算、不儲存**——非配股、`ex_date ≤ D < 發放日` 之股利（股價已
+  除息、股利自發放日起計入），**列示、永不計入**；被拒者標「未入帳（待釐清）」（§6.6）；更新前版本之
+  列不顯示。
+
+**(f) 第一個期間** = 帳本**任一表**第一列所在之月份（存款或換匯可早於第一筆交易）。故每個期間的活動
+都落在它自己的日曆期間內，每一年都能與該年之稅務包勾稽。走勢開始前之月份：持倉為零、有現金與活動、
+無走勢點（`trend_unavailable`）、XIRR 原因「尚無持倉，XIRR 不計」。
+
+**(g) 期間活動**（期間首日至 D，以帳本截切所用之日期計入；每列皆以原幣 **與** 報告幣表示，報告幣
+按**每列自身日期**之匯率換算——即走勢之流量換算；缺匯率 → 報告幣值 `None`）：
+
+| 列 | 定義（有對應者即稅務包 `export/tax.py` 之定義） |
+| --- | --- |
+| 已實現 — 出售與回補 | 期內 `kind` = `sale`／`short_cover` 之已實現列：對**調整後成本**（`realized`，與總報酬一致）與對**原始成本**（`proceeds_net − original_cost_removed`，資本利得）；依 `asset_type`（股票／選擇權）分 |
+| 已實現 — 清倉後股利 | `kind = "dividend"` 之列（§6.3b），另列，因同一筆亦在股利列 |
+| 股利 | **僅已入帳**者，依類型、帳戶、幣別：CASH／NET 為毛額／預扣／淨額；DRIP 另加再投資股數；STOCK 僅股數（無金額） |
+| 未入帳股利 | 期內被拒之股利（§6.6）：筆數與淨額，標「未入帳（待釐清）」 |
+| 交易手續費與稅 | 期內 `transactions.fees + tax`，依帳戶 |
+| 現金收支 | 七種 kind（§9.1.1），依帳戶 × 幣別 |
+| 換匯 | 期內換匯（from／to 金額，依帳戶）與已實現換匯（§8.2 之同一出口 `realized_fx_rows_as_of`） |
+| 期初庫存 | `build_date` 在期內者 |
+
+> ⚠ **各列不可相加。** 調整後成本模型下，出售之已實現**已含**折入該部位成本之現金股利（§6.1），
+> 故「已實現」＋「股利」**不是**「本期賺了多少」；系統不形成、也不顯示任何跨列合計（同 I4 之精神：
+> 股利只入總報酬一次）。見下方 E31。
+
+**(h) 與稅務包逐表勾稽**：已實現出售與回補（調整後與原始兩欄）≡ `realized_gains_<year>.csv`；
+已入帳 CASH／NET／DRIP 股利 ≡ `dividends_<year>.csv`；已實現換匯 ≡ `fx_realized_<year>.csv`。此為
+**構造上**成立：兩者讀同一組選列函式（`period_close.realized_rows`／`dividend_rows`／
+`fx_realized_rows`）。稅務包以**嚴格**重播產生——帳本有被拒股利時稅務包回 422、無包可勾稽，月結則將
+該筆列為「未入帳（待釐清）」。手續費、現金收支、換匯、期初庫存與期末現金無稅務對應表。
+
+**(i) 期末持倉與期末現金。** 持倉：每一帳戶 × 代號之部位，股票與選擇權皆列、以 `asset_type` 區分
+（OPT-D5）：股數、原始與調整後成本總額、所用價格與其日期、市值與未實現（待釐清部位為 `None`）、
+待釐清旗標。現金：每池於 D 之**日終餘額**（`cash_balances(…, as_of=D)`，**僅以已入帳股利**計，§6.6
+——被拒股利永不落入月底現金）及其按 D 匯率之報告幣值（空池不需匯率），故現金如部位一樣對得上各券商
+之月結單。
+
+**(j) 年結 ≡ 12 月月結**：同一 D（12-31），故 KPI 區塊、期末持倉、期末現金完全相同。不同者只有二：
+年結之 `period_twr` 以前一年 12-31 為起點；年結之活動涵蓋全年——**流量列 = 各月之和**，餘額不相加。
+本月與本年為即時值（as at 今日）。
+
+**(k) 來源、暫定與更新前版本。** D 早於 `live_from` 之過去期間取自結算庫；其餘以同一組函式即時計算
+——故日期在上個月的更正會立即改變上個月的列。**暫定**：過去期間之 D 晚於 `final_through`（D 當日
+到期之某市場報價工作未以 `ok` 結束），註記「月底收盤價尚未確定：<市場>報價工作未完成」（年結為
+「年底…」）；它取決於價格資料，不取決於結算庫；4 天後照常結算，並記入 `notes.unconfirmed_closes`。
+結算庫中 D 位於待更新區間之列標 `stale: true`，顯示「更新前版本」。
+
+**(l) 重述。** 一次重新結算若改變了已發布期間之 KPI，記一筆 `settle_restatement`（欄位中文標籤：
+總市值／累計總報酬／累計報酬率／累計 XIRR／當期報酬（TWR）／證券市值／淨投入／淨資產／`<幣別> 市值`；
+單位；前值 → 後值；前後 notes；原因；時間），**永不刪除**，該列標「已重述」。**上線重述**：每個月份
+首次發布時，若舊 `portfolio_snapshots` 有該月**於月底最後一日寫入**之定格值（上線當月之列從未是月結，
+不比較），逐欄差異記為 `cutover = 1`，原因「上線重述：月底定格值改為月底結算值」——23:50 定格用的是
+前一日美股收盤，且帳本匯入前之月份反映空帳本，故一次性重述是預期中的。活動列與持倉每次重算、不記重述。
+
+**(m) 已知、業主裁定延後之缺陷**（2026-10-19 裁定：v0.1.32 先維持對 v0.1.31 之逐位元一致，兩者各自
+於發版後另案修正；皆以 `xfail(strict=True)` 釘於 `tests/portfolio/test_engine_repro.py`）：
+- **PERF-F2**：走勢之匯率對只含帳本之**報價幣**；某 XIRR 類現金收支（REBATE／INTEREST_EXPENSE／
+  BROKER_FEE）之幣別若無任何標的以之報價，**整條走勢**（淨值、B、B−A、指數對照）不可用——儘管其匯率已
+  存、XIRR 亦已計入該筆。結算庫中早於該流量之日的月結保有走勢欄位；自該流量起之月結記
+  `notes.trend_unavailable`、無當期報酬；此類帳本上即時計算之過去月結完全沒有走勢欄位。
+- **價格基礎之分割邊界**：`upsert_prices` 折入 `(as_of, fetched_at]` 間之分割，`fetched_at` 為**台北**
+  日期。於分割生效日之台北日期、紐約開盤前抓取之美股（供應商仍給前一交易日之原始收盤）會被乘上分割
+  比例；隔日供應商重述後之抓取恢復正確值。其間以該列估值之日或月結偏差一個比例。
+
+**驗證錨點（E30、E31；皆可手算）**
+
+**E30 — 月底恰為分割日（週日）。** `tw_broker/SPB` 於 2026-05-05 買 500 股。其收盤序列（壓測
+`MONTH_END_SERIES`：2026-01-05 起為 80，每一日曆日 +0.005）於週五 2026-05-29 為
+$80 + 144 \times 0.005 = 80.72$。2-for-1 分割記於週日 2026-05-31（= D）。
+
+| 2026-05 月結 | 股數 | 所用價格（價格日） | 市值（TWD） |
+| --- | ---: | --- | ---: |
+| 記入分割前 | 500 | 80.72（2026-05-29） | $500 \times 80.72 = 40{,}360$ |
+| 記入分割後 | 1,000（分割記於 D，自 D 起計入） | $80.72 \div 2 = 40.36$（2026-05-29，`price_in` 再表述） | $1{,}000 \times 40.36 = 40{,}360$ |
+
+5 月月結之市值不因記入分割而改變；同時記入、日期在 D 之後的 `SPA` 分割（2026-06-01）亦然——5 月
+月結之總市值／總報酬／報酬率／XIRR 前後逐值相同。錨點：`month_end.anchor.split scope = 2026-05
+tw_broker/SPB`（`["1000", "40.36", "2026-05-29", "40360"]`）、`month_end.split_leaves_close_unchanged
+scope = 2026-05 <field>`（`phase1:month_end`）。同場景另錨：2026-02 月底 `MPX` 無價 →
+`notes.missing_prices = ["MPX"]` 且 `xirr = null`（`month_end.anchor.missing_price`、
+`month_end.anchor.missing_price_withholds_xirr`）；`STL` 之價格於 2026-04-30 已舊 6 天 →
+`stale_prices`，於 2026-05-31 恰舊 4 天 → 不列（`month_end.anchor.stale_boundary`）；2330 CASH 股利
+除息 2026-04-28、發放 2026-05-15 → 只列於 4 月月結之 `dividends_receivable`
+（`month_end.anchor.receivable`）。
+
+**E31 — 已結束之年度，與「各列不可相加」。** `tw_broker/YRA`：2025-11-04 買 1,000@120（fee 171，
+§3.1）；2025-12-10 CASH 股利 3,000；2025-12-16 賣 400@125（fee 71、tax 150）。其收盤序列於
+2025-12-31 為 $120 + 58 \times 0.005 = 120.29$。
+
+| 步驟 | 計算 | 值（TWD） |
+| --- | --- | ---: |
+| 原始成本 | $120{,}000 + 171$ | 120,171 |
+| 調整後成本（股利後） | $120{,}171 - 3{,}000$ | 117,171 |
+| 淨賣出價款 | $50{,}000 - 71 - 150$ | 49,779 |
+| 已實現（對調整後，活動列 `realized`） | $49{,}779 - 117{,}171 \times \tfrac{400}{1{,}000}$ | **2,910.6** |
+| 資本利得（對原始，活動列 `capital_gain`） | $49{,}779 - 120{,}171 \times \tfrac{400}{1{,}000}$ | **1,710.6** |
+| 股利列（已入帳 CASH 淨額） | — | **3,000** |
+| 期末持倉（D = 2025-12-31） | 600 股；原始 $120{,}171 \times 0.6$；調整後 $117{,}171 \times 0.6$ | 72,102.6／70,302.6 |
+| 期末市值／未實現（對調整後） | $600 \times 120.29$；$72{,}174 - 70{,}302.6$ | 72,174／1,871.4 |
+
+已實現與資本利得之差 $2{,}910.6 - 1{,}710.6 = 1{,}200 = 3{,}000 \times \tfrac{400}{1{,}000}$——正是已售出
+那 400 股所分得、早已折入成本之股利。若把「已實現 2,910.6」加上「股利 3,000」，這 1,200 便算了兩次，
+故系統不形成跨列合計。2025 年結之 KPI 區塊、持倉與現金 ≡ 2025-12 月結；年結活動之流量列 = 11 月 +
+12 月；已實現兩欄 ≡ `realized_gains_2025.csv`、股利 ≡ `dividends_2025.csv`。錨點：
+`prior_year.anchor.tax_2025`（2025 年之已實現列與股利列皆僅 YRA）、`tax.realized_adjusted`／
+`tax.realized_original scope = 2025 TWD`、`tax.dividends scope = 2025 TWD gross/withholding/net`、
+`period.year_equals_december scope = Y 2025 <field>`、`period_detail.price`／
+`period_detail.adjusted_cost_total scope = 2025-12 tw_broker|YRA`（`phase1:prior_year` 起之各檢查點）。
+
+> **數字來源**：E30 之字面值即壓測錨點本身；E31 之字面值由本手冊 §3.1／§4／§5.1 之公式手算，並以
+> app 之 `build_book` 重播核對，壓測則以獨立 oracle 對同一場景逐值比對（上列錨點）。當前實跑
+> （2026-10-20，wave-3 合併）：phase-1 **257 ops／152,086 斷言／0 fail**。
 
 ### 7.2 XIRR（年化、資金加權、FX-aware — 決策主指標）
 
@@ -1466,8 +1626,13 @@ XIRR 為**年化**指標,其指數為 `365 / window_days`,故觀察期愈短、�
   載明「觀察期 N 天・不足以年化（需 ≥30 天）」。邊界為**閉區間**：30 天**仍**年化,29 天不年化。
 - **被withheld 的是「年化」這個動作,不是報酬本身**：`total_return_rate`（§7.1）不受影響、
   仍在 wire 上,呈現同一筆資訊的未年化形式,故 KPI 區塊不會留白。
-- `xirr_window_days` **在任何情況下都照常回報**（含 rate 為 `None` 時）,30–365 天維持既有的
-  「短窗參考」提示。
+- `xirr_window_days` **只要 `xirr_reporting` 實際執行就照常回報**——含 rate 為 `None`（缺現價、
+  現金流無正負變化、未收斂）與本節「不足 30 天不年化」之情形；30–365 天維持既有的「短窗參考」提示。
+  **XIRR 在計算之前即被停算時則為 `null`**（業主裁決 2026-10-20：維持 v0.1.31 之行為）：① 帳本帶有
+  使 XIRR 停算之待釐清——賣超（含已歸零之賣超）、未能套用之公司行動、無持倉之股利、被拒之選擇權平倉列
+  （§5.3、§4.4.6、§6.6、§4.5）；② 缺所需之匯率（「查無 … 匯率」，計算中止）；③ 帳本尚無任何投入
+  流量。月結與年結之 `xirr_window_days` 依同一規則（§7.1b）。本條原文「在任何情況下都照常回報」與實作
+  不符，已依該裁決改寫。
 - **計算式本身未改**：`returns.py::xirr_reporting` 的現金流建構與求解完全不變,壓測 oracle
   的錨定值亦不受影響；本節規範的是**呈現層的揭露門檻**。
 - **緣由**：2026-08-05 於全新重置的實例上發現 —— 首日輸入第一筆交易後,`window_days = 1`
@@ -1503,7 +1668,7 @@ $$\text{sector\_value}_s = \sum_{h\in s}\operatorname{convert}(\text{market\_val
 
 $$\text{by\_currency\_value}[ccy] = \sum_{h:\ quote=ccy}\text{market\_value}_h\ (\text{原幣，不換算}),\qquad \text{reporting\_total\_value} = \sum_h \operatorname{convert}(\text{market\_value}_h,\ \text{spot})$$
 
-`reporting_total_value` 即 §7.1 之 `total_market_value`；`by_currency_value` 為**各報價幣原生市值**（月度快照之 `by_currency` 即存此，見 §7.1）。
+`reporting_total_value` 即 §7.1 之 `total_market_value`；`by_currency_value` 為**各報價幣原生市值**（月結與年結之 `by_currency_value` 即於 D 取此值，見 §7.1b；已退役之月度快照之 `by_currency` 亦存此）。
 
 **匯出層之報告幣值與合計列**：匯出報表（`export/holdings*.py`、`ledgers_report.py`、`tax.py`、`rebalance_report.py`）之「報告幣值」欄同走上式 `convert(...)`；其 **TOTAL／小計列**為對應欄之**逐幣別加總**（如 `Σ 淨額`、`Σ original_cost_total`、`Σ 市值`、`Σ dividends.net`、`Σ fx from/to`），**不引入新公式**（逐項見 §12.5）。**唯一例外**——**稅務報表之已實現以「賣出日匯率」換算**（`export/tax.py`）：
 
@@ -2040,6 +2205,8 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | E27 | 選擇權賣出開倉 → 買進平倉（`OPA260918P00045000` 2 口 → **217.39**） | §4.5 | `options.anchor.realized schwab/OPA260918P00045000@2026-08-14 None` |
 | E28 | 選擇權 1 → 3 合約調整後部分平倉（`OPA261218P00020000` → **9.13**；last_price **1**） | §4.5 | `options.anchor.realized schwab/OPA261218P00020000@2026-09-02 None`、`options.anchor.open.last_price schwab/OPA261218P00020000` |
 | E29 | 賣出 Put 被指派（`OPA260918P00040000` → 權利金 **218.69** 留在選擇權損益；OPA 300 股成本 **12,200**） | §4.5 | `options.anchor.realized schwab/OPA260918P00040000@2026-09-18 assigned`、`options.anchor.stock_legs_cost schwab|OPA` |
+| E30 | 月底恰為分割日（`SPB` 週日 2026-05-31 2-for-1 → 1,000 股 @40.36，市值 **40,360** 前後不變） | §7.1b | `month_end.anchor.split scope = 2026-05 tw_broker/SPB`、`month_end.split_leaves_close_unchanged`（`phase1:month_end`） |
+| E31 | 已結束之年度與各列不可相加（`YRA` 已實現 **2,910.6**／資本利得 **1,710.6**／股利 3,000；差 1,200 = 售出股所分得之股利） | §7.1b | `prior_year.anchor.tax_2025`、`tax.realized_adjusted scope = 2025 TWD`、`period.year_equals_december scope = Y 2025 <field>`（`phase1:prior_year` 起） |
 
 ### 12.2 詞彙表（中文 ↔ 英文欄位）
 
@@ -2087,6 +2254,11 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 同日優先序 | `EventPriority`（`OPENING`/`CORPORATE_ACTION`/`BUY`/`SELL`/`DIVIDEND`） | §4.1／§4.4.3 |
 | 未能套用之公司行動 | `unbookable_action` / `UnappliedAction` / `Book.unapplied_actions` | §4.4.6／§5.3 |
 | 行情原值／分割基礎 | `close_raw` / `split_basis`（`prices` 兩欄制） | §4.4.7 |
+| 月結／年結（期末日 D） | `settled_period`（`kind` = `M`／`Y`，`end_day`）／`PeriodKpi` | §7.1b |
+| 當期報酬（時間加權） | `period_twr` / `period_twr_reason` | §7.1b |
+| 證券市值（走勢，僅股票） | `trend_total_value` | §7.1b |
+| 期間活動 | `PeriodActivity`（`realized`〔各列含 `realized`／`capital_gain`〕/ `dividends` / `dividends_not_booked` / `fees` / `cash_movements` / `fx_conversions` / `fx_realized` / `openings`） | §7.1b |
+| 暫定／更新前版本／已重述 | `provisional` / `stale` / `restated`（`settle_restatement`，上線重述 `cutover`） | §7.1b |
 
 ### 12.3 版本歷史
 
@@ -2106,6 +2278,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.10` | 2026-09-06 | **§7.2／§9.1.1 之 D1 = A 殘留同步至 AI-D42**（QA DOC-02；基線 `v0.1.28 + feat/corporate-actions`）。2026-08-24 AI-D42 已把 `REBATE`／`INTEREST_EXPENSE`／`BROKER_FEE` 三類納入 XIRR（§7.2 表與 §4.4.7 橫幅早已更新），但 §7.2 之「D1 = A」整段（「函式簽章根本不接收 `cash_movements`」、驗證錨點「無 `cash_movements` 參數」）與 §9.1.1 之「七種 kind 全部不是 XIRR 流量」**未加取代標記**，與同節上表自相矛盾；`portfolio/returns.py::xirr_reporting` 實際帶**必填**關鍵字參數 `cash_movements`（無預設值，刻意如此）。本版：① §7.2 D1 = A 段補取代橫幅（原文完整保留）；② §9.1.1 該句改寫為三類進、四類不進；③ **`INTEREST` 不進 XIRR 再次確認**（實測：帳本加一筆 `INTEREST` 500 USD → XIRR 逐位相同 `0.3336061959279546`；對照組加 `BROKER_FEE` 500 USD → `0.33285721007646424`），並修正工程規則檔 `.claude/rules/domain-ledger.md` 中唯一把 `INTEREST` 列為流量的段落（全倉庫唯一寫反處；其引用之 `CASH_KIND_TABLE.credit` 不存在，實名 `shared/cash_kinds.py::movement_sign`）。英文鏡像自 v1.8 起未收到 AI-D42（`grep -c AI-D42` = 0）：本版同 change set 重生 §4.4.7 橫幅、§7.2 表與兩段橫幅、§7.6 AI-D48／AI-D49 段、§9.1.1 句與版本紀錄。**無任何公式或會計定義變更；無任何數字移動。** |
 | `v1.11` | 2026-10-05 | **新增 §6.6 被拒入帳的股利**（owner 裁定 2026-10-05；基線 `feat/corporate-actions`，上線前 code review CR-01..14／R1..R12／S1..S11 之後）：三類拒絕（無持倉／放空中／已換出）逐筆記於帳本、對一切金額貢獻為 0、列表照列標示「未入帳（待釐清）」不計合計、走勢該日不完整而持有中承接部位照計市值、補救說法單一來源；驗證錨點對應當前實跑（phase-1 137 ops／11,406 斷言／0 fail）。英文鏡像於同一 change set 重生。**除 §6.6 外無既有公式或會計定義變更。** |
 | `v1.12` | 2026-10-10 | **新增 §4.5 美股選擇權**（owner 裁定 R1–R7、OPT-D1..D22；基線 `feat/options-ledger`）：合約即標的、股當量、賣出開倉即宣告式賣空、價 0 平倉列（到期／被指派／履約）與 R5、選擇權費用分支、§4.4 平倉列永不開倉、`OPTION_ADJUST`、最後成交價估值與時點型／走勢型之分、OPT-D20；工作範例與驗證錨點取自當前實跑（phase-1 164 ops／19,948 斷言／0 fail）。英文鏡像於同一 change set 重生。**既有股票之公式與會計定義無任何變更。** |
+| `v1.13` | 2026-10-20 | **月結與年結取代月度快照**（PERF-D7，規格 `docs/spec/2026-10-18-settlement-store.md` §11；基線 `perf/settlement-store`，v0.1.32）。① **新增 §7.1b**：期末日 D（日曆日）、「D 當日（含）以前」之價格與匯率、自開始累計之 KPI（閘門同即時）、`period_twr` = I(D)／I(前一期末) − 1 與跨新舊版接縫之「待結算」、走勢欄位與 KPI 總市值分名、`notes`（含 `trend_unavailable`、`missing_cash_fx`、讀取時計算之 `dividends_receivable`）、第一個期間為帳本任一表第一列之月份、期間活動八類列（**不可相加**）與稅務包逐表勾稽、期末持倉與僅計已入帳股利之期末現金、年結 ≡ 12 月月結、暫定／更新前版本、重述與一次性之上線重述、PERF-F2 與價格基礎分割邊界兩項業主裁定延後之已知缺陷；新增 §12.1 **E30／E31** 與 §12.2 五則詞彙。② **§7.1 月度快照段改寫為退役說明**：23:50 定格（前一日美股收盤、其後從不更正）不再寫入，月末歷史金額之裁定依據改為 §7.1b；§7.3 之 `by_currency` 註記同步。③ **§7.2.1 `xirr_window_days` 更正**（業主裁決 2026-10-20：維持 v0.1.31 行為）：原文「在任何情況下都照常回報」與實作不符——XIRR 於計算前即被停算（待釐清、缺匯率、無流量）時為 `null`。④ §12.4 定位清單加入 §7.1b。驗證錨點對應當前實跑（phase-1 257 ops／152,086 斷言／0 fail）。英文鏡像於同一 change set 以人工重譯。**即時之 KPI、成本、損益、XIRR 與現金之公式與會計定義無任何變更**：儀表板於結算庫乾淨時與 v0.1.31 逐位元相同。 |
 
 ### 12.4 如何仲裁一個爭議金額
 
@@ -2113,7 +2286,8 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 
 1. **定位金額類型** → 對應章節：費／稅 §3；持倉成本／均價 §4；**公司行動（分割／換股／分拆）§4.4**；
    已實現 §5.1；未實現／資本利得 §5.2；
-   股利 §6；**配息偵測估算 §6.5**；總報酬／報酬率（含混合率）§7.1；XIRR §7.2；**配置權重／產業／幣別視圖／
+   股利 §6；**配息偵測估算 §6.5**；總報酬／報酬率（含混合率）§7.1；**月結／年結（月度成績）§7.1b**；
+   XIRR §7.2；**配置權重／產業／幣別視圖／
    報告幣估值／稅務已實現 §7.3**；**股利收入彙總／年度預估 §7.4**；**淨值與投入趨勢 §7.5**；換匯損益 §8；
    現金餘額 §9；再平衡 §11（**彙總 §11.4；試算 What-if §11.5**）。若該數字非以上任一 → 查 §12.5 是否屬
    仲裁範圍外之 class B／C（技術指標、警示門檻、LLM 額度）。

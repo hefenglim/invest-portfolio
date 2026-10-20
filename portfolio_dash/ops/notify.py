@@ -36,7 +36,7 @@ import secrets
 import smtplib
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
@@ -57,6 +57,9 @@ _APP_TZ = ZoneInfo("Asia/Taipei")
 # ntfy priority levels (1 min .. 5 max). severity -> priority per owner decision:
 # risk -> high(4), warn -> default(3), info -> low(2).
 _NTFY_PRIORITY: dict[str, int] = {"risk": 4, "warn": 3, "info": 2}
+
+#: The subscription id of the failed-settlement push (its zh name: ``shared.alert_rule_names``).
+SETTLEMENT_FAILED = "settlement_failed"
 
 # The rule catalog for the NOTIFICATION surface: ``(rule_id, zh label, severity)``, in the
 # order the 通知 settings page lists its subscription toggles. It is the push-message label
@@ -96,6 +99,11 @@ _CATALOG_SEVERITY: list[tuple[str, str]] = [
     # to subscribed=True on an existing install.
     ("digest_daily", "info"),
     ("digest_weekly", "info"),
+    # PERF plan P4 (2026-10-18): a failed AUTOMATIC re-settlement (the 06:40 nightly run, the
+    # Sunday self-check, a boot or job run). Pushed by ``api/settlement_service.py`` through
+    # the same gates as the digests; a push that falls in quiet hours is held and sent ONCE
+    # when they end (owner ruling Q-P1 = (a)). Subscribed by default (``load_config``).
+    (SETTLEMENT_FAILED, "warn"),
 ]
 _DIGEST_LABELS: dict[str, str] = {"digest_daily": "每日收盤摘要", "digest_weekly": "每週行動清單"}
 RULE_CATALOG: list[tuple[str, str, str]] = [
@@ -665,8 +673,23 @@ def in_quiet_hours(quiet: QuietHours, now: datetime) -> bool:
     return cur >= start or cur < end  # wraps midnight
 
 
+def quiet_hours_end(quiet: QuietHours, now: datetime) -> datetime | None:
+    """When the quiet window *now* falls in ends (Asia/Taipei, aware), or ``None`` when *now*
+    is not inside one (:func:`in_quiet_hours`). A held push is sent at this moment."""
+    if not in_quiet_hours(quiet, now):
+        return None
+    end = _parse_hm(quiet.end)
+    assert end is not None  # in_quiet_hours parsed it
+    local = now.astimezone(_APP_TZ)
+    at = local.replace(hour=end // 60, minute=end % 60, second=0, microsecond=0)
+    if at <= local:
+        at += timedelta(days=1)
+    return at
+
+
 __all__ = [
     "RULE_CATALOG",
+    "SETTLEMENT_FAILED",
     "EmailChannel",
     "EmailConfig",
     "NotifyChannel",
@@ -688,6 +711,7 @@ __all__ = [
     "heal_config",
     "in_quiet_hours",
     "load_config",
+    "quiet_hours_end",
     "normalize_base_url",
     "save_config",
 ]
