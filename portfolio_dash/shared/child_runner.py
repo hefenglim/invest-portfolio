@@ -13,11 +13,15 @@ Used by the settlement service (the settle child) and by the job dispatcher (job
   The gate is released before ``on_exit`` runs, so a slow callback — or one that spawns the
   chained run — never holds up the queue.
 - ``on_start`` (optional) runs on the waiter thread once the child's turn has come — after
-  the heavy gate granted it, for a heavy child — and before its process starts; never for a
-  child cancelled while queued. The job dispatcher marks the settlement's change trail there,
-  so a mark taken before a long gate wait does not count the owner's changes made during it
-  as the job's (code review 2026-10-20). Keep it short: the gate is held while it runs. An
-  exception it raises is logged and the child still starts.
+  the heavy gate granted it, for a heavy child — and before its process starts, unless the
+  child was cancelled by then (in the queue, or as its turn came). A cancel that lands WHILE
+  ``on_start`` runs, or right after it, still keeps the process from starting: ``on_start``
+  ran and the process did not. So pair it with ``on_exit``, which fires either way — a
+  bracket opened in ``on_start`` is then always closed. The job dispatcher marks the
+  settlement's change trail there, so a mark taken before a long gate wait does not count
+  the owner's changes made during it as the job's (code review 2026-10-20). Keep it short:
+  the gate is held while it runs. An exception it raises is logged and the child still
+  starts.
 - :meth:`ChildHandle.terminate_and_wait` terminates, waits, kills if still alive and waits
   again; for a child still in the queue it cancels it instead. It returns once the process
   is gone AND ``on_exit`` has returned.
@@ -379,6 +383,9 @@ class ChildHandle:
                     self._finish(self._never_ran(error=None, terminated=True))
                     return
                 entered = True
+            if self.cancel_requested:  # cancelled as its turn came: no on_start, no process
+                self._finish(self._never_ran(error=None, terminated=True))
+                return
             self._call_on_start()
             self._run_process()
         except BaseException as exc:   # on_exit must still fire (e.g. the lock folder is gone)
@@ -395,8 +402,10 @@ class ChildHandle:
             self._call_on_exit()
 
     def _call_on_start(self) -> None:
-        """The turn has come (the gate is held for a heavy child); the process is not started
-        yet. Never raises: an observer's failure does not stop the child."""
+        """The turn has come (the gate is held for a heavy child) and no cancel was recorded;
+        the process is not started yet — and a cancel landing from here on still keeps it
+        from starting (:meth:`_run_process` checks again). Never raises: an observer's
+        failure does not stop the child."""
         if self._on_start is None:
             return
         try:

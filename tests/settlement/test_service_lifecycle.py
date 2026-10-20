@@ -398,6 +398,59 @@ def test_a_job_that_changed_history_before_the_window_starts_a_run(
     assert service.after_job_hook("history_daily") is None
 
 
+def _owner_price(path: Path, day: date, close: str = "612.5") -> None:
+    """The owner revises a 2330 close (a ``prices`` counter: counters carry no actor)."""
+    conn = open_db(path)
+    try:
+        install_actor(conn, "user:owner")
+        upsert_prices(conn, [PriceRow(instrument="2330", market=Market.TW, as_of=day,
+                                      close=Decimal(close), source="test")],
+                      fetched_at=service._now())
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cancel(path: Path, run_id: int) -> None:
+    """What the waiter does for a cancelled (or dead) run: the claimed changes go back."""
+    conn = open_db(path)
+    try:
+        assert st.end_without_publish(conn, run_id, "cancelled")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("merge", [False, True], ids=["unclaimed", "merged"])
+def test_a_counter_put_back_after_the_jobs_mark_is_not_the_jobs(
+    path: Path, merge: bool
+) -> None:
+    """Review of the v0.1.32 follow-ups: the owner cancels a re-settlement while a job waits
+    behind it. The settle child's turn ends, the job's mark is taken, and only THEN does the
+    waiter put the cancelled run's claimed counters back (``on_exit`` runs after the gate is
+    released). A mark of PENDING counters alone read the owner's put-back counter as the
+    job's change. The mark now sums every unsettled counter per key, claimed ones included,
+    so a put-back — un-claimed in place, or merged into a pending counter of the same key —
+    changes nothing, while an earlier day the job writes still counts."""
+    service.start_run(scope="full", reason="button")
+    window = st.window_start(service._now().date())
+    _owner_price(path, date(2026, 3, 2))                 # the owner's pending revision ...
+    run_id = sup.fake_preparing_run(path, claim=True)    # ... claimed by a re-settlement
+    if merge:
+        _owner_price(path, date(2026, 4, 1), "613")      # a pending counter of the same key
+    mark = _mark(path)                                   # the queued job's turn comes
+    _cancel(path, run_id)                                # the waiter puts the claim back
+    _job_writes(path, price_day=window + timedelta(days=1))   # the job revises a close
+    assert service.settle_after_job("history_daily", mark=mark) is None
+    runs = len(sup.runs(path))
+    # the job's own revision dated BEFORE every pending day is still the job's
+    mark = _mark(path)
+    _job_writes(path, price_day=date(2026, 2, 2))
+    started = service.settle_after_job("history_daily", mark=mark)
+    assert started is not None and started.run_id is not None
+    assert len(sup.runs(path)) == runs + 1
+
+
 def test_a_busy_database_is_retried_by_the_waiter(
     path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

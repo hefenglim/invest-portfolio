@@ -313,6 +313,63 @@ def test_on_start_is_never_called_for_a_child_cancelled_in_the_queue(
     assert not result.started and rec.calls == []
 
 
+def _spawn_behind_the_gate(runner: ChildRunner, tmp_path: Path, rec: StartRecorder,
+                           **kw: Any) -> ChildHandle:
+    """A heavy ``exit_code 0`` spawned while another holder keeps the gate's lock, released
+    only once *rec* holds the handle — so it is set before the child's turn can come."""
+    other = proc_lock.try_lock(tmp_path / "heavy-child.lock")
+    assert other is not None
+    try:
+        rec.handle = runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True, **kw)
+        return rec.handle
+    finally:
+        other.release()
+
+
+def _cancel_from_another_thread(handle: ChildHandle) -> None:
+    """``terminate_and_wait`` as another thread would call it, returning once the cancel is
+    recorded (the call itself keeps waiting for the child's end on its own thread)."""
+    threading.Thread(target=handle.terminate_and_wait, args=(5.0,), daemon=True).start()
+    assert _wait_for(lambda: handle.cancel_requested)
+
+
+def test_a_cancel_as_the_turn_comes_skips_on_start(runner: ChildRunner, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancel recorded after the gate granted the turn but before ``on_start``: neither
+    ``on_start`` nor the process runs (the turn passes on), and ``on_exit`` still fires."""
+    real_enter = runner.gate.enter
+
+    def enter_then_cancel(handle: ChildHandle) -> proc_lock.LockHandle | None:
+        held = real_enter(handle)
+        _cancel_from_another_thread(handle)
+        return held
+
+    monkeypatch.setattr(runner.gate, "enter", enter_then_cancel)
+    rec, exits = StartRecorder(tmp_path / "heavy-child.lock"), Recorder()
+    result = _done(_spawn_behind_the_gate(runner, tmp_path, rec, on_start=rec, on_exit=exits))
+    assert not result.started and result.terminated
+    assert rec.calls == [] and exits.calls == [result]
+    monkeypatch.setattr(runner.gate, "enter", real_enter)
+    assert _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True)).ok   # the gate is free
+
+
+def test_a_cancel_landing_during_on_start_still_stops_the_process(
+        runner: ChildRunner, tmp_path: Path) -> None:
+    """``on_start`` ran, the process did not: a caller pairs ``on_start`` with ``on_exit``,
+    which fires either way, so a bracket opened in ``on_start`` is always closed."""
+    rec, exits = StartRecorder(tmp_path / "heavy-child.lock"), Recorder()
+
+    def on_start() -> None:
+        rec()
+        assert rec.handle is not None
+        _cancel_from_another_thread(rec.handle)
+
+    result = _done(_spawn_behind_the_gate(runner, tmp_path, rec, on_start=on_start,
+                                          on_exit=exits))
+    assert len(rec.calls) == 1 and exits.calls == [result]
+    assert not result.started and result.terminated and result.pid is None
+
+
 def test_an_on_start_that_raises_is_logged_and_the_child_still_runs(
         runner: ChildRunner, caplog: pytest.LogCaptureFixture) -> None:
     def _bad() -> None:

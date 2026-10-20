@@ -456,6 +456,86 @@ def test_a_cron_fire_brackets_the_child_with_the_hook_too(
     assert seen[0] is not None
 
 
+class HookRecorder:
+    """An after-job hook that records each half: the after-half with whether the job's row
+    was final when it ran, and that row's reason."""
+
+    def __init__(self, db: Path) -> None:
+        self.db = db
+        self.events: list[tuple[Any, ...]] = []
+
+    def __call__(self, job_id: str) -> Callable[[], None]:
+        self.events.append(("before", job_id))
+
+        def after() -> None:
+            row = _row(self.db, job_id=job_id)
+            self.events.append(("after", job_id, row["finished_at"] is not None,
+                                row["reason"]))
+
+        return after
+
+
+@pytest.mark.parametrize(("mode", "reason"), [("die", "worker_died"), ("slow", "timeout")])
+def test_the_hook_closes_its_bracket_once_after_a_child_dies_or_overruns(
+    template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    reason: str,
+) -> None:
+    """The after-half runs exactly once, after the row is final, on the waiter's error paths
+    too: a worker that dies mid-run and one stopped over its time limit."""
+    db = _copy(template.path, tmp_path)
+    _use_db(monkeypatch, db)
+    _child_mode(monkeypatch, mode=mode, job_id="signal_scan", sleep_s=120)
+    if mode == "slow":  # the dying child's start-up alone can outlast a 3 s limit
+        monkeypatch.setattr(jobs, "JOB_TIME_LIMIT_S", 3.0)
+    hook = HookRecorder(db)
+    jobs.register_after_job_hook(hook)
+    assert _dispatch("signal_scan") is not None
+    assert hook.events == [("before", "signal_scan"), ("after", "signal_scan", True, reason)]
+
+
+def test_a_cancel_landing_right_after_the_mark_still_closes_the_bracket(
+    template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``child_runner``'s ``on_start`` ran (the mark is taken) and a cancel lands before the
+    process starts: no child runs, and the after-half still runs exactly once, after the row
+    is final (「工作子程序無法啟動」)."""
+    db = _copy(template.path, tmp_path)
+    _use_db(monkeypatch, db)
+    _child_mode(monkeypatch, mode="pid", job_id="signal_scan")
+    hook = HookRecorder(db)
+    jobs.register_after_job_hook(hook)
+    real_spawn = child_runner.spawn
+    handles: list[child_runner.ChildHandle] = []
+
+    def spawn(module: str, args: Any = (), **kw: Any) -> child_runner.ChildHandle:
+        mark = kw.pop("on_start")
+
+        def mark_then_cancel() -> None:
+            mark()
+            canceller = threading.Thread(target=handles[0].terminate_and_wait, args=(5.0,),
+                                         daemon=True)
+            canceller.start()
+            _wait_until(lambda: handles[0].cancel_requested)
+
+        handle = real_spawn(module, args, on_start=mark_then_cancel, **kw)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(child_runner, "spawn", spawn)
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(), timeout=5)  # handle first
+    worker = threading.Thread(target=_dispatch, args=("signal_scan",), daemon=True)
+    try:
+        worker.start()
+        _wait_until(lambda: bool(handles))
+    finally:
+        gate.release()
+    worker.join(60)
+    assert not worker.is_alive()
+    assert handles[0].result is not None and not handles[0].result.started
+    assert hook.events == [("before", "signal_scan"),
+                           ("after", "signal_scan", True, "worker_not_started")]
+
+
 class SettledDb(NamedTuple):
     path: Path
     #: The reason of every automatic run the after-job hook asked for (none is run).

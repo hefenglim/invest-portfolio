@@ -1609,24 +1609,43 @@ def scheduled_run(conn: sqlite3.Connection, scope: str, *, now: datetime) -> Job
 
 @dataclass(frozen=True)
 class TrailMark:
-    """Where the change trail stood before a job (review E #9): the last log row, and every
-    PENDING price / FX counter's count and earliest day."""
+    """Where the change trail stood before a job (review E #9): the last log row, and per
+    price / FX counter KEY ``(table_name, key)`` the summed changes and the earliest day of
+    every UNSETTLED counter — pending or claimed (:func:`_unsettled_counters`)."""
 
     seq: int
     last_log_id: int
-    counters: dict[int, tuple[int, str]]
+    counters: dict[tuple[str, str], tuple[int, str]]
+
+
+#: Per counter key, over every counter no run has settled — pending AND claimed. A run's
+#: put-back (cancel, failure, crash: ``store._put_back``) un-claims a counter in place or
+#: merges it into the pending counter of its key (changes summed, earliest the min), so these
+#: sums do not move when it happens; the job's own writes still raise them.
+_UNSETTLED_COUNTERS_SQL = (
+    "SELECT table_name, key, SUM(changes), MIN(earliest) FROM settle_change_agg "
+    "WHERE settled_run_id IS NULL GROUP BY table_name, key")
+
+
+def _unsettled_counters(conn: sqlite3.Connection) -> dict[tuple[str, str], tuple[int, str]]:
+    return {(str(r[0]), str(r[1])): (int(r[2]), str(r[3]))
+            for r in conn.execute(_UNSETTLED_COUNTERS_SQL)}
 
 
 def trail_mark(conn: sqlite3.Connection) -> TrailMark | None:
     """Read the mark (``None`` without a store). Reads the store's ``settle_dirty``,
     ``settle_change_log`` and ``settle_change_agg`` by direct SQL (``portfolio/
-    settlement_store.py`` owns them; the cross-layer read convention)."""
+    settlement_store.py`` owns them; the cross-layer read convention).
+
+    The counters include the CLAIMED ones: a job queued behind a re-settlement takes its mark
+    once the settle child's turn ends — and the waiter puts a cancelled or dead run's claimed
+    counters back only after that (``child_runner`` runs ``on_exit`` after releasing the heavy
+    gate). A mark of the pending counters alone read the owner's put-back counter as the job's
+    change (review of the v0.1.32 follow-ups, 2026-10-20)."""
     try:
         seq = int(conn.execute("SELECT seq FROM settle_dirty WHERE id = 1").fetchone()[0])
         last = conn.execute("SELECT MAX(id) FROM settle_change_log").fetchone()[0]
-        counters = {int(r[0]): (int(r[1]), str(r[2])) for r in conn.execute(
-            "SELECT id, changes, earliest FROM settle_change_agg "
-            "WHERE claimed_run_id IS NULL AND settled_run_id IS NULL")}
+        counters = _unsettled_counters(conn)
     except (sqlite3.OperationalError, TypeError):
         return None
     return TrailMark(seq=seq, last_log_id=int(last or 0), counters=counters)
@@ -1635,21 +1654,21 @@ def trail_mark(conn: sqlite3.Connection) -> TrailMark | None:
 def job_earliest_change(conn: sqlite3.Connection, job_id: str,
                         mark: TrailMark) -> date | None:
     """The earliest day among the changes THIS job recorded since *mark*: its own trail rows
-    (actor ``job:<id>``) and the price / FX counters it created or moved earlier. A counter
-    that only grew keeps an earliest day older changes set, so it is not the job's — and that
-    older day was already pending, prompting the owner, before the job ran."""
+    (actor ``job:<id>``) and the price / FX counter keys it created or moved earlier — per
+    key, summed over every unsettled counter, as :func:`trail_mark` reads them. A key that
+    only grew keeps an earliest day older changes set, so it is not the job's — and that
+    older day was already pending, prompting the owner, before the job ran. A put-back since
+    the mark moves neither the sum nor the earliest day of its key."""
     days: list[date] = []
     row = conn.execute(
         f"SELECT MIN({store._AFFECTED_SQL}) FROM settle_change_log WHERE id > ? AND actor = ?",
         (mark.last_log_id, f"job:{job_id}")).fetchone()
     if row is not None and row[0]:
         days.append(date.fromisoformat(str(row[0])))
-    for counter_id, changes, earliest in conn.execute(
-            "SELECT id, changes, earliest FROM settle_change_agg "
-            "WHERE claimed_run_id IS NULL AND settled_run_id IS NULL"):
-        before = mark.counters.get(int(counter_id))
-        if before is None or (int(changes) > before[0] and str(earliest) < before[1]):
-            days.append(date.fromisoformat(str(earliest)))
+    for key, (changes, earliest) in _unsettled_counters(conn).items():
+        before = mark.counters.get(key)
+        if before is None or (changes > before[0] and earliest < before[1]):
+            days.append(date.fromisoformat(earliest))
     return min(days) if days else None
 
 

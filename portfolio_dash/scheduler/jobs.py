@@ -2302,9 +2302,10 @@ def _run_static_in_child(job_id: str, run_id: int, *, now: datetime,
     trail's ``prices`` / ``fx_rates`` counters carry no actor, so a counter the OWNER created
     or moved earlier during the wait would otherwise read as the job's change and start an
     automatic run (reason ``job:<id>``) instead of leaving it to the owner's prompt (code
-    review 2026-10-20). The second half runs once the child is gone and its row is final. A
-    run that never started (cancelled in the queue, not spawned) took no mark and calls
-    nothing.
+    review 2026-10-20). The second half runs once the child is gone and its row is final —
+    exactly when the mark was taken: also for a child that died, ran over
+    :data:`JOB_TIME_LIMIT_S`, or never started because a cancel landed right after the mark;
+    never for a run that took no mark (cancelled before its turn, not spawned).
 
     The residual limit: an owner's price / FX change made WHILE the job runs is still
     indistinguishable from the job's own, because the counters carry no actor. Its trail ROWS
