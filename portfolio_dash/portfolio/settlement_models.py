@@ -809,6 +809,9 @@ class PeriodClose(_Model):
     #: names the quote job that has not confirmed the closing prices yet (§11.4). ``None``
     #: when final (and always on the current period, which is live).
     provisional: str | None = None
+    #: (W4) The live current period, as at today: its 當期報酬 runs from the previous end to
+    #: date (the frontend marks the row 至今); ``False`` on every closed period.
+    current: bool = False
     #: (W3-G, optional) Every ``settle_restatement`` row of this period, oldest first (§14.6):
     #: what 已重述 / 上線重述 explains — the field's label and unit, old and new value, when and
     #: why. ``source`` is a machine reference, never shown.

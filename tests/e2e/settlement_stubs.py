@@ -239,6 +239,7 @@ def snapshot_row(month: str, **kw: Any) -> dict[str, Any]:
         "xirr": "0.1234", "by_currency": {"TWD": "1234567.89"}, "kind": "M",
         "provisional": None, "stale": False, "notes": notes, "xirr_reason": None,
         "period_twr": "0.0123", "period_twr_reason": None, "restated": None,
+        "current": False,
     }
     row.update(kw)
     return row

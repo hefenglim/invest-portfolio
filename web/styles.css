@@ -2807,5 +2807,6 @@ select.ai-edit { padding-right: 2px; }
   background: var(--accent-soft);
 }
 .snap-mark-cutover { color: var(--text-3); }
+.snap-mark-current { color: var(--text-3); }
 .snap-row-stale td { color: var(--text-2); }
 .snap-note { padding: 6px 2px 0; font-size: 11px; color: var(--amber); }

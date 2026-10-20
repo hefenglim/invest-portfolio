@@ -266,6 +266,11 @@ def test_the_current_month_is_the_kpi_band(app: FastAPI, settled: Settled) -> No
     assert (row["total_value"], row["total_return"], row["total_return_rate"], row["xirr"]) == (
         k["total_market_value"], k["total_return"], k["total_return_rate"], k["xirr"])
     assert row["xirr_reason"] == dash["freshness"]["xirr_unavailable_reason"]
+    # the live current period says so (its 當期報酬 is to date); every closed one does not
+    rows = _get(app, db, "/api/snapshots", params={"limit": 12})["rows"]
+    assert [r["current"] for r in rows] == [True] + [False] * (len(rows) - 1)
+    years = _periods(app, db, "Y")
+    assert [y["current"] for y in years] == [True] + [False] * (len(years) - 1)
 
 
 def test_a_year_row_never_crowds_out_a_month(app: FastAPI, settled: Settled) -> None:

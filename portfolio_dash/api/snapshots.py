@@ -584,6 +584,8 @@ def _month_row(s: _Served, now: datetime) -> dict[str, Any]:
         "period_twr": wire["period_twr"],
         "period_twr_reason": kpi.period_twr_reason,
         "restated": restated,
+        # the live current period: its 當期報酬 is to date (accountant as-built check, W4)
+        "current": s.period.current,
     }
 
 
@@ -592,7 +594,8 @@ def period_rows(conn: sqlite3.Connection, *, kind: Kind, limit: int, now: dateti
     """``GET /api/settlement/periods``: ``{rows: PeriodClose[], total_count}``, newest
     first, the current period (live) included."""
     served, total = _listing(conn, kind=kind, limit=limit, now=now, reporting=reporting)
-    return {"rows": [s.close.model_dump(mode="json", by_alias=True) for s in served],
+    return {"rows": [s.close.model_copy(update={"current": s.period.current})
+                     .model_dump(mode="json", by_alias=True) for s in served],
             "total_count": total}
 
 
@@ -612,8 +615,8 @@ def period_detail(conn: sqlite3.Connection, *, kind: Kind, period: str, now: dat
     if not picked:
         return None
     (served,) = _labelled(closes, conn, now)
-    detail = PeriodDetail(**served.close.model_dump(), holdings=served.holdings or [],
-                          cash=served.cash or [])
+    detail = PeriodDetail(**{**served.close.model_dump(), "current": served.period.current},
+                          holdings=served.holdings or [], cash=served.cash or [])
     return detail.model_dump(mode="json", by_alias=True)
 
 

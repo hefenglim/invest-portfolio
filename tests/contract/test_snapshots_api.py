@@ -21,7 +21,7 @@ _OLD_FIELDS = {"month", "as_of", "reporting_ccy", "total_value", "total_return",
                "total_return_rate", "xirr", "by_currency"}
 #: The additive fields of §11.4.
 _NEW_FIELDS = {"kind", "provisional", "stale", "notes", "xirr_reason", "period_twr",
-               "period_twr_reason", "restated"}
+               "period_twr_reason", "restated", "current"}
 
 
 def test_an_unusable_store_serves_every_month_live(api_client: TestClient) -> None:
@@ -38,6 +38,7 @@ def test_an_unusable_store_serves_every_month_live(api_client: TestClient) -> No
         assert isinstance(r["notes"], dict) and isinstance(r["by_currency"], dict)
     current = rows[0]
     assert current["as_of"] == GOLDEN_NOW.isoformat()      # live, as at now
+    assert current["current"] is True and not any(r["current"] for r in rows[1:])
     assert current["total_value"] is not None                # golden holds priced positions
     assert "TWD" in current["by_currency"]
     assert rows[1]["as_of"] == "2026-05-31"                  # a past month, as at its end

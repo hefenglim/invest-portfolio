@@ -1294,6 +1294,12 @@
       const tr = el('tr', s.stale ? 'snap-row-stale' : null);
       const tdLabel = el('td', 'col-text num snap-period');
       tdLabel.appendChild(el('span', null, s.label));
+      if (s.raw.current) {
+        /* the live current period: its 當期報酬 runs from the previous end to today */
+        tdLabel.appendChild(snapMark('snap-mark-current', '至今',
+          kind === 'Y' ? '今年至今的即時值：當期報酬自去年底起算至今天'
+            : '本月至今的即時值：當期報酬自上月底起算至今天'));
+      }
       if (s.raw.provisional) {
         tdLabel.appendChild(snapMark('snap-mark-provisional', '暫定', snapProvisionalText(s.raw)));
       }
