@@ -123,8 +123,8 @@ def test_monthly_marks_the_real_backend_cannot_produce_cheaply(
         assert "2884（2026-01-20 除息，2026-02-15 發放）" in title, title
         # today's book carries a 待釐清 position: one note under the table
         expect(panel.locator("#snapshots-note")).to_contain_text("過去月份的數字可能隨之更新")
-        for mark in ("snap-mark-provisional", "snap-mark-note"):
-            assert panel.locator("." + mark).first.get_attribute("style") is None
+        for cls in ("snap-mark-provisional", "snap-mark-note"):
+            assert panel.locator("." + cls).first.get_attribute("style") is None
         # a restated YEAR close, its tooltip from the period's own restatements
         panel.locator("#snapshots-kind .range-btn[data-kind='Y']").click()
         expect(rows).to_have_count(2)
