@@ -68,6 +68,10 @@ def demo(corpus_db: CorpusFactory) -> CorpusDB:
 def test_a_published_report_has_every_section(demo: CorpusDB) -> None:
     assert start_run(demo, 1, started_by="user:owner", reason="button") == "published"
     r = _report(demo, 1)
+    # a frozen report leaves no step 「待執行」: 預熱 runs in the web process after it (W4)
+    assert [p.key for p in r.steps if p.status == "pending"] == []
+    assert next(p for p in r.steps if p.key == "prewarm").detail == (
+        settle_worker.PREWARM_BY_THE_WEB)
     assert r.summary.status == "published" and r.summary.status_text == "完成"
     assert r.summary.finished_at is not None and r.summary.duration_s is not None
     assert r.range.from_ is not None and r.range.to == yesterday(demo)

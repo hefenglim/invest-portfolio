@@ -161,6 +161,9 @@ def test_a_failure_in_any_phase_leaves_the_published_generation_whole(
         "保留第 1 版（結算至 2026-08-10）；這 1 筆交易變更回到待結算")
     assert "本次未生效，已退回待結算" in report.summary_lines
     assert report.changes.handed_back
+    prewarm = next(p for p in report.steps if p.key == "prewarm")
+    assert (prewarm.status, prewarm.detail) == (
+        "skipped", settle_worker.PREWARM_SKIPPED_UNPUBLISHED)
     # the retry publishes, and the result is a fresh run's
     assert start_run(demo, 3, scope="dirty", reason="button", previous=2) == "published"
     retry = _report(demo, 3)

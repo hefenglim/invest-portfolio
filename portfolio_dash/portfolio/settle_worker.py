@@ -262,6 +262,13 @@ def _write_json_atomic(path: Path, text: str) -> None:
 # =============================================================================================
 
 
+#: Phase 8 (預熱) runs in the WEB process after the report is frozen (§9.3 #8), so a frozen
+#: report never leaves it 「待執行」: these are its details.
+PREWARM_BY_THE_WEB = "今天的結果由網站在背景另行預熱"
+PREWARM_SKIPPED_SUPERSEDED = "本次未切換版本，無需預熱"
+PREWARM_SKIPPED_UNPUBLISHED = "本次未生效，無需預熱"
+
+
 class _Eta:
     """Each phase's expected duration: the last successful run's duration for the phase,
     scaled by its unit count; the 2026-10-18 profile on a store's first run; during 逐日估值,
@@ -1328,6 +1335,9 @@ class _Run:
             "summary_lines": lines, "state": state_result, "changes": changes,
             "summary": self._final_summary(stored)})
         t.finish("swap", self._swap_detail(result))
+        # phase 8 runs in the web process after this report is frozen: never left 「待執行」
+        t.skip("prewarm", PREWARM_SKIPPED_SUPERSEDED if result.status == "superseded"
+               else PREWARM_BY_THE_WEB)
         t.report = final.model_copy(update={"steps": [p.model_copy()
                                                       for p in t.progress.phases]})
         status = st.finalise_run(self.conn, self.run_id, result.status, t.report)
@@ -1339,6 +1349,8 @@ class _Run:
         superseded) — the report says so with the fault noted, and nothing is raised."""
         status: RunStatus = result.status
         note = f"版本已切換，整理報告時發生錯誤（{type(exc).__name__}）"
+        with contextlib.suppress(Exception):
+            self.tracker.skip("prewarm", PREWARM_BY_THE_WEB)
         try:
             stored = st.get_run(self.conn, self.run_id) or self.tracker.report
             report = stored.model_copy(update={
@@ -1482,6 +1494,7 @@ class _Run:
                              reason_text=reason, consequence=consequence,
                              error_class=error_class)
         lines = [*self.lines, "本次未生效，已退回待結算"]
+        t.skip("prewarm", PREWARM_SKIPPED_UNPUBLISHED)
         report = report.model_copy(update={
             "failure": failure, "summary_lines": lines,
             "steps": [p.model_copy() for p in t.progress.phases],
