@@ -457,8 +457,10 @@ def trend_fx_currencies(bundle: LedgerBundle,
     """The currencies the trend converts into the reporting currency: its FX pair set (each
     against the reporting currency, in both directions). The live build (``dashboard.py``
     step 9, whose ``trend_fx_history`` B, 交易與融資成本 and the benchmark counterfactual read
-    too) and the settlement worker load exactly this set, so the store and the live tail can
-    never disagree on ``available``:
+    too) and the settlement worker both load this set, each over the ledger and the movements
+    cut at the last day it values (the live build at ``as_of``, the worker at its run's
+    ``through``), so over the same day range they convert the same flows at the same rates
+    and agree on ``available``:
 
     - the quote currency of every :func:`trend_symbols` symbol — every trade, dividend and
       opening flow, and every position valued on a day;

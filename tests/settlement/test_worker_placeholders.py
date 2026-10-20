@@ -7,9 +7,10 @@ and MAJOR 2).
   MYR into that pair set — the series is available again from the first day — while the
   trigger marks the store dirty only from 05-04. The dirty run must value from the first
   placeholder: chained ≡ fresh, byte for byte, on every settle table. (With the fixed pair set
-  no change dated after U can end its cause: every flow's own currency is in the set, and a
-  rate that ends it is dated on or before U, which marks the store dirty from there. The
-  widening stays the guard for any cause that can.)
+  the widening is defense in depth with no known production trigger: every flow's own
+  currency is in the set, and every change that can end a missing-rate cause — a rate on or
+  before U, an edit or deletion of the flow — is dated on or before U and marks the store
+  dirty from there. Hence the monkeypatch.)
 - **A placeholder is never a figure in a report.** A back-dated buy before the first rate
   makes the whole series unavailable: the history reads value → none (never → 0), counts no
   placeholder day as 「新結算」, and a close with no trend point says so in

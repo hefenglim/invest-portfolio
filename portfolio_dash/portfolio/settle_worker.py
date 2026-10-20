@@ -69,11 +69,15 @@ any v0.1.31 view, so it is stored as a PLACEHOLDER (``SettledDay.placeholder``:
   the published generation's first placeholder day P lies before the run's start and U is not
   P (the series is available again, or unavailable from another day), the run starts at
   ``min(P, U)`` instead and values every placeholder day again (the change that makes the
-  series available may be dated after U and mark the store dirty only from its own date —
-  before PERF-F2's fix, a later row in a new quote currency did; the widening stays the guard
-  for any cause that still can); the claim's range is widened accordingly
-  (``settle_run.range_from``). With U = P the placeholders stand: a nightly run
-  on a ledger unavailable since U settles its one new day, never a re-run from U;
+  series available may be dated after U and mark the store dirty only from its own date);
+  the claim's range is widened accordingly (``settle_run.range_from``). **This widening is
+  defense in depth with no known production trigger since PERF-F2's fix.** Before it, a later
+  row in a new quote currency was one; now every flow's own currency is in the pair set, so
+  every change that can end a missing-rate cause — a rate on or before U, or an edit or
+  deletion of the flow itself — is dated on or before U and marks the store dirty from there.
+  Its test reaches the branch by handing the worker v0.1.31's pair set (a monkeypatch,
+  ``tests/settlement/test_worker_placeholders.py``). With U = P the placeholders stand: a
+  nightly run on a ledger unavailable since U settles its one new day, never a re-run from U;
 - **it is never a figure in a report**: a day with a value on one side and a placeholder on
   the other is ``value_to_none`` / ``none_to_value``, a placeholder on both is no change, a
   placeholder day is never counted as a valued 「新結算」 / 「移除」 day, and a run that adds

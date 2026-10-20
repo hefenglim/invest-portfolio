@@ -54,7 +54,8 @@ same ledger without the rebate). The trend is golden's, its `net_invested` lower
 2026-03-16 by the rebate at its own date's rate (50 × 7.05 = 352.50) and its `net_worth` raised by
 the 50 MYR pool at each day's rate (7.05, then golden's 7 from 2026-06-09); B and
 交易與融資成本 are golden's plus 352.50; 本金匯率效果 is `B − A − 交易與融資成本` (AI-D48) with this
-corpus's own A (unchanged, 1000.00); the benchmark block, `fx_complete_reason` and
+corpus's own A, which the fix does not touch (111600) — so 112952.50 − 111600 − 352.50 =
+1000.00, golden's 1000 at the exponent of the operands; the benchmark block, `fx_complete_reason` and
 `trend_unavailable_reason` are golden's (a cash movement is no flow of the counterfactual,
 AI-D49, and golden stores no index closes). The January and February month ends and the tax
 package are byte-identical. `test_perf_f2_changes_exactly_the_listed_paths` checks the path
