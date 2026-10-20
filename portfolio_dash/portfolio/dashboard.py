@@ -833,7 +833,9 @@ def _stored_bench(state: settlement_store.StoreState | None,
     """The store's benchmark state and its day ``S``, under the conditions of PERF spec §10
     step 5 that do not need the flows (:func:`_benchmark_comparison` checks the last one — no
     flow dated after ``S``): a usable store, nothing pending and nothing claimed by a run
-    (``Dd`` is ∞), a state that was published (a partial publish stores none), and no
+    (:attr:`~settlement_store.StoreState.claimed_day` is ∞: the active run's whole
+    ``run_from`` counts here, where ``Dd`` counts only the dirty day it claimed), a state that
+    was published (a partial publish stores none), and no
     corporate action on a benchmark storage key dated after ``S`` — ``series_in``
     re-expresses every level into the valuation day's terms, and ``0050`` is both a benchmark
     and a stock the owner can hold. *bundle* is the build's registered ledger cut at today

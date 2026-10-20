@@ -1081,8 +1081,10 @@ def window_start(today: date) -> date:
 
 def live_from(state: StoreState, today: date) -> date:
     """The first day served live (§10 step 3): ``min(H + 1, max(Dd, W))`` with ``S`` =
-    ``settled_through``, ``H`` = ``held_through``, ``Dd`` = the earlier of ``dirty_from`` and
-    ``run_from`` (∞ when both are NULL) and ``W`` = the 1st of the previous month.
+    ``settled_through``, ``H`` = ``held_through``, ``Dd`` = :attr:`StoreState.dirty_day` —
+    the earlier of ``dirty_from`` and the ``run_dirty_from`` the active run CLAIMED (∞ when
+    both are NULL), never its ``run_from``: a full run on a clean store claims no change and
+    leaves every settled day current — and ``W`` = the 1st of the previous month.
 
     An unusable store returns ``date.min``: every day is live.
     """
@@ -1097,7 +1099,8 @@ def live_from(state: StoreState, today: date) -> date:
 
 def stale_range(state: StoreState, today: date) -> tuple[date, date] | None:
     """The days served from the previous generation although they are dirty (PERF-D3):
-    ``[Dd, live_from)`` when ``Dd`` lies before it, else ``None``."""
+    ``[Dd, live_from)`` when ``Dd`` (:attr:`StoreState.dirty_day`, as in :func:`live_from`)
+    lies before it, else ``None``."""
     if not state.usable:
         return None
     dirty = state.dirty_day
@@ -1167,7 +1170,9 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
     - for every CLAIMING scope (``dirty``, ``full``, ``nightly``) raises ``run_through`` to
       ``max(run_through, settled_through, held_through)`` — nothing moves back and no held day
       is left behind; :attr:`Claim.through_clamped` says so;
-    - records ``run_id`` / ``run_through`` and sets ``dirty_from = NULL``;
+    - records ``run_id`` / ``run_through`` and the ``run_dirty_from`` it claims (the
+      trail's earliest day; before anything was ever published, its whole range) — readers'
+      ``Dd`` (:attr:`StoreState.dirty_day`) — and sets ``dirty_from = NULL``;
     - tags every PENDING trail row and counter with ``claimed_run_id`` (rows are tagged, never
       moved);
     - moves the report to ``running`` with its range and its "before" versions;
@@ -2189,8 +2194,10 @@ def end_without_publish(conn: sqlite3.Connection, run_id: int, status: str) -> b
     """Every end but a publish — failure, cancel, crash, boot cleanup, ``superseded`` — as ONE
     transaction (§9.4 "Every other end"):
 
-    - ``dirty_from`` = the earlier of ``dirty_from`` and ``run_from`` — never an overwrite, so
-      an earlier change that arrived during the run is kept;
+    - ``dirty_from`` = the earlier of ``dirty_from`` and the ``run_dirty_from`` the run
+      CLAIMED (never its whole ``run_from`` range: a cancelled full run on a clean store
+      leaves it clean) — never an overwrite, so an earlier change that arrived during the run
+      is kept;
     - the run fields cleared and the generations above the published one deleted — only when
       this run is still the active one (an orphan's end never touches another run's state);
     - the claimed changes put back (:func:`put_back`);
