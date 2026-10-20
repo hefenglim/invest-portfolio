@@ -361,8 +361,9 @@ first, then claims (`running`, 進行中). Each run ends in exactly one of these
 
 A self-check that found a difference is `job_runs` `partial`, reason `selfcheck_diff`. Every
 end other than a publish runs one transaction: it puts the claimed changes back, sets
-`dirty_from` to the earlier of itself and `run_from`, clears the run fields and deletes the
-orphan generation. **Liveness is the OS lock, never the heartbeat.** A status read probes the
+`dirty_from` to the earlier of itself and the dirty day the run CLAIMED (`run_dirty_from`; the
+whole range only before anything was ever published), clears the run fields and deletes the
+orphan generation. A cancelled full run on a clean store leaves it clean. **Liveness is the OS lock, never the heartbeat.** A status read probes the
 lock, and a silent heartbeat only reads 「進行緩慢」 after 60 s. Boot ends every `preparing` /
 `running` report whose lock is free as 中斷（未續跑）, together with its `job_runs` row. It first
 terminates an orphan child that still holds the lock.
