@@ -80,3 +80,36 @@ def test_a_clean_stop_leaves_the_database_in_one_file(boot_db: Path) -> None:
         assert client.get("/api/dashboard").status_code == 200
         assert client.get("/api/dashboard").status_code == 200  # a cache hit: the version
     assert not boot_db.with_name(boot_db.name + "-wal").exists()  # connection was open
+
+
+#: Tables the app does NOT create in its own database at boot, each for a stated reason.
+_NOT_AT_BOOT = {
+    "portfolio_snapshots": "retired at W4: an existing database keeps it; no app path creates it",
+    "news_mentions": "lives in the news library's own file (news/store.py)",
+    "organized_news": "lives in the news library's own file (news/store.py)",
+}
+
+
+def test_every_table_the_package_creates_exists_after_boot(boot_db: Path) -> None:
+    """A table created by its first WRITE moves ``PRAGMA schema_version`` after boot recorded
+    it, and the settlement store is unusable until the next run's claim — every dashboard and
+    月度成績 then pays a full replay (final senior review, 2026-10-20: ``fee_rule_overrides``
+    on the first fee-rule save). So every ``CREATE TABLE`` in the package runs at boot."""
+    import re
+
+    package = Path(__file__).resolve().parents[2] / "portfolio_dash"
+    names: set[str] = set()
+    for source in package.rglob("*.py"):
+        names |= set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
+                                source.read_text(encoding="utf-8")))
+    _boot()
+    conn = sqlite3.connect(boot_db)
+    try:
+        present = {str(r[0]) for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        conn.close()
+    missing = sorted(names - present - set(_NOT_AT_BOOT))
+    assert missing == [], f"created only by a later write: {missing}"
+    assert set(_NOT_AT_BOOT) <= names, "a listed exception no longer exists in the package"
+

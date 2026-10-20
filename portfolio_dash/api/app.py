@@ -62,6 +62,9 @@ from portfolio_dash.api.settlement_service import on_boot as settlement_on_boot
 from portfolio_dash.api.static_cache import StaticCacheFiles
 from portfolio_dash.bootstrap import bootstrap_db
 from portfolio_dash.data_ingestion.config_seed import seed_accounts
+from portfolio_dash.data_ingestion.fee_overrides import (
+    ensure_tables as ensure_fee_override_tables,
+)
 from portfolio_dash.data_ingestion.moomoo_merge import (
     migrate_moomoo_accounts,
     needs_moomoo_merge,
@@ -179,6 +182,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_rebate_tables(conn)  # rebate_skips
         ensure_option_expiry_tables(conn)  # option_expiry_skips (options spec §7.2)
         action_log.ensure_table(conn)  # the log the middleware writes and 系統紀錄 reads
+        # fee_rule_overrides was created by its first write: a CREATE after boot moves
+        # schema_version past the recorded trigger version and the store is unusable until
+        # the next run's claim (final senior review, 2026-10-20). Every table exists at boot.
+        ensure_fee_override_tables(conn)
         # The settlement store (PERF spec 2026-10-18 §6, §7), after every table it borrows.
         # Order matters (plan W0.6): (1) every step above; (2) the settle DDL and the
         # job_runs.results migration (P3); (3) the trigger set, verified or recreated, on this
