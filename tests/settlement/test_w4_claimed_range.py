@@ -86,3 +86,38 @@ def test_the_claimed_change_day_is_cleared_with_the_run(corpus_db: CorpusFactory
         conn.close()
     assert (state.run_id, state.run_from, state.run_dirty_from, state.dirty_day) == (
         None, None, None, None)
+
+
+def test_a_full_run_that_ends_unpublished_puts_back_only_what_it_claimed(
+    corpus_db: CorpusFactory,
+) -> None:
+    """A cancelled / failed / interrupted full run on a CLEAN store leaves it clean — the put
+    back restores the claimed dirty day, never the run's whole range (final senior
+    re-verification, 2026-10-20: a cancel had marked all history 更新前版本 and asked for a
+    full re-settle). A run that did claim a change puts that day back."""
+    clean = corpus_db("demo")
+    prepare(clean)
+    assert start_run(clean, 1) == "published"
+    _claim_full(clean, 2)
+    conn = open_db(clean.path)
+    try:
+        st.end_without_publish(conn, 2, "cancelled")
+        state = st.store_state(conn, reporting=clean.reporting)
+    finally:
+        conn.close()
+    assert (state.dirty_from, state.dirty_day, state.run_id) == (None, None, None)
+    assert st.stale_range(state, clean.now.date()) is None
+
+    dirty = corpus_db("demo")
+    prepare(dirty)
+    assert start_run(dirty, 1) == "published"
+    _insert_back_dated_buy(dirty)
+    _claim_full(dirty, 2)
+    conn = open_db(dirty.path)
+    try:
+        st.end_without_publish(conn, 2, "failed")
+        state = st.store_state(conn, reporting=dirty.reporting)
+    finally:
+        conn.close()
+    assert state.dirty_from == BACK_DATED and state.run_id is None
+

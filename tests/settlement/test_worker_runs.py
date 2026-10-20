@@ -140,7 +140,7 @@ def test_a_failure_in_any_phase_leaves_the_published_generation_whole(
     monkeypatch.undo()
     state = _state(demo)
     assert state.generation == 1 and state.run_id is None and state.run_from is None
-    assert state.dirty_from == dirty  # put back: the earlier of dirty_from and run_from
+    assert state.dirty_from == dirty  # put back: the earlier of dirty_from and the claimed day
     assert _published(demo) == before  # G intact, its rows byte for byte
     conn = open_db(demo.path)
     try:

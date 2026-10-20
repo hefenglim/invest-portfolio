@@ -1228,10 +1228,13 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
                 "UPDATE settle_meta SET run_id = ?, run_from = NULL, run_through = ?, "
                 "run_dirty_from = NULL WHERE id = 1", (run_id, through.isoformat()))
         else:
+            # what the run claims as DIRTY: the trail's earliest day — or, before anything was
+            # ever published, its whole range (nothing settled exists to serve)
+            claimed_dirty = start if (generation == 0 or settled is None) else dirty_from
             conn.execute(
                 "UPDATE settle_meta SET run_id = ?, run_from = ?, run_through = ?, "
                 "run_dirty_from = ? WHERE id = 1",
-                (run_id, _iso(start), through.isoformat(), _iso(dirty_from)))
+                (run_id, _iso(start), through.isoformat(), _iso(claimed_dirty)))
             conn.execute("UPDATE settle_dirty SET dirty_from = NULL WHERE id = 1")
             records = conn.execute(
                 "UPDATE settle_change_log SET claimed_run_id = ? "
@@ -2164,11 +2167,15 @@ def _end(conn: sqlite3.Connection, run_id: int, status: str) -> tuple[int, int] 
         return None
     meta = _meta_row(conn)
     if meta is not None and meta["run_id"] is not None and int(meta["run_id"]) == run_id:
-        run_from = meta["run_from"]
-        if run_from is not None:
+        # put back the dirty day the run CLAIMED (its changes are back in the trail), never
+        # its whole range: a cancelled full run on a clean store leaves the store clean, and
+        # the published generation is untouched either way (final senior re-verification,
+        # 2026-10-20 — the range had marked all history 更新前版本 after a cancel)
+        claimed = meta["run_dirty_from"]
+        if claimed is not None:
             conn.execute(
                 "UPDATE settle_dirty SET dirty_from = CASE WHEN dirty_from IS NULL OR ? < "
-                "dirty_from THEN ? ELSE dirty_from END WHERE id = 1", (run_from, run_from))
+                "dirty_from THEN ? ELSE dirty_from END WHERE id = 1", (claimed, claimed))
         conn.execute("UPDATE settle_meta SET run_id = NULL, run_from = NULL, run_through = NULL, "
                      "run_dirty_from = NULL WHERE id = 1")
         _cleanup_orphans(conn)
