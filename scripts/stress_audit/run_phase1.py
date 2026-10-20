@@ -70,6 +70,9 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("B10", "moomoo_my", "NVDA", "2026-01-25", 30, 500)     # US: moomoo_us fees + USD FX pool
     buy("B19", "moomoo_my", "NVDA", "2026-02-12", 10, 520)
     buy("B11", "moomoo_my", "NVDA", "2026-03-10", 20, 550)
+    # PERF-F2: a MYR cash cost while no ledger instrument is quoted in MYR yet (the MY buys
+    # below are the first) — a temporary checkpoint.
+    run_unquoted_ccy_cash(ev, api, db_path, op)
     buy("B12", "moomoo_my", "1155", "2026-01-30", 1000, "9.50")   # MY: moomoo_my fees (MYR)
     buy("B13", "moomoo_my", "1155", "2026-02-25", 500, "10.20")
     buy("B18", "moomoo_my", "1155", "2026-03-15", 200, "10.50")
@@ -519,6 +522,45 @@ def run_live_window(ev: C.Evidence, api: C.Api, db_path, op: Ops):
              r.get("status") in (200, 201), "phase1:live_window")
     P1.check_live_window_row(ev, api, db_path, "live_window_correction", day)
     reconcile(ev, api, db_path, "live_window", valuation=True)
+
+
+def run_unquoted_ccy_cash(ev: C.Evidence, api: C.Api, db_path, op: Ops):
+    """PERF-F2 (fixed after v0.1.32): a 50 MYR ``REBATE`` — an XIRR cash kind (AI-D42) — on
+    moomoo_my dated 2026-01-28, while NO ledger instrument is quoted in MYR (the MY buys come
+    next). The trend used to load FX only for the ledger's quote currencies, so the rebate found
+    no rate and the WHOLE trend was unavailable — net worth, B, B − A, 交易與融資成本 and the
+    benchmark with it — although the MYR/TWD rate is stored (from the fixture's first row) and
+    XIRR counted the rebate. The oracle's trend has always converted every flow at its own
+    date's stored rate (``_TrendOracle``, ``oracle.net_invested_through`` /
+    ``oracle.trading_financing_cost``), so on the unfixed engine this checkpoint is red on
+    ``trend.available`` and every family riding on it, and green once the trend's pair set
+    holds the currency of every cash movement it converts. Reconciled in that state, then the
+    row is deleted — a temporary checkpoint, so the rest of the scenario is unchanged."""
+    ph = "phase1:unquoted_ccy_cash"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        quoted = sorted({r[0] for r in conn.execute(
+            "SELECT DISTINCT quote_ccy FROM instruments WHERE symbol IN (SELECT symbol FROM "
+            "transactions UNION SELECT symbol FROM dividends UNION SELECT symbol FROM "
+            "opening_inventory)")})
+    finally:
+        conn.close()
+    ev.check("unquoted_ccy_cash.precondition", "no ledger instrument quoted in MYR yet",
+             False, "MYR" in quoted, ph)
+    r = op.cash_move("moomoo_my", "rebate", "MYR", "2026-01-28", "50")
+    ev.check("unquoted_ccy_cash.row_written", "moomoo_my REBATE 50 MYR on 2026-01-28", 201,
+             r.get("status"), ph)
+    reconcile(ev, api, db_path, "unquoted_ccy_cash", valuation=True)
+    dash = api.get("/api/dashboard").json()
+    ev.check("unquoted_ccy_cash.trend_available", "the trend converts the MYR rebate",
+             [True, None], [(dash.get("trend") or {}).get("available"),
+                            (dash.get("freshness") or {}).get("trend_unavailable_reason")], ph)
+    j = r.get("json")
+    move_id = j.get("id") if isinstance(j, dict) else None
+    if move_id is not None:
+        resp = api.delete(f"/api/cash/movements/{move_id}")
+        ev.check("unquoted_ccy_cash.row_removed", f"cash movement id={move_id}", 200,
+                 resp.status_code, ph)
 
 
 def run_missing_fx(ev: C.Evidence, api: C.Api, db_path, op: Ops):

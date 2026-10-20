@@ -43,10 +43,10 @@ from portfolio_dash.portfolio.results import Book
 # ONE definition of both, shared with the metric that already takes these kinds: an oracle
 # of B that re-derived either would be free to disagree with XIRR about which flows exist.
 from portfolio_dash.portfolio.returns import (
-    XIRR_CASH_KINDS,
     CashMovementFlow,
     DividendIdentity,
     booked_dividends,
+    is_return_movement,
     replay_refusals,
 )
 from portfolio_dash.shared.cash_kinds import movement_sign
@@ -379,7 +379,7 @@ def build_reporting_flows(
         # and a debit in the pool balance.
         for mv in cash_movements:
             booking = mv
-            if mv.kind.upper() not in XIRR_CASH_KINDS:
+            if not is_return_movement(mv):
                 continue
             rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
             if rate is None:
@@ -424,7 +424,7 @@ def trading_financing_cost(
         total = _ZERO
         for mv in cash_movements:
             booking = mv
-            if mv.kind.upper() not in XIRR_CASH_KINDS:
+            if not is_return_movement(mv):
                 continue
             rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
             if rate is None:
@@ -437,6 +437,42 @@ def trading_financing_cost(
         # symbol nor account, so ``_uncomputable_message`` renders the GENERAL sentence — it
         # never invents an identity it cannot read off the row.
         raise UnbookableLedgerError(_uncomputable_message(booking)) from exc
+
+
+def trend_symbols(bundle: LedgerBundle) -> list[str]:
+    """Every symbol the trend reads a price history for, sorted: the symbol of each trade,
+    dividend and opening, and BOTH ends of every corporate action (audit F-50: a SPINOFF child
+    appears in no other ledger, so omitting it loaded no price for a position the replay
+    booked correctly, and every day after the spinoff read ``incomplete``). The live build
+    (``dashboard.py`` step 9) and the settlement worker load the trend's histories over this
+    one set. ``bundle.instruments`` holds each of them once the bundle is
+    ``without_unregistered()``."""
+    return sorted({t.symbol for t in bundle.transactions} | {d.symbol for d in bundle.dividends}
+                  | {o.symbol for o in bundle.opening}
+                  | {a.from_symbol for a in bundle.actions} | {a.to_symbol for a in bundle.actions})
+
+
+def trend_fx_currencies(bundle: LedgerBundle,
+                        cash_movements: Iterable[CashMovementFlow]) -> set[Currency]:
+    """The currencies the trend converts into the reporting currency: its FX pair set (each
+    against the reporting currency, in both directions). The live build (``dashboard.py``
+    step 9, whose ``trend_fx_history`` B, 交易與融資成本 and the benchmark counterfactual read
+    too) and the settlement worker load exactly this set, so the store and the live tail can
+    never disagree on ``available``:
+
+    - the quote currency of every :func:`trend_symbols` symbol — every trade, dividend and
+      opening flow, and every position valued on a day;
+    - the currency of every cash movement the trend takes as a flow — the movements
+      :func:`build_reporting_flows` and :func:`trading_financing_cost` admit, by the same
+      predicate (:func:`~portfolio_dash.portfolio.returns.is_return_movement`).
+
+    PERF-F2: the set used to hold the quote currencies only, so a REBATE / INTEREST_EXPENSE /
+    BROKER_FEE in a currency no instrument is quoted in found no rate, and the WHOLE trend was
+    unavailable (and with it net worth, B, B − A, 交易與融資成本 and the benchmark) although its
+    rate was stored and XIRR counted it. A movement with no rate on or before its date still
+    makes the series unavailable: that is a missing rate, not a missing pair."""
+    quoted = {bundle.instruments[sym].quote_ccy for sym in trend_symbols(bundle)}
+    return quoted | {mv.ccy for mv in cash_movements if is_return_movement(mv)}
 
 
 def trend_start(bundle: LedgerBundle) -> date | None:

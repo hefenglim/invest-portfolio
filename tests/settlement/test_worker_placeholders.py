@@ -1,11 +1,15 @@
 """Placeholders: the days of a series unavailable from some day U (package-D review BLOCKER 1
 and MAJOR 2).
 
-- **A placeholder never outlives the condition that made it.** ``unquoted_ccy_cash`` stores
-  placeholders from its MYR rebate (2026-03-16, no MYR rate in the trend's pair set). A MYR
-  instrument bought on 2026-05-04 brings MYR into the pair set — the series is available again
-  from the first day — while the trigger marks the store dirty only from 05-04. The dirty run
-  must value from the first placeholder: chained ≡ fresh, byte for byte, on every settle table.
+- **A placeholder never outlives the condition that made it.** Under v0.1.31's trend pair set
+  (the quote currencies only — PERF-F2, handed to the worker here) ``unquoted_ccy_cash`` stores
+  placeholders from its MYR rebate (2026-03-16). A MYR instrument bought on 2026-05-04 brings
+  MYR into that pair set — the series is available again from the first day — while the
+  trigger marks the store dirty only from 05-04. The dirty run must value from the first
+  placeholder: chained ≡ fresh, byte for byte, on every settle table. (With the fixed pair set
+  no change dated after U can end its cause: every flow's own currency is in the set, and a
+  rate that ends it is dated on or before U, which marks the store dirty from there. The
+  widening stays the guard for any cause that can.)
 - **A placeholder is never a figure in a report.** A back-dated buy before the first rate
   makes the whole series unavailable: the history reads value → none (never → 0), counts no
   placeholder day as 「新結算」, and a close with no trend point says so in
@@ -15,18 +19,36 @@ and MAJOR 2).
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
+from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
+from portfolio_dash.portfolio.returns import CashMovementFlow
+from portfolio_dash.portfolio.timeseries import trend_symbols
+from portfolio_dash.shared.enums import Currency
+from portfolio_dash.shared.models.ledger import LedgerBundle
+from tests.reference import perf_f2
 from tests.reference.corpora import open_db
 from tests.settlement.conftest import CorpusFactory
 from tests.settlement.test_worker import generation, prepare, start_run, yesterday
 from tests.settlement.test_worker_runs import _fresh, _published, _report, _x
 
 
-def test_a_placeholder_never_outlives_the_condition_that_made_it(corpus_db: CorpusFactory,
-                                                                 tmp_path: Path) -> None:
+def _v0131_pair_set(bundle: LedgerBundle,
+                    cash_movements: Iterable[CashMovementFlow]) -> set[Currency]:
+    """v0.1.31's trend pair set: the ledger's quote currencies only (PERF-F2's edge)."""
+    return {bundle.instruments[sym].quote_ccy for sym in trend_symbols(bundle)}
+
+
+def test_a_placeholder_never_outlives_the_condition_that_made_it(
+        corpus_db: CorpusFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # every run below — the dirty one and the fresh one it is compared with — reads the old
+    # pair set, the one under which a change dated after U could end a placeholder's cause
+    monkeypatch.setattr(settle_worker, "trend_fx_currencies", _v0131_pair_set)
     db = corpus_db("unquoted_ccy_cash")
     prepare(db)
     assert start_run(db, 1) == "published"
@@ -109,11 +131,13 @@ def test_a_placeholder_is_never_a_figure_in_the_report(corpus_db: CorpusFactory)
 
 
 def test_a_ledger_unavailable_since_u_settles_one_day_a_night(corpus_db: CorpusFactory) -> None:
-    """The fold verification's finding A: on ``unquoted_ccy_cash`` the series stays unavailable
-    from its MYR rebate (2026-03-16). A placeholder stands while its cause does (this run's U
-    equals the stored first placeholder), so each nightly run settles exactly its new day —
-    never a re-run from U."""
+    """The fold verification's finding A: on ``unquoted_ccy_cash`` with its rebate's rate
+    dropped (``perf_f2.drop_rebate_rate``) the series stays unavailable from its MYR rebate
+    (2026-03-16). A placeholder stands while its cause does (this run's U equals the stored
+    first placeholder), so each nightly run settles exactly its new day — never a re-run from
+    U."""
     db = corpus_db("unquoted_ccy_cash")
+    perf_f2.drop_rebate_rate(db.path)
     prepare(db)
     y = yesterday(db)
     assert start_run(db, 1, through=y - timedelta(days=3)) == "published"

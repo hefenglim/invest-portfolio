@@ -71,30 +71,41 @@ def _build(conn: sqlite3.Connection) -> DashboardData:
 
 
 def test_perf_f2_preconditions_hold(unquoted: sqlite3.Connection) -> None:
-    """The defect's shape, as v0.1.31 has it (and this code still does): the MYR/TWD rate IS
-    stored on or before the MYR rebate, XIRR counts the rebate, and the trend is unavailable
-    for want of a rate."""
+    """The defect's shape: the MYR/TWD rate IS stored on or before the MYR rebate, no ledger
+    instrument is quoted in MYR (so the quote currencies alone never load the pair), and XIRR
+    counts the rebate."""
     row = unquoted.execute(
         "SELECT MAX(as_of_date) FROM fx_rates WHERE base='MYR' AND quote='TWD' "
         "AND as_of_date<=?", (UNQUOTED_MOVE_DATE.isoformat(),)).fetchone()
     assert row[0] == UNQUOTED_FX_DATE.isoformat()
+    quoted = {r[0] for r in unquoted.execute(
+        "SELECT DISTINCT i.quote_ccy FROM instruments i WHERE i.symbol IN ("
+        "SELECT symbol FROM transactions UNION SELECT symbol FROM dividends "
+        "UNION SELECT symbol FROM opening_inventory)")}
+    assert "MYR" not in quoted and quoted
     data = _build(unquoted)
     assert data.kpis.xirr is not None
-    assert data.trend.available is False
-    assert (data.freshness.trend_unavailable_reason
-            == "帳本中有交易日期缺少匯率資料")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "PERF-F2 (confirmed in v0.1.31, not fixed — owner ruling pending): the trend's FX pair "
-    "set holds only the ledger's quote currencies, so an XIRR-kind cash movement in another "
-    "currency makes the whole trend unavailable although its rate is stored"))
 def test_perf_f2_an_xirr_kind_movement_in_an_unquoted_currency_keeps_the_trend(
     unquoted: sqlite3.Connection,
 ) -> None:
+    """Fixed: the trend's pair set holds the rebate's currency (``trend_fx_currencies``), so
+    the trend, B and its split are formed. The benchmark is no longer refused for want of a
+    rate: it gives golden's own answer — golden stores no index closes, and the rebate carries
+    no market, so it is no flow of the counterfactual (AI-D49)."""
+    rebate = unquoted.execute(
+        "SELECT m.amount, r.rate FROM cash_movements m JOIN fx_rates r ON r.base = m.ccy "
+        "AND r.quote = 'TWD' AND r.as_of_date <= m.date WHERE m.kind = 'REBATE' "
+        "ORDER BY r.as_of_date DESC LIMIT 1").fetchone()
     data = _build(unquoted)
     assert data.trend.available is True
-    assert data.benchmark is not None and data.benchmark.available is True
+    assert data.freshness.trend_unavailable_reason is None
+    assert data.kpis.total_return_fx_complete is not None
+    assert data.kpis.trading_financing_cost == Decimal(rebate[0]) * Decimal(rebate[1])
+    # the counterfactual RAN (every flow uncovered: no index closes) — not refused for FX
+    assert data.benchmark is not None and data.benchmark.uncovered_markets == ["TW", "US"]
+    assert "匯率" not in (data.benchmark.reason or "")
 
 
 # --- the price-basis split edge (spec §20 row 9) ------------------------------------------------

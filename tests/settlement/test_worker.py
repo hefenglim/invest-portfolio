@@ -4,9 +4,10 @@ the references, the cross-check at D; spec §18 "Store", "Period closes").
 A full run on every corpus publishes:
 
 - one settled day per day of ``[first day, through]``, each the v0.1.31 trend point of that day
-  (``tests/reference/payloads/<corpus>/dashboard.json``, written by v0.1.31's own code) — on
-  ``unquoted_ccy_cash`` (PERF-F2: v0.1.31 shows no trend) the days before the unconvertible
-  flow are the truncated-world points of the month-end references and the rest placeholders;
+  (``tests/reference/payloads/<corpus>/dashboard.json``, written by v0.1.31's own code; on
+  ``unquoted_ccy_cash`` with PERF-F2's intended difference, ``tests/reference/perf_f2.py``) —
+  and on that corpus with its rebate's rate dropped (a genuinely missing rate) the days before
+  the unconvertible flow keep their points and the rest are placeholders;
 - one close per month end and year end, whose KPI block and notes are the v0.1.31 "truncated
   world" dashboard at that month end (``month_end/<YYYY-MM>.json``) and whose trend figures are
   that world's point D.
@@ -32,6 +33,7 @@ from portfolio_dash.portfolio.settlement_models import RunRequest, RunScope, Run
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
 from portfolio_dash.shared.wire import to_wire
+from tests.reference import perf_f2
 from tests.reference.corpora import CORPUS_NAMES, CorpusDB, open_db
 from tests.settlement.conftest import CorpusFactory
 
@@ -52,7 +54,9 @@ def manifest(name: str) -> dict[str, Any]:
 
 
 def reference(name: str, member: str) -> dict[str, Any]:
-    doc: dict[str, Any] = json.loads((PAYLOADS / name / member).read_bytes())
+    """Reference file *member* of corpus *name*: v0.1.31's, with PERF-F2's intended difference
+    on ``unquoted_ccy_cash`` (``tests/reference/perf_f2.py``)."""
+    doc: dict[str, Any] = json.loads(perf_f2.expected_bytes(name, member))
     return doc
 
 
@@ -267,12 +271,15 @@ def test_a_full_run_settles_the_v0131_series_and_closes(corpus_db: CorpusFactory
         conn.close()
 
 
-def test_perf_f2_days_before_the_unconvertible_flow_keep_their_points(
+def test_a_missing_rate_keeps_the_days_before_the_unconvertible_flow(
         corpus_db: CorpusFactory) -> None:
-    """``unquoted_ccy_cash``: v0.1.31 shows no trend at all (PERF-F2, confirmed, not fixed),
-    but the truncated world of January and February has one — those days are settled with it,
-    and from the 50 MYR rebate (2026-03-16) on every day is a placeholder."""
+    """``unquoted_ccy_cash`` with its rebate's rate dropped (``perf_f2.drop_rebate_rate``): the
+    50 MYR rebate (2026-03-16) has NO rate on or before its date — a missing rate, which the
+    PERF-F2 fix leaves as it was — so the live series shows no trend at all. The truncated world
+    of January and February has one: those days are settled with it, and from the rebate on
+    every day is a placeholder."""
     db = corpus_db("unquoted_ccy_cash")
+    perf_f2.drop_rebate_rate(db.path)
     prepare(db)
     assert start_run(db, 1) == "published"
     conn = open_db(db.path)

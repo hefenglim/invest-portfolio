@@ -1,7 +1,8 @@
 """The corpora are what they claim to be (PERF plan W0.3).
 
 Plus two RECORDS read from the committed v0.1.31 payloads (never from the live code, so they
-stay true after a fix): what ``unquoted_ccy_cash`` shows of suspected defect PERF-F2, and that
+stay true after a fix): what ``unquoted_ccy_cash`` showed of defect PERF-F2 (fixed after
+v0.1.32), and that
 ``usd_reporting`` really carries 28-digit amounts into the trend's ``net_invested``.
 """
 
@@ -117,9 +118,10 @@ def test_unquoted_ccy_cash_has_its_shape(connect: Any) -> None:
 
 def test_record_perf_f2_in_v0131(connect: Any) -> None:
     """What v0.1.31 DID on ``unquoted_ccy_cash`` (spec §8 item 5, PERF-F2): the rebate's rate is
-    stored and XIRR uses it, but the trend loads only the ledger's quote currencies, finds no
-    MYR rate, and the whole trend — and with it net worth, B, B − A and the benchmark — is
-    unavailable. A fix changes these payloads; it is its own change, not part of the store."""
+    stored and XIRR uses it, but the trend loaded only the ledger's quote currencies, found no
+    MYR rate, and the whole trend — and with it net worth, B, B − A and the benchmark — was
+    unavailable. The fix (after v0.1.32) changes what the code renders for these files
+    (``tests/reference/perf_f2.py``), never the files themselves."""
     golden, f2 = _payload("golden"), _payload("unquoted_ccy_cash")
     assert golden["trend"]["available"] is True
     assert f2["trend"] == {"points": [], "reporting_currency": "TWD", "available": False}

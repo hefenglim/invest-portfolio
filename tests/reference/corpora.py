@@ -103,8 +103,9 @@ TEMPLATE_DIR_NAME = "pd-corpus-templates"
 DEMO_NOW = datetime(2026, 8, 11, 14, 30, tzinfo=TAIPEI)
 
 #: ``unquoted_ccy_cash``: the MYR/TWD rate stored ON OR BEFORE the rebate, so XIRR (which
-#: reads every stored pair) finds it, while the trend (which loads only the ledger's quote
-#: currencies, ``dashboard.py`` step 9) does not.
+#: reads every stored pair) finds it, while v0.1.31's trend (which loaded only the ledger's
+#: quote currencies, ``dashboard.py`` step 9) did not — PERF-F2, fixed after v0.1.32: the
+#: trend now loads the rebate's currency too (``tests/reference/perf_f2.py``).
 #: ``usd_reporting``: the one USD/TWD row added to golden (see the module docstring).
 USD_EXTRA_RATE_DATE = date(2026, 1, 2)
 USD_EXTRA_RATE = Decimal("31.9")

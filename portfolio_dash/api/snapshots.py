@@ -454,10 +454,11 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
     """The trend figures at D and the period's TWR, as the worker sets them, from the build's
     composed trend (the stored days before ``live_from``, live after).
 
-    While the LIVE series is unavailable (a flow without a rate, PERF-F2's shape) a close
+    While the LIVE series is unavailable (a flow with no rate on or before its date) a close
     computed here carries no trend figure and no 當期報酬, although the close the worker stores
-    for a day before the unconvertible flow has them: deferred with PERF-F2 (owner ruling
-    2026-10-19), which fixes the series itself after the release."""
+    for a day before the unconvertible flow has them — the live trend card shows none either.
+    Since PERF-F2's fix the trend's pair set holds every converted flow's own currency
+    (``timeseries.trend_fx_currencies``), so only a genuinely missing rate does this."""
     if first is None or as_at < first:
         kpi = pc.with_trend(kpi, point=None, twr=None, twr_reason=pc.TWR_NOT_STARTED_ZH,
                             trend_reason=pc.TREND_NOT_STARTED_ZH)

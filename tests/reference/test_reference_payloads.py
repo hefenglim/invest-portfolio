@@ -13,6 +13,12 @@ A corpus fingerprint is checked FIRST, so a seed edited since the payloads were 
 fails as "the corpus changed", not as a money difference. The only intended payload
 differences of the PERF program are listed in the plan's invariant 1; anything else here is a
 regression.
+
+**One intended difference since: PERF-F2** (``tests/reference/perf_f2.py``). On
+``unquoted_ccy_cash`` the fixed trend loads the rebate's currency, so its ``dashboard.json`` and
+its month ends from the rebate's month on differ from v0.1.31 on exactly the listed paths, each
+carrying the value derived from ``golden``'s own v0.1.31 file; every other byte of those files,
+and every other file, is v0.1.31's.
 """
 
 import json
@@ -21,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from tests.reference import perf_f2
 from tests.reference.canon import first_difference
 from tests.reference.corpora import CORPUS_NAMES, ensure_template, fingerprint, open_db
 from tests.reference.payload_gen import render_corpus
@@ -72,9 +79,28 @@ def test_current_code_reproduces_the_v0131_payloads(
     assert sorted(files) == sorted(entry["files"]), "the set of reference files changed"
     problems: list[str] = []
     for rel, actual in files.items():
-        expected = (_PAYLOADS / name / rel).read_bytes()
+        expected = perf_f2.expected_bytes(name, rel)
         if actual != expected:
             where = _json_diff(expected, actual) if rel.endswith(".json") else None
             problems.append(f"{name}/{rel}: bytes differ"
                             + (f" — first difference at {where}" if where else ""))
     assert not problems, "\n".join(problems)
+
+
+def test_perf_f2_changes_exactly_the_listed_paths() -> None:
+    """The intended difference is exactly :data:`perf_f2.DASHBOARD_CHANGES` /
+    :data:`perf_f2.MONTH_END_CHANGES` on exactly the affected files: every listed path really
+    differs from v0.1.31, and no other path does (the test above then pins the values)."""
+    files = _manifest()["corpora"][perf_f2.CORPUS]["files"]
+    affected = [rel for rel in files if perf_f2.is_affected(perf_f2.CORPUS, rel)]
+    assert sorted(affected) == ["dashboard.json", "month_end/2026-03.json",
+                                "month_end/2026-04.json", "month_end/2026-05.json"]
+    for rel in affected:
+        old = json.loads(perf_f2.v0131_bytes(perf_f2.CORPUS, rel))
+        new = json.loads(perf_f2.expected_bytes(perf_f2.CORPUS, rel))
+        assert perf_f2.changed_paths(old, new) == list(perf_f2.changes(rel)), rel
+    for name in CORPUS_NAMES:
+        for rel in _manifest()["corpora"][name]["files"]:
+            if not perf_f2.is_affected(name, rel):
+                assert perf_f2.expected_bytes(name, rel) == (
+                    _PAYLOADS / name / rel).read_bytes(), f"{name}/{rel}"

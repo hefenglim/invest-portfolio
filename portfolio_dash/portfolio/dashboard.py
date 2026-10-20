@@ -98,7 +98,9 @@ from portfolio_dash.portfolio.timeseries import (
     build_reporting_flows,
     trading_financing_cost,
     trend_book_days,
+    trend_fx_currencies,
     trend_start,
+    trend_symbols,
     value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes
@@ -1546,16 +1548,10 @@ def _build_dashboard(
     # The days served from the store (step 4), decided in the trend branch below.
     prefix: settlement_store.SettledPrefix | None = None
     if txs or divs or opening:
-        # BOTH ends of every corporate action (audit F-50): a SPINOFF child appears in no
-        # other ledger, so omitting it loaded no price history for a position the replay
-        # booked CORRECTLY — `daily_value_series` then found no price and marked every day
-        # after the spinoff `incomplete`, flattening the trend. `without_unregistered()`
-        # above guarantees both symbols have an Instrument row, so the `instruments[sym]`
-        # lookup below stays total.
-        ledger_symbols = sorted({t.symbol for t in txs} | {d.symbol for d in divs}
-                                | {o.symbol for o in opening}
-                                | {a.from_symbol for a in bundle.actions}
-                                | {a.to_symbol for a in bundle.actions})
+        # BOTH ends of every corporate action (audit F-50, `trend_symbols`): a SPINOFF child
+        # appears in no other ledger. `without_unregistered()` above guarantees every symbol
+        # has an Instrument row, so the quote-currency lookups stay total.
+        ledger_symbols = trend_symbols(bundle)
         first_day = trend_start(bundle)
         assert first_day is not None  # the ledger has a trade, a dividend or an opening
         # PERF spec §10 step 4: the days before `live` come from the store (contiguous from
@@ -1582,8 +1578,10 @@ def _build_dashboard(
         # (``trend_fx_history`` is declared before this branch so step 10's benchmark
         # counterfactual can read it on an EMPTY ledger too — where it is simply empty and
         # the counterfactual refuses honestly instead of raising UnboundLocalError.)
+        # The pair set has ONE owner, shared with the settlement worker (PERF-F2): the quote
+        # currencies AND the currency of every cash movement the trend converts.
         fx_history = trend_fx_history
-        for ccy in {instruments[sym].quote_ccy for sym in ledger_symbols}:
+        for ccy in trend_fx_currencies(bundle, cash_movements):
             if ccy == reporting:
                 continue
             for base, quote in ((ccy, reporting), (reporting, ccy)):

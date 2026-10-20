@@ -2743,7 +2743,8 @@ def settled_prefix(conn: sqlite3.Connection, state: StoreState, *, first_day: da
       only the reader's days);
     - the first PLACEHOLDER day (:func:`first_placeholder_day`, W2-D): a placeholder carries
       no figure, so from it on the reader values live — and when the live series is
-      unavailable the whole trend is, exactly as v0.1.31 answers (PERF-F2);
+      unavailable (a flow with no rate on or before its date) the whole trend is, exactly as
+      v0.1.31 answers;
     - the first day the generation does not hold (a gap; the series start moved earlier than
       the generation's ``first_day``): never a day served from nowhere.
 

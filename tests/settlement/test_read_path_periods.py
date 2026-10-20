@@ -3,7 +3,8 @@ plan §7.1, package G): ``GET /api/snapshots`` and ``GET /api/settlement/periods
 
 Stores are built by the REAL worker (inline) on the reference corpora. The oracles:
 
-- v0.1.31's truncated-world dashboards (``tests/reference/payloads/<corpus>/month_end``) for
+- v0.1.31's truncated-world dashboards (``tests/reference/payloads/<corpus>/month_end``, with
+  PERF-F2's intended difference on ``unquoted_ccy_cash``, ``tests/reference/perf_f2.py``) for
   every close the read path computes LIVE — ``PD_SETTLE=off``, every past month live;
 - the worker's own published closes for the same periods: a close served live and the close
   the worker stores for it are the same close, field for field (only ``source`` differs), so
@@ -41,6 +42,7 @@ from portfolio_dash.portfolio.returns import DividendRefusals, dividend_key
 from portfolio_dash.portfolio.settlement_models import PeriodHolding, PeriodKpi
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import valued_rows_as_of
+from tests.reference import perf_f2
 from tests.reference.corpora import (
     CORPORA,
     CORPUS_NAMES,
@@ -177,11 +179,6 @@ def test_every_live_month_is_the_v0131_truncated_world(
             row = rows[f"{d:%Y-%m}"]
             assert row["end_day"] == text
             ref = reference(name, f"month_end/{d:%Y-%m}.json")
-            if name == "unquoted_ccy_cash":
-                # PERF-F2 (deferred, owner 2026-10-19): the LIVE series is unavailable, so a
-                # live close shows no trend figure — the trend card shows none either — while
-                # the truncated world of Jan / Feb has one. The KPIs are the world's.
-                ref = {**ref, "trend": {**ref["trend"], "points": []}}
             detail = _get(app, db, f"/api/settlement/periods/M/{d:%Y-%m}")
             holdings = [PeriodHolding.model_validate(h) for h in detail["holdings"]]
             assert_close_is_truncated_world(f"{name} {d}", _kpi(row), ref, d, conn=conn,
@@ -192,7 +189,7 @@ def test_every_live_month_is_the_v0131_truncated_world(
         conn.close()
 
 
-@pytest.mark.parametrize("name", [n for n in CORPUS_NAMES if n != "unquoted_ccy_cash"])
+@pytest.mark.parametrize("name", CORPUS_NAMES)
 @pytest.mark.parametrize("kind", ["M", "Y"])
 def test_a_close_served_live_is_the_close_the_worker_stores(
         app: FastAPI, settled: Settled, name: str, kind: str,
@@ -217,10 +214,15 @@ def test_a_close_served_live_is_the_close_the_worker_stores(
 
 
 def test_the_unavailable_live_series_is_named_on_a_live_close(
-        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
-    """PERF-F2's shape, served live: no trend figure and no 當期報酬, in the build's own words
-    (帳本中有交易日期缺少匯率資料) — never a figure, never an empty reason."""
-    db = settled("unquoted_ccy_cash")
+        app: FastAPI, corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live series unavailable for a MISSING rate (``unquoted_ccy_cash`` with its rebate's
+    rate dropped, ``perf_f2.drop_rebate_rate``), served live: no trend figure and no 當期報酬,
+    in the build's own words (帳本中有交易日期缺少匯率資料) — never a figure, never an empty
+    reason."""
+    db = corpus_db("unquoted_ccy_cash")
+    perf_f2.drop_rebate_rate(db.path)
+    prepare(db)
+    assert start_run(db, 1) == "published"
     monkeypatch.setenv("PD_SETTLE", "off")
     for row in _periods(app, db, "M"):
         kpi = row["kpi"]

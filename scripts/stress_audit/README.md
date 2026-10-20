@@ -434,6 +434,7 @@ family reads its closes from the same fixture series.
 | `run_month_end` 2330 CASH | ex-date 04-28, paid 05-15: the April close's `dividends_receivable` |
 | `run_flat_oversell` `OVF` | a 賣超 netted back to EXACTLY zero (CR-11): no holdings row, but the book records it — XIRR withheld naming the position (live and every close from it), every trend day from the oversell incomplete — until the acknowledged sell is deleted |
 | `run_live_window` | a buy dated the 15th of the SERVER's last month, then corrected (10 → 12 shares): after each, with NO run, the change is inside the live window and last month's close and 月度成績 row already equal the oracle over the changed ledger, `source = live` |
+| `run_unquoted_ccy_cash` (temporary, before the first MY buy) | PERF-F2: a 50 MYR `REBATE` on moomoo_my dated 2026-01-28 while no ledger instrument is quoted in MYR — the trend converts it at its own date's MYR/TWD rate, so `trend.available`, net worth, B and `kpi.trading_financing_cost` agree with the oracle (the unfixed engine had no trend at all here); then the row is deleted |
 | `run_missing_fx` (temporary, before `final`) | a Malaysian buy dated 2025-12-15, before the first MYR/TWD row: December 2025 has 總市值 / 總報酬 / rate blank and `MYR/TWD` in `missing_fx`; every trend point from that day on is unavailable; then the row is deleted |
 
 Every month-end series DRIFTS 0.005 a calendar day (`SERIES_DRIFT`), exact at 4 dp: a close read
@@ -445,6 +446,7 @@ off the wrong day moves a money figure, and a cap below 4 dp shows.
 | --- | --- | --- |
 | M6 (review): `pricing/store.py` `_PRICE_DP = 2` instead of 4 — APP, temporary, restored | `fail=0` (the oracle read the stored close) | **`fail=5560`**: `prices.stored_close` (120, every checkpoint: `YRA 2025-11-04: stored 120.01 != 120.0050`), `trend.total_value` / `net_worth` (1,041 each), `stale.trend.*`, `store_period.position.price` / `market_value` / `unrealized`, `period_detail.*`, `period(.store).total_market_value` / `total_return` / `rate` / `xirr` / `period_twr` / `trend_total_value`, `snapshot.*` (2026-10-20, run on the merged tip `834440a` + this change) |
 | ORACLE breaks (2026-10-19, wave-2 tip): no split re-expression · a cover counted in gross · stale at 3 days | — | caught by `store_period.position.price` and `trend.total_value` on 2026-05-31; by the rate checks; by `stale_prices` at 2026-05-31 (STL) — the third only once STL existed |
+| PERF-F2 (2026-10-20, `fix/perf-f2-trend-fx-pairs`): `timeseries.trend_fx_currencies` returning the quote currencies only (v0.1.31's pair set) — APP, temporary, restored | `ops=261 pass=155161 fail=0` (with `--ui`) | **`fail=227`** (`--no-ui`): at `unquoted_ccy_cash` — `trend.available`, `unquoted_ccy_cash.trend_available`, `kpi.fx_complete_withheld`, `kpi.trading_financing_cost` (oracle 350.0) and the January onward `period.*` / `store_period.*` / `snapshot.period_twr` trend figures (94); at `checkpoint1` the `stale.*` families over the placeholder days the unfixed run stored (133) |
 
 **Disclosed readings, limitations and open questions.**
 
@@ -466,9 +468,11 @@ off the wrong day moves a money figure, and a cap below 4 dp shows.
   matched by words (走勢 or 匯率 / 尚無 / 期末 / 期初 / 待結算), not by sentence.
 * **Not reachable on this instance:** the scheduler is off, so no close is ever 暫定 and
   `notes.unconfirmed_closes` is always empty (asserted empty).
-* **PERF-F2 and the price-basis split edge** (owner ruling 2026-10-19: fixed after v0.1.32) do not
-  occur in this scenario. If an op adds one and the oracle disagrees, it is that owner-accepted
-  defect — recorded, never "fixed" in the oracle.
+* **PERF-F2 is fixed** (the trend's pair set holds the currency of every cash movement it
+  converts) and pinned by `run_unquoted_ccy_cash`; the oracle never had the defect, so it needed
+  no change. **The price-basis split edge** (owner ruling 2026-10-19: fixed after v0.1.32) does
+  not occur in this scenario. If an op adds it and the oracle disagrees, it is that
+  owner-accepted defect — recorded, never "fixed" in the oracle.
 * `kpi.realized_total` is `check_rel` (1 ULP addition-order difference on 28-digit rows).
 
 Baseline (2026-10-20, merged tip `834440a` + this change, `run_phase1.py` API only, 6m56s):
@@ -477,7 +481,10 @@ of the previous harness on the same tip:
 `ops=221 pass=101900 fail=0`; before the store: `ops=164 pass=19941 fail=0`). `ops` moved +36
 from the previous harness: 3 more checkpoints (prior year, flat oversell, missing FX), their
 settlement runs and pre-run records, the served-prefix records, and the new scenario ops. The
-gate's baseline is the first full `run_all.py --phase 1` at W4.
+gate's baseline is the first full `run_all.py --phase 1` at W4. With PERF-F2's
+`run_unquoted_ccy_cash` checkpoint (2026-10-20, `run_all.py --phase 1`, with `--ui`):
+**`ops=261 pass=155161 fail=0`** (the pass count drifts with the wall clock; compare same-day
+runs, never against an old count).
 
 ## Must-pass assertion families
 
@@ -486,8 +493,8 @@ A run is only green when **all** of these hold (exact Decimal unless noted):
 - **Settlement and month-end closes** (README §9) — `settle.*` (the status before the run, the
   run, the clean state after it), `prices.stored_close` / `fx.stored_rate` (the stored columns ≡
   what the fixture wrote), `backdated_edit.*`, `prior_year.*`, `flat_oversell.*`,
-  `live_window.*`, `missing_fx.*`, `month_end.*`, `month.asof.*` (the month-end oracle at today ≡
-  the live KPI block), `store_period.*` (the published closes — KPIs, notes, TWR, activity,
+  `live_window.*`, `unquoted_ccy_cash.*`, `missing_fx.*`, `month_end.*`, `month.asof.*` (the
+  month-end oracle at today ≡ the live KPI block), `store_period.*` (the published closes — KPIs, notes, TWR, activity,
   holdings and cash at D, closed years), `tax.*` (the sheet-by-sheet tie-out), and with package G
   `stale.*`, `period.*`, `period_detail.*`, `snapshot(s).*`. `check_rel` for the rate, the TWR, a
   realized or reporting sum (association only), XIRR `check_close`; everything else exact.

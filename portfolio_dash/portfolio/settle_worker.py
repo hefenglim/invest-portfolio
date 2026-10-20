@@ -56,20 +56,23 @@ day — ``value_series`` over books from ONE ``iter_books`` pass, ``compose_net_
 ``sorted(event days ∪ period ends)`` feeds both; a book is never rebuilt per month end.
 
 **A series that is unavailable from some day U** (a flow dated U has no on-or-before FX rate in
-the trend's pair set — v0.1.31 then shows no trend at all; PERF-F2 is the confirmed case): the
-days before U are valued over the ledger cut at U − 1 (every point there is what the truncated
-world shows); a day from U on has no value in any v0.1.31 view, so it is stored as a
-PLACEHOLDER (``SettledDay.placeholder``: ``total_value = net_invested = 0``, ``incomplete``,
-``net_worth`` and ``cash_total`` NULL, ``cash_incomplete``) and the closes from U on carry no
-trend figure and no 當期報酬 (``notes.trend_unavailable``). A placeholder carries no figure:
+the trend's pair set — the live build then shows no trend at all. Since PERF-F2's fix the pair
+set, ``timeseries.trend_fx_currencies``, holds every converted flow's own currency, so this is
+a rate genuinely missing on or before U): the days before U are valued over the ledger cut at
+U − 1 (every point there is what the truncated world shows); a day from U on has no value in
+any v0.1.31 view, so it is stored as a PLACEHOLDER (``SettledDay.placeholder``:
+``total_value = net_invested = 0``, ``incomplete``, ``net_worth`` and ``cash_total`` NULL,
+``cash_incomplete``) and the closes from U on carry no trend figure and no 當期報酬
+(``notes.trend_unavailable``). A placeholder carries no figure:
 
 - **it never outlives the condition that made it** — every run computes its own U first. When
   the published generation's first placeholder day P lies before the run's start and U is not
   P (the series is available again, or unavailable from another day), the run starts at
   ``min(P, U)`` instead and values every placeholder day again (the change that makes the
-  series available may be dated after U: PERF-F2's pair-set edge, a later row in a new quote
-  currency, marks the store dirty only from its own date); the claim's range is widened
-  accordingly (``settle_run.range_from``). With U = P the placeholders stand: a nightly run
+  series available may be dated after U and mark the store dirty only from its own date —
+  before PERF-F2's fix, a later row in a new quote currency did; the widening stays the guard
+  for any cause that still can); the claim's range is widened accordingly
+  (``settle_run.range_from``). With U = P the placeholders stand: a nightly run
   on a ledger unavailable since U settles its one new day, never a re-run from U;
 - **it is never a figure in a report**: a day with a value on one side and a placeholder on
   the other is ``value_to_none`` / ``none_to_value``, a placeholder on both is no change, a
@@ -158,7 +161,9 @@ from portfolio_dash.portfolio.timeseries import (
     build_reporting_flows,
     holds_open_option,
     trend_book_days,
+    trend_fx_currencies,
     trend_start,
+    trend_symbols,
     value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes, twr_index
@@ -521,19 +526,19 @@ def _first_row(cut: LedgerBundle, movements: Sequence[StoredCashMovement],
 
 
 def _histories(conn: sqlite3.Connection, cache: FxSeriesCache, cut: LedgerBundle,
-               first_day: date, through: date, reporting: Currency
-               ) -> tuple[PriceHistory, FxHistory, int, int]:
+               movements: Sequence[StoredCashMovement], first_day: date, through: date,
+               reporting: Currency) -> tuple[PriceHistory, FxHistory, int, int]:
     """The trend's price and FX histories exactly as ``_build_dashboard`` step 9 reads them:
-    every symbol of the ledger and BOTH ends of every corporate action (audit F-50), from the
-    last close on or before the first day (never before 1900); FX for the ledger's quote
-    currencies only, both directions — the pair set v0.1.31 reads (PERF-F2 is its edge)."""
-    symbols = sorted({t.symbol for t in cut.transactions} | {d.symbol for d in cut.dividends}
-                     | {o.symbol for o in cut.opening}
-                     | {a.from_symbol for a in cut.actions} | {a.to_symbol for a in cut.actions})
+    every symbol of the ledger and BOTH ends of every corporate action (``trend_symbols``),
+    from the last close on or before the first day (never before 1900); FX for the trend's
+    pair set (``trend_fx_currencies``: the quote currencies and the currency of every cash
+    movement the trend converts — PERF-F2), both directions. *movements* are the run's, cut
+    at *through*."""
+    symbols = trend_symbols(cut)
     prices: PriceHistory = {sym: bounded_closes(conn, sym, first_day, through, floor=_EPOCH)
                             for sym in symbols}
     fx: FxHistory = {}
-    for ccy in {cut.instruments[sym].quote_ccy for sym in symbols}:
+    for ccy in trend_fx_currencies(cut, movements):
         if ccy == reporting:
             continue
         for base, quote in ((ccy, reporting), (reporting, ccy)):
@@ -893,8 +898,8 @@ class _Run:
         loaded.first_row = _first_row(cut, loaded.movements, loaded.conversions, through)
         if loaded.first_day is not None and loaded.first_day <= through:
             (loaded.price_history, loaded.fx_history, loaded.prices_read,
-             loaded.fx_rows_read) = _histories(read, loaded.cache, cut, loaded.first_day,
-                                               through, self.reporting)
+             loaded.fx_rows_read) = _histories(read, loaded.cache, cut, loaded.movements,
+                                               loaded.first_day, through, self.reporting)
         symbols = len(loaded.price_history)
         t.finish("load", f"{symbols} 檔 · 價格 {loaded.prices_read:,} 筆 · "
                          f"匯率 {len(loaded.fx_history)} 組 {loaded.fx_rows_read:,} 筆",
