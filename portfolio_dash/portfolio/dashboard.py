@@ -838,7 +838,7 @@ def _stored_bench(state: settlement_store.StoreState | None,
     re-expresses every level into the valuation day's terms, and ``0050`` is both a benchmark
     and a stock the owner can hold. *bundle* is the build's registered ledger cut at today
     (its actions are the ``ActionIndex`` the live read re-expresses through)."""
-    if (state is None or state.dirty_day is not None or state.bench_state is None
+    if (state is None or state.claimed_day is not None or state.bench_state is None
             or state.settled_through is None):
         return None
     through = state.settled_through

@@ -19,10 +19,11 @@ W = date(2026, 9, 1)
 
 def _state(*, settled: date | None = date(2026, 10, 17), held: date | None = None,
            dirty: date | None = None, run_from: date | None = None,
-           usable: bool = True) -> st.StoreState:
+           run_dirty: date | None = None, usable: bool = True) -> st.StoreState:
     return st.StoreState(generation=1, settled_through=settled,
                          held_through=held or settled, first_day=date(2021, 1, 4),
-                         dirty_from=dirty, run_from=run_from, calc_ok=usable,
+                         dirty_from=dirty, run_from=run_from, run_dirty_from=run_dirty,
+                         calc_ok=usable,
                          currency_ok=True, triggers_ok=True)
 
 
@@ -39,10 +40,14 @@ def test_window_start_is_the_first_of_the_previous_month() -> None:
     (_state(dirty=date(2026, 9, 20)), date(2026, 9, 20), None),
     # dirty before the window: live from W, the stretch before it stale
     (_state(dirty=date(2025, 6, 16)), W, (date(2025, 6, 16), date(2026, 8, 31))),
-    # a range a run claimed is still dirty
-    (_state(run_from=date(2025, 6, 16)), W, (date(2025, 6, 16), date(2026, 8, 31))),
-    (_state(dirty=date(2026, 9, 3), run_from=date(2025, 6, 16)), W,
+    # a CHANGE a run claimed is still dirty until its swap ...
+    (_state(run_from=date(2025, 6, 16), run_dirty=date(2025, 6, 16)), W,
      (date(2025, 6, 16), date(2026, 8, 31))),
+    (_state(dirty=date(2026, 9, 3), run_from=date(2025, 6, 16), run_dirty=date(2025, 6, 16)),
+     W, (date(2025, 6, 16), date(2026, 8, 31))),
+    # ... but a range claimed with no change is not (a full run on a clean store; final
+    # senior review 2026-10-20)
+    (_state(run_from=date(2021, 1, 4)), date(2026, 10, 18), None),
     # after a partial publish: Dd = S + 1, the held days (S, H] labelled stale before W
     (_state(settled=date(2025, 6, 15), held=date(2026, 10, 17), dirty=date(2025, 6, 16)),
      W, (date(2025, 6, 16), date(2026, 8, 31))),
@@ -57,10 +62,15 @@ def test_live_from_and_the_stale_range(state: st.StoreState, live: date,
     assert st.stale_range(state, TODAY) == stale
 
 
-def test_the_dirty_day_is_the_earlier_of_dirty_from_and_run_from() -> None:
+def test_the_dirty_day_is_the_earlier_of_dirty_from_and_the_claimed_change() -> None:
     assert _state().dirty_day is None
-    assert _state(dirty=date(2026, 3, 1), run_from=date(2026, 2, 1)).dirty_day == date(2026, 2, 1)
+    claimed = _state(dirty=date(2026, 3, 1), run_from=date(2026, 2, 1),
+                     run_dirty=date(2026, 2, 1))
+    assert claimed.dirty_day == date(2026, 2, 1)
     assert _state(dirty=date(2026, 3, 1)).dirty_day == date(2026, 3, 1)
+    # the run's range alone dirties nothing, but it still holds the stored benchmark back
+    ranged = _state(run_from=date(2021, 1, 4))
+    assert ranged.dirty_day is None and ranged.claimed_day == date(2021, 1, 4)
 
 
 def _set(conn: sqlite3.Connection, **cols: object) -> None:

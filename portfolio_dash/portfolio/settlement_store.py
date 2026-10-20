@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS settle_meta (  -- exactly one row
     bench_state TEXT,  -- JSON: counterfactual state through settled_through
     built_at TEXT, run_id INTEGER,  -- the run that produced this generation
     run_from TEXT, run_through TEXT,  -- the ACTIVE run's range; NULL when idle (§9.4)
+    run_dirty_from TEXT,  -- the dirty_from the ACTIVE run claimed (readers' Dd); NULL = none
     held_through TEXT,  -- last day this generation holds rows for (§9.4 partial)
     trigger_schema_version INTEGER  -- PRAGMA schema_version when the trigger set was verified (§7)
 );
@@ -271,6 +272,11 @@ def create_tables(conn: sqlite3.Connection) -> None:
     """
     for statement in _statements(_DDL) + _statements(_INDEX_DDL):
         conn.execute(statement)
+    # a store created before the column existed (in-branch builds only — no released version
+    # had the store): add it once, at boot, before the trigger set's schema_version is recorded
+    if "run_dirty_from" not in {str(r[1]) for r in conn.execute(
+            "PRAGMA table_info(settle_meta)")}:
+        conn.execute("ALTER TABLE settle_meta ADD COLUMN run_dirty_from TEXT")
     conn.execute("INSERT OR IGNORE INTO settle_meta (id) VALUES (1)")
     conn.execute("INSERT OR IGNORE INTO settle_dirty (id) VALUES (1)")
     conn.commit()
@@ -971,7 +977,7 @@ def record_schema_version(conn: sqlite3.Connection) -> int:
 def _meta_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
     cur = conn.execute(
         "SELECT generation, settled_through, first_day, calc_version, reporting_ccy, "
-        "bench_state, built_at, run_id, run_from, run_through, held_through, "
+        "bench_state, built_at, run_id, run_from, run_through, run_dirty_from, held_through, "
         "trigger_schema_version FROM settle_meta WHERE id = 1")
     cur.row_factory = sqlite3.Row
     row: sqlite3.Row | None = cur.fetchone()
@@ -994,6 +1000,8 @@ class StoreState:
     run_id: int | None = None
     run_from: date | None = None
     run_through: date | None = None
+    #: The ``dirty_from`` the active run claimed (``None``: it claimed no change, or no run).
+    run_dirty_from: date | None = None
     dirty_from: date | None = None
     seq: int = 0
     trigger_schema_version: int | None = None
@@ -1010,8 +1018,17 @@ class StoreState:
 
     @property
     def dirty_day(self) -> date | None:
-        """``Dd``: the earlier of ``dirty_from`` and ``run_from`` — a range a run has claimed
-        is still dirty until its swap publishes it (review A #1). ``None`` = ∞."""
+        """``Dd``: the earlier of ``dirty_from`` and the ACTIVE run's claimed ``dirty_from``
+        — the changes a run has claimed are still dirty until its swap publishes them (review
+        A #1), but the rest of its range is not: a full run on a clean store claims no change
+        and serves every settled day as current (final senior review, 2026-10-20 — it had
+        labelled all history 更新前版本 for the whole run). ``None`` = ∞."""
+        return _nmin(self.dirty_from, self.run_dirty_from)
+
+    @property
+    def claimed_day(self) -> date | None:
+        """The earlier of ``dirty_from`` and the active run's ``run_from`` — "anything pending
+        or claimed" (§10 step 5: the stored benchmark state is used only when this is ∞)."""
         return _nmin(self.dirty_from, self.run_from)
 
 
@@ -1044,6 +1061,7 @@ def store_state(conn: sqlite3.Connection, *, reporting: Currency,
         run_id=None if meta["run_id"] is None else int(meta["run_id"]),
         run_from=_day(meta["run_from"]),
         run_through=_day(meta["run_through"]),
+        run_dirty_from=_day(meta["run_dirty_from"]),
         dirty_from=None if dirty is None else _day(dirty[0]),
         seq=0 if dirty is None else int(dirty[1]),
         trigger_schema_version=None if tsv is None else int(tsv),
@@ -1207,12 +1225,13 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
         records = counters = 0
         if effective == "selfcheck":
             conn.execute(
-                "UPDATE settle_meta SET run_id = ?, run_from = NULL, run_through = ? "
-                "WHERE id = 1", (run_id, through.isoformat()))
+                "UPDATE settle_meta SET run_id = ?, run_from = NULL, run_through = ?, "
+                "run_dirty_from = NULL WHERE id = 1", (run_id, through.isoformat()))
         else:
             conn.execute(
-                "UPDATE settle_meta SET run_id = ?, run_from = ?, run_through = ? WHERE id = 1",
-                (run_id, _iso(start), through.isoformat()))
+                "UPDATE settle_meta SET run_id = ?, run_from = ?, run_through = ?, "
+                "run_dirty_from = ? WHERE id = 1",
+                (run_id, _iso(start), through.isoformat(), _iso(dirty_from)))
             conn.execute("UPDATE settle_dirty SET dirty_from = NULL WHERE id = 1")
             records = conn.execute(
                 "UPDATE settle_change_log SET claimed_run_id = ? "
@@ -2150,8 +2169,8 @@ def _end(conn: sqlite3.Connection, run_id: int, status: str) -> tuple[int, int] 
             conn.execute(
                 "UPDATE settle_dirty SET dirty_from = CASE WHEN dirty_from IS NULL OR ? < "
                 "dirty_from THEN ? ELSE dirty_from END WHERE id = 1", (run_from, run_from))
-        conn.execute("UPDATE settle_meta SET run_id = NULL, run_from = NULL, run_through = NULL "
-                     "WHERE id = 1")
+        conn.execute("UPDATE settle_meta SET run_id = NULL, run_from = NULL, run_through = NULL, "
+                     "run_dirty_from = NULL WHERE id = 1")
         _cleanup_orphans(conn)
     put = _put_back(conn, run_id, None)
     conn.execute("UPDATE settle_run SET status = ?, finished_at = COALESCE(finished_at, ?) "
@@ -2342,7 +2361,7 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
             # an empty ledger on an empty store: nothing to publish, generation stays 0
             settled = _settle_claimed(conn, run_id, None)
             conn.execute("UPDATE settle_meta SET run_id = NULL, run_from = NULL, "
-                         "run_through = NULL WHERE id = 1")
+                         "run_through = NULL, run_dirty_from = NULL WHERE id = 1")
             _cleanup_orphans(conn)
             conn.execute("UPDATE settle_run SET status = 'published', generation_after = 0 "
                          "WHERE run_id = ?", (run_id,))
@@ -2383,7 +2402,8 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
         conn.execute(
             "UPDATE settle_meta SET generation = ?, settled_through = ?, held_through = ?, "
             "first_day = ?, calc_version = ?, reporting_ccy = ?, bench_state = ?, built_at = ?, "
-            "run_id = NULL, run_from = NULL, run_through = NULL WHERE id = 1",
+            "run_id = NULL, run_from = NULL, run_through = NULL, run_dirty_from = NULL "
+            "WHERE id = 1",
             (new, published.isoformat(), held.isoformat(), _iso(first_day), calc_version,
              reporting.value, bench if full else None, built))
         for sql in _DELETE_BELOW:
