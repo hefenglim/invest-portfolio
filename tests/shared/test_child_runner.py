@@ -265,6 +265,64 @@ def test_cancelling_a_queued_heavy_child(runner: ChildRunner, tmp_path: Path) ->
     assert _done(third).ok                                 # the queue moved on past it
 
 
+class StartRecorder:
+    """An ``on_start`` that records, at the moment it runs, whether the heavy gate's lock was
+    held and whether the child's process existed yet."""
+
+    def __init__(self, lock: Path) -> None:
+        self.lock = lock
+        self.handle: ChildHandle | None = None
+        self.calls: list[tuple[bool, int | None, str]] = []
+
+    def __call__(self) -> None:
+        assert self.handle is not None
+        self.calls.append((proc_lock.is_held(self.lock), self.handle.pid,
+                           threading.current_thread().name))
+
+
+def test_on_start_runs_once_the_gate_grants_the_turn_and_before_the_process(
+        runner: ChildRunner, tmp_path: Path) -> None:
+    """A heavy child's ``on_start`` waits with it: not while another holder keeps the gate,
+    then once its turn comes — the gate held for it, no process started yet (the job
+    dispatcher marks the change trail there, code review 2026-10-20)."""
+    lock = tmp_path / "heavy-child.lock"
+    other = proc_lock.try_lock(lock)
+    assert other is not None
+    rec = StartRecorder(lock)
+    try:
+        rec.handle = runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True, on_start=rec)
+        time.sleep(0.4)
+        assert rec.handle.state == "queued" and rec.calls == []
+    finally:
+        other.release()
+    assert _done(rec.handle).ok
+    assert len(rec.calls) == 1
+    held, pid, thread = rec.calls[0]
+    assert held and pid is None and thread.startswith("child-waiter:")
+
+
+def test_on_start_is_never_called_for_a_child_cancelled_in_the_queue(
+        runner: ChildRunner, tmp_path: Path) -> None:
+    ready = tmp_path / "ready.json"
+    first = runner.spawn(f"{_FX}.sleeper", [str(ready)], heavy=True)
+    assert _wait_for(ready.exists)
+    rec = StartRecorder(tmp_path / "heavy-child.lock")
+    rec.handle = runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True, on_start=rec)
+    result = rec.handle.terminate_and_wait(5.0)
+    first.terminate_and_wait(5.0)
+    assert not result.started and rec.calls == []
+
+
+def test_an_on_start_that_raises_is_logged_and_the_child_still_runs(
+        runner: ChildRunner, caplog: pytest.LogCaptureFixture) -> None:
+    def _bad() -> None:
+        raise RuntimeError("on_start bug")
+
+    caplog.set_level(logging.WARNING, logger="portfolio_dash.shared.child_runner")
+    assert _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True, on_start=_bad)).ok
+    assert any("on_start" in r.getMessage() for r in caplog.records)
+
+
 def test_a_broken_gate_lock_still_reports(tmp_path: Path) -> None:
     """The lock folder is the caller's job; if it is missing, on_exit still fires."""
     runner = ChildRunner(heavy_lock_path=tmp_path / "missing-dir" / "heavy-child.lock")

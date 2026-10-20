@@ -12,6 +12,12 @@ Used by the settlement service (the settle child) and by the job dispatcher (job
   folder never run two heavy children at once either. A non-heavy spawn never waits.
   The gate is released before ``on_exit`` runs, so a slow callback — or one that spawns the
   chained run — never holds up the queue.
+- ``on_start`` (optional) runs on the waiter thread once the child's turn has come — after
+  the heavy gate granted it, for a heavy child — and before its process starts; never for a
+  child cancelled while queued. The job dispatcher marks the settlement's change trail there,
+  so a mark taken before a long gate wait does not count the owner's changes made during it
+  as the job's (code review 2026-10-20). Keep it short: the gate is held while it runs. An
+  exception it raises is logged and the child still starts.
 - :meth:`ChildHandle.terminate_and_wait` terminates, waits, kills if still alive and waits
   again; for a child still in the queue it cancels it instead. It returns once the process
   is gone AND ``on_exit`` has returned.
@@ -255,13 +261,15 @@ class ChildHandle:
 
     def __init__(self, runner: ChildRunner, module: str, args: tuple[str, ...], heavy: bool,
                  env: dict[str, str], on_exit: Callable[[ChildResult], None] | None,
-                 stderr_tail_bytes: int) -> None:
+                 stderr_tail_bytes: int,
+                 on_start: Callable[[], None] | None = None) -> None:
         self.module = module
         self.args = args
         self.heavy = heavy
         self._runner = runner
         self._env = env
         self._on_exit = on_exit
+        self._on_start = on_start
         self._tail_bytes = stderr_tail_bytes
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[bytes] | None = None
@@ -371,6 +379,7 @@ class ChildHandle:
                     self._finish(self._never_ran(error=None, terminated=True))
                     return
                 entered = True
+            self._call_on_start()
             self._run_process()
         except BaseException as exc:   # on_exit must still fire (e.g. the lock folder is gone)
             log.exception("child runner: waiter for %s failed", self.module)
@@ -384,6 +393,16 @@ class ChildHandle:
                 self._runner.gate.leave(self)
             self._exited.set()
             self._call_on_exit()
+
+    def _call_on_start(self) -> None:
+        """The turn has come (the gate is held for a heavy child); the process is not started
+        yet. Never raises: an observer's failure does not stop the child."""
+        if self._on_start is None:
+            return
+        try:
+            self._on_start()
+        except Exception:
+            log.warning("child runner: on_start for %s raised", self.module, exc_info=True)
 
     def _run_process(self) -> None:
         cmd = [sys.executable, "-m", self.module, *self.args]
@@ -457,10 +476,11 @@ class ChildRunner:
     def spawn(self, module: str, args: Sequence[str] = (), *,
               env: Mapping[str, str] | None = None,
               on_exit: Callable[[ChildResult], None] | None = None,
-              heavy: bool = False) -> ChildHandle:
+              heavy: bool = False,
+              on_start: Callable[[], None] | None = None) -> ChildHandle:
         """Start ``python -m <module> <args>`` (queued behind the gate when *heavy*)."""
         handle = ChildHandle(self, module, tuple(args), heavy, child_env(env), on_exit,
-                             self._tail_bytes)
+                             self._tail_bytes, on_start)
         if heavy:
             self.gate.enqueue(handle)       # the ticket is taken HERE, so FIFO = spawn order
         try:
@@ -516,9 +536,11 @@ def default_runner() -> ChildRunner:
 
 def spawn(module: str, args: Sequence[str] = (), *, env: Mapping[str, str] | None = None,
           on_exit: Callable[[ChildResult], None] | None = None,
-          heavy: bool = False) -> ChildHandle:
+          heavy: bool = False,
+          on_start: Callable[[], None] | None = None) -> ChildHandle:
     """Start ``python -m <module> <args>`` on the process-wide runner (see the module doc)."""
-    return _default_runner.spawn(module, args, env=env, on_exit=on_exit, heavy=heavy)
+    return _default_runner.spawn(module, args, env=env, on_exit=on_exit, heavy=heavy,
+                                 on_start=on_start)
 
 
 # -- called inside a child's main() ----------------------------------------------------------

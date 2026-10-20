@@ -30,7 +30,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -44,6 +44,8 @@ from portfolio_dash.api import composition, job_worker
 from portfolio_dash.api import settlement_service as service
 from portfolio_dash.api.app import create_app
 from portfolio_dash.llm_insight import composer_store as cs
+from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.scheduler import jobs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
@@ -59,6 +61,7 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.shared import child_runner, proc_lock
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import install_actor, job_actor, session
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
@@ -451,6 +454,106 @@ def test_a_cron_fire_brackets_the_child_with_the_hook_too(
     run_id = _dispatch("signal_scan")
     assert run_id is not None and seen == [_row(db, run_id=run_id)["finished_at"]]
     assert seen[0] is not None
+
+
+class SettledDb(NamedTuple):
+    path: Path
+    #: The reason of every automatic run the after-job hook asked for (none is run).
+    started: list[str]
+
+
+@pytest.fixture
+def settled_db(template: Template, tmp_path: Path,
+               monkeypatch: pytest.MonkeyPatch) -> Iterator[SettledDb]:
+    """A template copy as the configured database with a published, usable store (the service
+    tests' stub worker, inline) and the automatic starts recorded by reason instead of run.
+    The caller binds the REAL after-job hook after :func:`_child_mode` (which clears it)."""
+    from tests.settlement import service_support as sup
+
+    db = sup.prepare(_copy(template.path, tmp_path), monkeypatch)
+    assert service.start_run(scope="full", reason="button").ended is not None
+    started: list[str] = []
+
+    def record(*, scope: str, reason: str, **kw: Any) -> None:
+        started.append(reason)
+
+    monkeypatch.setattr(service, "start_automatic", record)
+    yield SettledDb(db, started)
+    service.reset_for_tests()
+
+
+def _manual_run(job_id: str) -> None:
+    """The 立即執行 door: the request inserts the row, its daemon thread runs the job."""
+    with session() as conn:
+        start_run(conn, job_id, now=NOW)
+    run_job_func(job_id, now=NOW)
+
+
+def _dispatch_behind_the_gate(db: Path, during_wait: Callable[[], None], *,
+                              door: str = "schedule") -> None:
+    """A run of ``signal_scan`` — its cron fire, or a manual 立即執行 — queued behind another
+    heavy child (the gate's lock held here), *during_wait* run while it waits, then the gate
+    released and the run finished."""
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(), timeout=5)
+    run: Callable[[str], object] = _dispatch if door == "schedule" else _manual_run
+    worker = threading.Thread(target=run, args=("signal_scan",), daemon=True)
+    try:
+        worker.start()
+        _wait_until(lambda: any(c.handle is not None and c.waiting()
+                                for c in jobs._CHILD_RUNS.values()))
+        time.sleep(0.3)
+        during_wait()
+    finally:
+        gate.release()
+    worker.join(120)
+    assert not worker.is_alive()
+    assert _row(db, job_id="signal_scan")["status"] == "ok"
+
+
+def _owner_revises_a_close(db: Path) -> None:
+    """The owner's own price write (a new ``prices`` counter, dated before the live window):
+    counters carry no actor, so only WHEN the job's mark was taken tells it apart."""
+    conn = sqlite3.connect(db)
+    try:
+        install_actor(conn, "user:owner")
+        upsert_prices(conn, [PriceRow(instrument="2330", market=Market.TW,
+                                      as_of=date(2026, 3, 2), close=Decimal("612.5"),
+                                      source="test")], fetched_at=NOW)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("door", ["schedule", "manual"])
+def test_an_owner_change_made_while_a_job_waits_for_the_gate_is_not_the_jobs(
+    settled_db: SettledDb, monkeypatch: pytest.MonkeyPatch, door: str,
+) -> None:
+    """Code review 2026-10-20: the trail mark was taken BEFORE the job waited at the heavy
+    gate — possibly minutes, behind a settlement child — so a price counter the owner created
+    during the wait counted as the job's change and started an automatic run (reason
+    ``job:<id>``) instead of leaving it to the owner's prompt. The mark is now taken when the
+    gate grants the turn, on the cron fire and on 立即執行 alike."""
+    db = settled_db.path
+    _child_mode(monkeypatch, mode="pid", job_id="signal_scan")
+    jobs.register_after_job_hook(service.after_job_hook)
+    _dispatch_behind_the_gate(db, lambda: _owner_revises_a_close(db), door=door)
+    pending = sqlite3.connect(db)
+    try:   # the owner's change is recorded, and left pending for the owner's prompt
+        assert pending.execute(
+            "SELECT COUNT(*) FROM settle_change_agg WHERE claimed_run_id IS NULL "
+            "AND settled_run_id IS NULL").fetchone()[0] == 1
+    finally:
+        pending.close()
+    assert settled_db.started == []
+
+
+def test_a_change_the_job_itself_makes_after_the_gate_still_starts_a_run(
+    settled_db: SettledDb, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _child_mode(monkeypatch, mode="write", job_id="signal_scan")   # a cash movement, back-dated
+    jobs.register_after_job_hook(service.after_job_hook)
+    _dispatch_behind_the_gate(settled_db.path, lambda: None)
+    assert settled_db.started == ["job:signal_scan"]
 
 
 # ------------------------------------------------------------------- liveness

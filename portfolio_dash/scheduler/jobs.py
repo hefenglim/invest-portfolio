@@ -921,10 +921,12 @@ def register_dividend_scan_runner(fn: DividendScanRunner | None) -> None:
 #   it started.
 # - The after-job hook (spec §9.1: "after a scheduled job whose run raised ``seq`` with
 #   ``dirty_from`` < the live window start"): ``fn(job_id)`` is called just BEFORE a static
-#   job's func runs and returns the callable to call once the job's row is finalised (or
-#   ``None``). Two-phase so the hook can compare ``settle_dirty.seq`` across the run without
-#   ``scheduler/`` knowing the settle tables exist. Called only in the WEB process (plan P7):
-#   a job worker child that ran the job must hand the call back to its parent.
+#   job's func runs — for a job worker child, once the heavy gate grants its turn and before
+#   its process starts (``_run_static_in_child``), never before the wait — and returns the
+#   callable to call once the job's row is finalised (or ``None``). Two-phase so the hook can
+#   compare ``settle_dirty.seq`` across the run without ``scheduler/`` knowing the settle
+#   tables exist. Called only in the WEB process (plan P7): a job worker child that ran the
+#   job must hand the call back to its parent.
 SettlementRunner = Callable[..., "str | JobOutcome"]
 _SETTLEMENT_RUNNER: SettlementRunner | None = None
 AfterJobHook = Callable[[str], "Callable[[], None] | None"]
@@ -2289,8 +2291,40 @@ def parse_worker_now(text: str, tz: str | None) -> datetime:
     return now.astimezone(ZoneInfo(tz)) if tz else now
 
 
+def _run_static_in_child(job_id: str, run_id: int, *, now: datetime,
+                         trigger: TriggerSourceArg) -> None:
+    """:func:`_run_in_child` for a static job, bracketed by the after-job hook HERE, in the
+    web process (plan P7 / P13; the hook is never moved into the child).
+
+    The hook's first half — the change-trail mark — is taken when the heavy gate grants the
+    run its turn, just before the child process starts (``child_runner``'s ``on_start``),
+    never before the wait: a run can queue for minutes behind a settlement child, and the
+    trail's ``prices`` / ``fx_rates`` counters carry no actor, so a counter the OWNER created
+    or moved earlier during the wait would otherwise read as the job's change and start an
+    automatic run (reason ``job:<id>``) instead of leaving it to the owner's prompt (code
+    review 2026-10-20). The second half runs once the child is gone and its row is final. A
+    run that never started (cancelled in the queue, not spawned) took no mark and calls
+    nothing.
+
+    The residual limit: an owner's price / FX change made WHILE the job runs is still
+    indistinguishable from the job's own, because the counters carry no actor. Its trail ROWS
+    (ledger tables) do carry one, and only the job's own count.
+    """
+    after: Callable[[], None] | None = None
+
+    def mark() -> None:  # on the waiter thread; read here after the child is waited for
+        nonlocal after
+        after = _begin_after_job(job_id)
+
+    try:
+        _run_in_child(job_id, run_id, now=now, trigger=trigger, on_start=mark)
+    finally:
+        _end_after_job(job_id, after)
+
+
 def _run_in_child(job_id: str, run_id: int, *, now: datetime,
-                  trigger: TriggerSourceArg) -> None:
+                  trigger: TriggerSourceArg,
+                  on_start: Callable[[], None] | None = None) -> None:
     """Hand run *run_id* (its ``running`` row already committed) to a job worker child and
     wait until the child is gone and its row final (:func:`_child_exited`).
 
@@ -2305,7 +2339,10 @@ def _run_in_child(job_id: str, run_id: int, *, now: datetime,
       ``already_running`` until a restart (package H review, 2026-10-20);
     - it ran longer than :data:`JOB_TIME_LIMIT_S`: terminated, :data:`JOB_TIMED_OUT`,
       reason ``timeout``;
-    - it died without finishing its row: :data:`WORKER_DIED` (:func:`_close_if_open`)."""
+    - it died without finishing its row: :data:`WORKER_DIED` (:func:`_close_if_open`).
+
+    *on_start* is ``child_runner``'s: called once the heavy gate grants the run its turn,
+    before the child process starts (:func:`_run_static_in_child`)."""
     module = _JOB_WORKER_MODULE
     if module is None:  # pragma: no cover - runs_in_child checked it
         raise RuntimeError("no job worker module registered")
@@ -2318,7 +2355,7 @@ def _run_in_child(job_id: str, run_id: int, *, now: datetime,
     try:
         handle = child_runner.spawn(
             module, _worker_args(job_id, run_id, now, trigger), heavy=True,
-            on_exit=lambda result: _child_exited(entry, result, now=now))
+            on_exit=lambda result: _child_exited(entry, result, now=now), on_start=on_start)
     except Exception as exc:  # noqa: BLE001 — recorded on the row, never left running
         logger.exception("job %s run %s: the worker could not be spawned", job_id, run_id)
         try:
@@ -2777,19 +2814,17 @@ def run_job_func(job_id: str, *, now: datetime) -> None:
                     detail=f"執行失敗：{unknown_job_message(job_id)}", now=now,
                 )
                 return
+            if runs_in_child(conn, job_id):
+                # PERF spec §16: in a job worker child. The after-job hook still brackets
+                # the run HERE, in the web process: asked once the heavy gate grants the run
+                # its turn, called once the child is gone and the row is final (plan P7 /
+                # P13; code review 2026-10-20 — never before the gate wait).
+                _run_static_in_child(job_id, run_id, now=now, trigger="manual")
+                return
             # FU-D36: mark 執行中 once we own the row; the window before this (from
             # start_run inserting the row) is the honest 已排入 state. Clear only
             # after finish_job_run commits, so the poll never reads a done run as queued.
             after = _begin_after_job(job_id)
-            if runs_in_child(conn, job_id):
-                # PERF spec §16: in a job worker child. The after-job hook still brackets
-                # the run HERE, in the web process: asked before the spawn, called once the
-                # child is gone and the row is final (plan P7 / P13).
-                try:
-                    _run_in_child(job_id, run_id, now=now, trigger="manual")
-                finally:
-                    _end_after_job(job_id, after)
-                return
             _mark_running(job_id)
             try:
                 with usage_tally() as usage:
@@ -3021,14 +3056,15 @@ def dispatch_job(conn: sqlite3.Connection, job_id: str, *, now: datetime) -> int
     # The settlement's after-job hook (plan P13) sees the job's whole run: it compares the
     # change trail's seq before and after, and starts an automatic run when the job changed
     # history before the live window.
-    after = _begin_after_job(job_id)
+    if runs_in_child(conn, job_id):
+        # PERF spec §16: in a job worker child, on the row inserted here; this call returns
+        # once the child is gone and the row is final, as run_job does. The hook's mark is
+        # taken when the heavy gate grants the run its turn, not before the wait.
+        run_id = start_job_run(conn, job_id, now=now)
+        _run_static_in_child(job_id, run_id, now=now, trigger="schedule")
+        return run_id
+    after = _begin_after_job(job_id)  # in-process: no gate to wait at
     try:
-        if runs_in_child(conn, job_id):
-            # PERF spec §16: in a job worker child, on the row inserted here; this call
-            # returns once the child is gone and the row is final, as run_job does.
-            run_id = start_job_run(conn, job_id, now=now)
-            _run_in_child(job_id, run_id, now=now, trigger="schedule")
-            return run_id
         return run_job(conn, job_id, now=now)
     finally:
         _end_after_job(job_id, after)
