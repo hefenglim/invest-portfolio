@@ -272,3 +272,32 @@ def test_an_alerts_evaluation_for_one_caller_is_counted_uncached(db: Path) -> No
     finally:
         conn.close()
     assert result_cache.stats()["alerts"].uncached == before + 1
+
+
+def test_an_uncached_build_reads_inside_one_read_transaction(tmp_path: Path) -> None:
+    """PERF-S12 for the UNCACHED build (final senior review, 2026-10-20): a database that is not
+    the application's is never cached, so ``build_dashboard_keyed`` opens the read transaction
+    itself (``result_cache.read_snapshot``). Without it the ledger and the settlement store
+    were read in separate snapshots, and a swap between them could serve history newer than the
+    KPIs, unlabelled."""
+    other = tmp_path / "not-the-app.db"
+    conn = connect_path(other)
+    try:
+        init_golden_base(conn)
+        _seed_golden(conn)
+        conn.commit()
+        trace: list[str] = []
+        conn.set_trace_callback(trace.append)
+        data, key = build_dashboard_keyed(conn, now=NOW, reporting=TWD)
+        conn.set_trace_callback(None)
+    finally:
+        conn.close()
+    assert key is None  # built uncached
+    statements = [t.strip() for t in trace]
+    begins = [i for i, t in enumerate(statements) if t.upper() == "BEGIN"]
+    commits = [i for i, t in enumerate(statements) if t.upper() == "COMMIT"]
+    assert len(begins) == 1 and len(commits) == 1, statements[:5]
+    reads = [i for i, t in enumerate(statements) if t.upper().startswith("SELECT")]
+    assert reads and all(begins[0] < i < commits[0] for i in reads), "a read ran outside"
+    assert data.kpis is not None
+

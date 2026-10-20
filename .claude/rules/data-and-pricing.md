@@ -209,7 +209,8 @@ only source of truth.** Dropping the store loses nothing, and a run rebuilds it.
 **The tables** (spec §6; every money column is canonical Decimal TEXT, `money.to_db`):
 - `settle_meta` — one row: the published `generation` (0 = never settled), `settled_through`,
   `held_through`, `first_day`, `calc_version`, `reporting_ccy`, the benchmark state, the ACTIVE
-  run (`run_id`, `run_from`, `run_through`) and `trigger_schema_version`;
+  run (`run_id`, `run_from`, `run_through`, the `run_dirty_from` it claimed) and
+  `trigger_schema_version`;
 - `settle_dirty` — one row: `dirty_from` (NULL = clean) and `seq`, which rises with every
   recorded change;
 - `settle_change_log` / `settle_change_agg` — the change trail: one row per changed ledger or
@@ -314,12 +315,17 @@ month of the ledger's first row. With `N` = the `dirty_from` found at the swap:
   at `N`.
 - **`N ≤ range_from` → `superseded`:** nothing is published.
 
-`settled_through` never moves backwards. Orphan generations of a dead run are deleted at boot
-and at every claim.
+`settled_through` can move BACKWARDS: a partial publish sets it to `N − 1` (and a self-check
+with pending changes publishes `min(S, Dd − 1)`). `held_through` never does, and readers and the
+trigger bound use it, so no served figure is affected — the panel's 已結算至 can read an earlier
+day until the chained run finishes. Orphan generations of a dead run are deleted at boot and at
+every claim.
 
 **`live_from` and the stale range** (spec §10). `S` is `settled_through` and `H` is
-`held_through`. `Dd` is the earlier of `dirty_from` and the active run's `run_from`: a range a
-run has claimed stays dirty until its swap. `W` is the 1st of the previous month. Then
+`held_through`. `Dd` is the earlier of `dirty_from` and the `dirty_from` the active run CLAIMED
+(`run_dirty_from`): a change a run has claimed stays dirty until its swap, but the rest of its
+range does not — a full run on a clean store labels nothing stale (final senior review,
+2026-10-20). The stored benchmark still waits for anything pending OR claimed (`claimed_day`). `W` is the 1st of the previous month. Then
 **`live_from = min(H + 1, max(Dd, W))`**:
 - **Clean:** every day before `S + 1` is from the store.
 - **Dirty inside the window (`Dd ≥ W`):** every day from `Dd` is live, and every point is
