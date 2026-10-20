@@ -2656,6 +2656,25 @@ select.ai-edit { padding-right: 2px; }
 .st-chip-pulse .dot { animation: st-pulse 1.1s ease-in-out infinite; }
 @keyframes st-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 .st-chip-slow { border-style: dashed; }
+/* The chip is a new topbar item (~70-150px), and the bar was measured without it (the
+   <=1365px tier below). Measured with it (2026-10-20, dashboard, bell + quota chip present):
+   「待結算 · 2026-06-05 起」 (146px) wrapped the bar at 1,440px and even 「✓ 已結算」 (70px) at
+   1,366px. So, while the chip is SHOWN — under PD_SETTLE=off nothing changes —
+   - below 1,600px it drops its detail (the date, 進行緩慢, 未續跑; its title keeps them);
+   - below 1,440px the label-trim tier reaches up to it (the same controls, the same trim).
+   tests/e2e/test_settlement_panel_flow.py measures 1,600 / 1,440 / 1,366 / 1,280px. */
+.st-chip-detail { white-space: nowrap; }
+@media (max-width: 1599px) {
+  .st-chip .st-chip-detail { display: none; }
+}
+@media (max-width: 1439px) {
+  .topbar:has(#settle-chip:not([hidden])) .search-btn .tb-lbl,
+  .topbar:has(#settle-chip:not([hidden])) .search-btn kbd,
+  .topbar:has(#settle-chip:not([hidden])) .btn-refresh .tb-lbl,
+  .topbar:has(#settle-chip:not([hidden])) .asof .label { display: none; }
+  .topbar:has(#settle-chip:not([hidden])) .search-btn,
+  .topbar:has(#settle-chip:not([hidden])) .btn-refresh { padding-left: 10px; padding-right: 10px; }
+}
 
 /* 更新前版本 · 尚未包含 … 起的變更 (§14.5) — on the trend / 績效比較 and 月度成績 panels. */
 .st-banner {

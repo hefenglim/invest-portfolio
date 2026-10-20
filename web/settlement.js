@@ -269,7 +269,7 @@
           title: '歷史已結算至 ' + day(s.settled_through) + '（第 ' + count(s.generation) + ' 版）' };
       case 'pending': {
         const from = s.stale_from || s.dirty_from;
-        return { cls: 'st-chip-pending', text: '待結算' + (from ? ' · ' + day(from) + ' 起' : ''),
+        return { cls: 'st-chip-pending', text: '待結算', detail: from ? ' · ' + day(from) + ' 起' : '',
           title: '待結算：' + (tablesSummary(s.pending && s.pending.tables) || '有變更尚未結算')
             + '。點擊查看並立即重新結算' };
       }
@@ -278,11 +278,11 @@
       case 'running': {
         const pct = s.run && !nil(s.run.percent) ? ' ' + s.run.percent + '%' : '';
         return { cls: 'st-chip-run st-chip-pulse' + (s.slow ? ' st-chip-slow' : ''),
-          text: '結算中' + pct + (s.slow ? ' · 進行緩慢' : ''), title: runTitle(s.run) };
+          text: '結算中' + pct, detail: s.slow ? ' · 進行緩慢' : '', title: runTitle(s.run) };
       }
       case 'interrupted':
         return { cls: 'st-chip-warn',
-          text: '結算中斷 · ' + (last && last.resumed ? '已續跑' : '未續跑'),
+          text: '結算中斷', detail: ' · ' + (last && last.resumed ? '已續跑' : '未續跑'),
           title: (last && last.status_text) || '結算中斷' };
       case 'failed':
         return { cls: 'st-chip-fail', text: '結算失敗',
@@ -307,8 +307,12 @@
     }
     if (!ensureChip()) return;
     chip.className = 'badge st-chip ' + model.cls;
-    chip.replaceChildren(el('span', 'dot'), el('span', 'st-chip-text', model.text));
-    chip.title = model.title;
+    /* the detail (「 · 2026-06-05 起」…) is its own span: a narrow desktop drops it (styles.css),
+       the title keeps it */
+    const parts = [el('span', 'dot'), el('span', 'st-chip-text', model.text)];
+    if (model.detail) parts.push(el('span', 'st-chip-detail', model.detail));
+    chip.replaceChildren(...parts);
+    chip.title = (model.detail ? model.text + model.detail + '。' : '') + model.title;
     chip.hidden = false;
   }
 
@@ -777,7 +781,7 @@
       const bits = [];
       if (!nil(p.started_at)) bits.push(clock(p.started_at));
       if (!nil(p.elapsed_s)) bits.push(secs(p.elapsed_s));
-      if (!nil(p.total)) {
+      if (!nil(p.total) && Number(p.total) > 0) {
         bits.push((nil(p.done) ? '' : count(p.done) + ' / ') + count(p.total) + (p.unit ? ' ' + p.unit : ''));
       }
       if (!nil(p.rate)) bits.push(p.rate);
@@ -809,10 +813,13 @@
       + (nil(genAfter) ? '' : ' → 第 ' + count(genAfter) + ' 版' + (live ? '（切換後生效）' : '')));
     kv(host, '結算至', day(v.settled_through_before)
       + (nil(v.settled_through_after) ? '' : ' → ' + day(v.settled_through_after)));
-    const calcDiff = !nil(v.calc_version) && v.calc_version !== v.calc_version_before;
+    /* marked only when a version existed before and moved (a first run sets, not changes) */
+    const calcDiff = !nil(v.calc_version) && !nil(v.calc_version_before)
+      && v.calc_version !== v.calc_version_before;
     kv(host, '計算規則', (v.calc_version_before || NIL)
       + (nil(v.calc_version) ? '' : ' → ' + v.calc_version), calcDiff ? 'st-changed' : null);
-    const ccyDiff = !nil(v.reporting_ccy) && v.reporting_ccy !== v.reporting_ccy_before;
+    const ccyDiff = !nil(v.reporting_ccy) && !nil(v.reporting_ccy_before)
+      && v.reporting_ccy !== v.reporting_ccy_before;
     kv(host, '報告幣別', (v.reporting_ccy_before || NIL)
       + (nil(v.reporting_ccy) ? '' : ' → ' + v.reporting_ccy), ccyDiff ? 'st-changed' : null);
   }
@@ -871,7 +878,7 @@
        reloads whenever the progress's change summary moves (updateLive). */
     live.trailKey = changesKey(run);
     live.trail = changeTrail(why.body, 'run:' + run.run_id, () => (
-      live.claimed ? '這次結算沒有領取任何變更（例行延伸結算）' : '準備中：尚未領取變更'));
+      live.claimed ? '這次結算沒有領取任何變更' : '尚無紀錄'));
     live.claimed = run.status !== 'preparing';
     b.appendChild(why.node);
 
@@ -915,7 +922,7 @@
     const run = s.run;
     const live = panel.live;
     const r = run.range || {};
-    live.title.textContent = '重新結算：' + rangeText(r);
+    live.title.textContent = '重新結算：' + (nil(r.from) ? '準備中' : rangeText(r));
     live.trigger.textContent = trigger(run.trigger_text, run.started_by);
     live.time.textContent = '已用 ' + secs(run.elapsed_s) + ' · ' + etaText(run)
       + (s.slow ? ' · 進行緩慢' : '');
@@ -1188,11 +1195,6 @@
     /* the summary's other server-owned lines (§9.6): 「延續 #N 的變更…」, 「其中 N 筆變更曾於
        #M 嘗試」, 「本次未生效，已退回待結算」, the self-check's verdict … */
     const lines = rep.summary_lines || [];
-    if (lines.length) {
-      const ul = el('ul', 'st-list st-summary-lines');
-      lines.forEach((t) => ul.appendChild(el('li', null, t)));
-      sum.body.appendChild(ul);
-    }
     kv(sum.body, '開始', stamp(sm.started_at));
     kv(sum.body, '結束', stamp(sm.finished_at));
     kv(sum.body, '耗時', secs(sm.duration_s)
@@ -1202,6 +1204,11 @@
       if (!nil(sm.previous_run_id)) chain.appendChild(chainLink('接續自', sm.previous_run_id));
       if (!nil(sm.next_run_id)) chain.appendChild(chainLink('接著處理', sm.next_run_id));
       kv(sum.body, '接續', chain);
+    }
+    if (lines.length) {      // under the facts they summarise
+      const ul = el('ul', 'st-list st-summary-lines');
+      lines.forEach((t) => ul.appendChild(el('li', null, t)));
+      sum.body.appendChild(ul);
     }
     host.appendChild(sum.node);
 
@@ -1219,7 +1226,7 @@
       line(ch.body, handed, 'st-state-pending');
     }
     const tables = (rep.changes && rep.changes.tables) || [];
-    changeTables(ch.body, tables, '這次結算沒有變更（例行延伸結算）');
+    changeTables(ch.body, tables, '這次結算沒有領取任何變更');
     /* the trail when the run settled ANY change — ledger records or price / FX counters (a
        price-only run has records_total 0 and one counter per symbol) */
     if ((rep.changes && rep.changes.records_total) || tables.length) {

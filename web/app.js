@@ -1224,9 +1224,22 @@
         renderSnapshots();
       });
     });
-    /* A swap republished the history: the past rows may have moved (PERF §14.4). */
-    document.addEventListener('pd-settlement-swap', () => renderSnapshots());
+    /* The rows follow the settlement (PERF §14.4–§14.6): a back-dated change makes past
+       months 更新前版本 until a run publishes, and the swap then restates them. Both arrive
+       as a status read (after the page's own write, a poll, or the swap) — re-read the rows
+       whenever the store's version, its stale range or the change counter moved. The
+       first read only records where the page started: the boot render is already current. */
+    document.addEventListener('pd-settlement-status', (e) => {
+      const s = e && e.detail;
+      if (!s || s.state === 'off') return;
+      const sig = [s.generation, s.stale_from, s.stale_to, s.seq].join('|');
+      if (snapSig === null) { snapSig = sig; return; }
+      if (sig === snapSig) return;
+      snapSig = sig;
+      renderSnapshots();
+    });
   }
+  let snapSig = null;   // the settlement state the 月度成績 rows were last read for
   async function renderSnapshots() {
     const tbody = $('#snapshots-body');
     if (!tbody) return;
