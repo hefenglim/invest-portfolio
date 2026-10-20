@@ -100,25 +100,38 @@ def split_window_through(fetched_at: datetime, market: Market) -> date:
     as traded until ``history_daily`` re-fetched it about 20 hours later. On the New York date,
     that fetch is still the last pre-split session's own day, and the window is empty.
 
-    **TW and MY do not move.** Asia/Taipei and Asia/Kuala_Lumpur are both UTC+8 with no DST,
-    so for every instant the app clock stamps, the bound is exactly the ``fetched_at.date()``
-    it always was.
+    **TW and MY do not move — for +08:00 and naive stamps.** Asia/Taipei and Asia/Kuala_Lumpur
+    are both UTC+8 with no DST, so for every instant the app clock stamps in its default
+    configuration, the bound is exactly the ``fetched_at.date()`` it always was. Any OTHER
+    aware stamp is converted and can move: a row written with a UTC clock (the scheduler's
+    before the single-clock decision Q6, 2026-07-07) at 18:00 UTC on 06-15 is 02:00 on 06-16
+    in Taipei, one day later than the old bound. That is the rule as ruled, and
+    ``scripts/check_split_window.py`` lists such rows apart from the US ones. "Every
+    production stamp is +08:00" is a deployment assumption, not an invariant: the app clock is
+    ``Settings.tz_display`` (Asia/Taipei by default), and a deployment with another zone stamps
+    another offset, which this rule converts like any other.
 
     **A naive ``fetched_at`` keeps its own date**, unconverted, exactly as before: nothing says
     which zone it was written in, and ``astimezone`` would read the HOST's local zone. Every
     production fetch is aware (the app clock), so only test clocks and the stress harness's
-    naive stamps take this branch. An aware instant in another zone (UTC in tests) is
-    converted like any other, which is the point of the rule.
+    naive stamps take this branch.
 
     **What the ruling accepts.** The bound turns at the exchange's local MIDNIGHT, not at its
-    open. A fetch on the ex-date before the open (New York 00:00 to 09:30, which is 12:00 to
-    21:30 Taipei under EDT and 13:00 to 22:30 under EST) reads the split as already folded. A
-    provider that has not restated by then still gets a row at ratio x as traded, which the
-    next fetch heals as before. Only an owner's manual refresh can land there: ``quotes_us``
-    fires after the New York close, and ``history_daily`` (02:00 Taipei) runs mid-session in
-    New York. The rule also assumes a provider restates no earlier than the ex-date (the
-    measured behaviour the ruling rests on, spec 2026-10-18 §20 row 9): one that restated the
-    evening before would have that evening's fetch stored unfolded, healed the same way.
+    open, and that matches the provider only when it restates between the last pre-split
+    session's close and the ex-date's open — the measured behaviour the ruling rests on (spec
+    2026-10-18 §20 row 9). Two gaps remain; the next fetch after the ex-date has begun heals
+    either, as before:
+
+    * a fetch on the ex-date BEFORE the open (New York 00:00 to 09:30, which is 12:00 to 21:30
+      Taipei under EDT and 13:00 to 22:30 under EST) from a provider that has not restated yet
+      reads the split as already folded and stores ratio x as traded. Only an owner's manual
+      refresh lands there: ``quotes_us`` fires after the New York close, and ``history_daily``
+      (02:00 Taipei) runs mid-session in New York;
+    * a fetch BEFORE the exchange's midnight from a provider that restated EARLY reads the
+      split as not yet folded and stores the post-split close unfolded. For a MONDAY ex-date
+      the span is the whole weekend, so the scheduled ``history_daily`` runs at 02:00 Taipei
+      on Saturday, Sunday and Monday (Friday to Sunday afternoon in New York) are exposed, not
+      only a manual refresh; Tuesday's 02:00 run (Monday mid-session in New York) heals it.
     """
     if fetched_at.utcoffset() is None:
         return fetched_at.date()

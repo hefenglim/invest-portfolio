@@ -138,7 +138,8 @@ def refresh_quotes(
     imports nothing but ``pricing.*``; the corporate-action lookup is bound by the
     ``scheduler`` / ``api`` caller — and it is **required, never defaulted** (2026-09-10,
     ``architecture.md`` injection obligation (1)). "Store what the provider sent" is only
-    the as-traded value when no split lies in ``(as_of, fetched_at]``; for a held symbol
+    the as-traded value when no split lies in ``(as_of, T]``, ``T`` the fetch's date on the
+    exchange's calendar (``store.split_window_through``); for a held symbol
     that has split, a caller that forgot the binding would store re-stated history as if it
     were as-traded and the read path would divide it again — silently. A required argument
     turns that omission into a ``TypeError``. A caller that genuinely has no ledger (a test

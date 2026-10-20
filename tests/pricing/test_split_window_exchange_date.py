@@ -20,10 +20,12 @@ Every load-bearing assertion is on the stored TEXT: ``Decimal("400") == Decimal(
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from decimal import Decimal
+from typing import Self
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -148,12 +150,40 @@ def test_a_tw_or_my_fetch_keeps_the_taipei_date_at_every_minute_of_the_day(
     assert split_window_through(last, market) == date(2026, 6, 16)
 
 
+class _NoConversion(datetime):
+    """A naive stamp that fails the test if anything converts it — ``astimezone`` on a naive
+    datetime reads the HOST's zone, so a date assertion alone would pass on a host whose zone
+    happens to put the instant on the same New York date."""
+
+    def astimezone(self, tz: tzinfo | None = None) -> Self:
+        raise AssertionError("a naive fetched_at must not be converted")
+
+
 @pytest.mark.parametrize("market", list(Market))
-def test_a_naive_fetched_at_keeps_its_own_date(market: Market) -> None:
+@pytest.mark.parametrize(("hour", "minute"), [(0, 30), (5, 30), (23, 30)])
+def test_a_naive_fetched_at_keeps_its_own_date_unconverted(
+    market: Market, hour: int, minute: int,
+) -> None:
     """No offset → no conversion: a naive stamp behaves exactly as before the ruling (the test
-    clocks and the stress harness write naive stamps; ``astimezone`` would read the HOST's
-    local zone)."""
-    assert split_window_through(datetime(2026, 6, 16, 5, 30), market) == date(2026, 6, 16)
+    clocks and the stress harness write naive stamps)."""
+    naive = _NoConversion(2026, 6, 16, hour, minute)
+    assert split_window_through(naive, market) == date(2026, 6, 16)
+
+
+@pytest.mark.parametrize(("market", "bound"), [
+    (Market.TW, date(2026, 6, 16)),   # 02:00 in Taipei
+    (Market.MY, date(2026, 6, 16)),   # 02:00 in Kuala Lumpur
+    (Market.US, date(2026, 6, 15)),   # 14:00 in New York
+])
+def test_an_aware_stamp_in_another_zone_is_converted_for_every_market(
+    market: Market, bound: date,
+) -> None:
+    """TW and MY keep the old bound only for +08:00 (and naive) stamps. A UTC stamp — the
+    scheduler's clock before the single-clock decision Q6 (2026-07-07) — of 18:00 on 06-15 is
+    06-15 under ``fetched_at.date()`` and 06-16 on the TW / MY calendar: the rule as ruled."""
+    at = datetime(2026, 6, 15, 18, 0, tzinfo=UTC)
+    assert at.date() == date(2026, 6, 15)  # the pre-ruling bound
+    assert split_window_through(at, market) == bound
 
 
 # --- the write seam ------------------------------------------------------------------------
@@ -256,11 +286,41 @@ def test_a_naive_fetched_at_on_the_ex_date_still_folds_the_split(
     prices: sqlite3.Connection,
 ) -> None:
     """A naive stamp keeps the pre-ruling bound (its own date), on purpose: nothing says which
-    zone it was written in, so it is not converted."""
+    zone it was written in, so it is not converted (00:30 on 06-16 read in any zone east of
+    UTC-3:30 would be 06-15 in New York)."""
     got = _write(prices, symbol="AAA", market=Market.US, as_of=_LAST, close=_RESTATED,
-                 fetched_at=datetime(2026, 6, 16, 5, 30),
+                 fetched_at=_NoConversion(2026, 6, 16, 0, 30),
                  factor_of=_factor_of(_split("AAA", _EX)))
     assert got == ("400", "20")
+
+
+def test_a_tw_row_with_a_utc_stamp_folds_on_the_taipei_date(
+    prices: sqlite3.Connection,
+) -> None:
+    """A TW row stamped 18:00 UTC on 06-15 (02:00 on the ex-date in Taipei) now reads the split
+    as folded; ``fetched_at.date()`` read 06-15 and did not. TW and MY move only for such
+    non-+08:00 stamps."""
+    got = _write(prices, symbol="TTT", market=Market.TW, as_of=_LAST, close=Decimal("12.5"),
+                 fetched_at=datetime(2026, 6, 15, 18, 0, tzinfo=UTC),
+                 factor_of=_factor_of(_split("TTT", _EX, account="tw_broker")))
+    assert got == ("250.0", "20")
+
+
+def test_one_batch_of_several_markets_takes_each_markets_own_bound(
+    prices: sqlite3.Connection,
+) -> None:
+    """``refresh_history(benchmark_refs())`` writes 0050 (TW), ^GSPC (US) and ^KLSE (MY) in ONE
+    ``upsert_prices`` call. At 04:30 Taipei on the ex-date the TW and MY bounds are 06-16 and
+    the US bound is 06-15, so one bound for the whole batch (either one) gets a row wrong."""
+    actions = [_split("TTT", _EX, account="tw_broker"), _split("AAA", _EX),
+               _split("MMM", _EX, account="moomoo_my")]
+    rows = [PriceRow(instrument=s, market=m, as_of=_LAST, close=c, source="test")
+            for s, m, c in (("TTT", Market.TW, Decimal("12.5")), ("AAA", Market.US, _AS_TRADED),
+                            ("MMM", Market.MY, Decimal("0.125")))]
+    upsert_prices(prices, rows, fetched_at=_ny(_LAST, 16, 30), factor_of=_factor_of(*actions))
+    stored = {r["instrument"]: (r["close"], r["split_basis"]) for r in prices.execute(
+        "SELECT instrument, close, split_basis FROM prices")}
+    assert stored == {"TTT": ("250.0", "20"), "AAA": ("400", "1"), "MMM": ("2.500", "20")}
 
 
 _MIXED = ["1.5", "1.50", "305.3650", "0.005", "600", "0.4250", "0.14166666865348816"]
@@ -360,13 +420,30 @@ def test_a_split_entered_after_the_fetches_reconciles_to_the_bytes_the_write_sea
 def test_the_reconcile_keeps_a_naive_stamped_row_on_its_own_date(
     prices: sqlite3.Connection,
 ) -> None:
+    """00:30 on 06-16, stored without an offset: converted in any host zone east of UTC-3:30
+    it would be 06-15 in New York and fold nothing (the helper's no-conversion test pins the
+    rule on every host)."""
     upsert_prices(prices, [PriceRow(instrument="AAA", market=Market.US, as_of=_LAST,
                                     close=_RESTATED, source="test")],
-                  fetched_at=datetime(2026, 6, 16, 5, 30))
+                  fetched_at=datetime(2026, 6, 16, 0, 30))
     assert reconcile_prices(prices, ["AAA"], factor_of=_factor_of(_split("AAA", _EX))) == 1
     row = prices.execute("SELECT close, split_basis, fetched_at FROM prices").fetchone()
     assert (row["close"], row["split_basis"], row["fetched_at"]) == (
-        "400", "20", "2026-06-16T05:30:00")
+        "400", "20", "2026-06-16T00:30:00")
+
+
+def test_the_reconcile_reads_a_utc_stamped_tw_row_on_the_taipei_date(
+    prices: sqlite3.Connection,
+) -> None:
+    """The stored ISO offset is honoured on the way back: ``+00:00`` 18:00 on 06-15 is the
+    TW ex-date, exactly as the write seam reads it."""
+    upsert_prices(prices, [PriceRow(instrument="TTT", market=Market.TW, as_of=_LAST,
+                                    close=Decimal("12.5"), source="test")],
+                  fetched_at=datetime(2026, 6, 15, 18, 0, tzinfo=UTC))
+    factor_of = _factor_of(_split("TTT", _EX, account="tw_broker"))
+    assert reconcile_prices(prices, ["TTT"], factor_of=factor_of) == 1
+    assert tuple(prices.execute("SELECT close, split_basis, fetched_at FROM prices")
+                 .fetchone()) == ("250.0", "20", "2026-06-15T18:00:00+00:00")
 
 
 def test_the_reconcile_moves_a_row_the_taipei_date_rule_had_folded(
@@ -389,7 +466,7 @@ def test_the_reconcile_moves_a_row_the_taipei_date_rule_had_folded(
 
 
 def test_the_reconcile_leaves_a_row_with_an_unknown_market_untouched(
-    prices: sqlite3.Connection,
+    prices: sqlite3.Connection, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``market`` is NOT NULL and every writer stores a ``Market`` value; a hand-edited one
     degrades to "left untouched" (the reconcile's existing posture), never a raise that would
@@ -399,7 +476,11 @@ def test_the_reconcile_leaves_a_row_with_an_unknown_market_untouched(
                                         close=_RESTATED, source="test")],
                       fetched_at=_ny(_EX, 16, 30))
     prices.execute("UPDATE prices SET market='XX' WHERE instrument='BBB'")
+    prices.commit()
     factor_of = _factor_of(_split("AAA", _EX), _split("BBB", _EX))
-    assert reconcile_prices(prices, ["AAA", "BBB"], factor_of=factor_of) == 1
+    with caplog.at_level(logging.WARNING, logger="portfolio_dash.pricing.reconcile"):
+        assert reconcile_prices(prices, ["AAA", "BBB"], factor_of=factor_of) == 1
     stored = dict(prices.execute("SELECT instrument, close FROM prices").fetchall())
     assert stored == {"AAA": "400", "BBB": "20"}
+    skipped = [r.getMessage() for r in caplog.records if "BBB" in r.getMessage()]
+    assert skipped == ["price-basis reconcile skipped BBB 2026-06-15: unknown market 'XX'"]

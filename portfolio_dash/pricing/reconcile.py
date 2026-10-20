@@ -38,6 +38,7 @@ lookup arrives as a callable that ``api``/``scheduler`` binds; ``tests/pricing/
 test_layering.py`` greps every file under ``pricing/`` for both violations.
 """
 
+import logging
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ from portfolio_dash.pricing.store import (
 )
 from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.money import from_db
+
+logger = logging.getLogger(__name__)
 
 # ``close_raw`` is guaranteed present by ``pricing/schema.create_tables`` — the write seam
 # always writes it and the migration backfills legacy rows (``close_raw = close``, which is
@@ -107,16 +110,20 @@ def pending_restatements(
     conn: sqlite3.Connection, symbols: Iterable[str], *, factor_of: SplitFactorFn
 ) -> list[Restatement]:
     """Every stored row of *symbols* whose ``(close, OHLC, split_basis)`` differs from what
-    the CURRENT ledger says it should be. Reads only; :func:`reconcile_prices` writes them.
+    the CURRENT ledger says it should be. Reads only; :func:`apply_restatements` writes them.
 
-    ``factor_of`` is required for the reason :func:`reconcile_prices` states.
+    ``factor_of`` is required for the reason :func:`reconcile_prices` states. Outside a write
+    transaction the answer can be overtaken by a concurrent write before it is used; that is
+    why the writer re-reads it under the write lock rather than trusting an earlier call.
     """
     out: list[Restatement] = []
     for symbol in sorted(set(symbols)):
         for r in conn.execute(_ROWS_SQL, (symbol,)).fetchall():
             market = _MARKETS.get(r["market"])
-            if market is None:
-                continue  # a hand-edited row: left untouched (see _ROWS_SQL)
+            if market is None:  # a hand-edited row: left untouched (see _ROWS_SQL), and said so
+                logger.warning("price-basis reconcile skipped %s %s: unknown market %r",
+                               symbol, r["as_of_date"], r["market"])
+                continue
             basis = factor_of(
                 symbol,
                 after=date.fromisoformat(r["as_of_date"]),
@@ -141,15 +148,63 @@ def pending_restatements(
     return out
 
 
+def apply_restatements(
+    conn: sqlite3.Connection, symbols: Iterable[str], *, factor_of: SplitFactorFn
+) -> list[Restatement]:
+    """Rewrite every row :func:`pending_restatements` finds; returns the rows rewritten.
+
+    **The read and the write are ONE transaction.** With no transaction open on *conn*, the
+    write lock is taken first (``BEGIN IMMEDIATE``), then the rows are read, restated and
+    committed. A quote or history write from another connection therefore lands either
+    before the read (and is restated from its own raw value) or after the commit (and its
+    own write seam applies the same window). Read in autocommit and written afterwards, a
+    history re-fetch landing in between left a row derived from the OLD raw beside the NEW
+    one: ``close`` 400 over ``close_raw`` 20 / ``split_basis`` 1, measured (review of the
+    split-window fix). The lock is released on every path: committed when the work is done,
+    rolled back if anything raises.
+
+    **A caller that already holds a transaction keeps it.** SQLite does not nest
+    transactions, so nothing is begun inside it: the rows are read and written in the
+    caller's transaction, and committed only when some changed, exactly as before. Such a
+    caller is protected only as far as its own transaction protects it: if it has already
+    written, it holds the write lock; if it has only read, it does not. Every production
+    caller arrives through ``api.instrument_service.restate_price_basis`` after its own
+    writes have committed, so it takes the first path.
+
+    No symbols → no lock, no read, no write.
+    """
+    wanted = sorted(set(symbols))
+    if not wanted:
+        return []
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        changes = pending_restatements(conn, wanted, factor_of=factor_of)
+        if changes:
+            conn.executemany(
+                "UPDATE prices SET close=?, open=?, high=?, low=?, split_basis=? "
+                "WHERE instrument=? AND as_of_date=?",
+                [(*c.wanted, c.wanted_basis, c.symbol, c.as_of_date) for c in changes],
+            )
+    except BaseException:
+        if own:
+            conn.rollback()
+        raise
+    if own or changes:
+        conn.commit()
+    return changes
+
+
 def reconcile_prices(
     conn: sqlite3.Connection, symbols: Iterable[str], *, factor_of: SplitFactorFn
 ) -> int:
     """Rebuild every stored close of *symbols* from its raw value. Returns rows changed.
 
     Call on **any insert / edit / delete of a SPLIT row** (§5.1(c)); the application-level
-    entry point that binds the ledger is ``api.instrument_service.reconcile_price_basis``.
-    Needs no network and works for a delisted symbol, because the input it rebuilds from is
-    already stored.
+    entry point that binds the ledger, and also invalidates the symbols' derived signal rows,
+    is ``api.instrument_service.restate_price_basis``. Needs no network and works for a
+    delisted symbol, because the input it rebuilds from is already stored.
 
     ``factor_of`` is **required, never defaulted** (deliberate). A default of
     ``_no_factor`` would type-check, read harmlessly, and silently restate every close back
@@ -163,14 +218,7 @@ def reconcile_prices(
     byte-identical whether or not it compares first. Comparing the OUTPUT rather than
     ``target == split_basis`` also repairs a row whose close has drifted from its own raw
     value, which the basis comparison alone cannot see. The rows are
-    :func:`pending_restatements`' — the same computation a read-only check lists.
+    :func:`pending_restatements`' — the same computation a read-only check lists — read and
+    written in one transaction (:func:`apply_restatements`).
     """
-    changes = pending_restatements(conn, symbols, factor_of=factor_of)
-    if changes:
-        conn.executemany(
-            "UPDATE prices SET close=?, open=?, high=?, low=?, split_basis=? "
-            "WHERE instrument=? AND as_of_date=?",
-            [(*c.wanted, c.wanted_basis, c.symbol, c.as_of_date) for c in changes],
-        )
-        conn.commit()
-    return len(changes)
+    return len(apply_restatements(conn, symbols, factor_of=factor_of))

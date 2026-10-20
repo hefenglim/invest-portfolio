@@ -157,9 +157,10 @@ def test_the_next_days_restated_fetch_heals_the_row(prices: sqlite3.Connection) 
     assert _fetch(prices, restated, datetime(2026, 6, 17, 5, 30, tzinfo=TAIPEI)) == _AS_TRADED
 
 
-def test_a_fetch_on_the_ex_dates_taipei_date_before_the_ny_open_stores_the_close_as_traded(
+def test_a_fetch_on_the_ex_dates_taipei_date_before_new_york_midnight_stores_it_as_traded(
     prices: sqlite3.Connection,
 ) -> None:
-    # Tuesday 05:30 Taipei = Monday 17:30 New York: Monday's session is closed, the split has
-    # not taken effect, and the provider delivers Monday's close as traded.
+    # Tuesday 05:30 Taipei = Monday 17:30 New York: Monday's session is closed, the ex-date has
+    # not begun in New York (the window's bound turns at New York's midnight, owner ruling
+    # 2026-10-20), and the provider delivers Monday's close as traded.
     assert _fetch(prices, _AS_TRADED, datetime(2026, 6, 16, 5, 30, tzinfo=TAIPEI)) == _AS_TRADED

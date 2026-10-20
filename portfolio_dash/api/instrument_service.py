@@ -5,10 +5,10 @@ into ONE call. Layering: this is api-layer orchestration — it may call
 ``data_ingestion`` (register/store), ``pricing`` (probe/name/refresh), and the
 ``scheduler.jobs`` worklist constants; none of those layers import it back.
 
-It also hosts :func:`reconcile_price_basis` — the application-level entry point for the
-W6b price-basis reconcile — for the same layering reason: it already binds
-``scheduler.jobs.split_factor_fn`` for the quote/history legs, and ``pricing/`` may not
-reach the corporate-action ledger for itself (D17).
+It also hosts :func:`restate_price_basis` — the ONE application-level seam for the W6b
+price-basis reconcile and the W6 signal invalidation that goes with it — for the same
+layering reason: it already binds ``scheduler.jobs.split_factor_fn`` for the quote/history
+legs, and ``pricing/`` may not reach the corporate-action ledger for itself (D17).
 
 The correctness gate: by default a symbol is registrable ONLY when a real quote
 can be fetched for it (``require_quote=True``) — a symbol whose price no source
@@ -44,7 +44,7 @@ from portfolio_dash.pricing.board import probe_tw_board
 from portfolio_dash.pricing.bursa_registry import bursa_name
 from portfolio_dash.pricing.defaults import default_registry
 from portfolio_dash.pricing.names import lookup_name
-from portfolio_dash.pricing.reconcile import reconcile_prices
+from portfolio_dash.pricing.reconcile import Restatement, apply_restatements
 from portfolio_dash.pricing.refresh import (
     refresh_dividends,
     refresh_history,
@@ -71,6 +71,7 @@ from portfolio_dash.shared.instrument_names import (
 from portfolio_dash.shared.instrument_scope import OPTION_REGISTRATION_REFUSAL, is_option_symbol
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.symbol_format import contains_cjk
+from portfolio_dash.strategy import signal_history, signal_states
 
 logger = logging.getLogger(__name__)
 
@@ -80,28 +81,68 @@ _DEFAULT_CCY = {Market.TW: Currency.TWD, Market.US: Currency.USD, Market.MY: Cur
 # --- Price-basis reconcile (spec §5.1(c), D30 · W6b) ---------------------------------
 
 
-def reconcile_price_basis(conn: sqlite3.Connection, symbols: Iterable[str]) -> int:
-    """Restate *symbols*' stored closes against the CURRENT action ledger. Rows changed.
+def restate_price_basis(conn: sqlite3.Connection, symbols: Iterable[str]) -> list[Restatement]:
+    """Restate *symbols*' stored closes against the CURRENT action ledger; the rows rewritten.
 
-    **Call this on any insert / edit / delete of a SPLIT row** (§5.1(c)) — W7's ledger
-    router is the caller that makes it real; today the CRUD in ``data_ingestion/store.py``
-    has no production caller at all (audit F-32). Pass the SPLIT's ``from_symbol`` (which
-    E20 forces to equal its ``to_symbol``). Passing extra symbols is harmless — the
-    reconcile is a no-op for anything with no SPLIT in the ledger — so a router that cannot
-    cheaply tell a SPLIT from an EXCHANGE may simply pass both ends of the edited row.
+    **THE one price-basis restatement seam.** Every path that restates goes through here:
+    the corporate-action doors (form create / edit / set-delete / row-delete, CSV commit and
+    batch undo, through ``api/routers/ledgers.py::reconcile_split_prices`` and
+    :func:`reconcile_price_basis`) and ``scripts/check_split_window.py --apply``. The derived
+    signal invalidation lives HERE for that reason. While it lived in the doors' wrapper, the
+    script restated prices and left the signal rows behind (review of the split-window fix,
+    measured: 1 ``signal_states`` row kept vs 0 through the doors).
+
+    **Call this on any insert / edit / delete of a SPLIT row** (§5.1(c)), after the CRUD has
+    committed. Pass the SPLIT's ``from_symbol`` (which E20 forces to equal its
+    ``to_symbol``). Passing extra symbols is harmless for the prices — the reconcile is a
+    no-op for anything with no SPLIT in the ledger — so a router that cannot cheaply tell a
+    SPLIT from an EXCHANGE may simply pass both ends of the edited row. Empty strings are
+    dropped; no symbols → no write at all.
+
+    In order:
+
+    1. **W6 (AI-D27): the symbols' DERIVED signal rows are deleted**, before the prices
+       probe, so it also happens in a database with no ``prices`` table (both stores
+       degrade on a missing table). ``signal_history``: every stored evaluation is wrong
+       under the new basis (the next scan's replay rebuilds it). ``signal_states``: the
+       stale comparison row would diff against a post-restatement evaluation on the next
+       scan and fire PHANTOM transition events into ``alert_events``. A basis restatement
+       is not a market event; with the row gone the next scan silently reseeds, zero
+       events.
+    2. **No ``prices`` table** (a ledger-only DB: the CSV/AI parse paths and most unit
+       tests) → nothing to restate, ``[]`` rather than an ``OperationalError`` out of a
+       write path. Same table probe, same reason, as ``validate._has_prices``.
+    3. **The reconcile** (``pricing.reconcile.apply_restatements``), its read and write in
+       one transaction.
 
     **Why the entry point lives here and not in ``data_ingestion/``.** ``pricing/`` may not
     import anything above ``shared/`` (D17 / trap #12), so the ratio lookup is injected;
     this module already binds ``split_factor_fn(conn)`` for the quote/history legs and
-    ``api/`` may legally import both ``pricing`` and ``scheduler``. The alternative — a
-    ``data_ingestion → pricing`` import from inside the CRUD — is an edge
+    ``api/`` may legally import ``pricing``, ``scheduler`` and ``strategy``. The alternative
+    — a ``data_ingestion → pricing`` import from inside the CRUD — is an edge
     ``architecture.md``'s diagram does not have, and this feature has already spent one
     owner decision (D39a) on adding a single documented edge.
 
     The factor is bound ONCE for the whole call (trap #21): ``split_factor_fn`` reads and
     groups the entire action ledger, so binding it per symbol would re-read it per symbol.
     """
-    return reconcile_prices(conn, symbols, factor_of=split_factor_fn(conn))
+    wanted = sorted({s for s in symbols if s})
+    if not wanted:
+        return []
+    for s in wanted:
+        signal_history.delete_symbol(conn, s)
+        signal_states.delete_symbol(conn, s)
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prices'"
+    ).fetchone() is None:
+        return []
+    return apply_restatements(conn, wanted, factor_of=split_factor_fn(conn))
+
+
+def reconcile_price_basis(conn: sqlite3.Connection, symbols: Iterable[str]) -> int:
+    """:func:`restate_price_basis`, counted: the number of rows restated (what the doors
+    report as ``prices_restated``)."""
+    return len(restate_price_basis(conn, symbols))
 
 
 # --- Aliases (owner 2026-09-30, item 8: 「登錄名稱＋中文別名」) --------------------------

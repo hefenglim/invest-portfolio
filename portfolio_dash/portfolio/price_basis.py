@@ -17,7 +17,9 @@ pre-split price`` — inflated by the whole ratio, on the trend *and* on the liv
 
 **Divide** — the opposite direction from the write seam, and over a different window. The
 write asks *"which splits had the provider already folded into this delivered number?"*
-(``(as_of, fetched_at]``) and multiplies them back out to recover the as-traded value; the
+(``(as_of, T]``, ``T`` the fetch's date on the exchange's calendar,
+``pricing.store.split_window_through``) and multiplies them back out to recover the
+as-traded value; the
 read asks *"which splits happened between this price's own date and the day I am valuing?"*
 (``(pd, d]``) and divides to move that value into the new denomination. They compose, they
 do not compound: the stored invariant sits between them, so a row fetched before a split
