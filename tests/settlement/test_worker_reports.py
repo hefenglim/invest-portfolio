@@ -285,3 +285,39 @@ def test_a_cash_pool_without_a_rate_is_named_in_the_notes(corpus_db: CorpusFacto
         assert [(c.balance, c.reporting_value) for c in pool] == [(Decimal("1000"), None)]
     finally:
         conn.close()
+
+
+def test_a_correction_that_moves_no_figure_restates_nothing(corpus_db: CorpusFactory) -> None:
+    """Accountant as-built check (2026-10-20): on rich, 2330's close on Thu 2026-02-12 moves
+    548 → 560. With no flow on the 12th or the 13th the two daily ratios cancel, so February's
+    TWR is unchanged in fact — but the chain-linked index shifts its 27th digit. A ratio
+    restates only when it moved at ``RATIO_RESTATE_DP`` places; nothing in February moved."""
+    rich = corpus_db("rich")
+    prepare(rich)
+    assert start_run(rich, 1) == "published"
+    _x(rich, "UPDATE prices SET close = '560', close_raw = '560' "
+             "WHERE instrument = '2330' AND as_of_date = '2026-02-12'")
+    assert start_run(rich, 2, scope="dirty", reason="prompt") == "published"
+    conn = open_db(rich.path)
+    try:
+        rows = conn.execute("SELECT period, field, old_value, new_value FROM "
+                            "settle_restatement WHERE run_id = 2").fetchall()
+    finally:
+        conn.close()
+    assert [r for r in rows if r[0] == "2026-02"] == [], rows
+    for _period, field, old, new in rows:  # whatever did restate moved for real
+        if old is not None and new is not None and field in (
+                "period_twr", "total_return_rate", "xirr"):
+            assert abs(Decimal(old) - Decimal(new)) >= Decimal("1e-12"), (field, old, new)
+
+
+def test_moved_compares_money_exactly_and_a_ratio_at_twelve_places() -> None:
+    moved = settle_worker._moved
+    assert not moved(Decimal("0.015809862654881264168528325"),
+                     Decimal("0.015809862654881264168528324"), "ratio")
+    assert moved(Decimal("0.0158098626548"), Decimal("0.0158098626558"), "ratio")
+    assert moved(Decimal("100.00"), Decimal("100.01"), "TWD")
+    assert not moved(Decimal("100.00"), Decimal("100.00"), "TWD")
+    assert moved(None, Decimal("0"), "ratio") and moved(Decimal("0"), None, "TWD")
+    assert not moved(None, None, "ratio")
+

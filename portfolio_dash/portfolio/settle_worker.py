@@ -230,6 +230,26 @@ def _text(value: Decimal | None) -> str | None:
     return None if value is None else to_db(value)
 
 
+#: A ratio (period TWR, the rate, XIRR) restates only when it moved at this many decimal
+#: places. The TWR index is chain-linked over every day at Decimal's 28 digits, so a correction
+#: that leaves a period's value unchanged in fact — a price revised on two flowless days whose
+#: two daily ratios cancel — still shifts the 27th digit, and a restatement row is never
+#: pruned (accountant as-built check, 2026-10-20: rich 2026-02 read +1.58% → +1.58%). 12
+#: places is ten orders below the display (0.01%) and far above the arithmetic's noise.
+RATIO_RESTATE_DP = 12
+_RATIO_STEP = Decimal(1).scaleb(-RATIO_RESTATE_DP)
+
+
+def _moved(old: Decimal | None, new: Decimal | None, unit: str) -> bool:
+    """Whether a close's figure changed enough to restate: money exactly (its canonical TEXT),
+    a ratio at :data:`RATIO_RESTATE_DP` places; a value appearing or disappearing always."""
+    if old is None or new is None:
+        return (old is None) != (new is None)
+    if unit == "ratio":
+        return old.quantize(_RATIO_STEP) != new.quantize(_RATIO_STEP)
+    return _text(old) != _text(new)
+
+
 def _changes_phrase(tables: Sequence[Any]) -> str:
     """「2 筆交易與 14 筆價格變更」 from a change summary's per-table lines."""
     parts = [f"{t.changes} 筆{t.label}" for t in tables if t.changes]
@@ -1404,7 +1424,7 @@ class _Run:
                     label, unit, _value = b[name] if name in b else a[name]
                     old_v = a[name][2] if name in a else None
                     new_v = b[name][2] if name in b else None
-                    if _text(old_v) == _text(new_v):
+                    if not _moved(old_v, new_v, unit):
                         continue
                     drafts.append(st.RestatementDraft(
                         kind=new.kind, period=new.period, field=name, label=label, unit=unit,
@@ -1437,7 +1457,9 @@ class _Run:
                 pairs.append((f"by_currency_value.{ccy}", f"{ccy} 市值", ccy,
                               snap.by_currency.get(ccy), new_ccy.get(ccy)))
             for name, label, unit, old_v, new_v in pairs:
-                if old_v == new_v:  # by value: the snapshot's text is ``decimal_str``'s
+                # money by VALUE (the snapshot's text is ``decimal_str``'s); a ratio at
+                # RATIO_RESTATE_DP places, as every other restatement
+                if (not _moved(old_v, new_v, unit)) if unit == "ratio" else old_v == new_v:
                     continue
                 drafts.append(st.RestatementDraft(
                     kind="M", period=new.period, field=name, label=label, unit=unit,
