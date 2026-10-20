@@ -35,7 +35,8 @@ pytestmark = pytest.mark.enable_socket   # TestClient's anyio portal (a Windows 
 #: Fields whose value is a MAP keyed by data (a field name, a currency, a day, a flag), not a
 #: schema: their keys depend on the run, so nothing beneath them is compared.
 _MAPS = frozenset({"counts", "detail", "flags_before", "flags_after", "notes_before",
-                   "notes_after", "unconfirmed_closes", "by_currency_value"})
+                   "notes_after", "unconfirmed_closes", "by_currency_value",
+                   "by_currency"})
 
 
 def _keys(stub: Any, real: Any, path: str = "$") -> list[str]:
@@ -91,6 +92,7 @@ def real(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
         out["periods_y"] = client.get("/api/settlement/periods", params={"kind": "Y"}).json()
         out["periods_m"] = client.get("/api/settlement/periods",
                                       params={"kind": "M", "limit": 3}).json()
+        out["snapshots"] = client.get("/api/snapshots", params={"limit": 12}).json()
         sup.fake_preparing_run(path, reason="button", started_by=stubs.GUEST)
         out["status_preparing"] = client.get("/api/settlement/status").json()
         yield out
@@ -159,3 +161,15 @@ def test_the_period_stub_has_the_route_keys(real: dict[str, Any]) -> None:
     assert not _keys(stub, real["periods_y"])
     for row in real["periods_m"]["rows"]:
         assert not _keys(stub, {"rows": [row], "total_count": 1}), row["period"]
+
+
+def test_the_month_row_stub_has_the_route_keys(real: dict[str, Any]) -> None:
+    """``stubs.snapshot_row`` (the 月 rows the history flows stub) ≡ package G's real
+    ``GET /api/snapshots`` rows — a restated month (``{cutover, rows}``) and a plain one."""
+    rows = real["snapshots"]["rows"]
+    assert any(r["restated"] for r in rows), "the dirty run restated no month"
+    stub = stubs.snapshot_row("2026-06", restated={"cutover": False,
+                                                   "rows": [stubs.restatement(1)]})
+    for row in rows:
+        assert not _keys({"rows": [stub], "total_count": 1},
+                         {"rows": [row], "total_count": len(rows)}), row["month"]

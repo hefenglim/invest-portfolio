@@ -315,6 +315,37 @@ def test_a_reports_daily_changes_show_money_and_the_missing_price_flag(
 
 
 @pytest.mark.e2e
+def test_the_chip_never_wraps_the_topbar_on_common_laptops(
+    live_server: str, fresh_page: Page
+) -> None:
+    """The chip is a new topbar item; the bar's single-row guarantee
+    (test_no_horizontal_scroll) runs with the store off, i.e. WITHOUT it. Measured with it:
+    「待結算 · 2026-06-05 起」 wrapped the bar at 1,440px and 「✓ 已結算」 at 1,366px. The
+    chip's longest states must keep 1,600-1,280px single-row (its detail drops below 1,600px,
+    the label-trim tier reaches 1,439px while it shows)."""
+    states = [
+        status("pending", dirty_from="2026-06-05", stale_from="2026-06-05"),
+        status("running", run=progress(412), slow=True),
+        status("interrupted", last_run=summary(411, status="interrupted",
+                                               status_text="結算中斷（未續跑）")),
+    ]
+    stub = SettleStub(states[0])
+    with stubbed(fresh_page, stub):
+        for st in states:
+            stub.status = st
+            for width in (1600, 1440, 1366, 1280):
+                fresh_page.set_viewport_size({"width": width, "height": 900})
+                fresh_page.goto(live_server + "/index.html", wait_until="networkidle")
+                expect(_chip(fresh_page)).to_be_visible()
+                fresh_page.wait_for_timeout(300)
+                height = fresh_page.evaluate(
+                    "() => Math.round(document.getElementById('topbar')"
+                    ".getBoundingClientRect().height)")
+                assert height < 70, (
+                    f"the {st['state']} chip wrapped the topbar at {width}px ({height}px)")
+
+
+@pytest.mark.e2e
 def test_on_a_phone_the_chip_fits_and_the_panel_is_a_full_height_sheet(
     live_server: str, fresh_page: Page
 ) -> None:

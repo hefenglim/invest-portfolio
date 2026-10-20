@@ -17,14 +17,21 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from playwright.sync_api import Page, expect
 
+from portfolio_dash.data_ingestion.store import insert_transaction
+from portfolio_dash.shared.models.enums import Side
 from tests.conftest import _seed_golden
 from tests.e2e.conftest import FlowServerFactory
+
+_TPE = ZoneInfo("Asia/Taipei")
 
 _SETTLE_TIMEOUT = 120_000   # a child run on this machine: spawn + imports + ~130 days
 
@@ -99,8 +106,9 @@ def _posts(page: Page) -> list[tuple[str, str]]:
 def test_the_chip_and_the_prompt_follow_the_real_store(
     flow_server: FlowServerFactory, fresh_page: Page
 ) -> None:
-    """pending → running → clean as the store produces them; the prompt asked once per seq; a
-    second change on the same day after a settle is asked about again (review F #1)."""
+    """pending → running → clean as the store produces them; no prompt for a change inside
+    the live window, the prompt for an old one — asked once per seq; a second change on the
+    same day after a settle is asked about again (review F #1)."""
     base = flow_server(_seed_golden, settle=True)
     page = fresh_page
     posts = _posts(page)
@@ -108,11 +116,18 @@ def test_the_chip_and_the_prompt_follow_the_real_store(
     _settled(page)
     seq0 = _status(page)["seq"]
 
+    # a change dated yesterday is already reflected (the live window): never a prompt
+    _deposit(page, (datetime.now(_TPE).date() - timedelta(days=1)).isoformat())
+    page.wait_for_timeout(2500)              # the 800 ms debounce and its status read
+    assert page.locator(".modal.st-prompt").count() == 0
+    st = _status(page)
+    assert st["needs_prompt"] is False and st["seq"] > seq0, st
+
     _deposit(page, "2026-06-05")
     prompt = _prompt(page)
     expect(prompt).to_contain_text("要重新結算歷史資料嗎？")
     expect(prompt).to_contain_text("這筆變更影響 2026-06-05 起的歷史結算")
-    expect(prompt).to_contain_text("待結算：現金收支 1 筆")
+    expect(prompt).to_contain_text("待結算：現金收支 2 筆")
     expect(_chip(page)).to_have_class(re.compile(r"\bst-chip-pending\b"))
     expect(_chip(page)).to_contain_text("待結算 · 2026-06-05 起")
     prompt.get_by_role("button", name="立即重新結算").click()
@@ -252,3 +267,38 @@ def test_the_live_panel_during_a_run_its_queued_change_and_cancel(
     expect(fail).to_contain_text("結果")
     assert any(u.endswith("/api/settlement/cancel") for u, _b in posts)
     expect(_chip(page)).to_have_class(re.compile(r"\bst-chip-pending\b"))
+
+
+def _seed_with_an_oversell(conn: sqlite3.Connection) -> None:
+    """Golden, plus a sale of more 2330 than the account holds, written past the doors' guard
+    (as an import of an incomplete statement would): the tolerant replay keeps it 待釐清."""
+    _seed_golden(conn)
+    insert_transaction(conn, account_id="tw_broker", symbol="2330", side=Side.SELL,
+                       quantity=Decimal("50000"), price=Decimal("600"), fees=Decimal("0"),
+                       tax=Decimal("0"), trade_date=date(2026, 6, 8))
+
+
+@pytest.mark.e2e
+def test_a_rebuild_with_findings_warns_and_lists_them_and_stops_nothing(
+    flow_server: FlowServerFactory, fresh_page: Page
+) -> None:
+    """§14.4: 重新結算（驗證並重建歷史） lists every 待釐清 record of the tolerant replay — a
+    warning toast for the run this page started and the panel's 帳本檢查 lines — and the run
+    still publishes."""
+    base = flow_server(_seed_with_an_oversell, settle=True)
+    page = fresh_page
+    _open(page, base, "/index.html")
+    _settled(page)
+    gen = _status(page)["generation"]
+    page.locator(".refresh-wrap .btn-refresh").click()
+    page.get_by_role("button", name=re.compile("重新結算（驗證並重建歷史）")).click()
+    warn = page.locator(".toast.toast-warn").filter(has_text="待釐清")
+    expect(warn).to_contain_text("重新結算：發現", timeout=_SETTLE_TIMEOUT)
+    expect(warn).to_contain_text("2330")
+    _settled(page)
+    assert _status(page)["generation"] > gen, "a finding stops nothing: the run published"
+    _chip(page).click()
+    checks = page.locator(".st-card").first.locator(".st-sec[data-sec='rep-validation']")
+    expect(checks.locator(".st-findings li").first).to_contain_text("2330")
+    expect(checks).to_contain_text("待釐清")
+    expect(checks).not_to_contain_text("{account:")

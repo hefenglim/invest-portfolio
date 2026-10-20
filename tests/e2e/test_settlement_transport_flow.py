@@ -1,6 +1,7 @@
-"""PERF spec 2026-10-18 §13 (plan §6.3, package F): the frontend half of the transport work, in
-a real browser — every page boots with the settlement chip and no console error, the boot
-chains ask in parallel, and the duplicate reads are gone.
+"""PERF spec 2026-10-18 §13 (plan §6.3 / §8, package F): the frontend half of the transport work,
+in a real browser — every page boots with the settlement chip and no console error, the boot
+chains ask in parallel, the duplicate reads are gone, the bell never holds the top bar, and a
+page read pending 15 s says 「仍在計算中…」.
 
 The settlement API is stubbed (``fresh_page`` only) exactly as in
 ``tests/e2e/settlement_stubs.py`` (E's real shapes); everything else is the session
@@ -16,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from tests.e2e.settlement_stubs import SettleStub, status, stubbed
 
@@ -137,3 +138,71 @@ def test_the_duplicate_reads_are_gone(live_server: str, fresh_page: Page) -> Non
         # elsewhere the badge still asks the three counts
         fresh_page.goto(live_server + "/instruments.html", wait_until="networkidle")
         assert len([r for r in _timings(fresh_page) if r["path"].endswith("/count")]) == 3
+
+
+@pytest.mark.e2e
+def test_the_bell_never_holds_the_top_bar(live_server: str, fresh_page: Page) -> None:
+    """§13 (a): the bell's /api/alerts is a background read. Held unanswered, it must leave the
+    top progress bar down once the page's own reads are in — the bar tracks the page only."""
+    held: list[Route] = []
+
+    def _hold(route: Route) -> None:
+        held.append(route)              # answered at the end, never before the check
+
+    page = fresh_page
+    page.route("**/api/alerts*", _hold)
+    try:
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(live_server + "/instruments.html", wait_until="load")
+        page.wait_for_function("() => window.pdApi && window.pdApi.pending() === 0",
+                               timeout=30_000)
+        page.wait_for_timeout(400)      # past the bar's 150 ms show-delay
+        assert held, "the bell never asked — the check below would prove nothing"
+        assert page.locator(".net-progress").is_hidden()
+        assert page.locator(".net-slow").is_hidden()
+    finally:
+        for r in held:
+            r.fulfill(status=200, content_type="application/json", body='{"alerts": []}')
+        page.unroute("**/api/alerts*", _hold)
+
+
+@pytest.mark.e2e
+def test_a_page_read_pending_15_s_says_it_is_still_computing(
+    live_server: str, fresh_page: Page
+) -> None:
+    """§13 (c) / PERF-D6: a page read still pending after 15 s shows 「仍在計算中…」 in the top
+    bar and is not aborted; a background read held as long never does. The page clock is
+    advanced, not waited out."""
+    held: list[Route] = []
+
+    def _hold(route: Route) -> None:
+        held.append(route)
+
+    page = fresh_page
+    page.route("**/api/pd-e2e-held*", _hold)
+    try:
+        page.clock.install()
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(live_server + "/instruments.html", wait_until="load")
+        page.wait_for_function("() => window.pdApi && window.pdApi.pending() === 0",
+                               timeout=30_000)
+        notice = page.locator(".net-slow")
+        page.evaluate("() => { window.__bg = window.pdApi.get('/api/pd-e2e-held-bg', null,"
+                      " { background: true }); }")
+        page.clock.fast_forward("00:16")
+        assert notice.is_hidden(), "a background read never raises the notice"
+        page.evaluate("() => { window.__fg = window.pdApi.get('/api/pd-e2e-held-fg'); }")
+        page.clock.fast_forward("00:14")
+        assert notice.is_hidden(), "not before 15 s"
+        page.clock.fast_forward("00:02")
+        expect(notice).to_be_visible()
+        expect(notice).to_have_text("仍在計算中…")
+        fg = next(r for r in held if "held-fg" in r.request.url)
+        held.remove(fg)
+        fg.fulfill(status=200, content_type="application/json", body="{}")
+        page.evaluate("() => window.__fg")          # answered, never aborted
+        expect(notice).to_be_hidden()
+    finally:
+        for r in held:
+            r.fulfill(status=200, content_type="application/json", body="{}")
+        page.unroute("**/api/pd-e2e-held*", _hold)

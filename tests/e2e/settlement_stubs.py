@@ -214,7 +214,8 @@ def changes_page(rows: list[dict[str, Any]], *, counters: list[dict[str, Any]] |
 
 
 def period(period: str, **kw: Any) -> dict[str, Any]:
-    """A year close as ``GET /api/settlement/periods?kind=Y`` will serve it (package G)."""
+    """A close as ``GET /api/settlement/periods?kind=Y|M`` serves it (package G): the
+    PeriodClose, its ``restatements`` (that period's Restatement rows) included."""
     kpi: dict[str, Any] = {"reporting_ccy": "TWD", "total_market_value": "2000000",
                            "total_return": "300000", "total_return_rate": "0.15", "xirr": None,
                            "xirr_reason": "期間不足一年，XIRR 不計", "period_twr": "0.08"}
@@ -223,6 +224,24 @@ def period(period: str, **kw: Any) -> dict[str, Any]:
                             "kpi": kpi, "activity": {}, "source": "store"}
     base.update(kw)
     return _dump(PeriodClose(**base))
+
+
+def snapshot_row(month: str, **kw: Any) -> dict[str, Any]:
+    """A month row of ``GET /api/snapshots`` exactly as ``api/snapshots._month_row`` writes
+    it: the KPI figures as strings, ``provisional`` a zh note or ``None``, ``notes`` the full
+    PeriodNotes, ``restated`` ``{cutover, rows: [Restatement]}`` or ``None``."""
+    from portfolio_dash.portfolio.settlement_models import PeriodNotes
+
+    notes = PeriodNotes(**kw.pop("notes", {})).model_dump(mode="json")
+    row: dict[str, Any] = {
+        "month": month, "as_of": month + "-28", "reporting_ccy": "TWD",
+        "total_value": "1234567.89", "total_return": "234567.8", "total_return_rate": "0.2345",
+        "xirr": "0.1234", "by_currency": {"TWD": "1234567.89"}, "kind": "M",
+        "provisional": None, "stale": False, "notes": notes, "xirr_reason": None,
+        "period_twr": "0.0123", "period_twr_reason": None, "restated": None,
+    }
+    row.update(kw)
+    return row
 
 
 class SettleStub:
@@ -308,5 +327,6 @@ def stubbed(page: Page, stub: SettleStub,
 
 __all__ = [
     "GUEST", "PATTERN", "SettleStub", "change", "changes_page", "counter", "period",
-    "progress", "report", "restatement", "status", "stubbed", "summary", "table", "trigger",
+    "progress", "report", "restatement", "snapshot_row", "status", "stubbed", "summary", "table",
+    "trigger",
 ]
