@@ -10,7 +10,9 @@ fields included) a full build at that clock, in both directions. A new field tha
 hour — or a field dropped from the list — fails it.
 
 The second test is the byte-identity invariant (plan §0.1): ``GET /api/dashboard`` answered
-from a cache hit is byte for byte the reference payload v0.1.31's own code wrote. The third
+from a cache hit is byte for byte the reference payload v0.1.31's own code wrote — except
+PERF-F2's intended difference on ``unquoted_ccy_cash``, which ``tests/reference/perf_f2.py``
+owns (``expected_bytes``: v0.1.31's bytes everywhere else). The third
 pins the reporting currency in the key: a TWD build is never served to a USD request.
 """
 
@@ -37,8 +39,7 @@ from tests.reference.corpora import (
     open_db,
 )
 from tests.reference.payload_gen import dashboard_body, new_app
-
-_PAYLOADS = Path(__file__).resolve().parents[1] / "reference" / "payloads"
+from tests.reference.perf_f2 import expected_bytes
 
 CorpusFactory = Callable[[str], CorpusDB]
 
@@ -110,7 +111,7 @@ def test_dashboard_served_from_a_hit_is_the_v0131_reference(
     name: str, corpus: CorpusFactory,
 ) -> None:
     db: CorpusDB = corpus(name)
-    expected = (_PAYLOADS / name / "dashboard.json").read_bytes()
+    expected = expected_bytes(name, "dashboard.json")
     app = new_app()
     bodies: list[bytes] = []
     # The first GET on an unbooted corpus may seed a table (a commit: the next GET misses),
