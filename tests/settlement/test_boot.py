@@ -90,6 +90,17 @@ def test_a_clean_stop_leaves_the_database_in_one_file(boot_db: Path) -> None:
     assert app.state.stop_checkpoint[0] == 0
 
 
+def test_a_second_lifespan_in_one_process_caches_again(boot_db: Path) -> None:
+    """The first stop closed the result cache for good (``result_cache.shutdown``); the next
+    lifespan's start opens it again — the test suite runs many lifespans in one process."""
+    _boot()
+    assert result_cache._closed
+    with TestClient(create_app()) as client:
+        assert client.get("/api/dashboard").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200
+        assert result_cache.stats()["dashboard"].hits == 1
+
+
 def test_a_clean_stop_waits_for_a_running_prewarm_and_still_leaves_one_file(
     boot_db: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

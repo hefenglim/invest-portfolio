@@ -121,17 +121,25 @@ def checkpoint_on_stop(conn: sqlite3.Connection) -> tuple[int, int, int]:
     """``PRAGMA wal_checkpoint(TRUNCATE)`` at a clean stop: ``(busy, log, checkpointed)``.
 
     ``busy = 1`` means a connection of this process or another still held the database past
-    the busy timeout — a pre-warm that outlived ``result_cache.shutdown``'s wait, a settle or
-    job child still running. The WAL was not truncated, so ``-wal`` / ``-shm`` may remain
-    beside the database: logged, never raised (the stop goes on).
+    the busy timeout. At a stop that can be:
+
+    - a pre-warm that outlived ``result_cache.shutdown``'s wait;
+    - a request thread still computing after its client disconnected;
+    - an inline-mode job thread still running after ``scheduler.shutdown(wait=False)``;
+    - a settle or job child process still running — ``settlement_service.shutdown`` leaves a
+      running settle child alone, though it starts no new one from then on.
+
+    The WAL was not truncated, so ``-wal`` / ``-shm`` may remain beside the database, and the
+    ``-wal`` may hold COMMITTED changes: logged, never raised (the stop goes on).
     """
     row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     busy, log, done = int(row[0]), int(row[1]), int(row[2])
     if busy:
         logger.warning(
             "clean stop: the WAL checkpoint could not complete (busy; %d of %d frames "
-            "checkpointed) — -wal / -shm may remain beside the database (delete both before a "
-            "file-copy restore, docs/DEPLOYMENT.md)", done, log)
+            "checkpointed) — -wal / -shm may remain beside the database and the -wal may hold "
+            "committed changes: never delete it on its own (docs/DEPLOYMENT.md, WAL files)",
+            done, log)
     return busy, log, done
 
 
@@ -144,6 +152,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The PD_* flags (shared/flags.py) are read per call; read them all once here so a bad
     # value stops the boot with its own message instead of answering 500 on each request.
     flags.current()
+    # The result cache starts empty and OPEN: a no-op in a fresh process, and it reopens what
+    # an earlier lifespan's stop closed for good (`result_cache.shutdown`) when one process
+    # runs several lifespans (the test suite).
+    result_cache.reset()
     # Every boot write is stamped `system:boot` in the settlement store's change trail
     # (spec §7 "Who made the change"): a no-op on a fresh database until the trail exists,
     # installed again right after the settle DDL below.
@@ -246,6 +258,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # From here on no settle child starts: a waiter that finishes during the stop leaves
+        # its follow-up (a resume, a chained run) to the next boot.
         settlement_service.shutdown()
         if scheduler is not None:
             scheduler.shutdown(wait=False)

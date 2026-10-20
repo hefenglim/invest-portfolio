@@ -177,6 +177,15 @@ class CannotCancel(SettlementError):
         super().__init__("這次重新結算在同步模式下執行，無法中途取消")
 
 
+class Stopping(SettlementError):
+    """The app is stopping (:func:`shutdown` ran): no settle child starts any more."""
+
+    code = "stopping"
+
+    def __init__(self) -> None:
+        super().__init__("系統正在停止，重新結算將於下次啟動後處理")
+
+
 # =============================================================================================
 # Small helpers
 # =============================================================================================
@@ -674,6 +683,8 @@ class _State:
         self.queue: list[_Pending] = []
         self.scheduler: Any = None
         self.timer: threading.Timer | None = None
+        #: Set by :func:`shutdown`, cleared by :func:`on_boot` and :func:`reset_for_tests`.
+        self.stopping = False
 
 
 _S = _State()
@@ -688,6 +699,7 @@ def reset_for_tests() -> None:
         _S.queue = []
         _S.scheduler = None
         _S.timer = None
+        _S.stopping = False
 
 
 def bind_scheduler(scheduler: Any) -> None:
@@ -698,9 +710,18 @@ def bind_scheduler(scheduler: Any) -> None:
 
 
 def shutdown() -> None:
-    """App shutdown: stop the deferred push timer. A settle child is a separate process and
-    is left alone — boot finalises whatever it leaves behind (spec §9.4)."""
+    """App shutdown: stop the deferred push timer, and start no settle child from now on.
+
+    A settle child already running is a separate process and is left alone — boot finalises
+    whatever it leaves behind (spec §9.4). But its waiter may still finish during the stop
+    (the child ends, or systemd's SIGTERM reaches it too), and it used to start the run's
+    follow-up — a resume, a chained run, a queued nightly — as a NEW child in the middle of
+    the stop, writing a report the next boot then ended 中斷. Now :func:`start_run` refuses
+    with :class:`Stopping` and :func:`start_automatic` starts nothing: boot resumes an
+    interrupted run, and a dirty day waits for the next run (review of the v0.1.32
+    follow-ups, 2026-10-20). The lifespan's next boot (:func:`on_boot`) opens it again."""
     with _S.lock:
+        _S.stopping = True
         if _S.timer is not None:
             _S.timer.cancel()
             _S.timer = None
@@ -758,11 +779,13 @@ class Started:
 
 @dataclass(frozen=True)
 class AutoStart:
-    """An automatic start: started, queued behind the active run, or nothing (settling off)."""
+    """An automatic start: started, queued behind the active run, or nothing (settling off,
+    or the app is stopping — :attr:`stopping`)."""
 
     run_id: int | None = None
     queued_behind: int | None = None
     ended: RunEnd | None = None
+    stopping: bool = False
 
 
 def _active_run_ids(conn: sqlite3.Connection) -> list[int]:
@@ -868,11 +891,14 @@ def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
     (``PD_SETTLE_MODE=child``, the call returns at once) or inline (the call returns after the
     run and its follow-ups). Raises :class:`SettlementOff` with ``PD_SETTLE=off`` and
     :class:`AlreadyRunning` while a run is active (this process's, or any ``preparing`` /
-    ``running`` report — boot ends every orphan first)."""
+    ``running`` report — boot ends every orphan first), and :class:`Stopping` once the app's
+    stop began (:func:`shutdown`)."""
     if not flags.settle_enabled():
         raise SettlementOff
     now = now or _now()
     with _S.lock:
+        if _S.stopping:
+            raise Stopping
         if _S.active is not None:
             raise AlreadyRunning(_S.active.run_id)
         # A report left active by a waiter that could not finish it (its lock free, no run
@@ -941,13 +967,17 @@ def start_automatic(*, scope: RunScope, reason: str, now: datetime | None = None
                     previous_run_id: int | None = None, why: str | None = None,
                     mark_resumed: bool = False) -> AutoStart:
     """An automatic start (boot, nightly, self-check, a job's, chained, resume): queued behind
-    the active run instead of refused, nothing at all with settling off."""
+    the active run instead of refused, nothing at all with settling off or while the app
+    stops (boot resumes or settles what is left)."""
     try:
         started = start_run(scope=scope, reason=reason, started_by=None, now=now,
                             previous_run_id=previous_run_id, why=why,
                             mark_resumed=mark_resumed)
     except SettlementOff:
         return AutoStart()
+    except Stopping:
+        logger.info("settlement %s run not started: the app is stopping", reason)
+        return AutoStart(stopping=True)
     except AlreadyRunning as busy:
         _enqueue(_Pending(scope=scope, reason=reason, why=why,
                           previous_run_id=previous_run_id, mark_resumed=mark_resumed))
@@ -1584,6 +1614,8 @@ _JOB_LABEL: dict[str, str] = {"nightly": "每晚例行結算", "selfcheck": "每
 def trigger_outcome(label: str, started: AutoStart) -> JobOutcome:
     """The trigger job's own ``job_runs`` verdict (DEF-067 / DEF-073): what it started. The
     run itself has its own row (``job_id = 'settlement'``)."""
+    if started.stopping:
+        return JobOutcome("skipped", f"系統正在停止，{label}未執行")
     if started.queued_behind is not None:
         return JobOutcome("ok", f"重新結算 #{started.queued_behind} 正在進行，{label}排在其後")
     if started.ended is not None:
@@ -1811,12 +1843,16 @@ def on_boot(conn: sqlite3.Connection, *, trigger_check: TriggerCheck) -> BootPla
        after rows arrive settles it in full).
     5. An identical boot starts nothing.
 
-    Starting is :func:`start_after_boot`'s, once this session has committed.
+    Starting is :func:`start_after_boot`'s, once this session has committed. A boot also
+    opens the service again: an earlier lifespan's :func:`shutdown` in this process (a test)
+    left it refusing every start.
 
     **Never raises** (review E #8): every write runs under one SAVEPOINT; on any error it is
     rolled back, logged, and an empty plan returned — a settlement fault must not stop the
     app from booting, with ``PD_SETTLE=off`` least of all.
     """
+    with _S.lock:
+        _S.stopping = False
     try:
         with _savepoint(conn, "settle_boot"):
             return _on_boot(conn, trigger_check)

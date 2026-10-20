@@ -451,6 +451,50 @@ def test_a_counter_put_back_after_the_jobs_mark_is_not_the_jobs(
     assert len(sup.runs(path)) == runs + 1
 
 
+def test_no_run_starts_once_the_app_is_stopping(path: Path) -> None:
+    """Review of the v0.1.32 follow-ups: ``shutdown()`` began the stop, so no settle child
+    may start any more — not the owner's, not an automatic one, not a scheduled one. Boot
+    resumes or settles what is left."""
+    service.start_run(scope="full", reason="button")
+    sup.back_dated_trade(path, date(2026, 2, 2))
+    service.shutdown()
+    with pytest.raises(service.Stopping) as refused:
+        service.start_run(scope="dirty", reason="prompt", started_by="user:guest")
+    assert refused.value.code == "stopping"
+    assert service.start_automatic(scope="dirty", reason="job:history_daily") == \
+        service.AutoStart(stopping=True)
+    outcome = service.scheduled_run(None, "nightly", now=service._now())  # type: ignore[arg-type]
+    assert (outcome.status, outcome.detail) == ("skipped", "系統正在停止，每晚例行結算未執行")
+    assert len(sup.runs(path)) == 1
+    service.reset_for_tests()  # a new process (or test) starts open
+    assert service.start_run(scope="dirty", reason="prompt").ended is not None
+
+
+@pytest.mark.parametrize("plan", ["die_after_claim", "change_during"])
+def test_a_run_ending_during_the_stop_starts_no_follow_up(
+    path: Path, monkeypatch: pytest.MonkeyPatch, plan: str
+) -> None:
+    """A settle child that ends while the app stops (systemd's SIGTERM reaches it too, or it
+    simply finishes) is finalised by its waiter — which used to start the follow-up, a resume
+    or a chained run, as a NEW settle child in the middle of the stop. Now the follow-up is
+    left: boot resumes an interrupted run, and the dirty day waits for the next run."""
+    service.start_run(scope="full", reason="button")  # generation 1
+
+    def run_then_stop(run_id: int, *, db_path: Path) -> None:
+        try:
+            stub.run(run_id, db_path=db_path)
+        finally:
+            service.shutdown()  # the stop begins before this run's waiter finishes
+
+    monkeypatch.setattr(settle_worker, "run", run_then_stop)
+    stub.PLAN.append(plan)
+    started = service.start_run(scope="full", reason="button")
+    runs = sup.runs(path)
+    assert [r.run_id for r in runs][-1] == started.run_id and len(runs) == 2
+    assert runs[-1].status in ("interrupted", "partial", "superseded")
+    assert service.active_run_id() is None
+
+
 def test_a_busy_database_is_retried_by_the_waiter(
     path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

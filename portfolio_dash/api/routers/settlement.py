@@ -214,7 +214,7 @@ def settlement_run_start(
     try:
         started = service.start_run(scope=body.scope, reason=reason, started_by=started_by,
                                     now=now)
-    except (service.SettlementOff, service.AlreadyRunning) as exc:
+    except (service.SettlementOff, service.AlreadyRunning, service.Stopping) as exc:
         return _refused(exc)
     return JSONResponse(status_code=202, content={"run_id": started.run_id})
 

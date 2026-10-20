@@ -69,7 +69,7 @@ lifespan's ``wal_checkpoint(TRUNCATE)``: no pre-warm starts and no version conne
 again, a pre-warm already running is waited for (bounded), then the version connections are
 closed — a read-only connection cannot checkpoint, and a reader still in a read transaction
 keeps a TRUNCATE checkpoint from finishing, so either would leave ``-wal`` / ``-shm`` beside
-the database after a clean stop. :func:`reset` (tests) opens it again.
+the database after a clean stop. :func:`reset` opens it again (the lifespan's start; tests).
 
 Imports nothing above ``shared/``.
 """
@@ -134,9 +134,14 @@ class Stats:
 MAX_VERSION_CONNECTIONS = 4
 
 #: How long :func:`shutdown` waits for a pre-warm already running. A pre-warm is one dashboard
-#: build and one alerts evaluation — about a second on the VM with the settlement store (W4);
-#: the bound leaves room for a slow live build and stays far inside systemd's default 90 s
-#: stop timeout.
+#: build and one alerts evaluation — about a second on the VM while the settlement store is
+#: usable (W4). It does NOT cover a pre-warm while the store is unusable (the first boot of a
+#: release re-settles in full; ``PD_SETTLE=off``): that one is a full live build, 16–64 s on
+#: the VM, and a stop in that window outlives the wait — logged, the stop goes on, and the
+#: ``-wal`` it may leave holds nothing a later open does not fold back. Waiting that long
+#: instead would run a stop into systemd's default 90 s stop timeout, whose SIGKILL is a real
+#: crash; skipping the pre-warm while the store is unusable would make the owner's next page
+#: after an edit wait for that build instead.
 SHUTDOWN_PREWARM_WAIT_S = 15.0
 
 _lock = threading.Lock()
@@ -461,9 +466,9 @@ def _cancel_pending_prewarm() -> None:
 def reset() -> None:
     """Forget everything: entries, counters, a pending pre-warm, and close every version
     connection (tests; a process that is about to replace or delete a database file). The
-    cache is open afterwards — also after :func:`shutdown` (a test, or a second lifespan in
-    one process). A pre-warm already running is not waited for: a stopping process calls
-    :func:`shutdown`."""
+    cache is open afterwards — also after :func:`shutdown`: the lifespan calls it at START,
+    so a second lifespan in one process (the test suite) caches again. A pre-warm already
+    running is not waited for: a stopping process calls :func:`shutdown`."""
     global _closed
     with _lock:
         _entries.clear()
@@ -494,7 +499,8 @@ def shutdown(timeout: float = SHUTDOWN_PREWARM_WAIT_S) -> bool:
     lifespan logs that result too), and a daemon thread still reading at interpreter exit
     leaves ``-wal`` / ``-shm`` behind exactly as a crash does. Never hangs.
 
-    Final for the process: only :func:`reset` opens the cache again.
+    Final for the lifespan: only :func:`reset` opens the cache again (the next lifespan's
+    start calls it).
     """
     global _closed
     with _prewarms_done:
@@ -508,8 +514,8 @@ def shutdown(timeout: float = SHUTDOWN_PREWARM_WAIT_S) -> bool:
         logger.warning(
             "result cache: %d pre-warm(s) still running %.0f s into the stop; the stop goes "
             "on — the WAL checkpoint may not complete, and -wal / -shm may remain beside the "
-            "database (delete both before a file-copy restore, docs/DEPLOYMENT.md)",
-            late, timeout)
+            "database with committed changes in the -wal: never delete it on its own "
+            "(docs/DEPLOYMENT.md, WAL files)", late, timeout)
     return finished
 
 

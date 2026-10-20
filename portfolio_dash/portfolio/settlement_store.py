@@ -2195,9 +2195,9 @@ def end_without_publish(conn: sqlite3.Connection, run_id: int, status: str) -> b
     transaction (§9.4 "Every other end"):
 
     - ``dirty_from`` = the earlier of ``dirty_from`` and the ``run_dirty_from`` the run
-      CLAIMED (never its whole ``run_from`` range: a cancelled full run on a clean store
-      leaves it clean) — never an overwrite, so an earlier change that arrived during the run
-      is kept;
+      CLAIMED (:func:`claim`: the trail's earliest day, so a cancelled full run on a clean,
+      published store leaves it clean; before anything was ever published, its whole range)
+      — never an overwrite, so an earlier change that arrived during the run is kept;
     - the run fields cleared and the generations above the published one deleted — only when
       this run is still the active one (an orphan's end never touches another run's state);
     - the claimed changes put back (:func:`put_back`);

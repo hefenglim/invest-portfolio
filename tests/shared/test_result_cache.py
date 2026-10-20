@@ -743,8 +743,9 @@ def test_shutdown_cancels_a_pending_prewarm(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_reset_opens_the_cache_again_after_a_shutdown(reader: Reader) -> None:
-    """``shutdown`` is final for a stopping process; tests (and a second lifespan in one
-    process) get a working cache back from ``reset``."""
+    """``shutdown`` is final for a stopping process; ``reset`` gives a working cache back —
+    the conftest calls it around every test, and the lifespan at its start (a second
+    lifespan in one process: ``tests/settlement/test_boot.py``)."""
     assert result_cache.shutdown(1.0) is True
     assert reader.read() == reader.read() == {"x": 1}
     assert reader.runs == 2                          # closed: every read computes
