@@ -9,6 +9,8 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.32] - 2026-10-20
+
 The settlement store: history is settled ahead of time and served from it, results are kept in a
 cache, scheduled jobs and the settlement run in short-lived child processes (spec
 `docs/spec/2026-10-18-settlement-store.md`, plan `docs/superpowers/plans/2026-10-18-settlement-store.md`
