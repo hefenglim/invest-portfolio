@@ -314,6 +314,48 @@ def test_the_worker_rebuilds_now_in_the_parents_zone() -> None:
     assert now == NOW and now.tzinfo == NOW.tzinfo and now.isoformat() == NOW.isoformat()
 
 
+def test_the_worker_runs_its_job_with_the_after_job_hook_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The after-job hook belongs to the WEB process, where the settlement service lives (plan
+    P7): the parent asks it before the spawn and calls it once the row is final. The worker
+    binds the same runtime as the lifespan (``bind_runtime``, which binds the hook) and must
+    then clear it, or the job would run with the settlement service's hook bound inside the
+    child — a second bracket, which could start a settlement run from the child. Drives the
+    worker's real ``main`` in this process, with the job itself replaced by a probe."""
+    _use_db(monkeypatch, tmp_path / "portfolio.db")
+    monkeypatch.setenv("PD_JOB_MODE", "inline")  # main() sets it; restored on undo
+    monkeypatch.setattr(job_worker, "lower_own_priority", lambda: None)  # not the test's
+    bound: list[object] = []
+
+    def handler_restored() -> logging.Handler:
+        handler = logging.FileHandler(tmp_path / "app.log", encoding="utf-8")
+        bound.append(handler)
+        return handler
+
+    monkeypatch.setattr(job_worker, "attach_append_log", handler_restored)
+    seen: list[object] = []
+
+    def probe(conn: sqlite3.Connection, job_id: str, run_id: int, *, now: datetime,
+              trigger: str) -> bool:
+        seen.append(jobs._AFTER_JOB_HOOK)
+        return True
+
+    monkeypatch.setattr(jobs, "run_in_worker", probe)
+    try:
+        code = job_worker.main(["quotes_tw", "41", "--now", NOW.isoformat(),
+                                "--trigger", "manual", "--tz", "Asia/Taipei"])
+    finally:
+        for handler in bound:
+            assert isinstance(handler, logging.Handler)
+            handler.close()
+    assert code == job_worker.EXIT_DONE
+    assert seen == [None]
+    # not vacuous: the composition root the worker calls DOES bind the hook
+    composition.bind_runtime()
+    assert jobs._AFTER_JOB_HOOK is service.after_job_hook
+
+
 # ------------------------------------------------------------------- what runs where
 
 
