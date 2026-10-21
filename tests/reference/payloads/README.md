@@ -62,6 +62,23 @@ package are byte-identical. `test_perf_f2_changes_exactly_the_listed_paths` chec
 list both ways. `make_reference_payloads.py --here` now differs from these files on exactly
 those paths.
 
+**The trend points' `pnl`** (owner ruling 2026-10-22; one owner: `tests/reference/trend_pnl.py`).
+The trend tooltip's 累計總損益（含匯兌） was `total_value − net_invested` subtracted in JS floats;
+the server now sends it. Every served trend point gains ONE key, `pnl`, appended after
+`net_worth`: its own `total_value − net_invested` at the reporting currency's minor unit (TWD 0
+dp, USD / MYR 2 dp), ROUND_HALF_UP, a rounded-away loss reading `0` (never `-0`). These files are
+NOT regenerated. `trend_pnl.expected_bytes` composes with PERF-F2: it starts from
+`perf_f2.expected_bytes` and adds `pnl` to every point of `trend.points` in `dashboard.json` and
+in every `month_end/<YYYY-MM>.json` (whose one point D carries it too), derived from that point's
+own strings and the file's own `trend.reporting_currency` with a transcription of the rounding
+rule, never a call into the code under test. Nothing else changes: the tax package and every
+other byte are PERF-F2's expectation (`test_trend_pnl_adds_exactly_one_key_to_every_point`).
+The tests that compare what the API SERVES (`test_reference_payloads`, the store's read path,
+a result-cache hit) read `trend_pnl.expected_bytes`; the tests that compare what the settlement
+WORKER stores keep `perf_f2.expected_bytes`, because `pnl` is derived when a series is served
+and is never stored. `make_reference_payloads.py --here` now also differs on every trend point
+by that key.
+
 The corpus seeds are read from `tests/conftest.py` (`_seed_golden`, `init_golden_base`,
 `GOLDEN_NOW`) and `scripts/seed_demo.py`: the generator uses the 473fe5a copies of those two
 files, the test uses the current ones. Each corpus's **fingerprint** (sha256 over its ledger,

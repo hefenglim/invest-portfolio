@@ -12,7 +12,8 @@ hour — or a field dropped from the list — fails it.
 The second test is the byte-identity invariant (plan §0.1): ``GET /api/dashboard`` answered
 from a cache hit is byte for byte the reference payload v0.1.31's own code wrote — except
 PERF-F2's intended difference on ``unquoted_ccy_cash``, which ``tests/reference/perf_f2.py``
-owns (``expected_bytes``: v0.1.31's bytes everywhere else). The third
+owns, and the trend points' served ``pnl``, which ``tests/reference/trend_pnl.py`` owns
+(``expected_bytes``: both composed, v0.1.31's bytes everywhere else). The third
 pins the reporting currency in the key: a TWD build is never served to a USD request.
 """
 
@@ -39,7 +40,7 @@ from tests.reference.corpora import (
     open_db,
 )
 from tests.reference.payload_gen import dashboard_body, new_app
-from tests.reference.perf_f2 import expected_bytes
+from tests.reference.trend_pnl import expected_bytes
 
 CorpusFactory = Callable[[str], CorpusDB]
 

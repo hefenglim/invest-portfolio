@@ -172,7 +172,12 @@ def test_frozen_pipeline_reproduces_the_v0131_payload(corpus: Corpus) -> None:
     benchmark blocks — so the frozen modules are what v0.1.31 RAN, not just what it held."""
     name, conn, i = corpus
     payload = _payload(name)
-    assert to_wire(_frozen_trend(i).model_dump()) == payload["trend"]
+    # ``pnl`` (owner ruling 2026-10-22) is set on the SERVED series only (``with_trend_pnl``),
+    # never by the engine, so the frozen engine's points carry it unset: compared without it.
+    # ``tests/reference/trend_pnl.py`` pins its served values.
+    frozen = _frozen_trend(i)
+    assert all(p.pnl is None for p in frozen.points)
+    assert to_wire(frozen.model_dump(exclude={"points": {"__all__": {"pnl"}}})) == payload["trend"]
 
     book = ref_build_book(i.bundle, allow_oversell=True)
     flows = ref.ref_build_reporting_flows(i.bundle, i.trend_fx_history, i.reporting,

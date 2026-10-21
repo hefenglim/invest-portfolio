@@ -59,6 +59,8 @@ from portfolio_dash.portfolio.dashboard_models import (
     PriceFreshness,
     TrendPoint,
     TrendSeries,
+    trend_pnl,
+    with_trend_pnl,
 )
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
@@ -1741,10 +1743,15 @@ def _build_dashboard(
                 cash_movements, cash_convs, cash_txs, cash_divs, instruments,
                 cash_fx_history, reporting, end=as_of,
                 start=None if prefix is None else live)
-            trend = compose_net_worth(trend, cash_by_date)
+            # The series as SERVED carries each point's 累計總損益（含匯兌）, the tooltip's figure
+            # (owner ruling 2026-10-22, `dashboard_models.trend_pnl`): set on the live days
+            # here and on the stored days as they are built (`_stored_point`), so neither part
+            # is copied a second time.
+            trend = with_trend_pnl(compose_net_worth(trend, cash_by_date))
             if prefix is not None and prefix.days:
                 trend = trend.model_copy(update={
-                    "points": [_stored_point(d) for d in prefix.days] + trend.points})
+                    "points": [_stored_point(d, reporting) for d in prefix.days]
+                    + trend.points})
     else:
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
         trend_reason = "尚無任何帳本紀錄"
@@ -1907,11 +1914,14 @@ def _usable_store(conn: sqlite3.Connection,
     return state if state.usable else None
 
 
-def _stored_point(day: settlement_store.SettledDay) -> TrendPoint:
-    """A settled day as the trend point it was settled from, with its stored ``net_worth``."""
+def _stored_point(day: settlement_store.SettledDay, reporting: Currency) -> TrendPoint:
+    """A settled day as the trend point it was settled from, with its stored ``net_worth``,
+    as SERVED: with its ``pnl`` (``trend_pnl``, derived here — the store keeps no such
+    column)."""
     return TrendPoint(date=day.day, total_value=day.total_value,
                       net_invested=day.net_invested, incomplete=day.incomplete,
-                      net_worth=day.net_worth)
+                      net_worth=day.net_worth,
+                      pnl=trend_pnl(day.total_value, day.net_invested, reporting))
 
 
 def _history_state(store: settlement_store.StoreState | None,

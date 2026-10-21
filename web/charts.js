@@ -124,8 +124,11 @@
           const date = params[0].axisValue;
           const pt = t.points.find((p) => p.date === date);
           if (!pt) return date;
-          const spread = pt.total_value - pt.net_invested;
-          const spreadColor = spread > 0 ? C.up : spread < 0 ? C.down : C.text;
+          /* The SERVER's figure (`pnl`, owner ruling 2026-10-22): total_value − net_invested,
+             already at the reporting currency's minor unit — formatted here, never derived.
+             The colour reads the sign off the Decimal string (`f.signClass`), no arithmetic. */
+          const pnlSign = f.signClass(pt.pnl);
+          const pnlColor = pnlSign === 'sign-up' ? C.up : pnlSign === 'sign-down' ? C.down : C.text;
           let html = '<div style="font-size:11px;color:' + C.faint + '">' + date + '</div>';
           html += '<div>總市值&nbsp;&nbsp;<b>' + f.money(pt.total_value, 'TWD') + '</b></div>';
           html += '<div>累計淨投入&nbsp;&nbsp;<b>' + f.money(pt.net_invested, 'TWD') + '</b></div>';
@@ -133,10 +136,10 @@
             html += '<div>總淨值（含現金）&nbsp;&nbsp;<b style="color:' + C.netWorth + '">' +
                     f.money(pt.net_worth, 'TWD') + '</b></div>';
           }
-          /* AI-D41: this spread converts every flow at its own trade-date rate, so it is
-             the FX-COMPLETE lifetime result — NOT the 浮動損益 it was labelled. */
-          html += '<div>累計總損益（含匯兌）&nbsp;&nbsp;<b style="color:' + spreadColor + '">' +
-                  f.signed(spread, 'TWD') + '</b></div>';
+          /* AI-D41: `pnl` converts every flow at its own trade-date rate, so it is the
+             FX-COMPLETE lifetime result — NOT the 浮動損益 it was labelled. */
+          html += '<div>累計總損益（含匯兌）&nbsp;&nbsp;<b style="color:' + pnlColor + '">' +
+                  f.signed(pt.pnl, 'TWD') + '</b></div>';
           if (pt.incomplete) {
             html += '<div style="color:' + C.amber + ';font-size:11px">部分標的當日無價格</div>';
           }

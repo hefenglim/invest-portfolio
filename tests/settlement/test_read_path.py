@@ -4,8 +4,9 @@
 Every store here is built by the REAL worker (``settle_worker.run``, inline) on the reference
 corpora — never hand-written generations. The oracle is v0.1.31's own output: the reference
 payloads (``tests/reference/payloads``, with PERF-F2's intended difference on
-``unquoted_ccy_cash``, ``tests/reference/perf_f2.py``) and the frozen v0.1.31 engine
-(``tests/reference``).
+``unquoted_ccy_cash``, ``tests/reference/perf_f2.py``, and the served trend points' ``pnl``,
+``tests/reference/trend_pnl.py`` — which is also what proves a day served from the STORE carries
+it) and the frozen v0.1.31 engine (``tests/reference``).
 
 - **clean** and **dirty inside the live window**: ``GET /api/dashboard`` is byte-identical to
   the v0.1.31 reference on every corpus (invariant 1), and the store was actually read;
@@ -38,14 +39,14 @@ from portfolio_dash.data_ingestion.store import insert_transaction, upsert_instr
 from portfolio_dash.portfolio import dashboard
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.dashboard import _build_dashboard
-from portfolio_dash.portfolio.dashboard_models import TrendSeries
+from portfolio_dash.portfolio.dashboard_models import TrendSeries, with_trend_pnl
 from portfolio_dash.portfolio.settlement_models import RunRequest
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
-from tests.reference import perf_f2
+from tests.reference import perf_f2, trend_pnl
 from tests.reference import trend_v0131 as ref
 from tests.reference.canon import canon, first_difference
 from tests.reference.corpora import (
@@ -100,7 +101,7 @@ def settled(tmp_path_factory: pytest.TempPathFactory) -> Settled:
 
 
 def _reference(name: str) -> bytes:
-    return perf_f2.expected_bytes(name, "dashboard.json")
+    return trend_pnl.expected_bytes(name, "dashboard.json")
 
 
 def _body(app: FastAPI, db: CorpusDB) -> bytes:
@@ -443,7 +444,8 @@ _SHAPES = {
 
 
 def _frozen_trend(conn: sqlite3.Connection, now: datetime, reporting: Currency) -> TrendSeries:
-    """v0.1.31's steps 9 / 9b on the frozen functions and unbounded (1900-) loads."""
+    """v0.1.31's steps 9 / 9b on the frozen functions and unbounded (1900-) loads, as served
+    (``with_trend_pnl``)."""
     i = load_inputs(conn, now, reporting)
     trend = ref.ref_daily_value_series(i.bundle, i.price_history, i.trend_fx_history,
                                        i.reporting, end=i.as_of,
@@ -453,7 +455,9 @@ def _frozen_trend(conn: sqlite3.Connection, now: datetime, reporting: Currency) 
     cash = ref.ref_daily_cash_series(i.cash_movements, i.cash_convs, i.cash_txs, i.cash_divs,
                                      i.instruments, i.cash_fx_history, i.reporting,
                                      end=i.as_of)
-    return ref.ref_compose_net_worth(trend, cash)
+    # the series as SERVED: each point's pnl (owner ruling 2026-10-22), which the dashboard
+    # sets on every day it serves (stored and live) and the frozen engine never did
+    return with_trend_pnl(ref.ref_compose_net_worth(trend, cash))
 
 
 @pytest.fixture(params=sorted(_SHAPES))
