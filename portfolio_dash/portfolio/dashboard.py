@@ -1318,7 +1318,7 @@ _ONE_REPLAY_HELD_ENTRIES = 8_000
 
 
 def _replay_once(cut: LedgerBundle, book_days: list[date], as_of: date
-                 ) -> tuple[Book | None, Iterable[tuple[date, Book]]]:
+                 ) -> tuple[Book | None, Iterator[tuple[date, Book]]]:
     """Today's book and the trend's ``(day, book)`` pairs from ONE replay of *cut* (the
     valuation cut at *as_of*) — post-v0.1.32 item 2.
 
@@ -1329,21 +1329,27 @@ def _replay_once(cut: LedgerBundle, book_days: list[date], as_of: date
     (``iter_books``' contract — ``cut.through(as_of)`` holds the same rows as *cut*; pinned
     by ``tests/portfolio/test_engine_iter_books.py``), and the pairs before it are the very
     pairs the trend read. Today's book is needed BEFORE the trend reads any (its flows leave
-    out today's book's refused payouts), so the trend's books are HELD until it does.
+    out today's book's refused payouts), so the trend's books are HELD until it does — and
+    released one by one as it reads them (:func:`_drained`): a book the trend has passed is
+    referenced by nothing here.
 
     **Bounded** (:data:`_ONE_REPLAY_MAX_BOOKS`, :data:`_ONE_REPLAY_HELD_ENTRIES`). Past either
     bound this answers ``None`` for today's book (``kpis_as_of`` replays it itself, as
     before) and the trend reads the books held so far, then the REST of the same replay
     lazily — never past its own last day: the two replays it always cost, and no more.
 
-    **Errors keep their order and their sentences.** When the replay raises while its books
-    are held (a row that cannot be booked, a day whose holdings cannot be assembled), today's
-    book is ``None`` — ``kpis_as_of`` replays and raises whatever it raised before — and the
-    trend receives the books held so far and then the same exception, raised when it asks for
-    the book of the day that failed: where its own replay raised it before.
+    **A failure falls back to the two replays, from scratch.** When the replay raises while
+    its books are held — a row that cannot be booked, a day whose holdings cannot be
+    assembled, or a ``MemoryError`` — what it holds is dropped, today's book is ``None``
+    (``kpis_as_of`` replays and raises whatever it raised before) and the trend gets its own
+    replay, started only when it first asks for a book (:func:`_replay_later`), where the
+    build started it before item 2: a ledger error is raised again on the same day, in the
+    same sentence. ``MemoryError`` is not re-raised at once because the hold may be what
+    exhausted the memory: the old path holds at most two books, so shedding the hold gives
+    the build the chance it had before item 2 instead of failing one that used to succeed.
     """
     if len(book_days) > _ONE_REPLAY_MAX_BOOKS:
-        return None, zip(book_days, iter_books(cut, book_days), strict=True)
+        return None, _replay_later(cut, book_days)
     days = [*book_days, as_of]
     held: list[tuple[date, Book]] = []
     entries = 0
@@ -1357,17 +1363,26 @@ def _replay_once(cut: LedgerBundle, book_days: list[date], as_of: date
             size = len(book.holdings) + len(book.opened_positions)
             entries += size
             if remaining and entries + size * remaining > _ONE_REPLAY_HELD_ENTRIES:
-                return None, chain(held, islice(pairs, remaining))
-    except Exception as exc:  # noqa: BLE001 - re-raised where the trend's replay raised it
-        return None, _then_raise(held, exc)
-    return held[-1][1], held[:-1]
+                return None, chain(_drained(held), islice(pairs, remaining))
+    except Exception:  # noqa: BLE001 - every failure takes the two-replay path (docstring)
+        held.clear()
+        return None, _replay_later(cut, book_days)
+    today = held.pop()[1]
+    return today, _drained(held)
 
 
-def _then_raise(held: list[tuple[date, Book]],
-                exc: Exception) -> Iterator[tuple[date, Book]]:
-    """*held*'s pairs, then *exc* — the trend's replay up to the day it failed."""
-    yield from held
-    raise exc
+def _drained(held: list[tuple[date, Book]]) -> Iterator[tuple[date, Book]]:
+    """*held*'s pairs in order, each removed from *held* as it is handed out, so a book the
+    consumer has moved past is no longer referenced from here."""
+    held.reverse()
+    while held:
+        yield held.pop()
+
+
+def _replay_later(cut: LedgerBundle, book_days: list[date]) -> Iterator[tuple[date, Book]]:
+    """The trend's own replay of *cut* over *book_days*, started only when the trend first
+    asks for a book — where the build started it before item 2 (the two-replay path)."""
+    yield from zip(book_days, iter_books(cut, book_days), strict=True)
 
 
 def _build_dashboard(
@@ -1689,6 +1704,9 @@ def _build_dashboard(
             bundle, price_history, fx_history, reporting, start=live, end=as_of,
             cash_movements=cash_movements, refused_dividends=book.refused_dividends,
             books=trend_books, options_open_before=options_before)
+        # The trend has read its books (or returned without them): drop the iterator, which
+        # still holds any it did not read, before the rest of the build (review of item 2).
+        del trend_books
         if not trend.available:
             trend_reason = "帳本中有交易日期缺少匯率資料"
         else:
