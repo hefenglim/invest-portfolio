@@ -7,7 +7,9 @@
   change; a reporting-currency change compares nothing; a calc-version change is compared with
   the reason 計算規則更新;
 - "Result — closes": a back-dated correction writes restatement rows with label, unit, notes,
-  reason and source; the go-live restates a retired month-end snapshot once (``cutover``);
+  reason and source; each close's reason names the claimed changes on or before its own end
+  day (owner ruling 2026-10-22); the go-live restates a retired month-end snapshot once
+  (``cutover``);
 - the ETA rests on the last successful run once there is one.
 """
 
@@ -180,6 +182,91 @@ def test_a_backdated_correction_restates_the_closes_it_moves(demo: CorpusDB) -> 
         assert r.history.last_common_day is not None
     finally:
         conn.close()
+
+
+def test_each_restated_close_names_the_changes_on_or_before_its_day(demo: CorpusDB) -> None:
+    """Accountant MINOR 2 (owner ruling 2026-10-22): one run, two corrections — a trade of
+    2026-02-05 moved to 02-27 and a dividend of 2026-05-08 raised. A close before May can only
+    have moved for the trade; a close from May on for both. Every restated close used to read
+    the run's EARLIEST change (「2026-02-05 交易更正後重新結算」 on May–July too)."""
+    assert start_run(demo, 1) == "published"
+    conn = open_db(demo.path)
+    try:
+        tx = int(conn.execute("SELECT id FROM transactions WHERE symbol = 'ORBT' "
+                              "AND trade_date = '2026-02-05'").fetchone()[0])
+        dv = int(conn.execute("SELECT id FROM dividends WHERE symbol = 'KEMB' "
+                              "AND date = '2026-05-08'").fetchone()[0])
+    finally:
+        conn.close()
+    _x(demo, "UPDATE transactions SET trade_date = '2026-02-27' WHERE id = ?", (tx,))
+    _x(demo, "UPDATE dividends SET gross = '7000', net = '7000' WHERE id = ?", (dv,))
+    assert start_run(demo, 2, scope="dirty", reason="prompt") == "published"
+    conn = open_db(demo.path)
+    try:
+        rows = st.restatements_of_run(conn, 2)
+    finally:
+        conn.close()
+    by_period = {(x.kind, x.period): (x.reason, x.source) for x in rows}
+    trade_only = ("2026-02-05 交易更正後重新結算", f"transactions:{tx}")
+    both = ("2026-02-05 交易、2026-05-08 股利更正後重新結算",
+            f"transactions:{tx},dividends:{dv}")
+    assert by_period[("M", "2026-02")] == trade_only
+    assert by_period[("M", "2026-04")] == trade_only
+    for month in ("2026-05", "2026-06", "2026-07"):
+        assert by_period[("M", month)] == both, month
+    # one reason per close: every field of a close carries it
+    for x in rows:
+        assert (x.reason, x.source) == by_period[(x.kind, x.period)]
+
+
+def _change(day: str, table: str = "transactions", key: str = "1", *, op: str | None = "update",
+            batch: str | None = None) -> st.ClaimedChange:
+    return st.ClaimedChange(table=table, row_key=key, day=date.fromisoformat(day), op=op,
+                            import_batch_id=batch)
+
+
+def test_a_reason_names_three_changes_and_counts_the_rest() -> None:
+    reason = settle_worker.correction_reason
+    changes = [
+        _change("2026-01-03", key="1", op="insert", batch="7"),
+        _change("2026-01-04", "dividends", "2", op="insert", batch="7"),
+        _change("2026-02-05", key="9"),
+        _change("2026-02-05", key="10"),
+        _change("2026-03-02", "fx_rates", "MYR/TWD", op=None),
+        _change("2026-06-09", "prices", "2330", op=None),
+        _change("2026-07-01", "cash_movements", "4", op="delete"),
+    ]
+    # an import batch is ONE entry (its inserts), dated by its earliest record; the two trades
+    # of 02-05 read once and are both counted
+    assert reason(changes, date(2026, 2, 28), calc_changed=False) == (
+        "2026-01-03 匯入批次（交易／股利）、2026-02-05 交易等 3 筆更正後重新結算",
+        "import_batch:7,transactions:9")
+    assert reason(changes, date(2026, 3, 31), calc_changed=False)[0] == (
+        "2026-01-03 匯入批次（交易／股利）、2026-02-05 交易、2026-03-02 匯率（MYR/TWD）"
+        "等 4 筆更正後重新結算")
+    assert reason(changes, date(2026, 7, 31), calc_changed=False)[0].endswith(
+        "等 6 筆更正後重新結算")
+    # nothing on or before the close: no correction to name
+    assert reason(changes, date(2025, 12, 31), calc_changed=False) == ("重新結算", None)
+    # a calc-version change keeps its own reason
+    assert reason(changes, date(2026, 2, 28), calc_changed=True)[0] == "計算規則更新"
+
+
+def test_a_lone_or_edited_imported_row_is_its_own_entry() -> None:
+    """A batch is two or more imported rows inserted or deleted together; an UPDATE of an
+    imported row is a correction of that row, and a batch of one is that one record."""
+    reason = settle_worker.correction_reason
+    assert reason([_change("2026-02-05", op="update", batch="7"),
+                   _change("2026-02-06", key="2", op="update", batch="7")],
+                  date(2026, 2, 28), calc_changed=False)[0] == (
+        "2026-02-05 交易、2026-02-06 交易更正後重新結算")
+    assert reason([_change("2026-02-05", op="delete", batch="8")], date(2026, 2, 28),
+                  calc_changed=False) == ("2026-02-05 交易更正後重新結算", "transactions:1")
+    # a counter names its symbol or pair, so two on one day never read the same
+    assert reason([_change("2026-06-09", "prices", "2330", op=None),
+                   _change("2026-06-09", "prices", "2603", op=None)], date(2026, 6, 30),
+                  calc_changed=False)[0] == (
+        "2026-06-09 價格（2330）、2026-06-09 價格（2603）更正後重新結算")
 
 
 def test_the_go_live_restates_a_retired_snapshot_once(demo: CorpusDB) -> None:

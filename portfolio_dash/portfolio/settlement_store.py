@@ -2568,32 +2568,42 @@ def claimed_attempts(conn: sqlite3.Connection, run_id: int) -> ClaimedAttempts:
 
 @dataclass(frozen=True)
 class ClaimedChange:
-    """The earliest change a run claimed: its table, record key and affected day."""
+    """A change a run claimed: a ledger or reference record (its ``op`` and its import batch)
+    or a price / FX counter (``op`` ``None``, ``row_key`` the symbol or the pair), with its
+    affected day — the earlier of the old and new day; a counter's earliest."""
 
     table: str
     row_key: str
     day: date
+    #: ``insert`` / ``update`` / ``delete`` for a record; ``None`` for a counter.
+    op: str | None = None
+    import_batch_id: str | None = None
+
+    @property
+    def is_counter(self) -> bool:
+        return self.op is None
 
 
-def earliest_claimed_change(conn: sqlite3.Connection, run_id: int) -> ClaimedChange | None:
-    """The claimed change with the earliest affected day — a ledger record, or a price / FX
-    counter by its key — the "source" a restatement names (§14.6)."""
-    best: ClaimedChange | None = None
-    row = conn.execute(
-        f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d FROM settle_change_log "
-        "WHERE claimed_run_id = ? AND d IS NOT NULL ORDER BY d, id LIMIT 1",
-        (run_id,)).fetchone()
-    if row is not None:
-        best = ClaimedChange(table=str(row[0]), row_key=str(row[1]),
-                             day=date.fromisoformat(str(row[2])))
-    agg = conn.execute(
-        "SELECT table_name, key, earliest FROM settle_change_agg WHERE claimed_run_id = ? "
-        "ORDER BY earliest, id LIMIT 1", (run_id,)).fetchone()
-    if agg is not None:
-        day = date.fromisoformat(str(agg[2]))
-        if best is None or day < best.day:
-            best = ClaimedChange(table=str(agg[0]), row_key=str(agg[1]), day=day)
-    return best
+def claimed_changes(conn: sqlite3.Connection, run_id: int) -> list[ClaimedChange]:
+    """Every change run *run_id* claimed that has an affected day, earliest first (records in
+    trail order within a day, then the counters) — what a restatement's reason names (§14.6,
+    ``settle_worker.correction_reason``)."""
+    out = [
+        ClaimedChange(table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])),
+                      op=str(r[3]), import_batch_id=None if r[4] is None else str(r[4]))
+        for r in conn.execute(
+            f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d, op, import_batch_id "
+            "FROM settle_change_log WHERE claimed_run_id = ? AND d IS NOT NULL "
+            "ORDER BY d, id", (run_id,))
+    ]
+    out += [
+        ClaimedChange(table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])))
+        for r in conn.execute(
+            "SELECT table_name, key, earliest FROM settle_change_agg WHERE claimed_run_id = ? "
+            "ORDER BY earliest, id", (run_id,))
+    ]
+    out.sort(key=lambda c: c.day)  # stable: records before counters on one day
+    return out
 
 
 def discard_run_results(conn: sqlite3.Connection, run_id: int) -> int:
@@ -2874,7 +2884,7 @@ __all__ = [
     "cutover_snapshots",
     "discard_run_results",
     "first_placeholder_day",
-    "earliest_claimed_change",
+    "claimed_changes",
     "generation_rows",
     "last_successful_run",
     "CODE_DIGEST",

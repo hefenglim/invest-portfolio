@@ -271,6 +271,83 @@ def _moved(old: Decimal | None, new: Decimal | None, unit: str) -> bool:
     return _text(old) != _text(new)
 
 
+#: A restated close's reason names at most this many changes, then 「等 N 筆」.
+REASON_NAMED_MAX = 3
+#: The reason of a restatement no claimed change explains (a 重新結算 that found a moved
+#: figure with nothing claimed on or before the close's day).
+REASON_RESETTLED_ZH = "重新結算"
+#: The reason of a run whose code or calc version changed (unchanged since §14.6).
+REASON_CALC_ZH = "計算規則更新"
+
+
+def correction_reason(changes: Sequence[st.ClaimedChange], through: date, *,
+                      calc_changed: bool) -> tuple[str, str | None]:
+    """A restated close's ``(reason, source)`` (§14.6; accountant MINOR 2, owner ruling
+    2026-10-22): every claimed change whose affected day is on or before the close's end day
+    *through*, earliest first — 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A run
+    names, per close, only what can have moved THAT close: one reason per run named its
+    earliest change on every close, so a May dividend correction read as a February trade.
+
+    - **An entry** is one ledger or reference record (「2026-02-05 交易」), one price / FX
+      counter with its symbol or pair (「2026-06-09 價格（2330）」), or one import batch — the
+      inserts and deletes of two or more claimed records sharing ``import_batch_id`` (an import
+      or its undo), dated by its earliest record on or before *through*
+      (「2026-01-03 匯入批次（交易／股利）」). An UPDATE of an imported row is a correction of
+      that row and stays its own entry: it carries the row's batch id, not an import.
+    - **At most** :data:`REASON_NAMED_MAX` distinct texts are named; when there are more
+      entries than texts named (more entries, or two the same day and table), the total follows
+      as 「等 N 筆」 — N counts entries, an import batch and a symbol's counter each one.
+    - The vocabulary is ``CHANGE_TABLE_ZH``'s. :data:`REASON_CALC_ZH` when the calc version
+      changed; :data:`REASON_RESETTLED_ZH` when no claimed change is on or before *through*.
+
+    ``source`` is a machine reference, never shown: the named entries' ``table:key`` (an import
+    batch ``import_batch:<id>``), comma-joined, or ``None``."""
+    sizes: dict[str, int] = {}
+    for c in changes:
+        if c.import_batch_id is not None and c.op in ("insert", "delete"):
+            sizes[c.import_batch_id] = sizes.get(c.import_batch_id, 0) + 1
+    entries: dict[tuple[str, str, str], tuple[date, list[str]]] = {}
+    for c in changes:
+        if c.day > through:
+            continue
+        batch = c.import_batch_id
+        if batch is not None and c.op in ("insert", "delete") and sizes[batch] >= 2:
+            key = ("batch", batch, "")
+        else:
+            key = ("counter" if c.is_counter else "record", c.table, c.row_key)
+        if key not in entries:
+            entries[key] = (c.day, [])
+        tables = entries[key][1]
+        if c.table not in tables:
+            tables.append(c.table)
+    order = list(CHANGE_TABLE_ZH)
+
+    def label(table: str) -> str:
+        return CHANGE_TABLE_ZH.get(table, table)
+
+    texts: list[str] = []
+    refs: list[str] = []
+    for (kind, a, b), (day, tables) in entries.items():
+        if kind == "batch":
+            joined = "／".join(label(t) for t in sorted(
+                tables, key=lambda t: (order.index(t) if t in order else len(order), t)))
+            text, ref = f"{day.isoformat()} 匯入批次（{joined}）", f"import_batch:{a}"
+        elif kind == "counter":
+            text, ref = f"{day.isoformat()} {label(a)}（{b}）", f"{a}:{b}"
+        else:
+            text, ref = f"{day.isoformat()} {label(a)}", f"{a}:{b}"
+        if text not in texts and len(texts) < REASON_NAMED_MAX:
+            texts.append(text)
+            refs.append(ref)
+    source = ",".join(refs) if refs else None
+    if calc_changed:
+        return REASON_CALC_ZH, source
+    if not entries:
+        return REASON_RESETTLED_ZH, None
+    more = f"等 {len(entries)} 筆" if len(entries) > len(texts) else ""
+    return f"{'、'.join(texts)}{more}更正後重新結算", source
+
+
 def _changes_phrase(tables: Sequence[Any]) -> str:
     """「2 筆交易與 14 筆價格變更」 from a change summary's per-table lines."""
     parts = [f"{t.changes} 筆{t.label}" for t in tables if t.changes]
@@ -1419,27 +1496,26 @@ class _Run:
                       state: st.StoreState) -> list[st.RestatementDraft]:
         """The closes this run moved (§14.6): compared with the previous generation's close of
         the same period when both hold it (same reporting currency, inside the range), and —
-        on a period's FIRST publish — with its retired month-end snapshot (``cutover``)."""
+        on a period's FIRST publish — with its retired month-end snapshot (``cutover``). Each
+        close's reason names the claimed changes on or before ITS end day
+        (:func:`correction_reason`)."""
         at = datetime.now(UTC)
         drafts: list[st.RestatementDraft] = []
         old = ({(p.kind, p.period): p for p in st.read_periods(self.conn, old_gen, start=lo,
                                                                end=hi)}
                if old_gen > 0 else {})
-        source_change = st.earliest_claimed_change(self.conn, self.run_id)
-        if old_gen > 0 and not state.calc_ok:
-            reason = "計算規則更新"
-        elif source_change is not None:
-            label = CHANGE_TABLE_ZH.get(source_change.table, source_change.table)
-            reason = f"{source_change.day.isoformat()} {label}更正後重新結算"
-        else:
-            reason = "重新結算"
-        source = (None if source_change is None
-                  else f"{source_change.table}:{source_change.row_key}")
+        claimed = st.claimed_changes(self.conn, self.run_id)
+        calc_changed = old_gen > 0 and not state.calc_ok
+        reasons: dict[date, tuple[str, str | None]] = {}
         snapshots: dict[str, st.SnapshotRow] | None = None
         for c in closes:
             new = c.period
             before = old.get((new.kind, new.period))
             if before is not None:
+                if new.end_day not in reasons:
+                    reasons[new.end_day] = correction_reason(claimed, new.end_day,
+                                                             calc_changed=calc_changed)
+                reason, source = reasons[new.end_day]
                 a, b = _kpi_values(before, self.reporting), _kpi_values(new, self.reporting)
                 for name in [*a, *(k for k in b if k not in a)]:
                     label, unit, _value = b[name] if name in b else a[name]
