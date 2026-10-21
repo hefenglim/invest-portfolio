@@ -508,6 +508,75 @@ def test_a_commit_during_the_computation_makes_the_entry_unreachable(
     assert reader.read() == {"x": 2}             # the commit made the entry unreachable
 
 
+def _late_snapshot_read(reader: Reader, *, before: Callable[[], None] = lambda: None,
+                        inside: Callable[[], None] = lambda: None) -> dict[str, int]:
+    """A ``snapshot=False`` computation that opens its OWN snapshot late, as the closes of
+    ``api/snapshots.py`` do (after a dashboard build), and marks it: *before* runs ahead of
+    the snapshot, *inside* after its read."""
+    marks: list[result_cache.SnapshotMark | None] = []
+
+    def compute() -> dict[str, int]:
+        before()
+        with result_cache.marked_snapshot(reader.conn) as mark:
+            marks.append(mark)
+            value = reader.compute()
+            inside()
+        return value
+
+    return result_cache.cached(reader.conn, name="probe", now=NOW, compute=compute,
+                               copy=_own, snapshot=False,
+                               mark=lambda: marks[-1] if marks else None)
+
+
+def test_a_commit_before_a_marked_snapshot_files_the_entry_under_the_new_state(
+    db: Path, reader: Reader,
+) -> None:
+    """Post-v0.1.32 item 4: a commit landing between the key and the computation's own late
+    snapshot is IN the result; the entry is filed under the state it was read from, so the
+    next caller — whose key is past that commit — hits (before: a miss, everything again)."""
+    assert _late_snapshot_read(reader, before=lambda: _commit(db)) == {"x": 2}
+    assert reader.read() == {"x": 2}
+    assert reader.runs == 1
+
+
+def test_a_commit_after_the_marked_snapshot_opened_keeps_the_entry_unreachable(
+    db: Path, reader: Reader,
+) -> None:
+    """The snapshot predates that commit, so its result is older than the current state: the
+    entry stays under the key taken before, which no later caller takes."""
+    assert _late_snapshot_read(reader, inside=lambda: _commit(db)) == {"x": 1}
+    assert reader.read() == {"x": 2}
+    assert reader.runs == 2
+
+
+def test_a_write_window_or_an_own_write_since_the_mark_refuses_it(reader: Reader) -> None:
+    """In-process signals refuse the re-key too: a write window opening after the snapshot
+    (the generation), the caller's own connection writing after it (``total_changes``)."""
+    with result_cache.marked_snapshot(reader.conn) as mark:
+        reader.conn.execute("SELECT x FROM t").fetchone()
+    key = result_cache.key_for(reader.conn, name="probe", now=NOW)
+    assert key is not None
+    current = result_cache._current_key(reader.conn, key, mark)
+    assert current == key
+    flight.note_write()
+    assert result_cache._current_key(reader.conn, key, mark) is None
+    with result_cache.marked_snapshot(reader.conn) as mark:
+        pass
+    reader.conn.execute("CREATE TEMP TABLE own (x)")
+    reader.conn.execute("INSERT INTO own VALUES (1)")
+    reader.conn.commit()
+    key = result_cache.key_for(reader.conn, name="probe", now=NOW)
+    assert key is not None
+    assert result_cache._current_key(reader.conn, key, mark) is None
+
+
+def test_a_mark_inside_an_open_transaction_is_none(reader: Reader) -> None:
+    reader.conn.execute("UPDATE t SET x = 5")
+    with result_cache.marked_snapshot(reader.conn) as mark:
+        assert mark is None
+    reader.conn.rollback()
+
+
 def test_a_miss_runs_inside_one_read_transaction_and_ends_it(reader: Reader) -> None:
     seen: list[bool] = []
 

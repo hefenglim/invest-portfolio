@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from itertools import count
@@ -687,6 +687,83 @@ def test_a_write_between_the_cached_build_and_the_read_transaction_rebuilds(
     truth = _periods(app, db, "M")[0]
     assert injected and raced["period"] == truth["period"] == f"{db.now:%Y-%m}"
     assert raced == truth
+
+
+@pytest.fixture
+def cached_app_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[CorpusDB], None]]:
+    """Make a corpus copy the app's database, so the listings are cached (the result cache
+    serves only that file)."""
+    def use(db: CorpusDB) -> None:
+        monkeypatch.setenv("DB_PATH", str(db.path))
+        get_settings.cache_clear()
+        result_cache.reset()
+
+    yield use
+    result_cache.reset()
+    get_settings.cache_clear()
+
+
+_TODAYS_BUY = ("INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+               "trade_date) VALUES ('tw_broker', '2330', 'BUY', '1000', '600', '855', '0', ?)")
+
+
+def test_a_job_writing_during_a_listing_miss_leaves_the_listing_cached(
+        app: FastAPI, settled: Settled, cached_app_db: Callable[[CorpusDB], None],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-v0.1.32 item 4. The listing's key is taken before its computation, whose closes
+    open their read snapshot only after the dashboard build — seconds on a miss on prod. A
+    job committing in between is IN the closes (the build is redone inside the snapshot,
+    review G #8), yet the entry was filed under the older key, so the next listing computed
+    everything again (~7 s on prod). It is now filed under the state it was read from: the
+    next listing is a hit, and the same answer."""
+    db = settled("rich")
+    cached_app_db(db)
+    real = build_dashboard_keyed
+    injected: list[bool] = []
+
+    def build_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real(*a, **kw)
+        if not injected:
+            injected.append(True)
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", build_then_a_job_writes)
+    first = _get(app, db, "/api/snapshots")
+    second = _get(app, db, "/api/snapshots")
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", real)
+    stats = result_cache.stats()["periods:M"]
+    assert injected and (stats.misses, stats.hits) == (1, 1)
+    assert second == first
+    result_cache.reset()                               # the truth, computed afresh
+    assert _get(app, db, "/api/snapshots") == first
+
+
+def test_a_job_writing_after_the_closes_snapshot_opened_is_computed_again(
+        app: FastAPI, settled: Settled, cached_app_db: Callable[[CorpusDB], None],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side: a commit AFTER the closes' snapshot opened is not in them, so the
+    entry stays under the key taken before — the next listing computes the new state."""
+    db = settled("rich")
+    cached_app_db(db)
+    monkeypatch.setenv("PD_SETTLE", "off")             # every close live, so _live_closes runs
+    real = snapshots._live_closes
+    injected: list[bool] = []
+
+    def closes_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real(*a, **kw)
+        if not injected:
+            injected.append(True)
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "_live_closes", closes_then_a_job_writes)
+    before = _get(app, db, "/api/snapshots")["rows"][0]
+    after = _get(app, db, "/api/snapshots")["rows"][0]
+    stats = result_cache.stats()["periods:M"]
+    assert injected and (stats.misses, stats.hits) == (2, 0)
+    assert before["month"] == after["month"] == f"{db.now:%Y-%m}"
+    assert before["total_value"] != after["total_value"]   # the buy is in the second only
 
 
 # ---------------------------------------------------------------------------------------------

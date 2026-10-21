@@ -43,7 +43,11 @@ identity ``(st_dev, st_ino)`` is checked on every read: a file replaced under th
 between the two can only make an entry NEWER than its key (the next caller reads the moved
 version and misses); read the other way round, an entry built from the old data would sit
 under the new version and be served after the commit. A commit DURING the computation makes
-the entry unreachable for the same reason: the key is the one taken at compute START.
+the entry unreachable for the same reason: the key is the one taken at compute START —
+unless the computation opened its own snapshot late and marked it (:func:`marked_snapshot`,
+:func:`serve`'s ``mark``): a commit that landed BEFORE that snapshot is in the result, and
+when no commit has landed since, the entry is filed under the current key instead
+(post-v0.1.32 item 4, the closes of ``api/snapshots.py``).
 
 **No caching** (the key is ``None`` and the computation runs alone, exactly as before) when
 the caller's connection is in a transaction (its own uncommitted changes must be in its
@@ -308,6 +312,57 @@ def read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
         conn.execute("COMMIT")
 
 
+class SnapshotMark(NamedTuple):
+    """Which committed state a read snapshot holds (:func:`marked_snapshot`): the write
+    generation read before it opened; its connection's own ``PRAGMA data_version`` read
+    inside it — that value holds still for the rest of the transaction, and moves after it
+    only when ANOTHER connection has committed since; and the connection's own
+    ``total_changes``, which moves when it writes itself."""
+
+    generation: int
+    conn_version: int
+    conn_changes: int
+
+
+@contextmanager
+def marked_snapshot(conn: sqlite3.Connection) -> Iterator[SnapshotMark | None]:
+    """:func:`read_snapshot`, yielding the :class:`SnapshotMark` of the state it reads —
+    ``None`` when *conn* is already in a transaction (its reads are that transaction's, which
+    may hold its own changes: nothing to mark). A caller that computed a cached result from
+    this snapshot hands the mark to :func:`serve` (``mark=``), so the entry is filed under
+    the state it was computed from when that state is still the current one."""
+    if conn.in_transaction:
+        yield None
+        return
+    generation = flight.generation()
+    with read_snapshot(conn):
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()  # opens the snapshot
+        yield SnapshotMark(generation, int(conn.execute("PRAGMA data_version").fetchone()[0]),
+                           conn.total_changes)
+
+
+def _current_key(conn: sqlite3.Connection, key: CacheKey,
+                 mark: SnapshotMark | None) -> CacheKey | None:
+    """*key* with the CURRENT version when the state *mark* describes is still the current
+    one, else ``None``: no write window has opened or closed and no session has committed in
+    this process (the generation), no other connection has committed (the connection's own
+    ``data_version``) and the connection has written nothing (``total_changes``) since the
+    snapshot opened. The version is read AFTER the first check and BEFORE the others, so any
+    change from the snapshot's opening up to the last check refuses: the version read is
+    the version of exactly the marked state."""
+    if (mark is None or conn.in_transaction or flight.generation() != mark.generation
+            or conn.total_changes != mark.conn_changes):
+        return None
+    version = data_version(key.db_path)
+    if version is None:
+        return None
+    if int(conn.execute("PRAGMA data_version").fetchone()[0]) != mark.conn_version:
+        return None
+    if flight.generation() != mark.generation or conn.total_changes != mark.conn_changes:
+        return None
+    return key._replace(write_generation=mark.generation, data_version=version)
+
+
 # --- entries -------------------------------------------------------------------------------
 
 
@@ -349,6 +404,7 @@ def cached[T](
     extra: Hashable = (),
     restamp: Callable[[T], T] | None = None,
     snapshot: bool = True,
+    mark: Callable[[], SnapshotMark | None] | None = None,
 ) -> T:
     """``compute()``'s result for this request — from the cache, from an identical
     computation already running, or computed now (and kept as the latest entry of *name*).
@@ -360,6 +416,9 @@ def cached[T](
       and the leader's own result alike.
     * *snapshot* runs a miss inside :func:`read_snapshot` (see the module docstring for when
       to pass ``False``).
+    * *mark* (with ``snapshot=False``) answers, once the computation returned, the
+      :class:`SnapshotMark` of the read snapshot it opened itself (:func:`marked_snapshot`);
+      see :func:`serve`.
 
     An uncacheable request (:func:`key_for` is ``None``) runs ``compute()`` directly, as the
     code did before the cache — no snapshot, no sharing. :func:`cached_keyed` also returns
@@ -367,7 +426,7 @@ def cached[T](
     """
     value, _key = cached_keyed(
         conn, name=name, now=now, compute=compute, copy=copy, reporting=reporting,
-        extra=extra, restamp=restamp, snapshot=snapshot)
+        extra=extra, restamp=restamp, snapshot=snapshot, mark=mark)
     return value
 
 
@@ -382,6 +441,7 @@ def cached_keyed[T](
     extra: Hashable = (),
     restamp: Callable[[T], T] | None = None,
     snapshot: bool = True,
+    mark: Callable[[], SnapshotMark | None] | None = None,
 ) -> tuple[T, CacheKey | None]:
     """:func:`cached`, plus the :class:`CacheKey` the answer was served under (``None`` when
     it was computed uncached).
@@ -390,11 +450,13 @@ def cached_keyed[T](
     snapshot taken after that key's version was read, so it is never older than the key. A
     second cached result derived from this one may be filed under its own key only when the
     two keys agree on the state (:func:`same_state`) — otherwise it would sit under a
-    version newer than the data it was computed from.
+    version newer than the data it was computed from. With *mark* the returned key is still
+    the one taken before the computation (the conservative answer), even when the entry was
+    filed under a newer one (:func:`serve`).
     """
     key = key_for(conn, name=name, now=now, reporting=reporting, extra=extra)
     return serve(conn, key, name=name, compute=compute, copy=copy, restamp=restamp,
-                 snapshot=snapshot), key
+                 snapshot=snapshot, mark=mark), key
 
 
 def serve[T](
@@ -406,11 +468,21 @@ def serve[T](
     copy: Callable[[T], T],
     restamp: Callable[[T], T] | None = None,
     snapshot: bool = True,
+    mark: Callable[[], SnapshotMark | None] | None = None,
 ) -> T:
     """Serve *compute*'s result under a key the caller already took (:func:`key_for`) —
     for a caller that must inspect the key BEFORE deciding what to compute. A key taken
     earlier is the conservative choice: a commit since then only makes the entry
-    unreachable. ``None`` computes directly, uncached."""
+    unreachable. ``None`` computes directly, uncached.
+
+    *mark* (post-v0.1.32 item 4) is for a computation that opens its OWN read snapshot late
+    (``snapshot=False``) — ``api/snapshots.py``'s closes open theirs after a dashboard build
+    that may take seconds on a miss. A commit landing between the key and that snapshot (a
+    job writing meanwhile) is IN the result, yet the entry sat under the older key and was
+    unreachable, so the next request computed it all again. After the computation, *mark*
+    answers the :class:`SnapshotMark` of the snapshot it read (or ``None``): when that state
+    is still the current one (:func:`_current_key`) the entry is filed under the CURRENT key
+    instead — the key the next caller will take. Otherwise, under the key taken before."""
     if key is None:
         with _lock:
             _count(name, "uncached")
@@ -434,7 +506,8 @@ def serve[T](
                 value = compute()
         else:
             value = compute()
-        _store(key, copy(value))
+        filed = (_current_key(conn, key, mark()) if mark is not None else None) or key
+        _store(filed, copy(value))
         return value
 
     return _finish(flight.coalesce(key, lead, copy=copy), restamp)
@@ -595,6 +668,7 @@ def _run_prewarm(fn: Callable[[], object]) -> None:
 
 __all__ = [
     "CacheKey",
+    "SnapshotMark",
     "Stats",
     "cached",
     "cached_keyed",
@@ -603,6 +677,7 @@ __all__ = [
     "invalidate",
     "is_app_database",
     "key_for",
+    "marked_snapshot",
     "read_snapshot",
     "reset",
     "same_state",

@@ -267,25 +267,22 @@ def _data_version(conn: sqlite3.Connection) -> int | None:
     return int(conn.execute("PRAGMA data_version").fetchone()[0])
 
 
-def _snapshot_version(conn: sqlite3.Connection) -> int:
-    """``PRAGMA data_version`` as at this request's read snapshot: a read starts the snapshot
-    first, and the value then holds still for the rest of the transaction."""
-    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-    return int(conn.execute("PRAGMA data_version").fetchone()[0])
-
-
 def _inputs(conn: sqlite3.Connection, data: DashboardData, *, now: datetime,
-            reporting: Currency, before: int | None) -> _Inputs:
-    """Read inside this request's ONE read snapshot. *data* is the (cached) build taken before
-    it, and *before* the connection's ``data_version`` read before that build. The build is
-    redone inside the snapshot — uncached, consistent — when it may describe another state
-    than the snapshot (review G #8): another connection committed since *before* (a ledger
-    write lands between the cached build and this transaction; under ``PD_SETTLE=off`` the
-    store views below are both ``None`` and cannot see it), or the store this snapshot sees
-    is not the one the build saw (a run published in between). The pool ledgers come through
-    the cash API's one reviewed read (``load_cash_ledgers``, ⑪); a live close's cash at D
-    re-applies its own book's refusals (``cash_at``)."""
-    moved = before is not None and _snapshot_version(conn) != before
+            reporting: Currency, before: int | None,
+            mark: result_cache.SnapshotMark | None) -> _Inputs:
+    """Read inside this request's ONE read snapshot, whose *mark* carries the connection's
+    ``data_version`` as at the snapshot (``result_cache.marked_snapshot``; ``None`` when the
+    connection was already in a transaction, and then *before* is ``None`` too). *data* is
+    the (cached) build taken before it, and *before* the connection's ``data_version`` read
+    before that build. The build is redone inside the snapshot — uncached, consistent — when
+    it may describe another state than the snapshot (review G #8): another connection
+    committed since *before* (a ledger write lands between the cached build and this
+    transaction; under ``PD_SETTLE=off`` the store views below are both ``None`` and cannot
+    see it), or the store this snapshot sees is not the one the build saw (a run published
+    in between). The pool ledgers come through the cash API's one reviewed read
+    (``load_cash_ledgers``, ⑪); a live close's cash at D re-applies its own book's refusals
+    (``cash_at``)."""
+    moved = before is not None and mark is not None and mark.conn_version != before
     if moved or _store_view(data.history_state) != _state_view(conn, reporting):
         data = build_dashboard(conn, now=now, reporting=reporting)
     today = now.date()
@@ -314,16 +311,18 @@ _Select = Callable[[date | None], list[_Period]]
 
 
 def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
-            reporting: Currency, detail: bool) -> tuple[list[_Served], list[_Period]]:
-    """The closes of the periods *select* picks (in its order) and the periods it picked,
-    inside ONE read snapshot opened after the dashboard's cached build (PERF-S12): stored
-    where :func:`_from_store` says, live otherwise, each with the read-time fields of
-    §11.2 / §14.6."""
+            reporting: Currency, detail: bool
+            ) -> tuple[list[_Served], list[_Period], result_cache.SnapshotMark | None]:
+    """The closes of the periods *select* picks (in its order), the periods it picked and
+    the mark of the state they were read from, inside ONE read snapshot opened after the
+    dashboard's cached build (PERF-S12): stored where :func:`_from_store` says, live
+    otherwise, each with the read-time fields of §11.2 / §14.6. The mark lets the listing
+    file its cache entry under that state (post-v0.1.32 item 4, ``result_cache.serve``)."""
     today = now.date()
     before = _data_version(conn)
     data, _key = build_dashboard_keyed(conn, now=now, reporting=reporting)
-    with result_cache.read_snapshot(conn):
-        inputs = _inputs(conn, data, now=now, reporting=reporting, before=before)
+    with result_cache.marked_snapshot(conn) as mark:
+        inputs = _inputs(conn, data, now=now, reporting=reporting, before=before, mark=mark)
         history = inputs.history
         periods = select(inputs.first_row)
         served: dict[tuple[str, str], _Served] = {}
@@ -353,7 +352,7 @@ def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
             s.restatements = st.restatements_for(conn, p.kind, p.period)
             _read_time_fields(s, history=history, stale=stale, inputs=inputs, today=today)
             out.append(s)
-    return out, periods
+    return out, periods, mark
 
 
 def _read_time_fields(s: _Served, *, history: HistoryState, stale: tuple[date, date] | None,
@@ -546,6 +545,8 @@ def _listing(conn: sqlite3.Connection, *, kind: Kind, limit: int, now: datetime,
     this request's clock."""
     today = now.date()
 
+    marks: list[result_cache.SnapshotMark | None] = []
+
     def compute() -> tuple[list[_Served], int]:
         total = 0
 
@@ -555,13 +556,19 @@ def _listing(conn: sqlite3.Connection, *, kind: Kind, limit: int, now: datetime,
             total = len(periods)
             return periods[:limit]
 
-        served, _picked = _closes(conn, select, now=now, reporting=reporting, detail=False)
+        served, _picked, mark = _closes(conn, select, now=now, reporting=reporting,
+                                        detail=False)
+        marks.append(mark)
         return served, total
 
+    # The closes open their snapshot only after the dashboard build — seconds on a miss —
+    # so a job committing meanwhile is in the result although the key predates it: the mark
+    # files the entry under the state it was read from, when that is still current
+    # (post-v0.1.32 item 4: the next listing used to compute everything again).
     served, total = result_cache.cached(
         conn, name=f"periods:{kind}", now=now, reporting=reporting,
         extra=(limit, flags.settle_enabled()), compute=compute, copy=copy.deepcopy,
-        snapshot=False)
+        snapshot=False, mark=lambda: marks[-1] if marks else None)
     return _labelled(served, conn, now), total
 
 
@@ -624,7 +631,7 @@ def period_detail(conn: sqlite3.Connection, *, kind: Kind, period: str, now: dat
             return []
         return [p for p in _periods(first, today, kind) if p.period == period]
 
-    closes, picked = _closes(conn, select, now=now, reporting=reporting, detail=True)
+    closes, picked, _mark = _closes(conn, select, now=now, reporting=reporting, detail=True)
     if not picked:
         return None
     (served,) = _labelled(closes, conn, now)
