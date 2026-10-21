@@ -47,6 +47,19 @@
     return (Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : 0) + '%';
   };
 
+  /* The short-window hint of an annualised XIRR (FU-D26.7): XIRR annualises, so a sub-year
+     observation window makes the figure volatile. ONE wording for the KPI card and the 月度成績
+     累計 XIRR cell (accountant MINOR 7b, owner ruling 2026-10-22 — the 30-day gate itself stays
+     the server's). `days` is the server's `xirr_window_days`, a plain count of days, never
+     money — compared, never computed with. Only with an XIRR value; `null` when no hint. */
+  const XIRR_SHORT_WINDOW_DAYS = 365;
+  function xirrWindowHint(xirr, days) {
+    if (xirr === null || xirr === undefined || days === null || days === undefined
+        || days >= XIRR_SHORT_WINDOW_DAYS) return null;
+    return { text: '觀察期 ' + days + ' 天・短窗參考',
+             title: '觀察期不足一年，年化 XIRR 波動較大，僅供參考。' };
+  }
+
   /* M1-03 / D21 — the provenance sentence for a SPINOFF child's 股利回收率. Both totals were
      scaled by the same cost_carry, so the child's ratio IS the parent's, built on dividends
      the child never paid; the server says whose (payback_from_symbol) and how much was
@@ -381,14 +394,10 @@
         addFlag(card, '資料不足',
           (D.freshness && D.freshness.xirr_unavailable_reason) || '資料不足');
       }
-      /* Short-window confidence hint: XIRR annualizes, so a sub-year observation window
-         makes the figure volatile. window_days is a plain count (not money) — safe to
-         compare/render directly. Only shown when an XIRR value is present. */
-      const xirrWin = k && k.xirr_window_days;
-      if (!xirrNil && xirrWin !== null && xirrWin !== undefined && xirrWin < 365) {
-        addFlag(card, '觀察期 ' + xirrWin + ' 天・短窗參考',
-          '觀察期不足一年，年化 XIRR 波動較大，僅供參考。', 'badge-window-mini');
-      }
+      /* Short-window confidence hint (`xirrWindowHint`, shared with 月度成績): only shown
+         when an XIRR value is present. */
+      const hint = xirrWindowHint(k && k.xirr, k && k.xirr_window_days);
+      if (hint) addFlag(card, hint.text, hint.title, 'badge-window-mini');
       addCap(card, '資金加權・FX-aware・決策主指標');
       sign(card, k && k.xirr);
     }
@@ -1092,7 +1101,8 @@
      every figure is since inception as at the period's END, which is why the columns read
      累計 — a year row is never that year's own return (當期報酬（TWR） is). Two sources:
        · 月 — GET /api/snapshots?limit=12 (its old row fields + the additive kind,
-         provisional, stale, notes, xirr_reason, period_twr, period_twr_reason, restated);
+         provisional, stale, notes, xirr_reason, xirr_window_days, period_twr,
+         period_twr_reason, restated, current);
        · 年 — GET /api/settlement/periods?kind=Y (PeriodClose rows: the figures in `kpi`).
      Both are normalised to ONE row view below — field picking, no arithmetic: every number
      is the server's string and is only formatted. Every reason a figure is blank or marked
@@ -1196,14 +1206,16 @@
       return {
         label: r.period, ccy: k.reporting_ccy, total_value: k.total_market_value,
         total_return: k.total_return, rate: k.total_return_rate, xirr: k.xirr,
-        xirr_reason: k.xirr_reason, twr: k.period_twr, twr_reason: k.period_twr_reason,
+        xirr_reason: k.xirr_reason, xirr_window_days: k.xirr_window_days,
+        twr: k.period_twr, twr_reason: k.period_twr_reason,
         notes: k.notes, stale: !!r.stale, raw: r,
       };
     }
     return {
       label: r.month, ccy: r.reporting_ccy, total_value: r.total_value,
       total_return: r.total_return, rate: r.total_return_rate, xirr: r.xirr,
-      xirr_reason: r.xirr_reason, twr: r.period_twr, twr_reason: r.period_twr_reason,
+      xirr_reason: r.xirr_reason, xirr_window_days: r.xirr_window_days,
+      twr: r.period_twr, twr_reason: r.period_twr_reason,
       notes: r.notes, stale: !!r.stale, raw: r,
     };
   }
@@ -1331,7 +1343,18 @@
       ret.textContent = s.total_return == null ? f.NULL_GLYPH : f.signed(s.total_return, s.ccy);
       tr.appendChild(ret);
       tr.appendChild(cell(s.rate, true));
-      tr.appendChild(cell(s.xirr, true, s.xirr_reason));
+      const xirrTd = cell(s.xirr, true, s.xirr_reason);
+      /* the KPI card's own short-window hint, under the figure (accountant MINOR 7b): a
+         first-year month's 累計 XIRR annualises a short window */
+      const hint = xirrWindowHint(s.xirr, s.xirr_window_days);
+      if (hint) {
+        const host = el('div', 'snap-window');
+        const b = el('span', 'badge badge-window-mini', hint.text);
+        b.title = hint.title;
+        host.appendChild(b);
+        xirrTd.appendChild(host);
+      }
+      tr.appendChild(xirrTd);
       tr.appendChild(cell(s.twr, true, s.twr_reason));
       tbody.appendChild(tr);
     });

@@ -261,6 +261,8 @@ def test_the_snapshot_rows_are_the_month_closes(app: FastAPI, settled: Settled) 
         assert r["by_currency"] == k["by_currency_value"]
         assert (r["xirr_reason"], r["period_twr"], r["period_twr_reason"]) == (
             k["xirr_reason"], k["period_twr"], k["period_twr_reason"])
+        # 累計 XIRR's observation window — the 月度成績 cell's 「觀察期 N 天・短窗參考」 (MINOR 7b)
+        assert r["xirr_window_days"] == k["xirr_window_days"]
         assert r["notes"] == k["notes"]
         assert r["provisional"] is None and r["stale"] is False and r["restated"] is None
         if r is not current:

@@ -6,8 +6,9 @@ Three readers share ONE rule for which close is served from where:
 - ``GET /api/snapshots`` — the month rows of 月度成績 (:func:`snapshot_rows`): the row fields
   of the retired 23:50 snapshot (``month, as_of, reporting_ccy, total_value, total_return,
   total_return_rate, xirr, by_currency``) plus the additive ``kind``, ``provisional``,
-  ``stale``, ``notes``, ``xirr_reason``, ``period_twr``, ``period_twr_reason`` and
-  ``restated``. MONTHS ONLY — a year row must never crowd a month out of ``limit=12``;
+  ``stale``, ``notes``, ``xirr_reason``, ``xirr_window_days``, ``period_twr``,
+  ``period_twr_reason``, ``restated`` and ``current``. MONTHS ONLY — a year row must never
+  crowd a month out of ``limit=12``;
 - ``GET /api/settlement/periods?kind=M|Y`` — the closes themselves (:func:`period_rows`);
 - ``GET /api/settlement/periods/{kind}/{period}`` — one close with its holdings and cash at
   its day (:func:`period_detail`).
@@ -610,6 +611,9 @@ def _month_row(s: _Served, now: datetime) -> dict[str, Any]:
         "stale": s.close.stale,
         "notes": wire["notes"],
         "xirr_reason": kpi.xirr_reason,
+        # the 累計 XIRR's observation window in days — the cell's 「觀察期 N 天・短窗參考」
+        # under a year (accountant MINOR 7b, owner ruling 2026-10-22), as the KPI card shows it
+        "xirr_window_days": kpi.xirr_window_days,
         "period_twr": wire["period_twr"],
         "period_twr_reason": kpi.period_twr_reason,
         "restated": restated,
