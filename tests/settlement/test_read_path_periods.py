@@ -18,6 +18,7 @@ join; 更新前版本 and no ``dividends_receivable`` on a stale row; the restat
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -40,6 +41,8 @@ from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.dashboard import build_dashboard_keyed
 from portfolio_dash.portfolio.returns import DividendRefusals, dividend_key
 from portfolio_dash.portfolio.settlement_models import PeriodHolding, PeriodKpi
+from portfolio_dash.shared import result_cache
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import valued_rows_as_of
 from tests.reference import perf_f2
@@ -98,8 +101,10 @@ def settled(tmp_path_factory: pytest.TempPathFactory) -> Settled:
 
 
 def _get(app: FastAPI, db: CorpusDB, url: str, *, now: datetime | None = None,
-         params: dict[str, Any] | None = None) -> Any:
+         params: dict[str, Any] | None = None,
+         trace: Callable[[str], None] | None = None) -> Any:
     conn = open_db(db.path)
+    conn.set_trace_callback(trace)
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_now] = lambda: now or db.now
     app.dependency_overrides[get_reporting] = lambda: db.reporting
@@ -505,6 +510,44 @@ def test_the_provisional_note_names_the_end_days_market(
     july = next(r for r in _get(app, db, "/api/snapshots", now=monday)["rows"]
                 if r["month"] == "2026-07")
     assert july["provisional"] == "月底收盤價尚未確定：美股報價工作未完成"
+
+
+def test_one_listing_reads_the_quote_runs_and_the_schedule_once(
+        app: FastAPI, corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-v0.1.32 item 3: the 暫定 walk asks ``final_through`` once per day from the end day
+    back to ``through`` — here three probes (07-31, 07-30, 07-29) after the first answer — and
+    each answer read ``job_runs`` (its rows and the go-lives) and ``schedule_config`` again,
+    on every listing request, cache hits included. One request now reads each once, and the
+    label is the same."""
+    db = corpus_db("demo")
+    _quote_jobs(db, partial_on=date(2026, 7, 29), first=date(2026, 7, 1),
+                last=date(2026, 7, 31))
+    monkeypatch.delenv("PD_DISABLE_SCHEDULER", raising=False)
+    monkeypatch.setenv("PD_SETTLE", "off")
+    # the corpus is the app's database, so the closes are cached: a hit computes nothing and
+    # the labelling is the only reader of the two tables
+    monkeypatch.setenv("DB_PATH", str(db.path))
+    get_settings.cache_clear()
+    result_cache.reset()
+    saturday = datetime(2026, 8, 1, 10, 0, tzinfo=TPE)
+    expected = "月底收盤價尚未確定：台股報價工作未完成"
+    try:
+        miss = _get(app, db, "/api/snapshots", now=saturday)
+        reads: Counter[str] = Counter()
+
+        def trace(sql: str) -> None:
+            for table in ("job_runs", "schedule_config"):
+                if table in sql:
+                    reads[table] += 1
+
+        hit = _get(app, db, "/api/snapshots", now=saturday, trace=trace)
+        assert result_cache.stats()["periods:M"].hits == 1
+    finally:
+        result_cache.reset()
+        get_settings.cache_clear()
+    assert hit == miss
+    assert next(r for r in hit["rows"] if r["month"] == "2026-07")["provisional"] == expected
+    assert reads == {"job_runs": 2, "schedule_config": 1}
 
 
 # ---------------------------------------------------------------------------------------------

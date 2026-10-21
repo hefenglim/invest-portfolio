@@ -491,16 +491,71 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
     *since* bounds the fires examined (:data:`SINCE_GO_LIVE` = every quote run since go-live,
     what a run's ``unconfirmed_closes`` needs); without it only the days that can still block
     are examined (the status poll).
+
+    A caller that asks several times for one *now* (the 暫定 walk of ``api/snapshots.py``)
+    uses :class:`FinalThroughReader`, which reads the two tables once.
     """
+    return FinalThroughReader(conn, now)(since=since)
+
+
+class FinalThroughReader:
+    """:func:`final_through` for ONE *now*, asked any number of times (post-v0.1.32 item 3).
+
+    ``schedule_config`` is read on the first call; the quote jobs' ``job_runs`` rows once,
+    from the earliest *since* asked so far (a later call asking for an EARLIER window reads
+    them again, from there). Every answer is computed from those rows and equals
+    ``final_through(conn, now, since=...)``: the rows a wider read adds start more than two
+    days before the call's own window (:func:`_quote_runs`' margin), and no answer reads a
+    row started before its window's first fire — :func:`_verdict` starts at the fire, and the
+    unknown-schedule days start at the window. Answers are kept per *since* (they are a pure
+    function of the rows and *now*); callers must not mutate one.
+
+    Scoped to one request: the rows are a snapshot of the moment they were read, and the
+    answer depends on *now* beyond its date (a fire later than *now* is not ``ok``), so a
+    reader is never kept across requests.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, now: datetime) -> None:
+        self._conn = conn
+        self._now = now
+        self._schedule: list[_Schedule] | None = None
+        self._runs: tuple[dict[str, list[_JobRun]], dict[str, datetime]] | None = None
+        self._runs_from: date | None = None
+        self._answers: dict[date | None, FinalThrough] = {}
+
+    def __call__(self, *, since: date | None = None) -> FinalThrough:
+        answer = self._answers.get(since)
+        if answer is None:
+            answer = self._answers[since] = self._compute(since)
+        return answer
+
+    def _compute(self, since: date | None) -> FinalThrough:
+        now = self._now
+        today = _today(now)
+        yesterday = today - _ONE_DAY
+        if os.environ.get("PD_DISABLE_SCHEDULER") == "1":
+            return FinalThrough(through=yesterday)
+        window_from = since if since is not None else today - timedelta(days=STALE_AGE_DAYS + 1)
+        if self._schedule is None:
+            self._schedule = _schedule_rows(self._conn, now)
+        schedule = self._schedule
+        if not schedule:
+            return FinalThrough(through=yesterday)
+        if self._runs is None or self._runs_from is None or window_from < self._runs_from:
+            self._runs = _quote_runs(self._conn, window_from)
+            self._runs_from = window_from
+        runs_by_job, go_lives = self._runs
+        return _final_through(schedule, runs_by_job, go_lives, now=now,
+                              window_from=window_from)
+
+
+def _final_through(schedule: Sequence[_Schedule], runs_by_job: dict[str, list[_JobRun]],
+                   go_lives: dict[str, datetime], *, now: datetime,
+                   window_from: date) -> FinalThrough:
+    """:func:`final_through`'s judgement over rows already read (the reads are
+    :class:`FinalThroughReader`'s)."""
     today = _today(now)
     yesterday = today - _ONE_DAY
-    if os.environ.get("PD_DISABLE_SCHEDULER") == "1":
-        return FinalThrough(through=yesterday)
-    window_from = since if since is not None else today - timedelta(days=STALE_AGE_DAYS + 1)
-    schedule = _schedule_rows(conn, now)
-    if not schedule:
-        return FinalThrough(through=yesterday)
-    runs_by_job, go_lives = _quote_runs(conn, window_from)
     blocked: dict[date, set[str]] = {}
     unconfirmed: dict[date, set[str]] = {}
 
@@ -2151,6 +2206,7 @@ __all__ = [
     "CancelResult",
     "CannotCancel",
     "FinalThrough",
+    "FinalThroughReader",
     "NotRunning",
     "RunEnd",
     "SettlementError",

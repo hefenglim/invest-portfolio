@@ -54,7 +54,12 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from portfolio_dash.api.routers.cash import CashLedgers, load_cash_ledgers
-from portfolio_dash.api.settlement_service import SINCE_GO_LIVE, FinalThrough, final_through
+from portfolio_dash.api.settlement_service import (
+    SINCE_GO_LIVE,
+    FinalThrough,
+    FinalThroughReader,
+    final_through,
+)
 from portfolio_dash.data_ingestion.store import list_accounts, load_ledger_bundle
 from portfolio_dash.portfolio import period_close as pc
 from portfolio_dash.portfolio import settlement_store as st
@@ -482,7 +487,7 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
 # =============================================================================================
 
 
-def _end_day_jobs(conn: sqlite3.Connection, now: datetime, ft: FinalThrough,
+def _end_day_jobs(final: FinalThroughReader, ft: FinalThrough,
                   end: date) -> tuple[str, ...]:
     """The quote jobs whose close the period ending on *end* is not yet confirmed by (review
     G #6): those blocking the LATEST blocked day on or before *end* — the end day's own fire,
@@ -490,10 +495,11 @@ def _end_day_jobs(conn: sqlite3.Connection, now: datetime, ft: FinalThrough,
     only the jobs of the FIRST blocked day (``blocked_jobs``), which can be another market's
     earlier day (台股 partial on 09-29 and 美股 on 09-30: September's close is the US one).
     ``final_through(since=d)`` answers per day — its first blocked day on or after *d* — so
-    walking back from *end* to ``through`` finds the latest. ``ft.blocked_jobs`` when none."""
+    walking back from *end* to ``through`` finds the latest. ``ft.blocked_jobs`` when none.
+    Every probe is answered by the request's one *final* (its rows read once)."""
     day = end
     while day > ft.through:
-        probe = final_through(conn, now, since=day)
+        probe = final(since=day)
         if probe.blocked_on == day:
             return probe.blocked_jobs
         day -= _ONE_DAY
@@ -512,12 +518,18 @@ def _provisional_note(p: _Period, jobs: Sequence[str]) -> str:
 def _labelled(served: Sequence[_Served], conn: sqlite3.Connection,
               now: datetime) -> list[_Served]:
     """暫定 for a past period whose end day lies after ``final_through``; ``None`` otherwise
-    (and for the current period, which is live)."""
-    ft = final_through(conn, now)
+    (and for the current period, which is live).
+
+    Per request, never cached: the labels depend on *now* beyond its date. ONE
+    :class:`FinalThroughReader` answers ``final_through`` and every probe of the walk back
+    from an end day (:func:`_end_day_jobs`), so ``schedule_config`` and ``job_runs`` are read
+    once per request — they were read again for every day walked (post-v0.1.32 item 3)."""
+    final = FinalThroughReader(conn, now)
+    ft = final()
     for s in served:
         p = s.period
         note = (None if p.current or p.end <= ft.through
-                else _provisional_note(p, _end_day_jobs(conn, now, ft, p.end)))
+                else _provisional_note(p, _end_day_jobs(final, ft, p.end)))
         s.close = s.close.model_copy(update={"provisional": note})
     return list(served)
 
