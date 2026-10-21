@@ -3,10 +3,12 @@
 PERF spec 2026-10-18 §12.1. A stale hit would serve an answer computed before a write — the
 one thing the cache must never do — so every way a write can reach the file is pinned to a
 miss: another connection, another PROCESS, two commits inside one timer tick, a commit after
-a checkpoint reused the ``-wal`` at the same size, a write window, the caller's own open
-transaction. A commit landing between the version read and the computation's snapshot may
-only make an entry NEWER than its key, never older. Stub computations only; the dashboard
-itself is exercised in ``test_result_cache_dashboard.py``.
+a checkpoint reused the ``-wal`` at the same size, a write window's opening and closing, the
+caller's own open transaction. A commit landing between the version read and the
+computation's snapshot may only make an entry NEWER than its key, never older. While another
+request's write window is open, readers keep caching and sharing (post-v0.1.32 item 1): the
+window's commit is a commit like any other. Stub computations only; the dashboard itself is
+exercised in ``test_result_cache_dashboard.py``.
 """
 
 from __future__ import annotations
@@ -291,17 +293,31 @@ def test_version_connections_are_bounded_and_an_evicted_file_misses(
 # --- when nothing is cached ----------------------------------------------------------------
 
 
-def test_a_write_window_computes_alone_and_keeps_nothing(reader: Reader) -> None:
+def test_another_requests_write_window_still_caches_and_its_commit_misses(
+    db: Path, reader: Reader,
+) -> None:
+    """Post-v0.1.32 item 1: a write window open elsewhere in the process no longer makes every
+    reader compute alone (before: two runs inside the window, both uncached). The window's
+    commit moves ``data_version`` at the commit itself, and its closing moves the generation,
+    so nothing read before the commit is served after it, nor anything filed inside the window
+    after the window."""
+    reader.read()
     flight.begin_write()
     try:
-        reader.read()
-        reader.read()
+        assert reader.read() == {"x": 1}         # the window's opening moved the key
+        assert reader.read() == {"x": 1}         # ... and the window does not stop a hit
         assert reader.runs == 2
+        _commit(db)                              # the window's own commit
+        assert reader.read() == {"x": 2}
+        assert reader.runs == 3
+        assert reader.read() == {"x": 2}
+        assert reader.runs == 3
     finally:
         flight.end_write()
-    reader.read()                               # nothing was stored inside the window
-    assert reader.runs == 3
-    assert result_cache.stats()["probe"].uncached == 2
+    assert reader.read() == {"x": 2}             # the window's closing moved the key again
+    assert reader.runs == 4
+    stats = result_cache.stats()["probe"]
+    assert (stats.hits, stats.misses, stats.uncached) == (2, 4, 0)
 
 
 def test_a_write_window_closing_moves_the_key(reader: Reader) -> None:
@@ -516,7 +532,20 @@ def test_a_key_taken_inside_a_snapshot_is_none(reader: Reader) -> None:
 # --- in-flight sharing ---------------------------------------------------------------------
 
 
-def test_two_concurrent_identical_requests_compute_once(db: Path) -> None:
+@pytest.mark.parametrize("window", [False, True], ids=["no-window", "another-write-window"])
+def test_two_concurrent_identical_requests_compute_once(db: Path, window: bool) -> None:
+    """Also while another request's write window is open (post-v0.1.32 item 1; before, each
+    computed alone)."""
+    if window:
+        flight.begin_write()
+    try:
+        _two_concurrent_identical_requests_compute_once(db)
+    finally:
+        if window:
+            flight.end_write()
+
+
+def _two_concurrent_identical_requests_compute_once(db: Path) -> None:
     release = threading.Event()
     started = threading.Event()
     runs = [0]

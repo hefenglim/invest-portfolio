@@ -8,8 +8,9 @@ with a copy instead of a fresh build. In-flight sharing still goes through
 **The key** — :class:`CacheKey` ``(name, db_path, write_generation, data_version, day,
 reporting, extra)``:
 
-* ``write_generation`` is :func:`flight.write_generation`: it moves on every write window
-  (``api/app.py``'s mutating requests, every ``shared.db.session`` that changed a row);
+* ``write_generation`` is :func:`flight.generation`: it moves at both edges of every write
+  window (``api/app.py``'s mutating requests, every ``shared.db.session`` that changed a row)
+  — the process-local signal — and is read whether or not a window is open;
 * ``data_version`` is ``PRAGMA data_version`` read on ONE dedicated, never-writing connection
   per database file, held by this module. SQLite changes that value whenever ANY OTHER
   connection commits — another request, a job or settlement child process, a script, the
@@ -44,10 +45,34 @@ version and misses); read the other way round, an entry built from the old data 
 under the new version and be served after the commit. A commit DURING the computation makes
 the entry unreachable for the same reason: the key is the one taken at compute START.
 
-**No caching** (the key is ``None`` and the computation runs alone, exactly as before) while
-a write window is open anywhere in the process, when the caller's connection is in a
-transaction (its own uncommitted changes must be in its answer), for a database with no
-file (``:memory:``, a temp database), or for a file that is not the application's database.
+**No caching** (the key is ``None`` and the computation runs alone, exactly as before) when
+the caller's connection is in a transaction (its own uncommitted changes must be in its
+answer), for a database with no file (``:memory:``, a temp database), or for a file that is
+not the application's database.
+
+**Write windows** (post-v0.1.32 item 1). Until then a write window open ANYWHERE in the
+process also made every key ``None``, so one long mutating request (``POST
+/api/actions/refresh-quotes`` runs the quote jobs in the web process) left every concurrent
+reader computing alone, uncached and unshared. That rule predates this module: the in-flight
+key of 2026-10-13 had only the generation, which does not move AT a commit inside a window.
+The key here does not need it:
+
+* an answer served under a key contains every commit visible when its caller read that key.
+  ``data_version`` moves when any other connection commits (a request, a job or settlement
+  child, a script) and the version connection never writes, so two reads of one version saw
+  no commit between them; the computation's snapshot opens after its leader's read, so it
+  holds the state every caller of that key saw (or a newer one);
+* hence a client reads its own write on its next request: its request committed before the
+  response (PERF-S10, inside the window), so the next key's version is past that commit;
+  and no joiner receives a result computed before a commit it could see: a commit before
+  its arrival moved its version, so it is another key, another flight;
+* a connection with uncommitted changes computes alone: ``in_transaction`` above;
+* the generation still moves at both edges of every window and at every session commit, so
+  nothing filed during a window is reachable once it closes: a request's effect outside the
+  database (none feeds a cached computation today — settings are environment-only) is still
+  seen by the next request after its response.
+
+The windows still skip a pre-warm that fires while one is open (:func:`schedule_prewarm`).
 
 **Entries:** the latest one per ``name``. Every reader receives its own deep copy (``copy``),
 made from a stored value nobody mutates; then the caller's ``restamp`` sets the sub-day
@@ -245,9 +270,10 @@ def key_for(
     """
     if conn.in_transaction:
         return None
-    generation = flight.write_generation()
-    if generation is None:
-        return None
+    # The generation, open window or not: the version below moves at the commit itself, so
+    # another request's write window does not stop this caller caching (module docstring,
+    # "Write windows").
+    generation = flight.generation()
     path = db_file(conn)
     if path is None or not is_app_database(path):
         return None

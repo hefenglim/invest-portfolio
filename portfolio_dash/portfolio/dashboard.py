@@ -1245,8 +1245,9 @@ def build_dashboard(
     which replaced the in-flight-only sharing of 2026-10-13): one entry per database file,
     ``data_version``, write generation, DAY and reporting currency, so any commit — this
     process, another one, the settlement child — makes the next read build afresh, and
-    identical builds that run at the same time still run once. Nothing is cached while a
-    write is in progress, inside a transaction, or for a database with no file. Every reader
+    identical builds that run at the same time still run once — also while another request's
+    write window is open (post-v0.1.32 item 1: the commit itself moves ``data_version``).
+    Nothing is cached inside a transaction or for a database with no file. Every reader
     receives its own deep copy with the fields that depend on *now* beyond its date
     (:data:`SUB_DAY_FIELDS`) set to its own clock.
 

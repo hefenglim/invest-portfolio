@@ -322,15 +322,19 @@ def create_app() -> FastAPI:
         return response
 
     # Shared builds and the result cache (`shared/flight.py` 2026-10-13, `shared/
-    # result_cache.py` PERF 2026-10-18): no request joins or caches a dashboard build while a
-    # mutating request runs, and none joins one that started before it — so a page reloaded
-    # right after 儲存 never receives an answer computed before the save. Every method but
-    # GET / HEAD / OPTIONS counts, except the declared read-only POSTs (`api/read_only.py`:
-    # 試算, rebalance preview, prompt preview), which write nothing and so share like a GET.
-    # Since PERF-S10 (2026-10-18) `get_conn` is function-scoped, so the request's commit runs
-    # before the response starts, inside this window; `shared/db.session()` still brackets its
-    # own commit in a window, which covers the sessions opened outside a request (threads,
-    # jobs).
+    # result_cache.py` PERF 2026-10-18): the window moves the write generation at both of its
+    # edges, so nothing cached before a mutating request or during it is served after it, and
+    # it skips a pre-warm that fires while it is open. A page reloaded right after 儲存 never
+    # receives an answer computed before the save: the save committed before its response,
+    # and that commit moved the cache key's `data_version`. Readers keep caching and sharing
+    # WHILE the window is open (post-v0.1.32 item 1, `result_cache` "Write windows"): one long
+    # request such as 更新報價 no longer leaves every concurrent page computing alone. Every
+    # method but GET / HEAD / OPTIONS counts, except the declared read-only POSTs
+    # (`api/read_only.py`: 試算, rebalance preview, prompt preview), which write nothing and so
+    # share like a GET. Since PERF-S10 (2026-10-18) `get_conn` is function-scoped, so the
+    # request's commit runs before the response starts, inside this window;
+    # `shared/db.session()` still brackets its own commit in a window, which covers the
+    # sessions opened outside a request (threads, jobs).
     @app.middleware("http")
     async def _write_window_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
