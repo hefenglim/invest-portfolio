@@ -157,3 +157,37 @@ def test_a_ledger_unavailable_since_u_settles_one_day_a_night(corpus_db: CorpusF
         assert st.first_placeholder_day(conn, generation(conn)) == date(2026, 3, 16)
     finally:
         conn.close()
+
+
+#: The series' ONE sentence on ``unquoted_ccy_cash`` with its rebate's rate dropped
+#: (``timeseries.trend_unavailable_reason``; accountant MINOR 4, owner ruling 2026-10-22).
+MISSING_MYR = "2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算"
+
+
+def test_a_stored_close_without_a_trend_point_names_the_flow_and_its_pair(
+        corpus_db: CorpusFactory) -> None:
+    """A close from U on stores no trend figure and no 當期報酬, and says why in the series'
+    own sentence — the first flow with no rate (the 50 MYR rebate of 2026-03-16) and its pair
+    — in ``notes.trend_unavailable`` and ``period_twr_reason`` alike; the run's 逐日估值 step
+    says the same. Before the ruling the close read 「部分投入流量缺少當日匯率，該日沒有走勢資料」
+    and the report 「2026-03-16 起部分投入流量缺少當日匯率，該段沒有走勢資料」 — neither named
+    the pair."""
+    db = corpus_db("unquoted_ccy_cash")
+    perf_f2.drop_rebate_rate(db.path)
+    prepare(db)
+    assert start_run(db, 1) == "published"
+    conn = open_db(db.path)
+    try:
+        closes = {c.period: c for c in st.read_periods(conn, generation(conn), kind="M")}
+    finally:
+        conn.close()
+    for month in ("2026-01", "2026-02"):  # before the rebate: a trend point, no reason
+        kpi = closes[month].kpi
+        assert kpi.trend_total_value is not None and kpi.notes.trend_unavailable is None
+    for month in ("2026-03", "2026-04", "2026-05"):
+        kpi = closes[month].kpi
+        assert kpi.trend_total_value is None and kpi.period_twr is None, month
+        assert kpi.notes.trend_unavailable == MISSING_MYR, month
+        assert kpi.period_twr_reason == MISSING_MYR, month
+    step = next(s for s in _report(db, 1).steps if s.key == "valuate")
+    assert step.detail is not None and step.detail.endswith(f"；{MISSING_MYR}"), step.detail

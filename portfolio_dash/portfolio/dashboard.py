@@ -99,11 +99,13 @@ from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
     build_reporting_flows,
+    first_unconvertible_flow,
     trading_financing_cost,
     trend_book_days,
     trend_fx_currencies,
     trend_start,
     trend_symbols,
+    trend_unavailable_reason,
     value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes
@@ -1710,7 +1712,12 @@ def _build_dashboard(
         # still holds any it did not read, before the rest of the build (review of item 2).
         del trend_books
         if not trend.available:
-            trend_reason = "帳本中有交易日期缺少匯率資料"
+            # the series' ONE sentence: the first flow with no rate on or before its date,
+            # by its date and its pair (accountant MINOR 4, owner ruling 2026-10-22) — the
+            # same flows `value_series` converts, the same refusals
+            trend_reason = trend_unavailable_reason(first_unconvertible_flow(
+                bundle, fx_history, reporting, cash_movements=cash_movements,
+                refused_dividends=book.refused_dividends))
         else:
             # 9b. Total net worth (FU-D29 / deferred C8): compose the UNCHANGED trend
             # with a daily cash series. Cash is read from the SAME Stored rows the 資金管理

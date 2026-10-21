@@ -162,12 +162,15 @@ from portfolio_dash.portfolio.settlement_models import (
 from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
+    UnconvertibleFlow,
     build_reporting_flows,
+    first_unconvertible_flow,
     holds_open_option,
     trend_book_days,
     trend_fx_currencies,
     trend_start,
     trend_symbols,
+    trend_unavailable_reason,
     value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes, twr_index
@@ -643,30 +646,13 @@ def _cash_fx(cache: FxSeriesCache, ccys: set[Currency], reporting: Currency,
     return out
 
 
-def _first_unconvertible_day(cut: LedgerBundle, movements: Sequence[StoredCashMovement],
-                             fx: FxHistory, reporting: Currency, refused: Sequence[Any],
-                             first: date, through: date) -> date | None:
-    """The first day ``U`` whose prefix ledger has a flow without an on-or-before rate — by
-    ``build_reporting_flows`` itself (the one definition of a flow), bisected over the day
-    range: the predicate only turns true as the cut grows."""
-    def bad(day: date) -> bool:
-        return build_reporting_flows(
-            cut.valued_as_of(day), fx, reporting,
-            cash_movements=valued_rows_as_of(movements, day), refused_dividends=refused) is None
-
-    if build_reporting_flows(cut, fx, reporting, cash_movements=movements,
-                             refused_dividends=refused) is not None:
-        return None  # every flow converts: the series is available
-    lo, hi = first, through
-    if bad(lo):
-        return lo
-    while (hi - lo).days > 1:
-        mid = lo + timedelta(days=(hi - lo).days // 2)
-        if bad(mid):
-            hi = mid
-        else:
-            lo = mid
-    return hi
+def _unavailable_from(flow: UnconvertibleFlow | None, first: date) -> date | None:
+    """The first day ``U`` whose prefix ledger has a flow without an on-or-before rate: the
+    date of the first unconvertible flow (``timeseries.first_unconvertible_flow``, the ONE
+    owner), never before the trend's first day — a cost movement may precede the first trade,
+    and the series starts there. Every prefix cut on or after it holds that flow; none before
+    it holds any unconvertible flow."""
+    return None if flow is None else max(flow.on, first)
 
 
 def _bench_state(conn: sqlite3.Connection, cut: LedgerBundle, flows: Sequence[ReportingFlow],
@@ -1011,10 +997,13 @@ class _Run:
         through = claim.run_through
         plan = _Plan()
         if first is not None and first <= through:
-            # this run's own U: the first day an unconvertible flow counts (None: available)
-            plan.unavailable_from = _first_unconvertible_day(
-                loaded.cut, loaded.movements, loaded.fx_history, self.reporting,
-                review.book.refused_dividends, first, through)
+            # this run's own U: the first day an unconvertible flow counts (None: available),
+            # and the flow itself — the sentence every close from U on reads
+            plan.unconvertible = first_unconvertible_flow(
+                loaded.cut, loaded.fx_history, self.reporting,
+                cash_movements=loaded.movements,
+                refused_dividends=review.book.refused_dividends)
+            plan.unavailable_from = _unavailable_from(plan.unconvertible, first)
             # the closes start at the month of the ledger's FIRST ROW (a month funded before
             # its first trade has its close: its cash, its activity, no trend point)
             plan.close_first = (first if loaded.first_row is None
@@ -1130,6 +1119,8 @@ class _Run:
                                       refused_dividends=refused)
         series.flows = flows
         series.unavailable_from = plan.unavailable_from
+        series.unavailable_reason = (None if plan.unconvertible is None
+                                     else trend_unavailable_reason(plan.unconvertible))
         if (flows is None) != (plan.unavailable_from is not None):
             raise _Failure("valuate", "逐日估值時匯率可用性判斷不一致（內部錯誤）")
         trend_end = through if series.unavailable_from is None else (
@@ -1214,9 +1205,8 @@ class _Run:
             raise _Failure("valuate", "逐日估值後仍有未使用的帳本日（內部錯誤）")
         t.progress = t.progress.model_copy(update={"current": None})
         months = len(_month_chunks(start, through))
-        tail = ("" if series.unavailable_from is None else
-                f"；{series.unavailable_from.isoformat()} 起部分投入流量缺少當日匯率，"
-                "該段沒有走勢資料")
+        tail = ("" if series.unavailable_reason is None else
+                f"；{series.unavailable_reason}")
         t.finish("valuate", f"估值 {done:,} 天，寫入 {start:%Y-%m} 至 {through:%Y-%m}"
                             f"（{months} 個月）{tail}", done=done, total=days_total)
         return series
@@ -1299,9 +1289,10 @@ class _Run:
                 if kpi.xirr is None:  # the close's own words (the engine's reason is unchanged)
                     kpi = kpi.model_copy(update={"xirr_reason": pc.XIRR_NO_POSITION_ZH})
             else:
-                twr, why = pc.period_twr(index, points, start_end=start_end, end=end)
+                twr, why = pc.period_twr(index, points, start_end=start_end, end=end,
+                                         unavailable=series.unavailable_reason)
                 kpi = pc.with_trend(kpi, point=series.points.get(end), twr=twr,
-                                    twr_reason=why)
+                                    twr_reason=why, trend_reason=series.unavailable_reason)
             # every period is its own calendar period: the closes start at the month of the
             # ledger's first row, so no row is ever outside the period it is listed in
             act = pc.activity(start=pc.period_start(kind, end), end=end, book=book,
@@ -1648,6 +1639,8 @@ class _Plan:
     run_from: date | None = None
     #: This run's U: the first day an unconvertible flow counts (``None``: available).
     unavailable_from: date | None = None
+    #: The first flow with no rate on or before its date (``None``: available).
+    unconvertible: UnconvertibleFlow | None = None
     #: The first day the closes cover: the month of the ledger's first row.
     close_first: date | None = None
     value_start: date | None = None
@@ -1667,6 +1660,9 @@ class _Series:
     prefix: list[st.SettledDay] = field(default_factory=list)
     flows: list[ReportingFlow] | None = None
     unavailable_from: date | None = None
+    #: Why a day from ``unavailable_from`` has no trend point (``None``: available) — the
+    #: series' ONE sentence, ``timeseries.trend_unavailable_reason``.
+    unavailable_reason: str | None = None
 
 
 # =============================================================================================

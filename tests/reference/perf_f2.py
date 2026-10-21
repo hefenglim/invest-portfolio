@@ -39,9 +39,12 @@ the only difference the fixed trend can see is the rebate itself.
 
 **The missing-rate variant** (:func:`drop_rebate_rate`): the same corpus with every MYR/TWD and
 TWD/MYR row dated on or before the rebate deleted. The rebate then has NO rate on or before its
-date — a missing rate, not a missing pair — and the series is unavailable from 2026-03-16 with
-the reason 「帳本中有交易日期缺少匯率資料」, exactly as before the fix. The placeholder tests
-use it.
+date — a missing rate, not a missing pair — and the series is unavailable from 2026-03-16, as
+before the fix. Its reason names that flow and its pair, 「2026-03-16 起缺少 MYR/TWD 匯率（當日或
+之前無匯率），走勢無法計算」 (``timeseries.trend_unavailable_reason``; accountant MINOR 4, owner
+ruling 2026-10-22 — v0.1.31 read 「帳本中有交易日期缺少匯率資料」). No reference file carries
+that sentence: v0.1.31's affected files read the old one, and the fixed code renders golden's
+``null`` there (the trend is available on the corpus as seeded). The placeholder tests use it.
 """
 
 from __future__ import annotations

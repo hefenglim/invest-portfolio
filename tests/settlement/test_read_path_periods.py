@@ -222,17 +222,20 @@ def test_the_unavailable_live_series_is_named_on_a_live_close(
         app: FastAPI, corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """A live series unavailable for a MISSING rate (``unquoted_ccy_cash`` with its rebate's
     rate dropped, ``perf_f2.drop_rebate_rate``), served live: no trend figure and no 當期報酬,
-    in the build's own words (帳本中有交易日期缺少匯率資料) — never a figure, never an empty
+    in the build's own words — the series' ONE sentence, naming the first flow with no rate
+    and its pair (MINOR 4, owner ruling 2026-10-22) — never a figure, never an empty
     reason."""
     db = corpus_db("unquoted_ccy_cash")
     perf_f2.drop_rebate_rate(db.path)
     prepare(db)
     assert start_run(db, 1) == "published"
     monkeypatch.setenv("PD_SETTLE", "off")
+    sentence = "2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算"
     for row in _periods(app, db, "M"):
         kpi = row["kpi"]
         assert kpi["trend_total_value"] is None and kpi["period_twr"] is None
-        assert kpi["notes"]["trend_unavailable"] and kpi["period_twr_reason"]
+        assert kpi["notes"]["trend_unavailable"] == sentence, row["period"]
+        assert kpi["period_twr_reason"] == sentence, row["period"]
 
 
 # ---------------------------------------------------------------------------------------------

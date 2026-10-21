@@ -27,6 +27,7 @@ defect this one was: fixed once, believed general.
 
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal, getcontext
 
@@ -266,6 +267,65 @@ class _GivenBooks:
         return self._current[1]
 
 
+#: Why the trend is unavailable for want of a rate (zh, server-owned; accountant MINOR 4, owner
+#: ruling 2026-10-22): the FIRST flow with no rate on or before its own date, by its date and
+#: its pair. ONE sentence, read by every surface that says the trend cannot be computed — the
+#: dashboard's ``freshness.trend_unavailable_reason``, a close's ``notes.trend_unavailable``
+#: and 當期報酬 reason (live and stored), and the settlement run's report.
+TREND_FX_MISSING_ZH = "{day} 起缺少 {pair} 匯率（當日或之前無匯率），走勢無法計算"
+#: The same when no flow can be named — never reached while a missing rate is the cause
+#: (:func:`first_unconvertible_flow` names it); a caller holding every point passes no reason.
+TREND_FX_MISSING_UNNAMED_ZH = "部分投入流量缺少當日或之前的匯率，走勢無法計算"
+
+
+@dataclass(frozen=True)
+class UnconvertibleFlow:
+    """A flow of :func:`build_reporting_flows` with no rate on or before its own date: the
+    flow's date and its currency, against the reporting currency."""
+
+    on: date
+    ccy: Currency
+    reporting: Currency
+
+    @property
+    def pair(self) -> str:
+        return f"{self.ccy.value}/{self.reporting.value}"
+
+    @property
+    def reason(self) -> str:
+        return TREND_FX_MISSING_ZH.format(day=self.on.isoformat(), pair=self.pair)
+
+
+def trend_unavailable_reason(flow: UnconvertibleFlow | None) -> str:
+    """The ONE sentence of an unavailable trend (:data:`TREND_FX_MISSING_ZH`), from
+    :func:`first_unconvertible_flow`'s answer."""
+    return TREND_FX_MISSING_UNNAMED_ZH if flow is None else flow.reason
+
+
+def first_unconvertible_flow(
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
+) -> UnconvertibleFlow | None:
+    """The earliest flow of :func:`build_reporting_flows` with no rate on or before its own
+    date (ties: the currency code), or ``None`` when every flow converts — the ONE owner of
+    "which flow and pair cannot convert". It runs the flow builder itself (the same flows, the
+    same ``is_return_movement`` predicate, the same carry-forward lookup), so it names a flow
+    exactly when :func:`build_reporting_flows` returns ``None``.
+
+    The settlement worker's first unconvertible day U is this flow's date (never before the
+    trend's first day): every prefix of the ledger cut on or after it holds the flow."""
+    _flows, failed = _reporting_flows(bundle, fx_history, reporting,
+                                      cash_movements=cash_movements,
+                                      refused_dividends=refused_dividends)
+    if not failed:
+        return None
+    return min(failed, key=lambda f: (f.on, f.ccy.value))
+
+
 def build_reporting_flows(
     bundle: LedgerBundle,
     fx_history: FxHistory,
@@ -291,7 +351,8 @@ def build_reporting_flows(
     stream on an index instead. Two copies would let the portfolio and its counterfactual
     quietly disagree about which flows exist, and the whole comparison rests on them being the
     same money on the same dates. Each flow carries its ``market`` so the counterfactual can
-    route it to that market's benchmark; the trend simply ignores that field.
+    route it to that market's benchmark; the trend simply ignores that field. Which flow made
+    it ``None`` is :func:`first_unconvertible_flow`'s answer, from the same loop.
 
     **Cash movements are included since AI-D48** (owner ruling 2026-08-27), on exactly the
     three kinds ``xirr_reporting`` has taken since AI-D42: ``REBATE`` / ``INTEREST_EXPENSE`` /
@@ -324,6 +385,24 @@ def build_reporting_flows(
     same phantom withdrawal. Required with no default, like ``cash_movements``: a default
     would ship the old figure in silence.
     """
+    flows, failed = _reporting_flows(bundle, fx_history, reporting,
+                                     cash_movements=cash_movements,
+                                     refused_dividends=refused_dividends)
+    return None if failed else flows
+
+
+def _reporting_flows(
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
+) -> tuple[list[ReportingFlow], list[UnconvertibleFlow]]:
+    """:func:`build_reporting_flows`' loop: the converted flows, and every flow with no rate on
+    or before its date. Once one flow fails, the rest are only looked up, never converted — so
+    a ledger it refuses for a missing rate converts (and can raise on) exactly the rows the
+    first-failure return always converted."""
     def quote_ccy(symbol: str) -> Currency:
         inst = bundle.instruments.get(symbol)
         if inst is None:
@@ -368,12 +447,29 @@ def build_reporting_flows(
                 raw.append((dv.date, dv.symbol, -dv.net, dv))
 
         out: list[ReportingFlow] = []
+        failed: list[UnconvertibleFlow] = []
+
+        def rate_on(on: date, ccy: Currency) -> Decimal | None:
+            if not failed:
+                return _fx_at(fx_history, on, ccy, reporting)
+            # past the first failure a row is only looked up — the first-failure return never
+            # reached it, so nothing here may raise: a stored rate is a rate, whatever it is
+            try:
+                return _fx_at(fx_history, on, ccy, reporting)
+            except ArithmeticError:
+                return _ONE
+
         for d, symbol, amount, source in raw:
             booking = source
-            rate = _fx_at(fx_history, d, quote_ccy(symbol), reporting)
+            if failed and symbol not in bundle.instruments:
+                continue  # the first-failure return never reached this row's KeyError
+            ccy = quote_ccy(symbol)
+            rate = rate_on(d, ccy)
             if rate is None:
-                return None
-            out.append(ReportingFlow(d, market_of(symbol), convert(amount, rate), symbol))
+                failed.append(UnconvertibleFlow(d, ccy, reporting))
+                continue
+            if not failed:
+                out.append(ReportingFlow(d, market_of(symbol), convert(amount, rate), symbol))
         # AI-D48. Each movement carries its OWN currency (there is no symbol to look one up
         # from) and its sign comes from the shared table, so a kind can never be a credit here
         # and a debit in the pool balance.
@@ -381,12 +477,14 @@ def build_reporting_flows(
             booking = mv
             if not is_return_movement(mv):
                 continue
-            rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
+            rate = rate_on(mv.date, mv.ccy)
             if rate is None:
-                return None
-            out.append(ReportingFlow(
-                mv.date, None, convert(-movement_sign(mv.kind) * mv.amount, rate), ""))
-        return out
+                failed.append(UnconvertibleFlow(mv.date, mv.ccy, reporting))
+                continue
+            if not failed:
+                out.append(ReportingFlow(
+                    mv.date, None, convert(-movement_sign(mv.kind) * mv.amount, rate), ""))
+        return out, failed
     except ArithmeticError as exc:
         # The CLASS, not one cause — ``decimal.Overflow`` and ``decimal.DivisionByZero`` are
         # SIBLINGS of ``InvalidOperation``, not subclasses, and ``ZeroDivisionError`` is in it

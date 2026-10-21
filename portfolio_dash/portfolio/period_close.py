@@ -71,6 +71,7 @@ from portfolio_dash.portfolio.settlement_models import (
     PriceDate,
     RealizedLine,
 )
+from portfolio_dash.portfolio.timeseries import trend_unavailable_reason
 from portfolio_dash.pricing.store import FxSeriesCache
 from portfolio_dash.shared.enums import Currency
 from portfolio_dash.shared.fx import convert
@@ -372,8 +373,11 @@ def kpi_at(day: date, *, book: Book, ledger: CloseLedger, conn_source: OnOrBefor
     return CloseKpi(kpi=kpi, block=block)
 
 
-#: Why a close carries no trend figure or no 當期報酬 (zh, server-owned).
-TREND_UNAVAILABLE_ZH = "部分投入流量缺少當日匯率，該日沒有走勢資料"
+#: Why a close carries no trend figure or no 當期報酬 (zh, server-owned). A close with no trend
+#: point for want of a rate reads the series' own sentence, whose ONE owner is
+#: ``timeseries.trend_unavailable_reason`` (「2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），
+#: 走勢無法計算」); the callers hand it in (``period_twr(unavailable=)``,
+#: ``with_trend(trend_reason=)``).
 TWR_NO_ANCHOR_ZH = "尚無可計算的時間加權報酬（尚未有估值完整且市值為正的一日）"
 TWR_END_INCOMPLETE_ZH = "期末估值不完整（缺價格或待釐清），當期報酬暫不計算"
 TWR_START_INCOMPLETE_ZH = "期初估值不完整（缺價格或待釐清），當期報酬暫不計算"
@@ -397,18 +401,20 @@ class TwrIndex:
 
 
 def period_twr(index: TwrIndex, points: Mapping[date, TrendPoint], *, start_end: date | None,
-               end: date) -> tuple[Decimal | None, str | None]:
+               end: date, unavailable: str | None) -> tuple[Decimal | None, str | None]:
     """``I(end) / I(start_end) − 1`` on the full-series index (§11.2 ``period_twr``), with the
     reason when it is ``None``.
 
     *start_end* is the previous period's end day (``None`` for the first period); a period that
     begins before the index's anchor starts from the anchor (100). ``None`` when either end day
     is incomplete — the index carries over an incomplete day, but a period return ending on one
-    is not a measured return — or has no trend point at all. The stale-join rule
+    is not a measured return — or has no trend point at all: then the reason is *unavailable*,
+    the series' own sentence (``timeseries.trend_unavailable_reason`` of its first
+    unconvertible flow; ``None`` from a caller that holds every point). The stale-join rule
     (「待結算」, §11.2) is the read path's: it depends on the store at read time."""
     point = points.get(end)
     if point is None:
-        return None, TREND_UNAVAILABLE_ZH
+        return None, unavailable or trend_unavailable_reason(None)
     if index.anchor is None or end < index.anchor:
         return None, TWR_NO_ANCHOR_ZH
     if point.incomplete:
@@ -434,17 +440,18 @@ def kpi_incomplete(kpi: PeriodKpi) -> bool:
 
 
 def with_trend(kpi: PeriodKpi, *, point: TrendPoint | None, twr: Decimal | None,
-               twr_reason: str | None, trend_reason: str | None = None) -> PeriodKpi:
+               twr_reason: str | None, trend_reason: str | None) -> PeriodKpi:
     """The KPI block with the settled day D's trend figures and the period's TWR.
 
-    ``notes.incomplete`` is the settled day's own flag. A day with NO trend point (the series
-    is unavailable there, :data:`TREND_UNAVAILABLE_ZH`) carries no trend figure and says so in
-    ``notes.trend_unavailable``; its ``incomplete`` then states the KPIs' own completeness
-    (:func:`kpi_incomplete`) — a missing trend is not a missing price. *trend_reason*
-    replaces the sentence (:data:`TREND_NOT_STARTED_ZH` before the series starts)."""
+    ``notes.incomplete`` is the settled day's own flag. A day with NO trend point carries no
+    trend figure and says why in ``notes.trend_unavailable``: *trend_reason* — the series' own
+    sentence when it is unavailable there (``timeseries.trend_unavailable_reason``, which names
+    the first flow with no rate and its pair), :data:`TREND_NOT_STARTED_ZH` before the series
+    starts, ``None`` from a caller that holds every point. Its ``incomplete`` then states the
+    KPIs' own completeness (:func:`kpi_incomplete`) — a missing trend is not a missing price."""
     notes = kpi.notes.model_copy(update={
         "incomplete": kpi_incomplete(kpi) if point is None else point.incomplete,
-        "trend_unavailable": (trend_reason or TREND_UNAVAILABLE_ZH) if point is None
+        "trend_unavailable": (trend_reason or trend_unavailable_reason(None)) if point is None
         else None})
     return kpi.model_copy(update={
         "trend_total_value": None if point is None else point.total_value,
@@ -722,7 +729,6 @@ def period_start(kind: str, end: date) -> date:
 __all__ = [
     "CAPITAL_KINDS",
     "TREND_NOT_STARTED_ZH",
-    "TREND_UNAVAILABLE_ZH",
     "TWR_END_INCOMPLETE_ZH",
     "TWR_NOT_STARTED_ZH",
     "XIRR_NO_POSITION_ZH",

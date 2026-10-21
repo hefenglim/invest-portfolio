@@ -572,7 +572,9 @@ def test_a_series_unavailable_live_serves_no_trend(
     db = missing_rate
     data = _build(db)
     assert not data.trend.available and data.trend.points == []
-    assert data.freshness.trend_unavailable_reason == "帳本中有交易日期缺少匯率資料"
+    # the series' ONE sentence: the first flow with no rate, its date and its pair (MINOR 4)
+    assert data.freshness.trend_unavailable_reason == (
+        "2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算")
     assert data.history_state.generation == 1
     assert _body(app, db) == _live_body(app, db, monkeypatch)
 

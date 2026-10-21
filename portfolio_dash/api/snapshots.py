@@ -76,7 +76,12 @@ from portfolio_dash.portfolio.settlement_models import (
     PriceDate,
     Restatement,
 )
-from portfolio_dash.portfolio.timeseries import holds_open_option, trend_book_days, trend_start
+from portfolio_dash.portfolio.timeseries import (
+    holds_open_option,
+    trend_book_days,
+    trend_start,
+    trend_unavailable_reason,
+)
 from portfolio_dash.portfolio.twr import twr_index
 from portfolio_dash.pricing.store import FxSeriesCache
 from portfolio_dash.shared import flags, result_cache
@@ -471,14 +476,18 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
         return kpi
     if not data.trend.available:
         # the live series is unavailable (a flow without a rate): no trend figure — in the
-        # build's own words — exactly as the trend card shows none
-        reason = data.freshness.trend_unavailable_reason or pc.TREND_UNAVAILABLE_ZH
+        # build's own words (``timeseries.trend_unavailable_reason``: the first flow with no
+        # rate, its date and its pair) — exactly as the trend card shows none
+        reason = (data.freshness.trend_unavailable_reason
+                  or trend_unavailable_reason(None))
         return pc.with_trend(kpi, point=None, twr=None, twr_reason=reason,
                              trend_reason=reason)
     prev = p.start - _ONE_DAY
     start_end = prev if prev >= first else None
-    twr, why = pc.period_twr(index, points, start_end=start_end, end=as_at)
-    return pc.with_trend(kpi, point=points.get(as_at), twr=twr, twr_reason=why)
+    # an available live series holds every day from its first through today
+    twr, why = pc.period_twr(index, points, start_end=start_end, end=as_at, unavailable=None)
+    return pc.with_trend(kpi, point=points.get(as_at), twr=twr, twr_reason=why,
+                         trend_reason=None)
 
 
 # =============================================================================================
