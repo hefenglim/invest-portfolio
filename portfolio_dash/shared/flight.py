@@ -20,9 +20,11 @@ What a caller can rely on:
   (``api/app.py``) — no sharing at all while one runs, for a key built on
   :func:`write_generation` (see "Two readings" below) — and every ``shared.db.session``
   that changed a row commits inside a write window of its own and calls :func:`note_write`
-  when it closes, which covers the scheduler and the background runners too. The session's
-  window is not redundant: a request's connection commits in its dependency's exit, after
-  the HTTP window has already closed. A background writer's commit that lands DURING someone
+  when it closes, which covers the scheduler and the background runners too. Since PERF-S10
+  (2026-10-18) ``get_conn`` is function-scoped, so a request's own commit runs before its
+  response starts, INSIDE the HTTP window; the session's window is what covers every commit
+  made outside a request (a scheduler job, a background runner, a thread a request starts).
+  A background writer's commit that lands DURING someone
   else's build is seen by that build's joiners as it would be by a caller who had arrived
   a moment earlier — the same answer, a few seconds older — never as a lost write of
   their own.
