@@ -6,19 +6,66 @@ required for all ``/api/*`` except login/session). Stdlib only — no third-part
 dependency. Stores **only** salted scrypt hashes; ``password_hash`` is never returned
 or logged. Imports only ``shared`` + ``api.deps`` + stdlib (never portfolio/forex/
 pricing) — auth is access control, not business calculation.
+
+**Session idle expiry** (owner ruling 2026-10-22, review finding L5; sessions never expired
+before). A session expires after :data:`SESSION_IDLE_EXPIRY` without use, and each use slides
+the window. Its last use is ``auth_sessions.last_seen_at``. Because a GET never writes
+(DEF-065), the two halves are kept apart:
+
+* **the check is a pure read** in the gate (:func:`require_session`, :func:`session_state`):
+  an expired session answers 401 with :data:`SESSION_EXPIRED_MESSAGE` and is treated as gone
+  — never deleted by the request that found it;
+* **a use is recorded by the touch** (:func:`touch_after_response`), which the gate schedules
+  only when the stored stamp is :data:`SESSION_TOUCH_INTERVAL` old or older. It runs as a
+  background task AFTER the response, on its OWN short-lived connection with a
+  :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS` busy timeout, as one autocommit compare-and-set
+  UPDATE (:data:`TOUCH_SQL`). It is skipped when the write lock is held (a later request
+  retries), and it never raises. The request's own connection still writes nothing and takes
+  no write lock: ``tests/contract/test_def065_get_never_writes.py`` (section 5) holds the
+  touch as the one reviewed exception, by its statement and by its connection.
+
+So a session may lapse up to one touch interval before 30 days after its last request (its
+last use was recorded up to 6 h earlier). The boot (:func:`prepare_sessions_at_boot`) dates
+the sessions that have no stamp from the boot — every session created before this change,
+and any created by an older build re-pinned after it — and purges the expired, the locked
+(never revived: re-login issues a new token) and the orphaned ones.
 """
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import sqlite3
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, HTTPException, Request
 
-from portfolio_dash.api.deps import get_conn
+from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.shared import config_store
+from portfolio_dash.shared.db import get_connection
+
+logger = logging.getLogger(__name__)
+
+# --- session idle expiry: the owner's ruling, in ONE place ----------------------------------
+
+#: A session unused for longer than this is expired (owner ruling 2026-10-22).
+SESSION_IDLE_EXPIRY = timedelta(days=30)
+#: A use is recorded at most once per this interval per session (the touch's throttle).
+SESSION_TOUCH_INTERVAL = timedelta(hours=6)
+#: The touch's own connection waits at most this long for the write lock, then skips.
+SESSION_TOUCH_BUSY_TIMEOUT_MS = 100
+#: The gate's 401 for an expired session, and the login page's notice.
+SESSION_EXPIRED_MESSAGE = f"登入已逾期（{SESSION_IDLE_EXPIRY.days} 天未使用），請重新登入"
+#: The login page's notice for a cookie the store no longer knows (purged at boot, user
+#: removed): the form is back, and the visitor is told why.
+SESSION_INVALID_MESSAGE = "先前的登入已失效，請重新登入"
+#: The touch: a compare-and-set on the stamp the gate read, so two requests that both found
+#: it due record one use, and a session locked or removed in between is left alone.
+TOUCH_SQL = ("UPDATE auth_sessions SET last_seen_at = ? "
+             "WHERE token = ? AND locked = 0 AND last_seen_at IS ?")
 
 # scrypt parameters — named constants so verify reuses exactly what hash used.
 _SCRYPT_N = 2**14
@@ -34,15 +81,26 @@ _OPEN_PATHS = {"/api/auth/login", "/api/auth/session", "/api/health"}
 
 
 def create_auth_tables(conn: sqlite3.Connection) -> None:
-    """Create the auth tables if absent (idempotent; safe on every startup)."""
+    """Create the auth tables if absent (idempotent; safe on every startup).
+
+    ``auth_sessions.last_seen_at`` (session idle expiry, 2026-10-22) is added to an existing
+    table by an additive ``ALTER TABLE … ADD COLUMN`` — no rebuild, every row kept. It runs in
+    the boot session, before the settlement store records the schema version (``api/app.py``);
+    ``auth_sessions`` is not a settlement trigger table, so no re-settle follows. A build that
+    predates the column ignores it (its INSERT names its columns), so re-pinning one is safe.
+    """
     conn.executescript(
         "CREATE TABLE IF NOT EXISTS auth_users ("
         " username TEXT PRIMARY KEY, name TEXT NOT NULL,"
         " password_hash TEXT NOT NULL, created_at TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS auth_sessions ("
         " token TEXT PRIMARY KEY, username TEXT NOT NULL,"
-        " created_at TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0);"
+        " created_at TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0,"
+        " last_seen_at TEXT);"
     )
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(auth_sessions)")}
+    if "last_seen_at" not in columns:
+        conn.execute("ALTER TABLE auth_sessions ADD COLUMN last_seen_at TEXT")
     conn.commit()
 
 
@@ -165,38 +223,184 @@ def authenticate(conn: sqlite3.Connection, username: str, password: str) -> bool
 
 
 def create_session(conn: sqlite3.Connection, username: str, *, now: datetime) -> str:
-    """Create a fresh session token; clears that user's locked sessions (re-login
-    unlock per spec 9.2)."""
+    """Create a fresh session token, last seen *now*; clears that user's locked sessions
+    (re-login unlock per spec 9.2)."""
     conn.execute("DELETE FROM auth_sessions WHERE username = ? AND locked = 1", (username,))
     token = secrets.token_urlsafe(32)
     conn.execute(
-        "INSERT INTO auth_sessions (token, username, created_at, locked) VALUES (?, ?, ?, 0)",
-        (token, username, now.isoformat()),
+        "INSERT INTO auth_sessions (token, username, created_at, locked, last_seen_at)"
+        " VALUES (?, ?, ?, 0, ?)",
+        (token, username, now.isoformat(), now.isoformat()),
     )
     conn.commit()
     return token
 
 
+@dataclass(frozen=True)
+class SessionState:
+    """What the store knows of one token at *now* — read only, never written by a reader."""
+
+    username: str
+    locked: bool
+    #: the stored ``last_seen_at`` as read (``None`` = never recorded): the touch's guard
+    seen_raw: str | None
+    #: unused for longer than :data:`SESSION_IDLE_EXPIRY` (or an unreadable stamp)
+    expired: bool
+    #: valid, unlocked, and its last recorded use is :data:`SESSION_TOUCH_INTERVAL` old
+    touch_due: bool
+
+
+def _idle_for(stamp: str | None, now: datetime) -> timedelta | None:
+    """How long ago *stamp* was at *now*; ``None`` when it cannot be read.
+
+    A stamp without an offset (an older writer, a hand edit) reads as application-local
+    time, the zone every stamp this module writes carries.
+    """
+    if stamp is None:
+        return None
+    try:
+        seen = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if seen.tzinfo is None and now.tzinfo is not None:
+        seen = seen.replace(tzinfo=now.tzinfo)
+    elif seen.tzinfo is not None and now.tzinfo is None:
+        seen = seen.replace(tzinfo=None)
+    return now - seen
+
+
+def _is_expired(idle: timedelta | None) -> bool:
+    """THE expiry rule: unreadable, or idle for longer than the ruling allows."""
+    return idle is None or idle > SESSION_IDLE_EXPIRY
+
+
+def session_state(conn: sqlite3.Connection, token: str, *, now: datetime) -> SessionState | None:
+    """The token's state at *now*, or ``None`` when the store does not know it.
+
+    A row with no ``last_seen_at`` (written by a build that predates the column, until the
+    next boot dates it) reads its ``created_at``.
+    """
+    row = conn.execute(
+        "SELECT username, locked, created_at, last_seen_at FROM auth_sessions WHERE token = ?",
+        (token,),
+    ).fetchone()
+    if row is None:
+        return None
+    seen_raw: str | None = row["last_seen_at"]
+    idle = _idle_for(seen_raw if seen_raw is not None else row["created_at"], now)
+    expired = _is_expired(idle)
+    locked = bool(row["locked"])
+    return SessionState(
+        username=row["username"], locked=locked, seen_raw=seen_raw, expired=expired,
+        touch_due=(not expired and not locked and idle is not None
+                   and idle >= SESSION_TOUCH_INTERVAL),
+    )
+
+
+def touch_session(
+    conn: sqlite3.Connection, token: str, *, seen_raw: str | None, now: datetime
+) -> bool:
+    """Record a use of *token* at *now*, guarded by the stamp the caller read; ``True`` when
+    this call recorded it. The caller owns the connection (see :func:`touch_after_response`).
+    """
+    cur = conn.execute(TOUCH_SQL, (now.isoformat(), token, seen_raw))
+    if conn.in_transaction:
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def touch_after_response(app: Any, token: str, seen_raw: str | None, now: datetime) -> None:
+    """The background task the gate schedules when a touch is due: best effort, never raises.
+
+    It runs after the response, so the request's connection is already closed; it opens its
+    OWN, waits at most :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS` for the write lock and runs one
+    autocommit statement. A held lock skips it (a later request retries). When a test has
+    injected ``get_conn`` (the hermetic golden database), the touch writes there, exactly as
+    the action-log middleware does — the configured file is not the database that request
+    used.
+    """
+    try:
+        override = getattr(app, "dependency_overrides", {}).get(get_conn)
+        if override is not None:
+            injected = override()
+            if isinstance(injected, sqlite3.Connection):
+                touch_session(injected, token, seen_raw=seen_raw, now=now)
+            return
+        conn = get_connection()
+        try:
+            conn.isolation_level = None  # autocommit: the UPDATE is its own transaction
+            conn.execute(f"PRAGMA busy_timeout = {int(SESSION_TOUCH_BUSY_TIMEOUT_MS)}")
+            touch_session(conn, token, seen_raw=seen_raw, now=now)
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        # The write lock was held past the busy timeout ("database is locked"): skipped.
+        logger.debug("session touch skipped: %s", exc)
+    except Exception:  # noqa: BLE001 — a bookkeeping write never fails or follows a request
+        logger.warning("session touch failed", exc_info=True)
+
+
+@dataclass(frozen=True)
+class SessionBoot:
+    """What the boot did to the session table (logged, and kept on ``app.state``)."""
+
+    #: sessions with no ``last_seen_at``, dated from this boot (pre-upgrade or older build)
+    dated: int
+    expired: int
+    locked: int
+    #: sessions whose user no longer exists
+    orphaned: int
+
+    @property
+    def purged(self) -> int:
+        return self.expired + self.locked + self.orphaned
+
+
+def prepare_sessions_at_boot(conn: sqlite3.Connection, *, now: datetime) -> SessionBoot:
+    """Date unstamped sessions from *now*, then purge the expired, locked and orphaned ones.
+
+    **Upgrade rule.** A session created before ``last_seen_at`` existed has no recorded use:
+    an active one cannot be told apart from an idle one, so it counts from the upgrade (the
+    first boot of this build) — nobody is logged out on deploy day, and a session nobody
+    uses expires 30 days later. A locked session is never revived (re-login issues a new
+    token and deletes it), so it is purged with the expired ones.
+    """
+    dated = conn.execute(
+        "UPDATE auth_sessions SET last_seen_at = ? WHERE last_seen_at IS NULL",
+        (now.isoformat(),),
+    ).rowcount
+    users = {r[0] for r in conn.execute("SELECT username FROM auth_users")}
+    expired = locked = orphaned = 0
+    doomed: list[tuple[str]] = []
+    for token, username, seen, is_locked in conn.execute(
+        "SELECT token, username, last_seen_at, locked FROM auth_sessions"
+    ).fetchall():
+        if username not in users:
+            orphaned += 1
+        elif _is_expired(_idle_for(seen, now)):
+            expired += 1
+        elif is_locked:
+            locked += 1
+        else:
+            continue
+        doomed.append((token,))
+    conn.executemany("DELETE FROM auth_sessions WHERE token = ?", doomed)
+    conn.commit()
+    return SessionBoot(dated=dated, expired=expired, locked=locked, orphaned=orphaned)
+
+
 def session_user(conn: sqlite3.Connection, token: str) -> str | None:
-    """Username for a valid, unlocked token; None if unknown or locked."""
+    """Username for a known, unlocked token; None if unknown or locked.
+
+    Clock-free on purpose: it names who a request writes as (``deps.request_actor``) and who
+    the action log attributes a request to. Whether the session has EXPIRED is the gate's
+    decision (:func:`require_session`, :func:`session_state`), and every gated request passes
+    the gate before it can write anything.
+    """
     row = conn.execute(
         "SELECT username FROM auth_sessions WHERE token = ? AND locked = 0", (token,)
     ).fetchone()
     return row["username"] if row is not None else None
-
-
-def session_row(conn: sqlite3.Connection, token: str) -> dict[str, object] | None:
-    """Row for ANY known token (including locked): ``{username, locked: bool}``.
-
-    Used by GET /auth/session to tell a locked-but-known session apart from an
-    unknown cookie (``session_user`` cannot, as it returns None for locked rows).
-    """
-    row = conn.execute(
-        "SELECT username, locked FROM auth_sessions WHERE token = ?", (token,)
-    ).fetchone()
-    if row is None:
-        return None
-    return {"username": row["username"], "locked": bool(row["locked"])}
 
 
 def delete_session(conn: sqlite3.Connection, token: str) -> None:
@@ -215,14 +419,23 @@ def lock_session(conn: sqlite3.Connection, token: str) -> bool:
 
 
 def require_session(
-    request: Request, conn: sqlite3.Connection = Depends(get_conn, scope="function")
+    request: Request,
+    background_tasks: BackgroundTasks,
+    conn: sqlite3.Connection = Depends(get_conn, scope="function"),
+    now: datetime = Depends(get_now),
 ) -> None:
     """Global gate (wired in create_app): protect ``/api/*`` in protected mode.
 
     Allows: non-``/api/`` paths (static files), the open paths (login/session), and
-    everything in guest mode. Otherwise requires a valid, unlocked ``pd_session``
-    cookie -> 401. Shares ``Depends(get_conn)`` — with the routes' ``scope="function"``, so
-    the request has one connection — and tests' DB override applies.
+    everything in guest mode. Otherwise requires a known, unlocked, unexpired ``pd_session``
+    cookie -> 401 (an expired one says so: :data:`SESSION_EXPIRED_MESSAGE`). Shares
+    ``Depends(get_conn)`` — with the routes' ``scope="function"``, so the request has one
+    connection — and tests' DB override applies.
+
+    It only READS (DEF-065). When the session's last recorded use is a touch interval old, it
+    schedules :func:`touch_after_response`, which runs after the response on its own
+    connection. A request that ends in an error response runs no background task: the next
+    request touches instead.
     """
     path = request.url.path
     if not path.startswith("/api/") or path in _OPEN_PATHS:
@@ -230,5 +443,10 @@ def require_session(
     if not is_protected(conn):
         return
     token = request.cookies.get("pd_session")
-    if token is None or session_user(conn, token) is None:
+    state = session_state(conn, token, now=now) if token is not None else None
+    if token is None or state is None or state.locked:
         raise HTTPException(status_code=401, detail="需要登入")
+    if state.expired:
+        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_MESSAGE)
+    if state.touch_due:
+        background_tasks.add_task(touch_after_response, request.app, token, state.seen_raw, now)

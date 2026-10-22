@@ -1,0 +1,391 @@
+"""Session idle expiry (owner ruling 2026-10-22, review finding L5).
+
+A login session expires after 30 days without use (sliding: every use extends it), and the
+boot purges expired sessions. Login sessions never expired before this change.
+
+The design constraint is DEF-065 — a GET never writes, on its own connection or by taking the
+write lock. The expiry check is therefore a pure read inside the gate
+(``auth_store.require_session``), and a USE is recorded by a separate step, the touch:
+
+* at most once per ``SESSION_TOUCH_INTERVAL`` (6 h) per session — the gate schedules it only
+  when the stored stamp is older than that;
+* AFTER the response (a FastAPI background task), on its OWN short-lived connection with a
+  ``SESSION_TOUCH_BUSY_TIMEOUT_MS`` busy timeout, as one autocommit compare-and-set UPDATE;
+* skipped when the write lock is held (a later request retries), and never raising.
+
+Hermetic half: the golden in-memory client (``api_client``), whose injected ``get_conn`` the
+touch reuses exactly as the action log does. File half: a real database file, where the
+touch opens its own connection — the probes below drive the ASGI app directly and watch the
+order of ``send`` messages, because TestClient returns only after the background task.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sqlite3
+import time
+from collections.abc import Callable, Iterator, MutableMapping
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pytest_socket import disable_socket, enable_socket
+
+from portfolio_dash.api import auth_store as A
+from portfolio_dash.api.app import create_app
+from portfolio_dash.api.deps import get_now
+from portfolio_dash.shared import db as shared_db
+from portfolio_dash.shared.clock import app_now
+from portfolio_dash.shared.config import get_settings
+from tests.conftest import GOLDEN_NOW, init_golden_base
+
+_USER, _PASS = "chiaming", "password123"
+_DAY = timedelta(days=1)
+
+
+# --- hermetic: the golden client -------------------------------------------------------------
+
+
+def _login(client: TestClient) -> str:
+    """Create the first user (guest mode lets it), log in at the client's clock; the token."""
+    assert client.post("/api/users", json={"name": "家明", "username": _USER,
+                                           "password": _PASS}).status_code == 201
+    r = client.post("/api/auth/login", json={"username": _USER, "password": _PASS})
+    assert r.status_code == 200, r.text
+    token = r.cookies.get("pd_session")
+    assert isinstance(token, str) and token
+    return token
+
+
+def _at(client: TestClient, now: datetime) -> None:
+    app = client.app
+    assert isinstance(app, FastAPI)
+    app.dependency_overrides[get_now] = lambda: now
+
+
+def _seen(conn: sqlite3.Connection, token: str) -> str | None:
+    row = conn.execute("SELECT last_seen_at FROM auth_sessions WHERE token = ?",
+                       (token,)).fetchone()
+    return None if row is None else row[0]
+
+
+def test_an_expired_session_is_refused_with_the_zh_message(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    _login(api_client)
+    _at(api_client, GOLDEN_NOW + 29 * _DAY + timedelta(hours=23))
+    assert api_client.get("/api/accounts").status_code == 200
+    token = api_client.cookies.get("pd_session")
+    assert token is not None
+    # 29 d 23 h recorded a use; measure the next 30 days from it
+    seen = datetime.fromisoformat(_seen(golden_db, token) or "")
+    _at(api_client, seen + 30 * _DAY + timedelta(seconds=1))
+    r = api_client.get("/api/accounts")
+    assert r.status_code == 401
+    assert r.json() == {"error": {"code": "unauthorized",
+                                  "message": "登入已逾期（30 天未使用），請重新登入"}}
+    # the expired row is treated as gone: no use is recorded for it
+    assert _seen(golden_db, token) == seen.isoformat()
+
+
+def test_a_use_slides_the_expiry(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
+    token = _login(api_client)
+    _at(api_client, GOLDEN_NOW + 20 * _DAY)
+    assert api_client.get("/api/accounts").status_code == 200
+    assert _seen(golden_db, token) == (GOLDEN_NOW + 20 * _DAY).isoformat()
+    _at(api_client, GOLDEN_NOW + 45 * _DAY)  # 45 days after the login, 25 after its last use
+    assert api_client.get("/api/accounts").status_code == 200
+
+
+def test_a_use_is_recorded_at_most_once_per_six_hours(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    token = _login(api_client)
+    login_stamp = _seen(golden_db, token)
+    assert login_stamp == GOLDEN_NOW.isoformat()
+    _at(api_client, GOLDEN_NOW + timedelta(hours=5, minutes=59, seconds=59))
+    for _ in range(3):
+        assert api_client.get("/api/accounts").status_code == 200
+    assert _seen(golden_db, token) == login_stamp
+    _at(api_client, GOLDEN_NOW + timedelta(hours=6))
+    assert api_client.get("/api/accounts").status_code == 200
+    assert _seen(golden_db, token) == (GOLDEN_NOW + timedelta(hours=6)).isoformat()
+
+
+@pytest.mark.parametrize("failure", [sqlite3.OperationalError("database is locked"),
+                                     RuntimeError("anything else")])
+def test_a_failing_touch_never_fails_the_request(
+    api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    token = _login(api_client)
+
+    def broken(*_a: Any, **_k: Any) -> bool:
+        raise failure
+
+    monkeypatch.setattr(A, "touch_session", broken)
+    _at(api_client, GOLDEN_NOW + _DAY)
+    r = api_client.get("/api/accounts")
+    assert r.status_code == 200, r.text
+    assert _seen(golden_db, token) == GOLDEN_NOW.isoformat()
+
+
+def test_auth_session_tells_an_expired_login_from_a_signed_out_one(
+    api_client: TestClient, golden_db: sqlite3.Connection
+) -> None:
+    _login(api_client)
+    signed_in = api_client.get("/api/auth/session").json()
+    assert signed_in == {"mode": "user", "username": _USER, "name": "家明", "locked": False}
+    _at(api_client, GOLDEN_NOW + 30 * _DAY + timedelta(seconds=1))
+    assert api_client.get("/api/auth/session").json() == {
+        "mode": "user", "username": None, "name": None, "locked": False,
+        "ended": "expired", "notice": "登入已逾期（30 天未使用），請重新登入"}
+    # A cookie the store no longer knows (the boot purged it, the user was removed): the
+    # login page can still say why the form is back.
+    api_client.cookies.set("pd_session", "purged-token")
+    assert api_client.get("/api/auth/session").json() == {
+        "mode": "user", "username": None, "name": None, "locked": False,
+        "ended": "invalid", "notice": "先前的登入已失效，請重新登入"}
+    # No cookie at all: the answer is exactly what it was before this change.
+    api_client.cookies.clear()
+    assert api_client.get("/api/auth/session").json() == {
+        "mode": "user", "username": None, "name": None, "locked": False}
+
+
+def test_logout_still_works(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
+    token = _login(api_client)
+    _at(api_client, GOLDEN_NOW + 10 * _DAY)
+    assert api_client.post("/api/auth/logout").status_code == 204
+    assert _seen(golden_db, token) is None  # the row is gone
+    assert api_client.cookies.get("pd_session") is None  # and the cookie with it
+    assert api_client.get("/api/auth/session").json() == {
+        "mode": "user", "username": None, "name": None, "locked": False}
+    assert api_client.get("/api/accounts").status_code == 401
+
+
+def test_guest_mode_is_unchanged(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
+    """No authorised user: every route is open whatever the cookie, nothing is recorded."""
+    golden_db.execute(
+        "INSERT INTO auth_sessions (token, username, created_at, last_seen_at, locked) "
+        "VALUES ('old', 'ghost', ?, ?, 0)",
+        ((GOLDEN_NOW - 400 * _DAY).isoformat(), (GOLDEN_NOW - 400 * _DAY).isoformat()))
+    golden_db.commit()
+    api_client.cookies.set("pd_session", "old")
+    assert api_client.get("/api/auth/session").json() == {"mode": "guest"}
+    assert api_client.get("/api/accounts").status_code == 200
+    assert _seen(golden_db, "old") == (GOLDEN_NOW - 400 * _DAY).isoformat()
+
+
+# --- a real database file: the touch's own connection ----------------------------------------
+
+
+@pytest.fixture
+def protected_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A file-backed, protected database as the configured one (no lifespan)."""
+    path = tmp_path / "auth.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    init_golden_base(conn)
+    conn.execute("PRAGMA journal_mode = WAL")
+    A.create_user(conn, name="家明", username=_USER, password=_PASS, now=GOLDEN_NOW)
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("DB_PATH", str(path))
+    get_settings.cache_clear()
+    yield path
+    get_settings.cache_clear()
+
+
+def _file_session(path: Path, *, idle: timedelta) -> str:
+    """A session last seen *idle* ago on the real clock (the app's own, no override)."""
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        token = A.create_session(conn, _USER, now=app_now() - idle)
+    finally:
+        conn.close()
+    return token
+
+
+def _file_seen(path: Path, token: str) -> str | None:
+    conn = sqlite3.connect(path)
+    try:
+        return _seen(conn, token)
+    finally:
+        conn.close()
+
+
+def _drive(app: FastAPI, path: str, token: str,
+           on_send: Callable[[MutableMapping[str, Any]], None]) -> None:
+    """One GET through the ASGI app, calling *on_send* with every message it sends."""
+    scope: dict[str, Any] = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "GET", "scheme": "http", "path": path, "raw_path": path.encode(),
+        "root_path": "", "query_string": b"",
+        "headers": [(b"cookie", f"pd_session={token}".encode())],
+        "server": ("probe", 80), "client": ("probe", 1),
+    }
+    received = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal received
+        if received:
+            await asyncio.sleep(3600)
+        received = True
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        on_send(message)
+
+    enable_socket()  # the event loop's self-pipe on Windows; the request is in-process
+    try:
+        asyncio.run(app(scope, receive, send))
+    finally:
+        disable_socket(allow_unix_socket=True)
+
+
+def test_the_touch_runs_after_the_response_on_its_own_connection(
+    protected_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The response is complete (its last body message sent) before the use is recorded, and
+    the connection that records it is not the request's: the request's connection runs no
+    write and takes no write lock."""
+    token = _file_session(protected_db, idle=timedelta(hours=7))
+    before = _file_seen(protected_db, token)
+    statements: dict[int, list[str]] = {}
+    real = shared_db.connect_path
+
+    def traced(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
+        conn = real(path, read_only=read_only)
+        log = statements.setdefault(len(statements), [])
+        conn.set_trace_callback(log.append)
+        return conn
+
+    monkeypatch.setattr(shared_db, "connect_path", traced)
+    at_end: list[str | None] = []
+
+    def on_send(message: MutableMapping[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            at_end.append(_file_seen(protected_db, token))
+
+    _drive(create_app(), "/api/accounts", token, on_send)
+    assert at_end == [before], "the use was recorded before the response was complete"
+    after = _file_seen(protected_db, token)
+    assert after is not None and before is not None and after > before
+    touchers = [i for i, log in statements.items()
+                if any(s.lstrip().startswith("UPDATE auth_sessions") for s in log)]
+    assert len(touchers) == 1, statements
+    (touch_conn,) = touchers
+    readers = [i for i, log in statements.items()
+               if any("FROM auth_sessions WHERE token" in s for s in log)]
+    assert readers and touch_conn not in readers, "the touch ran on the request's connection"
+    for i in readers:
+        assert not any(s.lstrip().upper().startswith(
+            ("INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN IMMEDIATE", "BEGIN EXCLUSIVE"))
+            for s in statements[i]), statements[i]
+    # the touch's connection ran its pragmas and the one UPDATE, nothing else
+    assert all(s.lstrip().upper().startswith(("PRAGMA", "UPDATE AUTH_SESSIONS"))
+               for s in statements[touch_conn]), statements[touch_conn]
+
+
+def test_a_held_write_lock_skips_the_touch_and_the_request_answers(
+    protected_db: Path,
+) -> None:
+    token = _file_session(protected_db, idle=timedelta(hours=7))
+    before = _file_seen(protected_db, token)
+    enable_socket()
+    try:
+        client = TestClient(create_app())
+        client.cookies.set("pd_session", token)
+        holder = sqlite3.connect(protected_db, isolation_level=None)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            started = time.perf_counter()
+            r = client.get("/api/accounts")  # TestClient waits for the background touch too
+            elapsed = time.perf_counter() - started
+            holder.execute("ROLLBACK")
+        finally:
+            holder.close()
+        assert r.status_code == 200, r.text
+        # the touch gave up after its own busy timeout, not the 5 s every other one waits
+        assert elapsed < 3.0, f"the request waited {elapsed:.1f} s behind the write lock"
+        assert _file_seen(protected_db, token) == before  # skipped
+        assert client.get("/api/accounts").status_code == 200  # a later request retries
+        after = _file_seen(protected_db, token)
+        assert after is not None and before is not None and after > before
+    finally:
+        disable_socket(allow_unix_socket=True)
+
+
+# --- the boot: upgrade and purge, through the real lifespan ----------------------------------
+
+
+@pytest.fixture
+def boot_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    path = tmp_path / "boot.db"
+    monkeypatch.setenv("DB_PATH", str(path))
+    monkeypatch.setenv("PD_DISABLE_SCHEDULER", "1")
+    get_settings.cache_clear()
+    enable_socket()
+    try:
+        yield path
+    finally:
+        disable_socket(allow_unix_socket=True)
+        get_settings.cache_clear()
+
+
+def _boot(caplog: pytest.LogCaptureFixture) -> A.SessionBoot:
+    app = create_app()
+    caplog.set_level(logging.INFO, logger="portfolio_dash.api.app")
+    with TestClient(app):
+        outcome = app.state.session_boot
+    assert isinstance(outcome, A.SessionBoot)
+    return outcome
+
+
+def test_the_boot_dates_old_sessions_from_the_upgrade_and_purges_dead_ones(
+    boot_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A database from before this change: its sessions have no `last_seen_at`. The first
+    boot dates every one of them from the boot (nobody is logged out on deploy day), and purges
+    the locked one (locked sessions are never revived: re-login issues a new token) and the
+    one whose user is gone."""
+    now = app_now()
+    conn = sqlite3.connect(boot_db)
+    conn.executescript(  # the auth schema as it stood through v0.1.32
+        "CREATE TABLE auth_users (username TEXT PRIMARY KEY, name TEXT NOT NULL,"
+        " password_hash TEXT NOT NULL, created_at TEXT NOT NULL);"
+        "CREATE TABLE auth_sessions (token TEXT PRIMARY KEY, username TEXT NOT NULL,"
+        " created_at TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0);"
+    )
+    conn.execute("INSERT INTO auth_users VALUES (?, '家明', ?, ?)",
+                 (_USER, A.hash_password(_PASS), now.isoformat()))
+    old = (now - 90 * _DAY).isoformat()
+    conn.executemany("INSERT INTO auth_sessions VALUES (?, ?, ?, ?)", [
+        ("in-use", _USER, old, 0), ("locked", _USER, old, 1), ("orphan", "ghost", old, 0)])
+    conn.commit()
+    conn.close()
+
+    first = _boot(caplog)
+    assert (first.dated, first.expired, first.locked, first.orphaned) == (3, 0, 1, 1)
+    assert any("auth sessions" in r.getMessage() and "2 purged" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+    conn = sqlite3.connect(boot_db)
+    conn.row_factory = sqlite3.Row
+    rows = {r["token"]: r["last_seen_at"] for r in conn.execute("SELECT * FROM auth_sessions")}
+    assert set(rows) == {"in-use"}
+    assert datetime.fromisoformat(rows["in-use"]) >= now  # dated from the boot, not 90 d ago
+    # 31 days later nobody used it: the next boot purges it
+    conn.execute("UPDATE auth_sessions SET last_seen_at = ?",
+                 ((app_now() - 31 * _DAY).isoformat(),))
+    conn.commit()
+    conn.close()
+    second = _boot(caplog)
+    assert (second.dated, second.expired, second.purged) == (0, 1, 1)
+    assert _file_seen(boot_db, "in-use") is None

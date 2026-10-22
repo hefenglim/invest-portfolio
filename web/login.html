@@ -46,6 +46,7 @@
   <form class="login-card" data-screen-label="登入卡" onsubmit="return false;">
     <div class="login-logo">portfolio<span class="tld">-dash</span></div>
     <div class="login-sub">個人多市場投資管理</div>
+    <div class="login-hint" id="login-notice" role="status" hidden="hidden"></div>
     <div class="login-hint" id="login-hint" hidden="hidden"></div>
     <a class="login-guest-link" id="login-guest-link" href="index.html" hidden="hidden">前往儀表板</a>
     <div class="login-error" id="login-error" hidden="hidden">帳號或密碼錯誤</div>
@@ -78,18 +79,27 @@
      finds no user and answers 401 by design — so the hint sends the visitor to the
      dashboard and says the form will not pass (L22b, second re-verification 2026-09-17:
      the first hint promised 「任何帳號密碼都能進入」 and contradicted the 401). A failed
-     probe leaves the form exactly as before; empty-field validation stays client-side. */
+     probe leaves the form exactly as before; empty-field validation stays client-side.
+     The same probe says WHY the form is back (session idle expiry, 2026-10-22): a cookie
+     that no longer opens a session comes back with the server's own sentence in `notice`
+     (expired after 30 days without use, or a login the store no longer knows), shown in
+     #login-notice. The api.js 401 redirect is what brings an expired session here. */
   (function () {
     var userInput = document.getElementById('login-user');
     var passInput = document.getElementById('login-pass');
     var errEl = document.getElementById('login-error');
     var btn = document.getElementById('login-btn');
     var hintEl = document.getElementById('login-hint');
+    var noticeEl = document.getElementById('login-notice');
     var guestLink = document.getElementById('login-guest-link');
 
     function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
 
     window.pdApi.get('/api/auth/session').then(function (s) {
+      if (s && s.mode === 'user' && s.notice && noticeEl) {
+        noticeEl.textContent = s.notice;
+        noticeEl.hidden = false;
+      }
       if (s && s.mode === 'guest' && hintEl) {
         hintEl.textContent = '目前為訪客模式：尚未設定授權用戶，無需登入即可使用，'
           + '請直接前往儀表板（此頁送出帳密不會通過）。資料未受登入保護；'

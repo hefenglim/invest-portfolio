@@ -53,25 +53,34 @@ def login(
 def session(
     conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
+    now: datetime = Depends(get_now),
 ) -> dict[str, Any]:
     # Case 1: guest mode (no users) -> everything open.
     if not A.is_protected(conn):
         return {"mode": "guest"}
-    # Case 2: protected + known cookie (even if locked -> surface lock state).
+    signed_out: dict[str, Any] = {"mode": "user", "username": None, "name": None,
+                                  "locked": False}
+    # Case 2: protected + known, unexpired cookie (even if locked -> surface lock state).
     if pd_session is not None:
-        row = A.session_row(conn, pd_session)
-        if row is not None:
-            username = row["username"]
-            user = A.get_user(conn, str(username))
+        state = A.session_state(conn, pd_session, now=now)
+        if state is not None and not state.expired:
+            user = A.get_user(conn, state.username)
             name = user["name"] if user is not None else None
             return {
                 "mode": "user",
-                "username": username,
+                "username": state.username,
                 "name": name,
-                "locked": row["locked"],
+                "locked": state.locked,
             }
-    # Case 3: protected + absent/unknown cookie -> signed-out (shell shows login).
-    return {"mode": "user", "username": None, "name": None, "locked": False}
+        # Case 3: protected + a cookie that no longer opens a session (2026-10-22). Signed
+        # out, plus the reason for the login page: expired after 30 days without use, or a
+        # token the store no longer knows (the boot purged it, its user was removed). The
+        # expired row is left alone — a GET never writes; the boot purges it.
+        expired = state is not None
+        return {**signed_out, "ended": "expired" if expired else "invalid",
+                "notice": A.SESSION_EXPIRED_MESSAGE if expired else A.SESSION_INVALID_MESSAGE}
+    # Case 4: protected + no cookie -> signed-out (shell shows login).
+    return signed_out
 
 
 @router.post("/auth/logout", status_code=204)

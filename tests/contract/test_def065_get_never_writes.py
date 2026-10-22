@@ -331,3 +331,124 @@ def test_no_get_or_read_only_post_connection_carries_the_actor_trigger(
     assert not carriers, f"read connections carrying the actor trigger: {carriers}"
     assert len(seen) > 60, "the probe saw too few requests"
     assert any(seen["control"]), "the probe must see the trigger on a mutating request"
+
+
+# --- 5. protected mode: the session touch, the ONE reviewed write a GET may cause ----------
+#
+# Reviewed exception (owner ruling 2026-10-22, review finding L5 — sessions expire after 30
+# days without use). Sliding expiry must record a use, and most uses are GETs. The record is
+# the "touch" (`auth_store.touch_after_response`), and it is allowed ONLY in this shape:
+#   * this exact statement (`_REVIEWED_TOUCH`), nothing else;
+#   * on a connection that runs nothing but its pragmas and that statement — never the
+#     request's connection, which still writes nothing and takes no write lock;
+#   * after the response (a background task), at most once per SESSION_TOUCH_INTERVAL per
+#     session, giving up after SESSION_TOUCH_BUSY_TIMEOUT_MS when the write lock is held.
+# The guest-mode class test (3.) above has no exception at all: with no authorised user the
+# gate reads no session and nothing is touched.
+
+#: ``auth_store.TOUCH_SQL`` as the trace reports it (parameters expanded).
+_REVIEWED_TOUCH = re.compile(
+    r"^UPDATE auth_sessions SET last_seen_at = '[^']*' "
+    r"WHERE token = '[^']*' AND locked = 0 AND last_seen_at IS ('[^']*'|NULL)$")
+_LOCK_TAKER = re.compile(r"^\s*BEGIN\s+(IMMEDIATE|EXCLUSIVE)\b", re.I)
+_OPEN = {"/api/auth/session", "/api/health"}  # outside the gate: no session is read
+
+
+def test_protected_get_routes_write_nothing_and_the_touch_is_the_reviewed_exception(
+    db_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    from portfolio_dash.api import auth_store
+    from portfolio_dash.shared.clock import app_now
+
+    news_db = db_file.parent / "news.db"
+    traced: list[tuple[str, int, str]] = []  # (route, connection number, statement)
+    current = ["boot"]
+    opened = [0]
+    real = sqlite3.connect
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs["timeout"] = _BUSY_S
+        conn: sqlite3.Connection = real(*args, **kwargs)
+        number = opened[0]
+        opened[0] += 1
+        conn.set_trace_callback(lambda sql: traced.append((current[0], number, sql)))
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+    class _HeldLock(_WriteLock):
+        """The lock holders, opened untraced: their BEGIN IMMEDIATE is the test's own."""
+
+        def __init__(self, *paths: Path) -> None:
+            self._conns = [real(str(p), isolation_level=None) for p in paths if p.exists()]
+
+    app = create_app()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        seed = real(str(db_file))
+        seed.row_factory = sqlite3.Row
+        _seed_golden(seed)
+        auth_store.create_user(seed, name="owner", username="owner", password="pw-123456",
+                               now=GOLDEN_NOW)
+        seed.commit()
+        current[0] = "login"
+        assert client.post("/api/auth/login", json={
+            "username": "owner", "password": "pw-123456"}).status_code == 200
+        due = (app_now() - timedelta(hours=7)).isoformat()  # a touch is due on every request
+        seed.execute("UPDATE auth_sessions SET last_seen_at = ?", (due,))
+        seed.commit()
+        routes = _get_routes(app)
+        assert len(routes) >= 60, f"route enumeration broke: {len(routes)}"
+        failing: list[str] = []
+        answered: set[str] = set()  # gated routes that answered 2xx: each one schedules a touch
+        for template, path in routes:
+            current[0] = template
+            with _HeldLock(db_file, news_db):
+                r = client.get(path, params=_QUERY.get(template, {}))
+            if r.status_code >= 500 or r.status_code == 401:
+                failing.append(f"{template} -> {r.status_code} {r.text[:160]}")
+            elif r.status_code < 400 and template not in _OPEN:
+                answered.add(template)
+        stamp_under_lock = seed.execute("SELECT last_seen_at FROM auth_sessions").fetchone()[0]
+        # with the lock released, one GET records the use, and the next ones do not
+        current[0] = "free"
+        assert client.get("/api/accounts").status_code == 200
+        current[0] = "throttled"
+        assert client.get("/api/accounts").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200
+        stamp_after = seed.execute("SELECT last_seen_at FROM auth_sessions").fetchone()[0]
+        seed.close()
+
+    by_conn: dict[tuple[str, int], list[str]] = defaultdict(list)
+    for route, number, sql in traced:
+        by_conn[(route, number)].append(sql.strip())
+    offenders: list[str] = []
+    touch_conns: dict[str, int] = defaultdict(int)
+    for (route, number), stmts in by_conn.items():
+        if route in ("boot", "login"):
+            continue
+        writes = [s for s in stmts if _WRITE.match(s) and not _NOOP_DDL.match(s)]
+        takers = [s for s in stmts if _LOCK_TAKER.match(s)]
+        if not writes and not takers:
+            continue
+        reviewed = (not takers and all(_REVIEWED_TOUCH.match(w) for w in writes)
+                    and all(_REVIEWED_TOUCH.match(s) or s.upper().startswith("PRAGMA")
+                            for s in stmts))
+        if reviewed:
+            touch_conns[route] += 1
+        else:
+            offenders.append(f"{route} (connection {number}): {stmts[:4]}")
+    assert not failing, "protected GET routes that fail while another connection writes:\n" + (
+        "\n".join(failing))
+    assert not offenders, "protected GET routes that write outside the reviewed touch:\n" + (
+        "\n".join(offenders))
+    # positive control: every gated route that answered attempted the touch under the lock
+    # (once, on one connection of its own), and every attempt gave up
+    assert len(answered) >= 50, f"too few routes answered: {sorted(answered)}"
+    attempted = {route: n for route, n in touch_conns.items() if route in answered}
+    assert attempted == dict.fromkeys(answered, 1), (
+        f"routes without exactly one touch: {sorted(answered ^ set(attempted))} {attempted}")
+    assert stamp_under_lock == due, "a touch went through while the write lock was held"
+    assert touch_conns.get("free") == 1 and stamp_after > due
+    assert "throttled" not in touch_conns, "a second touch inside the touch interval"

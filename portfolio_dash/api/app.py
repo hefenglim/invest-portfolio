@@ -12,7 +12,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Request, Response
 
 from portfolio_dash.api import action_log, alert_inputs, settlement_service
-from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
+from portfolio_dash.api.auth_store import (
+    ensure_auth_seeded,
+    prepare_sessions_at_boot,
+    require_session,
+    session_user,
+)
 from portfolio_dash.api.composition import bind_runtime
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.dividend_inbox import ensure_tables as ensure_dividend_inbox_tables
@@ -185,7 +190,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_scheduler_seeded(conn)  # also seeds the 5 ingest jobs' schedule rows
         ensure_alert_rules_seeded(conn)
         ensure_target_weights_seeded(conn)  # per-symbol target weights (P3 batch 2, D8)
-        ensure_auth_seeded(conn)
+        ensure_auth_seeded(conn)  # also adds auth_sessions.last_seen_at to an older table
+        # Session idle expiry (owner ruling 2026-10-22): date every session that has no
+        # recorded use from this boot (the upgrade rule), then purge the expired, locked and
+        # orphaned ones. auth_sessions is not a settlement trigger table.
+        session_boot = prepare_sessions_at_boot(conn, now=app_now())
+        logger.info(
+            "boot: auth sessions: %d purged (%d expired, %d locked, %d orphaned); "
+            "%d dated from this boot", session_boot.purged, session_boot.expired,
+            session_boot.locked, session_boot.orphaned, session_boot.dated)
         ensure_system_prompt_seeded(conn)
         ensure_news_prompt_seeded(conn)  # editable news-organizer prompt (batch ④)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
@@ -239,6 +252,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         settlement_store.record_schema_version(conn)
     # What the boot's trigger check found (read by tests and diagnostics; never by a route).
     app.state.settle_trigger_check = trigger_check
+    # What the boot did to the login sessions (same: tests and diagnostics only).
+    app.state.session_boot = session_boot
     # The news library lives in its own file (news/store.py); its first open creates and
     # migrates it, so open it once here rather than inside the first GET /api/news.
     get_news_connection().close()
