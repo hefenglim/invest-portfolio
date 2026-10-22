@@ -1696,8 +1696,10 @@ release**: its absence is not a zero.
   (「2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算」; one owner,
   `timeseries.trend_unavailable_reason`, read by the dashboard's
   `freshness.trend_unavailable_reason`, this field and the period-return reason of a live and a
-  stored close, and the run report's daily-valuation step; owner ruling 2026-10-22), or the trend
-  has not started yet (「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」);
+  stored close, and the run report's daily-valuation step; owner ruling 2026-10-22. A close
+  computed live and dated **before** that flow reads the same owner's variant
+  「即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算」, see (m)), or the trend has not started
+  yet (「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」);
 - `missing_cash_fx`: a non-empty cash pool at D with no rate to the reporting currency;
 - `dividends_receivable`: **computed when the close is read, never stored**. It holds every
   non-STOCK dividend with `ex_date ≤ D < payment date` (the price has already dropped, while the
@@ -1772,13 +1774,20 @@ range is marked `stale: true` and shows 「更新前版本」.
 累計報酬率 / 累計 XIRR / 當期報酬（TWR） / 證券市值 / 淨投入 / 淨資產 / `<currency> 市值`), the unit,
 the old value → the new value, the notes before and after, the reason and the time. The row is
 **never deleted**, and the period row is marked 「已重述」. **The reason**: 「計算規則更新」 when the
-calc version changed; otherwise every change the run claimed whose affected day is **on or before
-that close's end day D**, earliest first, at most 3 named and then 「等 N 筆」 (N counts all of
-them: two or more imported rows inserted or deleted together are one entry,
-「匯入批次（交易／股利）」, and a price or a rate is one entry per symbol or pair, e.g.
-「價格（2330）」) — e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A close names only what can
-have moved it; with no such change it reads 「重新結算」 (owner ruling 2026-10-22; before it, every
-row of one run named that run's earliest change. Stored restatement rows are never rewritten).
+calc version changed; otherwise every change that moved the period whose affected day is **on or
+before that close's end day D**, earliest first, at most 3 named and then 「等 N 筆」 (N counts all
+of them) — e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A close names only what can have
+moved it; with no such change it reads 「重新結算」. "The changes that moved the period" are the
+ones the run claimed plus, for a run chained after a **partial** publish, those its predecessor
+(and the chain before it) settled: after a partial publish the closes from the hand-over day
+still hold an earlier version's figures, moved by both runs' changes. Counting: two or more
+**records** an import inserted, or its **undo** deleted (told by the 「批次復原 #n」 tag in
+`ledger_audit`), are one entry, 「匯入批次（交易／股利）」; an edit or a hand delete of an imported
+row is a correction of its own; a price or a rate is one entry per symbol or pair, e.g.
+「價格（2330）」; the rebuilt triggers are one undated entry, 「觸發器重建（交易）」, and alone they
+read 「觸發器重建（交易）後重新結算」 (owner ruling 2026-10-22 and the review after it; before it,
+every row of one run named that run's earliest change. Stored restatement rows are never
+rewritten).
 **The go-live restatement (上線重述)**: on
 each month's first publish, if the old `portfolio_snapshots` holds that month's freeze **written
 on the month's last day** (the go-live month's row was never a close and is not compared), every
@@ -1804,7 +1813,10 @@ they are plain regression tests now):
   it read 「帳本中有交易日期缺少匯率資料」): a close stored for a day before that flow
   keeps its trend fields, a close from that flow on carries `notes.trend_unavailable` and no
   period return, and on such a ledger a past close computed live (the live trend being wholly
-  unavailable) has no trend fields at all.
+  unavailable) has no trend fields at all — one dated before that flow reads the same owner's
+  variant 「即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算」 (same date and pair): the live series
+  as a whole is unavailable, not that day's rate (the figures are unchanged; whether a live
+  computation should cut its own trend at the day before the flow is an owner's decision).
 - **The price-basis split edge (fixed, owner ruling 2026-10-20)**: the upper bound `T` of the
   write window `(as_of, T]` was the fetch's **Taipei** date. When the US quote job fetched a
   split's last pre-split session at 16:30 New York, it was already the next day (the ex-date) in
@@ -2913,7 +2925,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.12` | 2026-10-10 | **New §4.5 US Equity Options** (owner rulings R1–R7, OPT-D1..D22; baseline `feat/options-ledger`): a contract as an instrument, share-equivalents, sell-to-open as the declared short, price-0 close rows (expiry / assignment / exercise) and R5, the option fee branch, §4.4 a close row never opens a lot, `OPTION_ADJUST`, last-trade valuation and the point-in-time / trend-derived split, OPT-D20; worked examples and anchors from the current run (phase-1 164 ops / 19,948 assertions / 0 fail). Mirror regenerated in the same change set. **No formula or accounting definition of a stock changed.** |
 | `v1.13` | 2026-10-20 | **Month and year closes replace the monthly snapshot** (PERF-D7, spec `docs/spec/2026-10-18-settlement-store.md` §11; baseline `perf/settlement-store`, v0.1.32). ① **New §7.1b**: the end day D (a calendar day), prices and FX "on or before D", cumulative KPIs (the same gates as live), `period_twr` = I(D) / I(previous end) − 1 and 「待結算」 across the seam between the old and the new version, the trend fields named apart from KPI 總市值, the `notes` (including `trend_unavailable`, `missing_cash_fx` and the `dividends_receivable` computed when read), the first period as the month of the ledger's first row in any table, the eight kinds of period-activity line (**not additive**) and the sheet-by-sheet tie-out with the tax package, the holdings at the period end and the cash at the period end counting booked dividends only, the year close ≡ the December close, provisional / the pre-update version, restatements and the one-time go-live restatement, and the two known defects the owner ruled to defer, PERF-F2 and the price-basis split edge; added §12.1 **E30 / E31** and five §12.2 glossary rows. ② **The §7.1 monthly-snapshot paragraph is rewritten as a retirement note**: the 23:50 freeze (the previous day's US close, never corrected afterwards) is no longer written, and the basis for arbitrating a month-end historical amount is now §7.1b; the §7.3 `by_currency` note is synchronized. ③ **§7.2.1 `xirr_window_days` corrected** (owner ruling 2026-10-20: keep v0.1.31's behaviour): the original "reported in every case" did not match the implementation — it is `null` when XIRR is withheld before it is computed (a 待釐清, a missing rate, no flow). ④ §7.1b added to the §12.4 locating list. Verification anchors match the current run (phase-1 257 ops / 152,086 assertions / 0 fail). Mirror re-translated by hand in the same change set. **No formula or accounting definition of the live KPIs, cost, P&L, XIRR or cash changed**: with the settlement store clean, the dashboard is byte-identical to v0.1.31. |
 | `v1.14` | 2026-10-21 | **Two fixes after v0.1.32** (owner rulings 2026-10-19 and 2026-10-20): §7.1b (m) now records them as fixed. ① **PERF-F2**: the trend's FX pairs are the quote currencies ∪ the currency of every cash movement the trend converts (`timeseries.trend_fx_currencies`), so a REBATE / INTEREST_EXPENSE / BROKER_FEE in a currency no instrument is quoted in no longer makes the whole trend, B, B−A, the trading and financing cost and the index comparison unavailable; a genuinely missing rate still does. ② **The price-basis split edge**: the write window's bound is the exchange-local date. Stress phase 1 gains the `run_unquoted_ccy_cash` checkpoint (on a copy, with its own server). Mirror re-translated by hand in the same change set. **No formula or accounting definition of XIRR, cost, P&L or cash changed**; what moves is only the trend-derived figures that were unavailable for want of an FX pair, and the temporarily wrong close of a split's last pre-split session. |
-| `v1.15` | 2026-10-22 | **The accountant review's five minor findings** (owner rulings 2026-10-22). ① **The restatement reason, per close** (§7.1b (l)): each restatement now names the changes the run claimed whose affected day is on or before that close's end day D (earliest first, at most 3 then 「等 N 筆」, an import batch as one entry), e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」; before it, every row of one run named that run's earliest change. Only restatement rows written from now on change. ② **One owner for the trend-unavailable sentence** (§7.1b (e), (m)): 「2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算」 names the first flow with no rate and its pair (`timeseries.first_unconvertible_flow` / `trend_unavailable_reason`), shared by the dashboard, a live and a stored close, the period-return reason and the run report; it replaces 「帳本中有交易日期缺少匯率資料」 and 「部分投入流量缺少當日匯率，該日沒有走勢資料」. ③ **The short-window hint on 月度成績** (§7.1b (b), §7.2.1): the 累計 XIRR cell carries the KPI card's 「觀察期 N 天・短窗參考」 under 365 days, and `/api/snapshots` month rows gain `xirr_window_days`; the 30-day gate is unchanged. ④ **Every price missing** (§5.3, §7.1b (a)): documented only — 總市值 and the unrealized part read 0, only XIRR is all-or-nothing. ⑤ **A corporate action is not a period-activity line** (§7.1b (g)): documented only. Mirror re-translated by hand in the same change set. **No formula or accounting definition of XIRR, cost, P&L or cash changed**; what changes is the wording of the restatement reason and of an unavailable trend, and one hint on 月度成績. |
+| `v1.15` | 2026-10-22 | **The accountant review's five minor findings** (owner rulings 2026-10-22). ① **The restatement reason, per close** (§7.1b (l)): each restatement now names the changes the run claimed whose affected day is on or before that close's end day D (earliest first, at most 3 then 「等 N 筆」, an import batch as one entry), e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」; before it, every row of one run named that run's earliest change. Only restatement rows written from now on change. ② **One owner for the trend-unavailable sentence** (§7.1b (e), (m)): 「2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算」 names the first flow with no rate and its pair (`timeseries.first_unconvertible_flow` / `trend_unavailable_reason`), shared by the dashboard, a live and a stored close, the period-return reason and the run report; it replaces 「帳本中有交易日期缺少匯率資料」 and 「部分投入流量缺少當日匯率，該日沒有走勢資料」. ③ **The short-window hint on 月度成績** (§7.1b (b), §7.2.1): the 累計 XIRR cell carries the KPI card's 「觀察期 N 天・短窗參考」 under 365 days, and `/api/snapshots` month rows gain `xirr_window_days`; the 30-day gate is unchanged. The independent review the same day: a run chained after a partial publish also names its predecessor's settled changes; an import batch counts records and groups deletes only from its undo; the rebuilt triggers read 「觸發器重建（交易）」; a live close dated before the missing-rate flow reads the variant 「即時走勢因 … 而無法計算」; outside a partial publish, a change written after a run's swap no longer starts an automatic chained run (it takes the prompt or the nightly run, PERF-D2). ④ **Every price missing** (§5.3, §7.1b (a)): documented only — 總市值 and the unrealized part read 0, only XIRR is all-or-nothing. ⑤ **A corporate action is not a period-activity line** (§7.1b (g)): documented only. Mirror re-translated by hand in the same change set. **No formula or accounting definition of XIRR, cost, P&L or cash changed**; what changes is the wording of the restatement reason and of an unavailable trend, and one hint on 月度成績. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 
