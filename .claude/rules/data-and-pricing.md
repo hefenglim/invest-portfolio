@@ -276,7 +276,11 @@ new-formula rows over old ones.
   `cash_movements`, `fx_conversions`, `corporate_actions`), plus `prices`, `fx_rates`,
   `instruments`, `accounts` and `account_market_rules`.
 - **Kinds:** `AFTER INSERT`, `AFTER UPDATE … WHEN` and `AFTER DELETE` only, plus a
-  `BEFORE INSERT` on the six ledgers that marks the row a `REPLACE` removes.
+  `BEFORE INSERT` on the six ledgers that marks the row a `REPLACE` removes. On the five
+  id-keyed ledgers (only an outside writer REPLACEs them) a removed row whose day is not the new
+  row's is also written to the trail as a `delete`, with its own `seq`: the `REPLACE` reads as
+  the delete + insert it is, so a close between the old day and a later new day can name it.
+  `opening_inventory` marks only (`upsert_opening`'s `DO UPDATE` is recorded by its UPDATE).
 - **The `WHEN` clause** is generated from `PRAGMA table_info` minus each table's exclusion list
   (P8). So a column added to a ledger later is an input by default, and changes the trigger's
   text.

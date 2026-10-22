@@ -544,7 +544,8 @@ class _Spec:
     key_columns: tuple[str, ...] = ()
     price_gate: bool = False
     #: The key a ``REPLACE`` conflicts on, when the removed row's affected day can differ from
-    #: the new row's (a date column outside the key): the BEFORE INSERT trigger marks it.
+    #: the new row's (a date column outside the key): the BEFORE INSERT trigger marks it (and,
+    #: keyed by ``id``, writes it to the trail as a ``delete`` when its day is not the new one).
     replace_key: tuple[str, ...] = ()
 
 
@@ -768,11 +769,16 @@ def _spec_triggers(spec: _Spec, columns: Sequence[str],
     # only when a row with the key exists, a watched column differs, and the REMOVED row's day
     # is inside the bound.
     #
-    # The id-keyed ledgers (the application never upserts them): when the NEW row's day lies
-    # past the bound, its AFTER INSERT records nothing, so this trigger also adds 1 to ``seq``
-    # and writes the removed row as a ``delete`` trail row — the REPLACE then reads as the
-    # delete + insert it is. When the new day is inside the bound, the AFTER INSERT records the
-    # change and this trigger only marks the removed day.
+    # The id-keyed ledgers (the application never upserts them; only an outside writer — a
+    # script, the sqlite3 CLI — REPLACEs them): when the removed row's day differs from the NEW
+    # row's, this trigger also adds 1 to ``seq`` and writes the removed row as a ``delete``
+    # trail row, so the REPLACE reads as the delete + insert it is. That covers a new day past
+    # the bound (its AFTER INSERT records nothing, and the day always differs: the removed one
+    # is inside) and a move inside it: the AFTER INSERT's trail row carries only the NEW day,
+    # so without the delete a close between a removed day and a LATER new day had no change on
+    # or before its end day to name (``settle_worker.correction_reason``). On an unchanged day
+    # the AFTER INSERT's row already names the change, and this trigger only marks the day —
+    # one trail row, never two.
     #
     # ``opening_inventory`` marks only: ``upsert_opening`` takes ``DO UPDATE``, which fires
     # BEFORE INSERT too and is recorded by the AFTER UPDATE — a trail row here would record it
@@ -782,15 +788,15 @@ def _spec_triggers(spec: _Spec, columns: Sequence[str],
         differs = " OR ".join(f"o.{c} IS NOT NEW.{c}" for c in _watched(spec, columns))
         removed = f"(SELECT {_r(spec.day, 'o')} FROM {spec.table} AS o WHERE {key})"
         logs = spec.replace_key == ("id",)
-        past = f"{new_day} > {_BOUND}"
-        seq = f", seq = seq + CASE WHEN {past} THEN 1 ELSE 0 END" if logs else ""
+        moved = f"{removed} IS NOT {new_day}"
+        seq = f", seq = seq + CASE WHEN {moved} THEN 1 ELSE 0 END" if logs else ""
         rep_body = [f"UPDATE settle_dirty SET dirty_from = CASE WHEN dirty_from IS NULL OR "
                     f"{removed} < dirty_from THEN {removed} ELSE dirty_from END{seq} "
                     f"WHERE id = 1"]
         if logs:
             rep_body.append(
                 f"{_LOG_INSERT} SELECT {_log_values(spec, 'delete', columns, old_row='o')} "
-                f"FROM {spec.table} AS o WHERE {key} AND {past}")
+                f"FROM {spec.table} AS o WHERE {key} AND {_r(spec.day, 'o')} IS NOT {new_day}")
         out[f"{base}_rep"] = _trigger_sql(
             f"{base}_rep", f"BEFORE INSERT ON {spec.table}",
             f"EXISTS (SELECT 1 FROM {spec.table} AS o WHERE {key} AND ({differs}) "
