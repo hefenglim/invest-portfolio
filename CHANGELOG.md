@@ -9,6 +9,8 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.33] - 2026-10-22
+
 Changes after v0.1.32, each built on its own branch, reviewed independently, its findings fixed by
 its own author, then cherry-picked onto `fix/post-v0132`: the two defects the settlement-store work
 reproduced and the owner deferred (ruling 2026-10-19); the v0.1.32 code-review follow-ups and its

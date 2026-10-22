@@ -66,6 +66,73 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.33 (post-v0.1.32 fixes: review follow-ups, PERF-F2, split edge, minors) -------
+    Feature(
+        version="0.1.33",
+        id="trend-tooltip-server-pnl",
+        title="走勢圖提示的「累計總損益（含匯兌）」改由伺服器計算",
+        desc="滑過「總市值 vs 累計淨投入」走勢圖時顯示的累計總損益，現在和上方的含匯兌總損益用同一"
+        "套計算，依報告幣別的小數位四捨五入；當天有部分持股缺價（資料不完整）時改顯示「—」，"
+        "不再顯示一個偏低的數字。報告幣別是美元時，圖上各數字也會顯示到分",
+        href="index.html",
+        area="儀表板 → 總市值 vs 累計淨投入",
+        target="#trend-chart",
+    ),
+    Feature(
+        version="0.1.33",
+        id="trend-keeps-unquoted-cash-cost",
+        title="沒有該幣別持股時的退款或費用，不再讓走勢圖整個消失",
+        desc="例如帳上沒有馬股、卻收到一筆馬幣退款時，以前走勢圖、含匯兌總損益、交易與融資成本與指數"
+        "對照會整組不見。現在照常顯示；只有某筆流量當天真的查不到匯率時，才會說明是哪一天、哪個幣別"
+        "缺匯率",
+        href="index.html",
+        area="儀表板 → 總市值 vs 累計淨投入",
+        target="#trend-chart",
+    ),
+    Feature(
+        version="0.1.33",
+        id="split-window-exchange-date",
+        title="美股分割前最後一個交易日的收盤，不再暫時被乘上分割比例",
+        desc="美股報價在紐約收盤後抓取，台北已是隔天；遇到股票分割時，以前會把前一個交易日的收盤"
+        "誤乘上分割比例，要到隔天才恢復，期間的走勢與月結會差一個比例。現在依交易所當地日期判斷"
+        "分割是否生效；台股、馬股不受影響",
+        href="index.html",
+        area="儀表板 → 持倉明細",
+        target="#holdings-table",
+    ),
+    Feature(
+        version="0.1.33",
+        id="monthly-reasons-and-short-window",
+        title="月度成績：短期 XIRR 加註「短窗參考」，已重述會寫出每一筆更正",
+        desc="觀察期不到一年的月份，累計 XIRR 旁會和首頁 KPI 一樣標示「觀察期 N 天・短窗參考」。"
+        "一次重新結算處理好幾筆更正時，「已重述」會寫出影響該月的每一筆更正（例如「2026-02-05 交易"
+        "、2026-05-08 股利更正後重新結算」），不再只寫最早那一筆；走勢無法計算時也會說明是哪一天、"
+        "哪個幣別缺匯率",
+        href="index.html",
+        area="儀表板 → 月度成績",
+        target="#snapshots-panel",
+    ),
+    Feature(
+        version="0.1.33",
+        id="settlement-chip-steadier",
+        title="取消重新結算後不再立刻被問，結算狀態也不再在結束瞬間閃「待結算」",
+        desc="在結算面板按下取消後，不會再馬上跳出「要重新結算嗎？」。結算剛完成的那一刻，右上角的"
+        "結算狀態不會再短暫顯示「待結算」或「更新前版本」；結算剛結束時才改的舊資料，會照常先問你"
+        "要不要重新結算",
+        href="index.html",
+        area="頂端列 → 結算狀態",
+        target="#settle-chip",
+    ),
+    Feature(
+        version="0.1.33",
+        id="login-idle-expiry",
+        title="登入 30 天未使用會自動登出",
+        desc="為保護帳本，登入狀態約 30 天未使用即失效，需要重新登入；期間只要有使用就會自動延長。"
+        "逾期時登入頁會說明原因，也可以直接登出清除。升級當天不會被登出",
+        href="settings.html#accounts",
+        area="設定 → 帳戶與費率 → 授權用戶",
+        target="#users-wrap",
+    ),
     # --- v0.1.32 (the settlement store: history settled ahead, pages from the cache) -------
     Feature(
         version="0.1.32",
@@ -2079,6 +2146,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.33": "2026-10-22",
     "0.1.32": "2026-10-20",
     "0.1.31": "2026-10-14",
     "0.1.30": "2026-10-11",
