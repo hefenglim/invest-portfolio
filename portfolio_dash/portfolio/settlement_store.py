@@ -85,6 +85,7 @@ from portfolio_dash.portfolio.settlement_models import (
     RunStatus,
     RunSummary,
     RunVersions,
+    StateResult,
     is_run_reason,
     run_status_text,
 )
@@ -2260,6 +2261,11 @@ class SwapResult:
     held_through: date | None
     #: A partial publish: the chained run's first day (``N``).
     handed_from: date | None = None
+    #: A full publish that found ``dirty_from`` set, after ``through`` (a change committed
+    #: WHILE the run was active, dated past its range): the chained run's first day. ``None``
+    #: on a full publish of a clean store — a change committed after this swap is not the
+    #: run's, and waits for the prompt (PERF-D2) or the nightly run.
+    queued_from: date | None = None
     settled_records: int = 0
     settled_counters: int = 0
     put_back_records: int = 0
@@ -2431,6 +2437,12 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
         report = _load_report(conn, run_id)
         if report is not None:
             update: dict[str, Any] = {}
+            if arrived is not None:
+                # the run's OWN follow-up, decided here, inside the swap: a change committed
+                # while it was active (the waiter chains a run from it). A change committed
+                # after this transaction is not the run's (PERF-D2: prompt first).
+                update["state"] = (report.state or StateResult()).model_copy(
+                    update={"chained_from": arrived})
             if not full:
                 assert arrived is not None
                 update["range"] = report.range.model_copy(
@@ -2444,7 +2456,8 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
         pruned = _prune(conn, KEEP_RUNS)
     return SwapResult(
         status=status, generation=new, settled_through=published, held_through=held,
-        handed_from=None if full else arrived, settled_records=settled[0],
+        handed_from=None if full else arrived, queued_from=arrived if full else None,
+        settled_records=settled[0],
         settled_counters=settled[1], put_back_records=put[0], put_back_counters=put[1],
         pruned=pruned)
 

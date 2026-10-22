@@ -15,7 +15,7 @@ The PARENT of every run:
   OOM, a child that died before it claimed), finalises ``job_runs`` per DEF-067
   (``settlement_models.job_status_for``), pushes on a failed AUTOMATIC run (P4, Q-P1 = (a)),
   calls ``flight.note_write()``, pre-warms, then starts the follow-up (chained / resume /
-  queued);
+  queued — chained only for what the run itself left, :func:`_follow_up`);
 - :func:`cancel` terminates, waits, and ends the run as cancelled unless it published;
 - :func:`on_boot` + :func:`start_after_boot` are the boot hook (see their docstrings);
 - :func:`status` is the chip's read — it never writes and never starts anything.
@@ -822,6 +822,10 @@ class RunEnd:
     scope: RunScope
     resumed: bool = False
     dirty_after: date | None = None
+    #: The day its OWN follow-up starts from, as its swap decided it (``StateResult.
+    #: chained_from``): a partial publish's hand-over, or a change committed while it was
+    #: active. ``None`` on a clean full publish — see :func:`_follow_up`.
+    chained_from: date | None = None
 
 
 @dataclass(frozen=True)
@@ -1260,11 +1264,20 @@ def _finalise(conn: sqlite3.Connection, run_id: int, *, exit_info: _Exit | None,
     dirty_after = store.store_state(conn, reporting=_reporting()).dirty_from
     return RunEnd(run_id=run_id, status=status, job_status=job_status, detail=detail,
                   reason=ended.summary.reason, scope=ended.inputs.scope,
-                  resumed=ended.summary.resumed, dirty_after=dirty_after)
+                  resumed=ended.summary.resumed, dirty_after=dirty_after,
+                  chained_from=None if ended.state is None else ended.state.chained_from)
 
 
 def _follow_up(ended: RunEnd) -> _Pending | None:
-    """The run that follows *ended* (spec §9.1 "chained", §9.4 resume)."""
+    """The run that follows *ended* (spec §9.1 "chained", §9.4 resume).
+
+    A ``chained`` run follows only what the ended run itself left (review 2026-10-22, PERF-D2):
+    a ``partial`` publish's hand-over, a ``superseded`` run's put-back claim, or a change
+    committed WHILE a published run was active (its swap found it: ``chained_from``, spec Q3).
+    A change committed AFTER the swap — in the window before this waiter finalises, when the
+    status already reads idle — is nobody's follow-up: dated before the live window it takes
+    the ordinary prompt (``needs_prompt``), inside it it is live and waits for the nightly run.
+    Chaining it ran an owner's back-dated edit without the prompt the owner ruled for."""
     if not flags.settle_enabled():
         return None
     if ended.status == "cancelled":
@@ -1281,7 +1294,10 @@ def _follow_up(ended: RunEnd) -> _Pending | None:
     with _S.lock:
         if _S.queue:
             return _S.queue.pop(0)
-    if ended.status in ("published", "partial", "superseded") and ended.dirty_after is not None:
+    if ended.dirty_after is None:
+        return None
+    if ended.status in ("partial", "superseded") or (
+            ended.status == "published" and ended.chained_from is not None):
         return _Pending(scope="dirty", reason="chained", previous_run_id=ended.run_id)
     return None
 

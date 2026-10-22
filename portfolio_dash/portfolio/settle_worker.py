@@ -1457,7 +1457,8 @@ class _Run:
             stale_cleared=stale is None,
             stale_reason=None if stale is None else
             f"歷史走勢與月度成績尚未包含 {stale[0].isoformat()} 起的變更",
-            pending_positions=pending, chained_from=result.handed_from)
+            pending_positions=pending,
+            chained_from=result.handed_from or result.queued_from)
         changes = stored.changes.model_copy(update={
             "handed_back": result.status == "superseded"})
         final = stored.model_copy(update={

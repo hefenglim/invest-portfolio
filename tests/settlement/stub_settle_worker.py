@@ -15,7 +15,10 @@ Each call consumes the next behaviour of a plan:
 Behaviours: ``publish`` (default), ``fail``, ``die_before_claim``, ``die_after_claim``,
 ``sleep`` (claims, then sleeps until terminated), ``selfcheck_diff`` (a self-check that
 found 3 differences; any self-check-scope ``publish`` is clean), ``change_during``
-(commits a back-dated trade after the claim, so the swap publishes partially).
+(commits a back-dated trade after the claim, so the swap publishes partially),
+``change_after_swap`` / ``change_after_swap_inside`` (publishes, then commits a trade dated
+2026-02-02 — before the live window — or inside it, in the window before the parent's waiter
+finalises the run: the status already reads idle there).
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import sys
 import time
 import traceback
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -44,6 +47,7 @@ from portfolio_dash.portfolio.settlement_models import (
     SelfcheckResult,
 )
 from portfolio_dash.shared import proc_lock
+from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import connect_path
 from portfolio_dash.shared.models.enums import Side
@@ -189,6 +193,17 @@ def run(run_id: int, *, db_path: Path) -> None:
             finally:
                 other.close()
         _publish(conn, run_id, claim, selfcheck_diff=behaviour == "selfcheck_diff")
+        if behaviour in ("change_after_swap", "change_after_swap_inside"):
+            day = (st.window_start(app_now().date()) + timedelta(days=2)
+                   if behaviour == "change_after_swap_inside" else date(2026, 2, 2))
+            other = connect_path(db_path)
+            try:
+                insert_transaction(other, account_id="tw_broker", symbol="2330", side=Side.BUY,
+                                   quantity=Decimal("1"), price=Decimal("500"),
+                                   fees=Decimal("0"), tax=Decimal("0"), trade_date=day)
+                other.commit()
+            finally:
+                other.close()
     finally:
         conn.close()
         lock.release()
