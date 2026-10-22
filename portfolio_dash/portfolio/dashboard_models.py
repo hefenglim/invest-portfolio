@@ -226,31 +226,47 @@ class TrendPoint(BaseModel):
     # trend is built. None on a cash-incomplete day (a non-zero pool lacked FX) so the
     # frontend draws an honest gap. Never a money-of-record input.
     net_worth: Decimal | None = None
-    # 累計總損益（含匯兌） as SERVED (owner ruling 2026-10-22): ``total_value − net_invested`` at
+    # 累計總損益（含匯兌） as SERVED (owner rulings 2026-10-22): ``total_value − net_invested`` at
     # the reporting currency's minor unit (:func:`trend_pnl`), so the trend tooltip only
-    # formats it. The name is short on purpose: the dashboard serves one point per day of the
+    # formats it — and None (the tooltip's 「—」) on an ``incomplete`` day, whose value is not
+    # one to show. The name is short on purpose: the dashboard serves one point per day of the
     # ledger's life (2,179 on a prod-sized ledger). Set on the dashboard's SERVED series only,
     # once per build — on the days from the settlement store as they are built
     # (``dashboard._stored_point``) and on the live days by :func:`with_trend_pnl`; None on
-    # every internal series (the replay, the net-worth composition, the settlement worker),
+    # every internal series too (the replay, the net-worth composition, the settlement worker),
     # which the engine-equality pins compare with v0.1.31's own. Display-only: never an input,
     # never stored.
     pnl: Decimal | None = None
 
 
-def trend_pnl(total_value: Decimal, net_invested: Decimal, reporting: Currency) -> Decimal:
+def trend_pnl(total_value: Decimal, net_invested: Decimal, reporting: Currency, *,
+              incomplete: bool) -> Decimal | None:
     """A trend day's 累計總損益（含匯兌）: ``total_value − net_invested``, quantized to the
     reporting currency's minor unit for DISPLAY (``quantize_amount``: TWD 0 dp, USD / MYR 2 dp,
     ROUND_HALF_UP). The ONE owner of the tooltip's figure (owner ruling 2026-10-22): the
     tooltip used to subtract the two Decimal strings in JS floats.
 
+    **None on an ``incomplete`` day** (owner ruling 2026-10-22, the KPI B gate's own rule: an
+    unreliable figure is not shown). Such a day's ``total_value`` leaves out a holding whose
+    value is unknown or 待釐清 — a missing price, a 賣超, a dividend the replay refused, a
+    corporate action it could not apply, an option close it refused — so the difference is not
+    the day's result. The tooltip prints 「—」 and keeps its 「部分標的當日無價格」 note.
+
     AI-D41: every flow in ``net_invested`` is converted at its own date's rate and the value at
-    that day's, so this is figure B as of that day — the FX-COMPLETE lifetime result, never
-    the 浮動損益 it was once labelled. On the last day it is ``kpis.total_return_fx_complete``
-    rounded for display; B itself stays at full precision and is computed from the series, not
-    from this. A loss rounded away to zero reads ``0``, never ``-0``: a minus sign in front of
-    a zero is noise, and every sign test would colour it as a loss.
+    that day's, so this is figure B as of that day — the FX-COMPLETE lifetime result, never the
+    浮動損益 it was once labelled. Its relation to the KPI (``kpis.total_return_fx_complete``,
+    ``dashboard.fx_complete_return``): the SAME subtraction on the trend's LAST point, which B
+    keeps at full precision and this rounds for display. B is withheld when that point is
+    incomplete — and then this is None too — and also whenever the book records a refused
+    option close; the trend marks every day from such a close's date incomplete, so on the last
+    day the two gates agree. A 賣超, a refused dividend and an unapplied action withhold B only
+    through that same last-day ``incomplete`` (they choose the reason, not the gate). So: on the
+    last point this is either B quantized, or None exactly when B is withheld. On earlier days
+    there is no KPI to compare with. A loss rounded away to zero reads ``0``, never ``-0``: a
+    minus sign in front of a zero is noise, and every sign test would colour it as a loss.
     """
+    if incomplete:
+        return None
     pnl = quantize_amount(total_value - net_invested, reporting)
     return abs(pnl) if pnl.is_zero() else pnl
 
@@ -270,7 +286,8 @@ class TrendSeries(BaseModel):
 
 def with_trend_pnl(series: TrendSeries) -> TrendSeries:
     """*series* with every point's ``pnl`` set (:func:`trend_pnl`, in the series' own reporting
-    currency): the series as SERVED. A copy; *series* is not changed.
+    currency; None on an incomplete day): the series as SERVED. A copy; *series* is not
+    changed.
 
     The dashboard applies it to its LIVE days, once per build; the days it serves from the
     settlement store get theirs as they are built (``dashboard._stored_point``), so the
@@ -280,7 +297,8 @@ def with_trend_pnl(series: TrendSeries) -> TrendSeries:
     per dump added about three times what a precomputed field adds to a request."""
     ccy = series.reporting_currency
     return series.model_copy(update={"points": [
-        p.model_copy(update={"pnl": trend_pnl(p.total_value, p.net_invested, ccy)})
+        p.model_copy(update={"pnl": trend_pnl(p.total_value, p.net_invested, ccy,
+                                              incomplete=p.incomplete)})
         for p in series.points]})
 
 

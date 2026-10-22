@@ -22,9 +22,9 @@ and every other file, is v0.1.31's.
 
 **One more since: the trend points' ``pnl``** (owner ruling 2026-10-22,
 ``tests/reference/trend_pnl.py``). Every served trend point gains one key, appended after
-``net_worth``: its own ``total_value − net_invested`` at the reporting currency's minor unit.
-It composes with PERF-F2 — ``trend_pnl.expected_bytes`` starts from ``perf_f2.expected_bytes``
-— and changes nothing else.
+``net_worth``: its own ``total_value − net_invested`` at the reporting currency's minor unit,
+``null`` on an incomplete day. It composes with PERF-F2 — ``trend_pnl.expected_bytes`` starts
+from ``perf_f2.expected_bytes`` — and changes nothing else.
 """
 
 import json
@@ -136,15 +136,18 @@ def test_trend_pnl_adds_exactly_one_key_to_every_point() -> None:
     assert seen > 2000, seen   # every corpus's whole series and every month end's point D
 
 
-@pytest.mark.parametrize(("total", "invested", "ccy", "expected"), [
-    ("1234567.8", "1000000.3", "TWD", "234568"),
-    ("100", "100.5", "TWD", "-1"),
-    ("100", "100.3", "TWD", "0"),
-    ("100", "100.003", "USD", "0.00"),
-    ("1000.005", "0", "USD", "1000.01"),
-    ("4082.123", "4000", "MYR", "82.12"),
+@pytest.mark.parametrize(("total", "invested", "ccy", "incomplete", "expected"), [
+    ("1234567.8", "1000000.3", "TWD", False, "234568"),
+    ("100", "100.5", "TWD", False, "-1"),
+    ("100", "100.3", "TWD", False, "0"),
+    ("100", "100.003", "USD", False, "0.00"),
+    ("1000.005", "0", "USD", False, "1000.01"),
+    ("4082.123", "4000", "MYR", False, "82.12"),
+    ("1000", "900", "TWD", True, None),
+    ("1000", "900", "USD", True, None),
 ])
-def test_the_transcribed_rounding_rule(total: str, invested: str, ccy: str,
-                                       expected: str) -> None:
-    """The oracle's own rule, pinned: ROUND_HALF_UP at the minor unit, no ``-0``."""
-    assert trend_pnl.point_pnl(total, invested, ccy) == expected
+def test_the_transcribed_rounding_rule(total: str, invested: str, ccy: str, incomplete: bool,
+                                       expected: str | None) -> None:
+    """The oracle's own rule, pinned: ROUND_HALF_UP at the minor unit, no ``-0``, ``null`` on
+    an incomplete day."""
+    assert trend_pnl.point_pnl(total, invested, ccy, incomplete=incomplete) == expected

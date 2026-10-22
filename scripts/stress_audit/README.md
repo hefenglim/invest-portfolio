@@ -147,6 +147,7 @@ are sampled by construction — plus `ASOF` and the last point.
 | `trend.incomplete` | yes | the app's honesty about days it cannot value |
 | `trend.total_value` | no | the per-day valuation — see below |
 | `trend.net_worth` | no | `total_value` + every cash pool's end-of-day balance at that day's rate (YQ3, 2026-10-05) |
+| `trend.pnl` · `trend.pnl_text` | no | the tooltip's 累計總損益（含匯兌） (owner rulings 2026-10-22): the harness's own `total_value − net_invested` at the reporting currency's minor unit, ROUND_HALF_UP, `0` never `-0` — value AND text; `null` on every incomplete day (asserted even where the value is not judgeable) |
 
 Since YQ1/YQ3 (2026-10-05) two questions are kept apart: whether a day is **incomplete**
 (`_day_incomplete`) and whether its **value** is honest (`_day_value_judgeable`). A refused

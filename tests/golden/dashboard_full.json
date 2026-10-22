@@ -525,7 +525,7 @@
         "net_invested": "500000",
         "incomplete": true,
         "net_worth": "-500000",
-        "pnl": "-500000"
+        "pnl": null
       },
       {
         "date": "2026-01-06",
@@ -533,7 +533,7 @@
         "net_invested": "860000",
         "incomplete": true,
         "net_worth": "-860000",
-        "pnl": "-860000"
+        "pnl": null
       },
       {
         "date": "2026-01-07",
@@ -541,7 +541,7 @@
         "net_invested": "960000",
         "incomplete": true,
         "net_worth": "-960000",
-        "pnl": "-960000"
+        "pnl": null
       },
       {
         "date": "2026-01-08",
@@ -549,7 +549,7 @@
         "net_invested": "1075000",
         "incomplete": true,
         "net_worth": "-1075000",
-        "pnl": "-1075000"
+        "pnl": null
       },
       {
         "date": "2026-01-09",
@@ -557,7 +557,7 @@
         "net_invested": "1075000",
         "incomplete": true,
         "net_worth": "-1075000",
-        "pnl": "-1075000"
+        "pnl": null
       },
       {
         "date": "2026-01-10",
@@ -565,7 +565,7 @@
         "net_invested": "1853100",
         "incomplete": true,
         "net_worth": "-1853100",
-        "pnl": "-1853100"
+        "pnl": null
       },
       {
         "date": "2026-01-11",
@@ -573,7 +573,7 @@
         "net_invested": "1853100",
         "incomplete": true,
         "net_worth": "-1853100",
-        "pnl": "-1853100"
+        "pnl": null
       },
       {
         "date": "2026-01-12",
@@ -581,7 +581,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-13",
@@ -589,7 +589,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-14",
@@ -597,7 +597,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-15",
@@ -605,7 +605,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-16",
@@ -613,7 +613,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-17",
@@ -621,7 +621,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-18",
@@ -629,7 +629,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-19",
@@ -637,7 +637,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-20",
@@ -645,7 +645,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-21",
@@ -653,7 +653,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-22",
@@ -661,7 +661,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-23",
@@ -669,7 +669,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-24",
@@ -677,7 +677,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-25",
@@ -685,7 +685,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-26",
@@ -693,7 +693,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-27",
@@ -701,7 +701,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-28",
@@ -709,7 +709,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-29",
@@ -717,7 +717,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-30",
@@ -725,7 +725,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-01-31",
@@ -733,7 +733,7 @@
         "net_invested": "1977100",
         "incomplete": true,
         "net_worth": "-1977100",
-        "pnl": "-1977100"
+        "pnl": null
       },
       {
         "date": "2026-02-01",
@@ -741,7 +741,7 @@
         "net_invested": "2038300.0",
         "incomplete": true,
         "net_worth": "-2038300.0",
-        "pnl": "-2038300"
+        "pnl": null
       },
       {
         "date": "2026-02-02",
@@ -749,7 +749,7 @@
         "net_invested": "2038300.0",
         "incomplete": true,
         "net_worth": "-2038300.0",
-        "pnl": "-2038300"
+        "pnl": null
       },
       {
         "date": "2026-02-03",
@@ -757,7 +757,7 @@
         "net_invested": "2038300.0",
         "incomplete": true,
         "net_worth": "-2038300.0",
-        "pnl": "-2038300"
+        "pnl": null
       },
       {
         "date": "2026-02-04",
@@ -765,7 +765,7 @@
         "net_invested": "2038300.0",
         "incomplete": true,
         "net_worth": "-2038300.0",
-        "pnl": "-2038300"
+        "pnl": null
       },
       {
         "date": "2026-02-05",
@@ -773,7 +773,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2558300.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-06",
@@ -781,7 +781,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2558300.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-07",
@@ -789,7 +789,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2558300.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-08",
@@ -797,7 +797,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2558300.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-09",
@@ -805,7 +805,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2558300.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-10",
@@ -813,7 +813,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2557120.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-11",
@@ -821,7 +821,7 @@
         "net_invested": "2558300.0",
         "incomplete": true,
         "net_worth": "-2557120.0",
-        "pnl": "-2558300"
+        "pnl": null
       },
       {
         "date": "2026-02-12",
@@ -829,7 +829,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-13",
@@ -837,7 +837,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-14",
@@ -845,7 +845,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-15",
@@ -853,7 +853,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-16",
@@ -861,7 +861,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-17",
@@ -869,7 +869,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-18",
@@ -877,7 +877,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-19",
@@ -885,7 +885,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-20",
@@ -893,7 +893,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-21",
@@ -901,7 +901,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-22",
@@ -909,7 +909,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-23",
@@ -917,7 +917,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-24",
@@ -925,7 +925,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-25",
@@ -933,7 +933,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-26",
@@ -941,7 +941,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-27",
@@ -949,7 +949,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-02-28",
@@ -957,7 +957,7 @@
         "net_invested": "2651225.0",
         "incomplete": true,
         "net_worth": "-2658120.0",
-        "pnl": "-2651225"
+        "pnl": null
       },
       {
         "date": "2026-03-01",
@@ -965,7 +965,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-02",
@@ -973,7 +973,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-03",
@@ -981,7 +981,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-04",
@@ -989,7 +989,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-05",
@@ -997,7 +997,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-06",
@@ -1005,7 +1005,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-07",
@@ -1013,7 +1013,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-08",
@@ -1021,7 +1021,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-09",
@@ -1029,7 +1029,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-10",
@@ -1037,7 +1037,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-11",
@@ -1045,7 +1045,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-12",
@@ -1053,7 +1053,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-13",
@@ -1061,7 +1061,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-14",
@@ -1069,7 +1069,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-15",
@@ -1077,7 +1077,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-16",
@@ -1085,7 +1085,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-17",
@@ -1093,7 +1093,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-18",
@@ -1101,7 +1101,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-19",
@@ -1109,7 +1109,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-20",
@@ -1117,7 +1117,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-21",
@@ -1125,7 +1125,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-22",
@@ -1133,7 +1133,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-23",
@@ -1141,7 +1141,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-24",
@@ -1149,7 +1149,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-25",
@@ -1157,7 +1157,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-26",
@@ -1165,7 +1165,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-27",
@@ -1173,7 +1173,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-28",
@@ -1181,7 +1181,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-29",
@@ -1189,7 +1189,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-30",
@@ -1197,7 +1197,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-03-31",
@@ -1205,7 +1205,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-04-01",
@@ -1213,7 +1213,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-04-02",
@@ -1221,7 +1221,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-04-03",
@@ -1229,7 +1229,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-04-04",
@@ -1237,7 +1237,7 @@
         "net_invested": "2631225.0",
         "incomplete": true,
         "net_worth": "-2638120.0",
-        "pnl": "-2631225"
+        "pnl": null
       },
       {
         "date": "2026-04-05",
@@ -1245,7 +1245,7 @@
         "net_invested": "2629865.0",
         "incomplete": true,
         "net_worth": "-2636760.0",
-        "pnl": "-2629865"
+        "pnl": null
       },
       {
         "date": "2026-04-06",
@@ -1253,7 +1253,7 @@
         "net_invested": "2629865.0",
         "incomplete": true,
         "net_worth": "-2636760.0",
-        "pnl": "-2629865"
+        "pnl": null
       },
       {
         "date": "2026-04-07",
@@ -1261,7 +1261,7 @@
         "net_invested": "2629865.0",
         "incomplete": true,
         "net_worth": "-2636760.0",
-        "pnl": "-2629865"
+        "pnl": null
       },
       {
         "date": "2026-04-08",
@@ -1269,7 +1269,7 @@
         "net_invested": "2629865.0",
         "incomplete": true,
         "net_worth": "-2636760.0",
-        "pnl": "-2629865"
+        "pnl": null
       },
       {
         "date": "2026-04-09",
@@ -1277,7 +1277,7 @@
         "net_invested": "2629865.0",
         "incomplete": true,
         "net_worth": "-2636760.0",
-        "pnl": "-2629865"
+        "pnl": null
       },
       {
         "date": "2026-04-10",
@@ -1285,7 +1285,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-11",
@@ -1293,7 +1293,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-12",
@@ -1301,7 +1301,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-13",
@@ -1309,7 +1309,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-14",
@@ -1317,7 +1317,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-15",
@@ -1325,7 +1325,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-16",
@@ -1333,7 +1333,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-17",
@@ -1341,7 +1341,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-18",
@@ -1349,7 +1349,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-19",
@@ -1357,7 +1357,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-20",
@@ -1365,7 +1365,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-21",
@@ -1373,7 +1373,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-22",
@@ -1381,7 +1381,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-23",
@@ -1389,7 +1389,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-24",
@@ -1397,7 +1397,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-25",
@@ -1405,7 +1405,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-26",
@@ -1413,7 +1413,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-27",
@@ -1421,7 +1421,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-28",
@@ -1429,7 +1429,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-29",
@@ -1437,7 +1437,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-04-30",
@@ -1445,7 +1445,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2556760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-01",
@@ -1453,7 +1453,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-02",
@@ -1461,7 +1461,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-03",
@@ -1469,7 +1469,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-04",
@@ -1477,7 +1477,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-05",
@@ -1485,7 +1485,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-06",
@@ -1493,7 +1493,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-07",
@@ -1501,7 +1501,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-08",
@@ -1509,7 +1509,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-09",
@@ -1517,7 +1517,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-10",
@@ -1525,7 +1525,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-11",
@@ -1533,7 +1533,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-12",
@@ -1541,7 +1541,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-13",
@@ -1549,7 +1549,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-14",
@@ -1557,7 +1557,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-15",
@@ -1565,7 +1565,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-16",
@@ -1573,7 +1573,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-17",
@@ -1581,7 +1581,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-18",
@@ -1589,7 +1589,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-19",
@@ -1597,7 +1597,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-20",
@@ -1605,7 +1605,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-21",
@@ -1613,7 +1613,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-22",
@@ -1621,7 +1621,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-23",
@@ -1629,7 +1629,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-24",
@@ -1637,7 +1637,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-25",
@@ -1645,7 +1645,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-26",
@@ -1653,7 +1653,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-27",
@@ -1661,7 +1661,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-28",
@@ -1669,7 +1669,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-29",
@@ -1677,7 +1677,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-30",
@@ -1685,7 +1685,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-05-31",
@@ -1693,7 +1693,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-06-01",
@@ -1701,7 +1701,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-06-02",
@@ -1709,7 +1709,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-06-03",
@@ -1717,7 +1717,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-06-04",
@@ -1725,7 +1725,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-06-05",
@@ -1733,7 +1733,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2555760.0",
-        "pnl": "-2549865"
+        "pnl": null
       },
       {
         "date": "2026-06-06",
@@ -1741,7 +1741,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2414010.0",
-        "pnl": "-2408115"
+        "pnl": null
       },
       {
         "date": "2026-06-07",
@@ -1749,7 +1749,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2414010.0",
-        "pnl": "-2408115"
+        "pnl": null
       },
       {
         "date": "2026-06-08",
@@ -1757,7 +1757,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "-2414010.0",
-        "pnl": "-2408115"
+        "pnl": null
       },
       {
         "date": "2026-06-09",
@@ -1765,7 +1765,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "367240.000",
-        "pnl": "388100"
+        "pnl": null
       },
       {
         "date": "2026-06-10",
@@ -1773,7 +1773,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "367240.000",
-        "pnl": "388100"
+        "pnl": null
       },
       {
         "date": "2026-06-11",
@@ -1781,7 +1781,7 @@
         "net_invested": "2549865.0",
         "incomplete": true,
         "net_worth": "367240.000",
-        "pnl": "388100"
+        "pnl": null
       }
     ],
     "reporting_currency": "TWD",

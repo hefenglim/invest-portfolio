@@ -1,13 +1,14 @@
-"""The trend points' ``pnl`` (owner ruling 2026-10-22) on top of the v0.1.31 reference payloads
-— ONE owner for every test that compares a SERVED payload against them.
+"""The trend points' ``pnl`` (owner rulings 2026-10-22) on top of the v0.1.31 reference
+payloads — ONE owner for every test that compares a SERVED payload against them.
 
 The trend tooltip's 累計總損益（含匯兌） used to be ``total_value − net_invested`` subtracted in JS
 floats (``web/charts.js``). The owner ruled that the server sends it instead: every trend point
 gains one key, ``pnl``, appended after ``net_worth`` — that point's ``total_value −
 net_invested`` at the reporting currency's minor unit (TWD 0 dp, USD / MYR 2 dp), ROUND_HALF_UP,
-a rounded-away loss reading ``0`` rather than ``-0``. The reference files are never regenerated
-(``payloads/README.md``), so this module states WHICH bytes the field changes and what it
-changes them TO.
+a rounded-away loss reading ``0`` rather than ``-0`` — and ``null`` on a point the file itself
+marks ``incomplete`` (the second ruling: an unreliable figure is not shown, as the KPI B gate
+withholds B). The reference files are never regenerated (``payloads/README.md``), so this
+module states WHICH bytes the field changes and what it changes them TO.
 
 **Composed with PERF-F2, never instead of it.** :func:`expected_bytes` starts from
 ``perf_f2.expected_bytes`` (v0.1.31's bytes, with PERF-F2's intended difference on
@@ -16,7 +17,8 @@ every file is PERF-F2's expectation: the tax package and a file with no trend po
 returned as they are.
 
 **Derived independently.** Each value is computed HERE from the file's own ``total_value`` /
-``net_invested`` strings and its own ``trend.reporting_currency``, with a transcription of the
+``net_invested`` strings, its own ``incomplete`` flag and its own ``trend.reporting_currency``,
+with a transcription of the
 rounding rule (:data:`_MINOR`, ROUND_HALF_UP) rather than a call into the code under test
 (``portfolio.dashboard_models.trend_pnl``), so the comparison cannot pass by agreeing
 with itself.
@@ -37,7 +39,7 @@ from typing import Any
 from tests.reference import perf_f2
 from tests.reference.payload_gen import canonical_json
 
-#: The wire key (``portfolio.dashboard_models.TREND_PNL_KEY``), spelled out on purpose.
+#: The wire key (the field ``portfolio.dashboard_models.TrendPoint.pnl``), spelled out here.
 KEY = "pnl"
 #: Display minor units per reporting currency — a transcription of
 #: ``shared/money.MINOR_UNITS``, not an import of it.
@@ -49,8 +51,12 @@ def carries_points(rel: str) -> bool:
     return rel == "dashboard.json" or rel.startswith("month_end/")
 
 
-def point_pnl(total_value: str, net_invested: str, reporting: str) -> str:
-    """One point's ``pnl`` as the wire carries it, from the point's own strings."""
+def point_pnl(total_value: str, net_invested: str, reporting: str, *,
+              incomplete: bool) -> str | None:
+    """One point's ``pnl`` as the wire carries it, from the point's own strings and flag:
+    ``None`` (JSON ``null``) on an incomplete day."""
+    if incomplete:
+        return None
     exact = Decimal(total_value) - Decimal(net_invested)
     shown = exact.quantize(Decimal(1).scaleb(-_MINOR[reporting]), rounding=ROUND_HALF_UP)
     if shown.is_zero():
@@ -68,7 +74,8 @@ def with_pnl(doc: dict[str, Any]) -> dict[str, Any]:
     reporting = trend["reporting_currency"]
     for point in trend.get("points", []):
         assert KEY not in point, f"a v0.1.31 point already has {KEY!r}: {point}"
-        point[KEY] = point_pnl(point["total_value"], point["net_invested"], reporting)
+        point[KEY] = point_pnl(point["total_value"], point["net_invested"], reporting,
+                               incomplete=point["incomplete"])
     return out
 
 

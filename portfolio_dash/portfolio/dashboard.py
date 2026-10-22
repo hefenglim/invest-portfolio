@@ -1921,7 +1921,8 @@ def _stored_point(day: settlement_store.SettledDay, reporting: Currency) -> Tren
     return TrendPoint(date=day.day, total_value=day.total_value,
                       net_invested=day.net_invested, incomplete=day.incomplete,
                       net_worth=day.net_worth,
-                      pnl=trend_pnl(day.total_value, day.net_invested, reporting))
+                      pnl=trend_pnl(day.total_value, day.net_invested, reporting,
+                                    incomplete=day.incomplete))
 
 
 def _history_state(store: settlement_store.StoreState | None,

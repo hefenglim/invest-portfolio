@@ -921,6 +921,16 @@ class _TrendOracle:
         return index, anchor, incomplete, broken
 
 
+def _shown_pnl(total_value: Decimal, net_invested: Decimal) -> Decimal:
+    """A trend point's ``pnl`` as the app must serve it (owner rulings 2026-10-22) — the
+    harness's OWN rounding, not an import: ``total_value − net_invested`` at the reporting
+    currency's minor unit (``oracle.MINOR_UNITS``), ROUND_HALF_UP, a loss rounded away to zero
+    as ``0`` (never ``-0``). An incomplete day serves none (the caller's rule)."""
+    shown = (total_value - net_invested).quantize(D(1).scaleb(-O.MINOR_UNITS[REPORTING]),
+                                                  rounding=ROUND_HALF_UP)
+    return shown.copy_abs() if shown.is_zero() else shown
+
+
 def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, point: dict,
                        phase: str) -> None:
     """Compare one published trend point with the oracle's."""
@@ -930,6 +940,10 @@ def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, po
         return
     ev.check(f"{prefix}.incomplete", day_iso, want["incomplete"], bool(point["incomplete"]),
              phase)
+    served_pnl = point.get("pnl")
+    if want["incomplete"]:
+        # owner ruling 2026-10-22: an incomplete day's 累計總損益 is not shown (null, 「—」)
+        ev.check(f"{prefix}.pnl", day_iso, None, served_pnl, phase)
     if "total_value" not in want:
         return
     ev.check(f"{prefix}.total_value", day_iso, want["total_value"],
@@ -937,6 +951,14 @@ def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, po
     ev.check(f"{prefix}.net_worth", day_iso, want["net_worth"],
              dec(point.get("net_worth")) if point.get("net_worth") is not None else None,
              phase)
+    if not want["incomplete"]:
+        shown = _shown_pnl(want["total_value"], want["net_invested"])
+        ev.check(f"{prefix}.pnl", day_iso, shown,
+                 dec(served_pnl) if served_pnl is not None else None, phase)
+        # the TEXT too: the minor unit's places and no "-0" (the value check above compares
+        # numerically, where "13" == "13.0" and "-0" == "0")
+        ev.check(f"{prefix}.pnl_text", day_iso, repr(format(shown, "f")), repr(served_pnl),
+                 phase)
 
 
 def _reconcile_trend(ev: C.Evidence, dash, oracle_trend: _TrendOracle, phase: str) -> None:

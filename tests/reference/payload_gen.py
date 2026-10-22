@@ -141,8 +141,9 @@ def period_subset(payload: dict[str, Any], d: date) -> dict[str, Any]:
     Every key except :data:`PERIOD_DROP_KEYS`; holding rows without
     :data:`PERIOD_DROP_HOLDING_KEYS`; ``trend.points`` reduced to the single point dated D
     (empty when the trend has none — e.g. unavailable). The point carries ``total_value``,
-    ``net_invested``, ``incomplete`` and ``net_worth`` — the settled day D. Nothing is
-    re-formatted: every value is the server's own string.
+    ``net_invested``, ``incomplete`` and ``net_worth`` — the settled day D — and, served since
+    2026-10-22, ``pnl`` (``tests/reference/trend_pnl.py``; the v0.1.31 files predate it).
+    Nothing is re-formatted: every value is the server's own string.
     """
     out: dict[str, Any] = {}
     for key, value in payload.items():

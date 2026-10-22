@@ -6,7 +6,8 @@ violation of the locked decision that the frontend never computes money
 (``tests/contract/test_frontend_never_computes_money.py``). The owner ruled that the server
 sends a COMPACT per-point field instead: a short name, ``pnl``, the value at the reporting
 currency's display precision (``quantize_amount``: TWD 0 dp, USD / MYR 2 dp, ROUND_HALF_UP),
-and the tooltip only formats it.
+and the tooltip only formats it. On an ``incomplete`` day it is None (JSON ``null``, the
+tooltip's 「—」): the second ruling of the day, the KPI B gate's own rule.
 
 ``trend_pnl`` owns the value. It is set on the series the dashboard SERVES only, once per
 build: on the live days by ``with_trend_pnl`` and on each day from the settlement store as it
@@ -70,7 +71,8 @@ def test_every_served_point_carries_pnl_at_the_reporting_minor_unit(
         ccy: Currency, total: str, invested: str, expected: str) -> None:
     series = _served(ccy, _point(1, total, invested))
     assert _wire_pnl(series) == [expected]
-    assert trend_pnl(D(total), D(invested), ccy) == series.points[0].pnl == D(expected)
+    assert trend_pnl(D(total), D(invested), ccy, incomplete=False) == series.points[0].pnl \
+        == D(expected)
 
 
 @pytest.mark.parametrize(("ccy", "expected"), [(Currency.TWD, "0"), (Currency.USD, "0.00")])
@@ -89,9 +91,22 @@ def test_the_28_digit_operands_of_a_usd_reporting_trend_quantize() -> None:
     assert _wire_pnl(series) == ["2048.60"]
 
 
+@pytest.mark.parametrize("ccy", [Currency.TWD, Currency.USD, Currency.MYR])
+def test_an_incomplete_day_serves_null(ccy: Currency) -> None:
+    """Owner ruling 2026-10-22: an incomplete day's total_value leaves a holding out (a missing
+    price, a 賣超, a refused dividend, an unapplied action, a refused close), so its difference
+    is not shown — ``null`` on the wire, 「—」 in the tooltip — on the days around it as usual."""
+    series = _served(ccy, _point(1, "1000", "900"),
+                     _point(2, "800", "900", incomplete=True),
+                     _point(3, "1000", "900"))
+    shown = "100" if ccy is Currency.TWD else "100.00"
+    assert _wire_pnl(series) == [shown, None, shown]
+    assert trend_pnl(D("800"), D("900"), ccy, incomplete=True) is None
+
+
 def test_pnl_is_the_last_key_and_every_other_key_is_unchanged() -> None:
     """Additive and last: a served point's other keys keep their order and their bytes."""
-    p = _point(3, "639600", "528000", net_worth="701234.5", incomplete=True)
+    p = _point(3, "639600", "528000", net_worth="701234.5")
     dumped = to_wire(_served(Currency.TWD, p).model_dump())["points"][0]
     assert list(dumped) == ["date", "total_value", "net_invested", "incomplete", "net_worth",
                             "pnl"]
@@ -161,11 +176,14 @@ def test_the_dashboard_build_is_the_only_caller() -> None:
     assert "trend_pnl(" in inspect.getsource(dashboard._stored_point)
 
 
-@pytest.mark.parametrize(("ccy", "expected"), [(Currency.TWD, "-20000"),
-                                               (Currency.USD, "-20000.49")])
-def test_a_stored_day_is_served_with_its_pnl(ccy: Currency, expected: str) -> None:
+@pytest.mark.parametrize(("ccy", "incomplete", "expected"), [
+    (Currency.TWD, False, "-20000"), (Currency.USD, False, "-20000.49"),
+    (Currency.TWD, True, None), (Currency.USD, True, None)])
+def test_a_stored_day_is_served_with_its_pnl(ccy: Currency, incomplete: bool,
+                                             expected: str | None) -> None:
     """A day from the settlement store is built with it — the store keeps no such column; it is
-    derived when the day is served, in the reader's reporting currency."""
+    derived when the day is served, in the reader's reporting currency, by the same rule as a
+    live day (None on an incomplete one)."""
     import dataclasses
 
     from portfolio_dash.portfolio.settlement_store import SettledDay
@@ -173,8 +191,8 @@ def test_a_stored_day_is_served_with_its_pnl(ccy: Currency, expected: str) -> No
     assert "pnl" not in {f.name for f in dataclasses.fields(SettledDay)}
     day = SettledDay(day=date(2026, 6, 1), total_value=D("500000.0"),
                      net_invested=D("520000.49"), net_worth=D("1"), cash_total=D("0"),
-                     cash_incomplete=False, incomplete=False, options_open=False)
+                     cash_incomplete=False, incomplete=incomplete, options_open=False)
     point = dashboard._stored_point(day, ccy)
-    assert point.pnl == D(expected)
+    assert point.pnl == (None if expected is None else D(expected))
     assert (point.total_value, point.net_invested, point.net_worth) == (
         day.total_value, day.net_invested, day.net_worth)
