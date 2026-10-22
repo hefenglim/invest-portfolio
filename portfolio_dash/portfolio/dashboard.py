@@ -59,6 +59,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     PriceFreshness,
     TrendPoint,
     TrendSeries,
+    UnconvertibleFlow,
     trend_pnl,
     with_trend_pnl,
 )
@@ -1655,6 +1656,8 @@ def _build_dashboard(
 
     # 9. Trend — bulk-load histories, then the ONE-pass daily replay (PERF spec §8).
     trend_reason: str | None = None
+    # the flow `trend_reason` names (kept off the wire; 月度成績's live closes read it)
+    trend_flow: UnconvertibleFlow | None = None
     # Declared OUT here (empty by default) because step 10's benchmark counterfactual reads
     # it as well, and on a ledger with no events the trend branch below never runs. Empty is
     # the honest value there: no flows to convert, so the counterfactual refuses.
@@ -1715,9 +1718,10 @@ def _build_dashboard(
             # the series' ONE sentence: the first flow with no rate on or before its date,
             # by its date and its pair (accountant MINOR 4, owner ruling 2026-10-22) — the
             # same flows `value_series` converts, the same refusals
-            trend_reason = trend_unavailable_reason(first_unconvertible_flow(
+            trend_flow = first_unconvertible_flow(
                 bundle, fx_history, reporting, cash_movements=cash_movements,
-                refused_dividends=book.refused_dividends))
+                refused_dividends=book.refused_dividends)
+            trend_reason = trend_unavailable_reason(trend_flow)
         else:
             # 9b. Total net worth (FU-D29 / deferred C8): compose the UNCHANGED trend
             # with a daily cash series. Cash is read from the SAME Stored rows the 資金管理
@@ -1874,6 +1878,7 @@ def _build_dashboard(
         fx_triangulation=_fx_triangulation(resolver.reads, history=resolver.history,
                                            valued_on=as_of),
     )
+    freshness.set_trend_unconvertible(trend_flow)
 
     return DashboardData(
         as_of=now,

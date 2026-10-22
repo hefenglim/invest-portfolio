@@ -478,8 +478,13 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
     if not data.trend.available:
         # the live series is unavailable (a flow without a rate): no trend figure — in the
         # build's own words (``timeseries.trend_unavailable_reason``: the first flow with no
-        # rate, its date and its pair) — exactly as the trend card shows none
-        reason = (data.freshness.trend_unavailable_reason
+        # rate, its date and its pair) — exactly as the trend card shows none. A close dated
+        # BEFORE that flow reads the sentence's variant: the live series as a whole is
+        # unavailable from the flow on, not this day (review 2026-10-22; the stored close of
+        # the same day has its trend point — a live cut at U − 1 would be an owner's decision)
+        flow = data.freshness.trend_unconvertible
+        reason = (trend_unavailable_reason(flow, as_at=as_at) if flow is not None
+                  else data.freshness.trend_unavailable_reason
                   or trend_unavailable_reason(None))
         return pc.with_trend(kpi, point=None, twr=None, twr_reason=reason,
                              trend_reason=reason)

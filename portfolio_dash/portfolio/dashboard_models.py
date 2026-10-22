@@ -4,11 +4,18 @@ All money/quantity/rate fields are Decimal at full precision; display formatting
 (thousands separators, decimal places) is a template concern, never done here.
 """
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.results import (
@@ -404,6 +411,21 @@ class BenchmarkComparison(BaseModel):
     by_market: list[BenchmarkMarketLeg] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class UnconvertibleFlow:
+    """A flow of the trend (``timeseries.build_reporting_flows``) with no rate on or before its
+    own date: the flow's date and its currency, against the reporting currency. Found by
+    ``timeseries.first_unconvertible_flow``; its sentences are ``timeseries``' too."""
+
+    on: date
+    ccy: Currency
+    reporting: Currency
+
+    @property
+    def pair(self) -> str:
+        return f"{self.ccy.value}/{self.reporting.value}"
+
+
 class FreshnessReport(BaseModel):
     prices: list[PriceFreshness]
     fx: list[FxFreshness]
@@ -438,6 +460,20 @@ class FreshnessReport(BaseModel):
     # router's scheduler_state(). False means nothing on this instance refreshes on a
     # schedule — every 「最後更新」 stamp on the page is only as new as the last manual run.
     scheduler_running: bool | None = None
+    # NOT on the wire (a private attribute: never serialized, so every payload is unchanged):
+    # the flow ``trend_unavailable_reason`` names, for the 月度成績 live closes, which word a
+    # close dated before it differently (``timeseries.trend_unavailable_reason(as_at=)``).
+    # Set by the build (``dashboard._build_dashboard``); kept by every copy of the model.
+    _trend_unconvertible: UnconvertibleFlow | None = PrivateAttr(default=None)
+
+    @property
+    def trend_unconvertible(self) -> UnconvertibleFlow | None:
+        """The first flow with no rate on or before its date, when the trend is unavailable
+        for want of one (``None`` otherwise, and on a model not built by the dashboard)."""
+        return self._trend_unconvertible
+
+    def set_trend_unconvertible(self, flow: UnconvertibleFlow | None) -> None:
+        self._trend_unconvertible = flow
 
 
 class InsightCardStub(BaseModel):

@@ -231,11 +231,18 @@ def test_the_unavailable_live_series_is_named_on_a_live_close(
     assert start_run(db, 1) == "published"
     monkeypatch.setenv("PD_SETTLE", "off")
     sentence = "2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算"
+    # a close dated BEFORE the flow names it as the live series' cause, never its own day's
+    # (review 2026-10-22: its stored twin has a trend point)
+    before = "即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算"
+    seen = set()
     for row in _periods(app, db, "M"):
         kpi = row["kpi"]
+        want = before if row["end_day"] < "2026-03-16" else sentence
+        seen.add(want)
         assert kpi["trend_total_value"] is None and kpi["period_twr"] is None
-        assert kpi["notes"]["trend_unavailable"] == sentence, row["period"]
-        assert kpi["period_twr_reason"] == sentence, row["period"]
+        assert kpi["notes"]["trend_unavailable"] == want, row["period"]
+        assert kpi["period_twr_reason"] == want, row["period"]
+    assert seen == {before, sentence}
 
 
 # ---------------------------------------------------------------------------------------------

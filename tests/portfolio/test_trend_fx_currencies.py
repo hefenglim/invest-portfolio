@@ -26,6 +26,7 @@ from portfolio_dash.data_ingestion.store import (
     load_ledger_bundle,
 )
 from portfolio_dash.portfolio.dashboard import _build_dashboard
+from portfolio_dash.portfolio.dashboard_models import UnconvertibleFlow
 from portfolio_dash.portfolio.returns import (
     XIRR_CASH_KINDS,
     is_return_movement,
@@ -33,7 +34,6 @@ from portfolio_dash.portfolio.returns import (
 )
 from portfolio_dash.portfolio.timeseries import (
     FxHistory,
-    UnconvertibleFlow,
     build_reporting_flows,
     first_unconvertible_flow,
     trend_fx_currencies,
@@ -114,6 +114,10 @@ def test_a_missing_rate_still_withholds_the_whole_trend(
     data = _build_dashboard(missing_rate, now=c.now, reporting=c.reporting)
     assert data.trend.available is False and data.trend.points == []
     assert data.freshness.trend_unavailable_reason == _MISSING_MYR
+    # the flow itself rides with the build, off the wire (月度成績's live closes read it)
+    assert data.freshness.trend_unconvertible == UnconvertibleFlow(
+        date(2026, 3, 16), Currency.MYR, Currency.TWD)
+    assert "trend_unconvertible" not in data.freshness.model_dump()
     assert data.kpis.total_return_fx_complete is None
     assert data.kpis.trading_financing_cost is None
     assert data.kpis.principal_fx_effect is None
@@ -195,6 +199,11 @@ def test_the_first_unconvertible_flow_is_named_by_its_date_and_pair(
                                     refused_dividends=refused)
     assert flow == UnconvertibleFlow(date(2026, 3, 16), Currency.MYR, Currency.TWD)
     assert flow.pair == "MYR/TWD" and trend_unavailable_reason(flow) == _MISSING_MYR
+    # a day before the flow reads the live series' variant, from the same date and pair; the
+    # flow's own day and after read the sentence itself
+    assert trend_unavailable_reason(flow, as_at=date(2026, 2, 28)) == (
+        "即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算")
+    assert trend_unavailable_reason(flow, as_at=date(2026, 3, 16)) == _MISSING_MYR
     assert build_reporting_flows(bundle, fx, c.reporting, cash_movements=moves,
                                  refused_dividends=refused) is None
     # the settlement's U is that flow's day — what the worker's bisection found

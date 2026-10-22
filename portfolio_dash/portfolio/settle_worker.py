@@ -133,7 +133,7 @@ from portfolio_dash.portfolio.dashboard import (
     bounded_closes,
     closes_in,
 )
-from portfolio_dash.portfolio.dashboard_models import TrendPoint
+from portfolio_dash.portfolio.dashboard_models import TrendPoint, UnconvertibleFlow
 from portfolio_dash.portfolio.ledger_findings import LedgerReview, review_ledger
 from portfolio_dash.portfolio.networth import CashDay, compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.results import Book
@@ -162,7 +162,6 @@ from portfolio_dash.portfolio.settlement_models import (
 from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
-    UnconvertibleFlow,
     build_reporting_flows,
     first_unconvertible_flow,
     holds_open_option,

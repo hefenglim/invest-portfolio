@@ -27,7 +27,6 @@ defect this one was: fixed once, believed general.
 
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal, getcontext
 
@@ -37,7 +36,7 @@ from portfolio_dash.portfolio.cost_basis import (
     _uncomputable_message,
     build_book,
 )
-from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
+from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries, UnconvertibleFlow
 from portfolio_dash.portfolio.price_basis import price_in
 from portfolio_dash.portfolio.results import Book
 
@@ -276,30 +275,23 @@ TREND_FX_MISSING_ZH = "{day} 起缺少 {pair} 匯率（當日或之前無匯率�
 #: The same when no flow can be named — never reached while a missing rate is the cause
 #: (:func:`first_unconvertible_flow` names it); a caller holding every point passes no reason.
 TREND_FX_MISSING_UNNAMED_ZH = "部分投入流量缺少當日或之前的匯率，走勢無法計算"
+#: Its variant for a close dated BEFORE that flow, computed live (review 2026-10-22): the day
+#: itself would have a trend point, but the LIVE series is all-or-nothing and is unavailable
+#: as a whole — the close says so, never that its own day lacks a rate.
+TREND_FX_MISSING_LIVE_ZH = "即時走勢因 {day} 起缺少 {pair} 匯率而無法計算"
 
 
-@dataclass(frozen=True)
-class UnconvertibleFlow:
-    """A flow of :func:`build_reporting_flows` with no rate on or before its own date: the
-    flow's date and its currency, against the reporting currency."""
-
-    on: date
-    ccy: Currency
-    reporting: Currency
-
-    @property
-    def pair(self) -> str:
-        return f"{self.ccy.value}/{self.reporting.value}"
-
-    @property
-    def reason(self) -> str:
-        return TREND_FX_MISSING_ZH.format(day=self.on.isoformat(), pair=self.pair)
-
-
-def trend_unavailable_reason(flow: UnconvertibleFlow | None) -> str:
+def trend_unavailable_reason(flow: UnconvertibleFlow | None, *,
+                             as_at: date | None = None) -> str:
     """The ONE sentence of an unavailable trend (:data:`TREND_FX_MISSING_ZH`), from
-    :func:`first_unconvertible_flow`'s answer."""
-    return TREND_FX_MISSING_UNNAMED_ZH if flow is None else flow.reason
+    :func:`first_unconvertible_flow`'s answer — the flow's date and pair. With *as_at* before
+    that date (a live close of a day before the flow, ``api/snapshots.py``) its variant
+    :data:`TREND_FX_MISSING_LIVE_ZH`, from the same date and pair."""
+    if flow is None:
+        return TREND_FX_MISSING_UNNAMED_ZH
+    template = (TREND_FX_MISSING_LIVE_ZH if as_at is not None and as_at < flow.on
+                else TREND_FX_MISSING_ZH)
+    return template.format(day=flow.on.isoformat(), pair=flow.pair)
 
 
 def first_unconvertible_flow(
