@@ -41,7 +41,7 @@ from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
 from portfolio_dash.scheduler.jobs import create_scheduler_tables, migrate_job_runs_results
-from portfolio_dash.shared import result_cache
+from portfolio_dash.shared import child_runner, result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -84,6 +84,16 @@ def _fresh_result_cache() -> Iterator[None]:
     result_cache.reset()
     yield
     result_cache.reset()
+
+
+@pytest.fixture(autouse=True)
+def _child_runner_open() -> Iterator[None]:
+    """A test that stops the process-wide child runner (``child_runner.stop_all``, as the
+    lifespan's stop does) leaves it refusing to start a child: every test starts and ends with
+    it open, as the next lifespan would (``child_runner.reopen``)."""
+    child_runner.reopen()
+    yield
+    child_runner.reopen()
 
 
 @pytest.fixture(autouse=True)

@@ -173,6 +173,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # an earlier lifespan's stop closed for good (`result_cache.shutdown`) when one process
     # runs several lifespans (the test suite).
     result_cache.reset()
+    # Likewise the child runner: an earlier lifespan's stop (`child_runner.stop_all`) left it
+    # refusing to start a child.
+    child_runner.reopen()
     # Every boot write is stamped `system:boot` in the settlement store's change trail
     # (spec §7 "Who made the change"): a no-op on a fresh database until the trail exists,
     # installed again right after the settle DDL below.

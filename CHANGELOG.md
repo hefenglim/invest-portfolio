@@ -31,8 +31,11 @@ The six backlog items recorded with v0.1.33, each fixed on its own branch and re
   cancels every queued child, terminates every running one (killed after `STOP_KILL_AFTER_S`, 5 s)
   and waits up to `STOP_CHILDREN_WAIT_S` (30 s) for each run to be finalised. A settle run the stop
   ends is 中斷 「系統停止時結算尚未完成」 (resumed at boot, no failure push, no pre-warm during the
-  stop); a job run reads 「系統停止時此工作尚未完成」 (reason `interrupted`). Under systemd the children
-  usually die from the unit's SIGTERM first and keep their earlier wording.
+  stop); a job run reads 「系統停止時此工作尚未完成」 (reason `interrupted`). A child spawned after the
+  stop began (a job thread already past the scheduler's shutdown) never starts its process; the
+  next lifespan reopens the runner (`child_runner.reopen`). Under systemd's default
+  `KillMode=control-group` the children usually die from the unit's SIGTERM first and keep their
+  earlier wording.
 - **Schedule history** (`scheduler/jobs.py::update_schedule`): `previous_schedule` is the STAMP —
   the schedule the live scheduler ran — not a row hand-edited since the last boot, which was never
   in effect; saving a hand edit as it stands now counts as a change, saving the stamp back does not.
@@ -49,8 +52,6 @@ The six backlog items recorded with v0.1.33, each fixed on its own branch and re
 
 - A stopped settle run that boot settles in full instead of resuming (a calc-version change at the
   deploy) keeps its own consequence text, without the 「未續跑：…」 note.
-- A child spawned after `stop_all` began is not stopped (the scheduler and the settlement service
-  start no new work by then).
 - The touch's 3 s settle counts from each request's ARRIVAL: a request still running past it (a
   full live build while the store is unusable) can see the touch commit mid-build.
 

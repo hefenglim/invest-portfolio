@@ -388,6 +388,13 @@ class ChildHandle:
                 f"child {self.module} (pid {proc.pid}) survived kill for {max(timeout, 5.0)} s"
             ) from exc
 
+    def _mark_stopped(self) -> None:
+        """Spawned after the app's stop began (:meth:`ChildRunner.spawn`): the child never
+        starts its process, and its result says the stop ended it."""
+        with self._lock:
+            self._cancel = True
+            self._stopped = True
+
     def _request_stop(self) -> subprocess.Popen[bytes] | None:
         """:func:`stop_all`'s first step for this child: cancel it — a queued child, or one
         whose turn is coming, never starts its process — and return the process to terminate
@@ -527,6 +534,9 @@ class ChildRunner:
         #: exited while its ``on_exit`` still writes, nor a non-heavy one.
         self._live: set[ChildHandle] = set()
         self._live_lock = threading.Lock()
+        #: Set by :meth:`stop_all`, cleared by :meth:`reopen` (the next lifespan): a child
+        #: spawned from then on never starts its process.
+        self._stopping = False
 
     def spawn(self, module: str, args: Sequence[str] = (), *,
               env: Mapping[str, str] | None = None,
@@ -538,6 +548,13 @@ class ChildRunner:
                              self._tail_bytes, on_start)
         with self._live_lock:
             self._live.add(handle)
+            if self._stopping:
+                # The app's stop began, and its snapshot of the live children cannot see this
+                # one: a job thread already past the scheduler's shutdown reaching here would
+                # otherwise start a child nobody stops, holding the database through the WAL
+                # checkpoint (review of the backlog fixes, 2026-10-22). It never starts; its
+                # owner records it as the stop's, like a queued child stop_all cancels.
+                handle._mark_stopped()
         if heavy:
             self.gate.enqueue(handle)       # the ticket is taken HERE, so FIFO = spawn order
         try:
@@ -556,6 +573,12 @@ class ChildRunner:
         with self._live_lock:
             self._live.discard(handle)
 
+    def reopen(self) -> None:
+        """Undo :meth:`stop_all`'s refusal: the lifespan's start (a second lifespan in one
+        process, as the tests run them, spawns children again)."""
+        with self._live_lock:
+            self._stopping = False
+
     def stop_all(self, timeout: float) -> list[ChildHandle]:
         """Stop every child of this runner that is still alive — the app is stopping — and
         wait for each until its process is gone and its ``on_exit`` has returned, *timeout*
@@ -570,10 +593,11 @@ class ChildRunner:
            set — except a child whose process had already exited on its own, whose result
            stands.
 
-        A child spawned after the call began is not stopped (the lifespan calls this after
-        the scheduler and the settlement service stopped starting new work). Never raises."""
+        A child spawned after the call began never starts its process (:meth:`spawn`), until
+        :meth:`reopen`. Never raises."""
         deadline = time.monotonic() + timeout
         with self._live_lock:
+            self._stopping = True
             handles = list(self._live)
         if not handles:
             return []
@@ -649,6 +673,11 @@ def spawn(module: str, args: Sequence[str] = (), *, env: Mapping[str, str] | Non
 def stop_all(timeout: float) -> list[ChildHandle]:
     """:meth:`ChildRunner.stop_all` on the process-wide runner: the app's stop."""
     return _default_runner.stop_all(timeout)
+
+
+def reopen() -> None:
+    """:meth:`ChildRunner.reopen` on the process-wide runner: the lifespan's start."""
+    _default_runner.reopen()
 
 
 # -- called inside a child's main() ----------------------------------------------------------

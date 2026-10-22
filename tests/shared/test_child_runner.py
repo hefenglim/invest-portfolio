@@ -434,6 +434,25 @@ def test_stop_all_is_bounded_and_an_exited_childs_result_stands(runner: ChildRun
     assert runner._live == set()
 
 
+@pytest.mark.parametrize("heavy", [True, False])
+def test_a_child_spawned_after_the_stop_began_never_starts_until_reopen(
+        runner: ChildRunner, heavy: bool) -> None:
+    """A job thread already past the scheduler's shutdown can reach ``spawn`` after
+    ``stop_all`` took its snapshot (review of the backlog fixes, 2026-10-22): that child never
+    starts its process — nobody would stop it, and it would hold the database through the
+    checkpoint — and its result says the stop ended it. ``reopen`` (the next lifespan) lets
+    children start again."""
+    assert runner.stop_all(_WAIT) == []          # no child alive: the stop still begins
+    rec = Recorder()
+    result = _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=heavy, on_exit=rec))
+    assert rec.calls == [result]
+    assert not result.started and result.pid is None and result.terminated and result.stopped
+    assert runner._live == set() and runner.gate.queued() == 0
+    runner.reopen()
+    again = _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=heavy))
+    assert again.started and again.ok and not again.stopped
+
+
 def test_a_broken_gate_lock_still_reports(tmp_path: Path) -> None:
     """The lock folder is the caller's job; if it is missing, on_exit still fires."""
     runner = ChildRunner(heavy_lock_path=tmp_path / "missing-dir" / "heavy-child.lock")

@@ -321,6 +321,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       `error` 「系統停止時此工作尚未完成」 with reason `interrupted`. A child left running held the
       database through the checkpoint (its `-wal` / `-shm` stayed), and outside systemd's
       `KillMode=control-group` (a dev server's Ctrl+C) it went on running after the app stopped.
+      From the call on, a child spawned anyway (a job thread already past the scheduler's
+      shutdown) never starts its process and is recorded `stopped`; the lifespan's start
+      reopens the runner (`child_runner.reopen`).
     - **`on_start`** (optional) runs on the waiter thread once the child's turn has come (after
       the heavy gate, for a heavy child) and before its process starts, unless the child was
       cancelled by then. A cancel landing during or right after it still keeps the process from
