@@ -2284,6 +2284,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 股利收入彙總 | `dividend_total` / `total_by_currency` | §7.4 |
 | 年度股利預估 | `declared_gross` / `declared_net` | §7.4 |
 | 淨值趨勢市值／累計淨投入 | `total_value` / `net_invested`（`TrendPoint`） | §7.5 |
+| 趨勢圖提示 累計總損益（含匯兌） | `pnl`（`TrendPoint`，依報告幣別顯示位數四捨五入；當日不完整時為 null，提示顯示「—」） | §7.5 |
 | 配息偵測估算 | `est_gross` / `est_net` / `est_reinvest_shares` | §6.5 |
 | 配股面額換股常數 | `TW_STOCK_PAR = 10` | §6.5 |
 | 再平衡週轉／費用／預估餘額 | `turnover_reporting` / `total_fees_reporting` / `cash_after` | §11.4 |

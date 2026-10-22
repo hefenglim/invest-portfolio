@@ -2888,6 +2888,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 股利收入彙總 (dividend-income summary) | `dividend_total` / `total_by_currency` | §7.4 |
 | 年度股利預估 (annual dividend projection) | `declared_gross` / `declared_net` | §7.4 |
 | 淨值趨勢市值／累計淨投入 (net-value trend / cumulative net invested) | `total_value` / `net_invested` (`TrendPoint`) | §7.5 |
+| 趨勢圖提示 累計總損益（含匯兌） (trend tooltip: lifetime P&L incl. FX) | `pnl` (`TrendPoint`, rounded half-up to the reporting currency's display places; null on an incomplete day, where the tooltip prints 「—」) | §7.5 |
 | 配息偵測估算 (dividend-detection estimate) | `est_gross` / `est_net` / `est_reinvest_shares` | §6.5 |
 | 配股面額換股常數 (stock-dividend par-value conversion constant) | `TW_STOCK_PAR = 10` | §6.5 |
 | 再平衡週轉／費用／預估餘額 (rebalance turnover / fees / projected balance) | `turnover_reporting` / `total_fees_reporting` / `cash_after` | §11.4 |

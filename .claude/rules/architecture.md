@@ -162,7 +162,8 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   Two calls stay in the lifespan because no job reaches them: the live scheduler
   (`settlement_service.bind_scheduler`) and the boot run (`start_after_boot`). The job worker child
   clears the after-job hook right after binding, because the hook belongs to the web process,
-  where the settlement service lives (P7).
+  where the settlement service lives (P7) — pinned by
+  `tests/scheduler/test_jobs_in_child.py::test_the_worker_runs_its_job_with_the_after_job_hook_cleared`.
 - **The settle worker's import limits** (spec 2026-10-18 §9.2). `portfolio/settle_worker.py`
   runs as `python -m portfolio_dash.portfolio.settle_worker --run <id>`. It imports only
   `portfolio/`, `pricing/`, `forex/`, `data_ingestion/` and `shared/`. It never imports `fastapi`,
@@ -177,7 +178,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   owned by `api/snapshots.py`. This is an UPWARD read, done once, for the go-live restatement only.
   It is absent-safe: a fresh database never creates the table. `api/settlement_service.py` reads
   `job_runs` and `schedule_config` (scheduler-owned) for `final_through`, and reads the settle
-  tables for the after-job hook's `trail_mark`.
+  tables for the after-job hook's `trail_mark`. `settlement_store._undo_deletes` reads
+  `ledger_audit` (absent-safe) to tell an import batch's undo from hand deletes in a restatement
+  reason, spelling the undo's tag with `data_ingestion/store.py::undo_source` (the one spelling,
+  re-exported by `provenance`).
 - **Reviewed-reader guards list the settlement's readers.** Three contract tests find every reader
   of a figure by scan, and require each one to apply the rule or to be a reviewed entry with its
   reason:
@@ -188,7 +192,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 
   The settlement's readers are entries there, each checked at its call site:
   - `portfolio/period_close.py::cash_at` / `kpi_at`;
-  - `portfolio/settle_worker.py::_valuate`, `_first_unconvertible_day`, `_load` and `_Run._close`;
+  - `portfolio/settle_worker.py::_valuate`, `_plan`, `_load` and `_Run._close`;
+  - `portfolio/timeseries.py::_reporting_flows` and `first_unconvertible_flow` (the one owner of
+    "which flow cannot convert");
   - `api/snapshots.py::period_detail`.
 
   Each reads booked dividends only, and each tags positions with `asset_type`. A new settlement
@@ -196,6 +202,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 - The web layer **reads** computed results. It does not compute. No cost-basis or
   return math in routers, and none in `web/` JS: the frontend receives every number as a
   Decimal **string** and only formats it (`tests/contract/test_frontend_never_computes_money.py`).
+  The last exception, the trend tooltip's `total_value − net_invested`, was removed 2026-10-22: the
+  server sends `TrendPoint.pnl` (`dashboard_models.trend_pnl`: display-quantized, null on an
+  incomplete day), the guard scans `TrendPoint` with no known violation left, and the trend card
+  formats every figure in the series' `reporting_currency`.
 - `llm_insight` consumes the portfolio's *computed* numbers; it does not recompute
   them and does not produce numbers of its own (see `data-and-pricing.md` and
   `llm-insight.md`).
@@ -215,7 +225,7 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   process-wide state or reach the OS:
   - **`flight.py`** (2026-10-13) lets callers asking for the SAME computation while it RUNS
     share it. Its one user is `result_cache`. It keeps nothing once the computation returns.
-    A write ends sharing through two seams that must stay wired:
+    A write moves the write generation through two seams that must stay wired:
     - `api/app.py`'s write window around every request that is not a GET / HEAD / OPTIONS or a
       declared read-only POST;
     - `shared/db.session()`, which commits any session that changed a row inside a window of its
@@ -223,7 +233,11 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 
     Since PERF-S10 a request's own commit runs inside the HTTP window. The session's window
     still covers threads and jobs. A connection holding uncommitted changes always computes
-    alone, and each joiner receives its own deep copy. `tests/shared/test_flight.py` +
+    alone, and each joiner receives its own deep copy. A key built on the generation alone
+    (`write_generation()`, `None` while a window is open) must not share during a window;
+    `result_cache` keys on `generation()` plus `PRAGMA data_version`, which moves at the commit
+    itself, so its readers keep caching and sharing while another request's window is open
+    (post-v0.1.32, the code review's backlog item 1). `tests/shared/test_flight.py` +
     `tests/portfolio/test_dashboard_shared_build.py`.
   - **`result_cache.py`** (PERF, 2026-10-18) KEEPS results: "nothing is kept" is no longer true
     of the app, only of `flight`. It holds the latest result per name until the database
@@ -235,11 +249,17 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       read-only (`connect_path(read_only=True)`: a `mode=ro` URI and no pragma) and in
       autocommit, and it is read BEFORE the computation's read snapshot opens. So any other
       connection's commit moves the version: another request, a job or settle child, a script.
-      A commit during the computation only makes the entry unreachable. `day` is `now.date()`,
-      so no entry outlives its day.
+      A commit during the computation only makes the entry unreachable — except for a
+      computation that opens its own read snapshot after a slow step (the closes of
+      `api/snapshots.py`, after the dashboard build): it opens it with `marked_snapshot` and
+      passes `mark=`, and when no commit, window edge or own write happened since that snapshot
+      opened, the entry is filed under the CURRENT key instead of the one taken before the
+      computation. `day` is `now.date()`, so no entry outlives its day.
     - **Scope.** It caches the app's OWN database only (`get_settings().db_path`). Any other file
-      computes uncached and gets no version connection. Nothing is cached while a write window is
-      open, inside a transaction, or for a database with no file.
+      computes uncached and gets no version connection. Nothing is cached inside a transaction or
+      for a database with no file. Another request's write window does not stop caching or
+      sharing: its commit moves `data_version` and its edges move the generation, so nothing
+      cached before or during it is served after it.
     - **Copies.** Every reader receives a deep copy. The caller then re-stamps the fields that
       depend on `now` beyond its date: `portfolio/dashboard.py::SUB_DAY_FIELDS`, today `as_of`.
       A miss runs inside ONE read transaction (PERF-S12).
@@ -368,7 +388,8 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   `/api/rebalance/preview` and `/api/prompts/preview`. They POST only because their input does
   not fit a query string, and they write nothing, not even an action-log row. `is_read_only()`
   treats them exactly like a GET / HEAD / OPTIONS:
-  - the write-window middleware skips them, so they share and cache like a GET;
+  - the write-window middleware skips them, so they move no write generation and leave every
+    cached entry reachable;
   - `get_conn` installs no actor on them;
   - `action_log` excludes them.
 
