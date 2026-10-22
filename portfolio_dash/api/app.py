@@ -97,7 +97,7 @@ from portfolio_dash.scheduler.jobs import (
     migrate_job_runs_results,
 )
 from portfolio_dash.scheduler.runtime import build_scheduler
-from portfolio_dash.shared import flags, result_cache
+from portfolio_dash.shared import child_runner, flags, result_cache
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import install_actor, session
@@ -118,6 +118,16 @@ from portfolio_dash.strategy.target_weights import ensure_target_weights_seeded
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 #: Seconds after the last write window closes before today's result is pre-warmed (plan W4).
 WRITE_PREWARM_DELAY_S = 3.0
+#: How long a stop waits, in all, for the child processes it terminates — the settle child
+#: and the job children (``child_runner.stop_all``) — to be gone and their runs finalised.
+#: A terminated child ends at once (none handles SIGTERM; on Windows a terminate IS the kill),
+#: so this bounds the waiters' own writes, each retried against a busy database. It sits under
+#: systemd's default 90 s stop timeout together with the rest of the stop: up to
+#: ``auth_store.SHUTDOWN_TOUCH_WAIT_S`` (2 s) for a session touch before it, then up to
+#: ``result_cache.SHUTDOWN_PREWARM_WAIT_S`` (15 s) for a pre-warm and the checkpoint's busy
+#: timeout (5 s): 52 s at worst, the rest left to the requests uvicorn drains before the
+#: lifespan stops. systemd's SIGKILL at 90 s would be a real crash.
+STOP_CHILDREN_WAIT_S = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +141,10 @@ def checkpoint_on_stop(conn: sqlite3.Connection) -> tuple[int, int, int]:
     - a pre-warm that outlived ``result_cache.shutdown``'s wait;
     - a request thread still computing after its client disconnected;
     - an inline-mode job thread still running after ``scheduler.shutdown(wait=False)``;
-    - a settle or job child process still running — ``settlement_service.shutdown`` leaves a
-      running settle child alone, though it starts no new one from then on.
+    - a settle or job child that outlived :data:`STOP_CHILDREN_WAIT_S` — the stop terminates
+      every child this process spawned before it checkpoints (``child_runner.stop_all``), so
+      only one that survives its kill, or whose run could not be finalised in time, is left;
+    - a process this one did not spawn: an orphan child of an earlier process, a script.
 
     The WAL was not truncated, so ``-wal`` / ``-shm`` may remain beside the database, and the
     ``-wal`` may hold COMMITTED changes: logged, never raised (the stop goes on).
@@ -282,6 +294,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # cancel it, and wait briefly for one already running. A cancelled touch is simply
         # recorded on the session's first use after the boot — its stamp did not move.
         auth_store.cancel_pending_touches()
+        # Then stop every child this process spawned — the settle child, the job children —
+        # and wait (bounded) until each is gone and its run finalised: 中斷 as a restart leaves
+        # it, so boot resumes a settle range, and a job row reads 系統停止時此工作尚未完成. A child
+        # left running held the database through the checkpoint below (its `-wal` / `-shm`
+        # stayed), and outside systemd — whose default KillMode=control-group already sends
+        # every process of the unit SIGTERM — it went on running after the app had stopped.
+        child_runner.stop_all(STOP_CHILDREN_WAIT_S)
         # The result cache holds a READ-ONLY connection per database for the life of the
         # process, and a read-only connection cannot checkpoint: left open, the last close no
         # longer folds the WAL back and deletes it. Close it for good — it also waits (bounded)

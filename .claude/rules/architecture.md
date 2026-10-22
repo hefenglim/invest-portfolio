@@ -268,11 +268,13 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       (`api/app.py::WRITE_PREWARM_DELAY_S`), 1 s after a settlement run ends, and at once after
       a recorded session touch, which itself waited for the page load to settle (`api/` →
       the session touch).
-    - **Shutdown.** The lifespan calls `result_cache.shutdown()` first. It closes the cache for
-      the rest of the lifespan (no pre-warm starts, no version connection opens, no entry is
-      kept), waits up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running —
-      whose read snapshot would keep a TRUNCATE checkpoint from finishing and which would
-      reopen a version connection — and closes the version connections. THEN the lifespan runs
+    - **Shutdown.** The lifespan calls `result_cache.shutdown()` once it has cancelled the
+      pending session touches (`auth_store.cancel_pending_touches`) and stopped every child
+      process it spawned (`child_runner.stop_all`, below). It closes the cache for the rest of
+      the lifespan (no pre-warm starts, no version connection opens, no entry is kept), waits
+      up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running — whose read
+      snapshot would keep a TRUNCATE checkpoint from finishing and which would reopen a version
+      connection — and closes the version connections. THEN the lifespan runs
       `PRAGMA wal_checkpoint(TRUNCATE)` (`api/app.py::checkpoint_on_stop`, result on
       `app.state.stop_checkpoint`). A read-only connection cannot checkpoint, and a clean stop
       must leave the database in one file. A pre-warm that outlives the wait (a full live build
@@ -304,6 +306,18 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       package's own root, and `DB_PATH` is made absolute. It never uses `-I`, which would drop
       both.
     - `terminate_and_wait` returns once the process is gone AND `on_exit` has returned.
+    - **`stop_all`** is the app's stop (backlog item 2, 2026-10-22). The lifespan calls it after
+      `settlement_service.shutdown()` and the scheduler's, before the result cache's shutdown and
+      the WAL checkpoint, with ONE bound, `api/app.py::STOP_CHILDREN_WAIT_S` (30 s, which fits
+      under systemd's default 90 s stop timeout with the 15 s pre-warm wait). It cancels every
+      live child of the runner first — so none that is queued starts as the gate passes the turn
+      on — terminates the running ones (killed `STOP_KILL_AFTER_S` later if still alive), and
+      waits until each is gone and its `on_exit` has returned (the runner keeps every child
+      until then). Each result carries `stopped`, and its owner records the run as a restart
+      leaves it: a settle run 中斷 (「系統停止時結算尚未完成」, which boot resumes), a job row
+      `error` 「系統停止時此工作尚未完成」 with reason `interrupted`. A child left running held the
+      database through the checkpoint (its `-wal` / `-shm` stayed), and outside systemd's
+      `KillMode=control-group` (a dev server's Ctrl+C) it went on running after the app stopped.
     - **`on_start`** (optional) runs on the waiter thread once the child's turn has come (after
       the heavy gate, for a heavy child) and before its process starts, unless the child was
       cancelled by then. A cancel landing during or right after it still keeps the process from
@@ -435,8 +449,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     hours and sent once they end, Q-P1 = (a)), calls `flight.note_write()`, pre-warms, and
     starts the follow-up (chained, resume or queued). `shutdown()` stops every new start:
     `start_run` raises `Stopping`, `start_automatic` starts nothing, and a waiter finishing
-    during the stop leaves its follow-up to the next boot (`on_boot` opens it again). It also
-    owns cancel, the boot hook
+    during the stop leaves its follow-up to the next boot (`on_boot` opens it again) and
+    pre-warms nothing. The lifespan then terminates a running child (`child_runner.stop_all`):
+    its waiter ends the run 中斷 「系統停止時結算尚未完成」, with no failure push, and boot resumes
+    its range. It also owns cancel, the boot hook
     (`on_boot` plans inside the boot session; `start_after_boot` starts once that session has
     committed) and the chip's `status`, which only reads. **Every settlement read is one
     snapshot** (2026-10-22, found by the stress audit): `status` / `runs_page` / `run_report` /
@@ -523,6 +539,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     settle child has no limit.
   - A child that dies without finishing its row is finalised by the parent as
     「工作子程序異常結束」.
+  - A child the app's stop ended (`child_runner.stop_all`: terminated, or cancelled while it
+    waited for the gate) is finalised by the parent as `error` 「系統停止時此工作尚未完成」, reason
+    `interrupted` — the reason a restart gives.
   - At boot, `close_abandoned_runs` closes every unfinished non-`settlement` `job_runs` row whose
     lock nobody holds, as `error` 「系統重新啟動時此工作尚未完成」, reason `interrupted`. The first
     boot of v0.1.32 closes the rows left stuck by older versions this way. Settlement rows are

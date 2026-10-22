@@ -9,6 +9,7 @@ on Windows).
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -158,3 +159,68 @@ def test_a_worker_that_cannot_be_spawned_ends_failed_and_frees_the_service(
     sup.wait_until(_done)
     assert sup.report(path, again.run_id).summary.status == "published"
 
+
+def test_the_apps_stop_ends_a_running_child_interrupted_and_boot_resumes_it(
+    path: Path, tmp_path: Path
+) -> None:
+    """Backlog item 2: the lifespan's stop terminates the running settle child
+    (``child_runner.stop_all``) instead of leaving it to hold the database through the WAL
+    checkpoint. Its waiter ends the run 中斷 with the stop's reason — never 已取消, which boot
+    would not resume — starts no follow-up and sends no failure push (a resume run's included:
+    boot resumes it), and the next boot plans its resume."""
+    _plan(tmp_path, "publish", "sleep")
+    first = service.start_run(scope="full", reason="button")
+    sup.wait_until(_done)
+    assert sup.report(path, first.run_id).summary.status == "published"   # generation 1
+    resumed = service.start_automatic(scope="full", reason="resume",
+                                      previous_run_id=first.run_id)
+    run_id = resumed.run_id
+    assert run_id is not None
+    sup.wait_until(lambda: sup.report(path, run_id).summary.status == "running")
+    sup.wait_until(lambda: proc_lock.is_held(proc_lock.settlement_lock_path()))
+    service.shutdown()
+    assert child_runner.stop_all(30) == []
+    assert service.active_run_id() is None          # the waiter finished before the return
+    assert not proc_lock.is_held(proc_lock.settlement_lock_path())
+    report = sup.report(path, run_id)
+    assert report.summary.status == "interrupted" and report.summary.cancelled_by is None
+    assert report.failure is not None
+    assert report.failure.reason_text == service._STOP_INTERRUPTED == "系統停止時結算尚未完成"
+    row = sup.job_row(path, run_id)
+    assert (row["status"], row["reason"]) == ("error", "interrupted")
+    assert row["detail"].startswith("重新結算中斷") and service._STOP_INTERRUPTED in row["detail"]
+    assert [r.run_id for r in sup.runs(path)] == [first.run_id, run_id]   # no follow-up
+    assert sup.PUSHES == []
+    conn = open_db(path)
+    try:
+        plan = service.on_boot(conn, trigger_check=TriggerCheck())
+        conn.commit()
+    finally:
+        conn.close()
+    assert plan.interrupted == ()                   # nothing left for boot to end
+    assert plan.start == service.BootStart(scope="full", reason="resume",
+                                           previous_run_id=run_id, mark_resumed=True)
+
+
+def test_the_apps_stop_ends_a_run_queued_behind_the_gate_interrupted(
+    path: Path, tmp_path: Path
+) -> None:
+    """A run still waiting for the heavy gate when the stop comes never starts its process,
+    and ends 中斷 — as boot ends a ``preparing`` orphan — never 失敗 「結算程序無法啟動」."""
+    _plan(tmp_path, "publish")
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(), timeout=5)  # another heavy child
+    try:
+        started = service.start_run(scope="full", reason="button")
+        time.sleep(0.3)
+        assert sup.report(path, started.run_id).summary.status == "preparing"
+        service.shutdown()
+        assert child_runner.stop_all(30) == []
+    finally:
+        gate.release()
+    assert service.active_run_id() is None
+    report = sup.report(path, started.run_id)
+    assert report.summary.status == "interrupted"
+    assert report.failure is not None and report.failure.reason_text == service._STOP_INTERRUPTED
+    assert (sup.job_row(path, started.run_id)["status"],
+            sup.job_row(path, started.run_id)["reason"]) == ("error", "interrupted")
+    assert service.read_progress(started.run_id) is None   # its process never ran

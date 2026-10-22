@@ -450,14 +450,16 @@ month close as a cutover restatement (上線重述, `domain-ledger.md` → month
 Nothing else reads it.
 
 **Restore after a crash: delete `-wal` / `-shm`.** The database runs in WAL mode. On a clean
-stop the lifespan closes the result cache (`result_cache.shutdown()`: it waits up to 15 s for a
-running pre-warm, then closes its read-only connections) and then checkpoints
-(`wal_checkpoint(TRUNCATE)`), so the folder holds ONE file. After a crash (an OOM kill, a power
-loss), or a stop whose log says the checkpoint could not complete, `<db>-wal` and `<db>-shm` may
-remain beside it. The `-wal` holds COMMITTED changes: fold it back before a backup by copy, and
-delete both only when a restore replaces the file — otherwise SQLite replays the stale WAL into
-the restored file. The store needs no restore of its own: boot settles in full when it is absent or does not
-match the code. The procedure is in `docs/DEPLOYMENT.md`.
+stop the lifespan terminates every child process it spawned and waits up to 30 s for their runs
+to be finalised (`child_runner.stop_all`: a settle run ends 中斷 and boot resumes it), closes the
+result cache (`result_cache.shutdown()`: it waits up to 15 s for a running pre-warm, then closes
+its read-only connections) and then checkpoints (`wal_checkpoint(TRUNCATE)`), so the folder
+holds ONE file. After a crash (an OOM kill, a power loss), or a stop whose log says the
+checkpoint could not complete (a pre-warm or a child that outlived its wait, a process the app
+did not spawn), `<db>-wal` and `<db>-shm` may remain beside it. The `-wal` holds COMMITTED
+changes: fold it back before a backup by copy, and delete both only when a restore replaces the
+file — otherwise SQLite replays the stale WAL into the restored file. The store needs no restore
+of its own: boot settles in full when it is absent or does not match the code. The procedure is in `docs/DEPLOYMENT.md`.
 
 ## Pricing sources — quotes come from finance APIs, never from an LLM
 

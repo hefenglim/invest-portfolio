@@ -4,6 +4,7 @@ depends on an ordinary boot leaving ``schema_version`` alone)."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -17,11 +18,15 @@ from pytest_socket import disable_socket, enable_socket
 
 from portfolio_dash.api import alert_inputs
 from portfolio_dash.api import app as app_module
+from portfolio_dash.api import settlement_service as service
 from portfolio_dash.api.app import checkpoint_on_stop, create_app
 from portfolio_dash.portfolio.settlement_store import SETTLE_TABLES
-from portfolio_dash.shared import result_cache
+from portfolio_dash.shared import proc_lock, result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import connect_path, session
+from tests.settlement import service_support as sup
+from tests.settlement import stub_settle_worker as stub
+from tests.settlement.conftest import CorpusFactory
 
 
 @pytest.fixture
@@ -164,6 +169,48 @@ def test_a_clean_stop_waits_for_a_running_prewarm_and_still_leaves_one_file(
     assert app.state.stop_checkpoint[0] == 0
     assert [s for s in ("-wal", "-shm")
             if boot_db.with_name(boot_db.name + s).exists()] == []
+
+
+def test_a_clean_stop_ends_the_running_settle_child_and_still_leaves_one_file(
+    corpus_db: CorpusFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog item 2, with a REAL child (inline mode cannot show it): the first boot of a
+    release re-settles in full, and the owner stops the service during it. The stop
+    terminates the settle child before the checkpoint (``child_runner.stop_all``) — it used
+    to be left running, holding the database, so ``-wal`` / ``-shm`` stayed beside it, and
+    outside systemd it went on after the app had stopped. The run ends 中斷 with the stop's
+    reason, which the next boot resumes."""
+    db = corpus_db("golden").path
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("PD_SETTLE_MODE", "child")
+    monkeypatch.setenv(stub.PLAN_ENV, str(tmp_path / "plan.json"))
+    (tmp_path / "plan.json").write_text(json.dumps(["sleep"]), encoding="utf-8")
+    monkeypatch.setattr(service, "WORKER_MODULE", "tests.settlement.stub_settle_worker")
+    get_settings.cache_clear()
+    service.reset_for_tests()
+    app = create_app()
+    enable_socket()  # the TestClient portal's event loop uses a socket pair on Windows
+    try:
+        with TestClient(app):
+            run_id = service.active_run_id()      # the boot's full run: generation 0
+            assert run_id is not None
+            sup.wait_until(lambda: sup.report(db, run_id).summary.status == "running")
+            assert proc_lock.is_held(proc_lock.settlement_lock_path())
+            stop_began = time.monotonic()
+        took = time.monotonic() - stop_began
+    finally:
+        disable_socket(allow_unix_socket=True)
+        service.reset_for_tests()
+        get_settings.cache_clear()
+    assert took < app_module.STOP_CHILDREN_WAIT_S
+    assert not proc_lock.is_held(proc_lock.settlement_lock_path(db.parent))
+    assert app.state.stop_checkpoint[0] == 0
+    assert [s for s in ("-wal", "-shm") if db.with_name(db.name + s).exists()] == []
+    report = sup.report(db, run_id)
+    assert report.summary.status == "interrupted"
+    assert report.failure is not None and report.failure.reason_text == service._STOP_INTERRUPTED
+    assert (sup.job_row(db, run_id)["status"], sup.job_row(db, run_id)["reason"]) == (
+        "error", "interrupted")
 
 
 def test_a_checkpoint_a_reader_blocks_is_logged_and_the_stop_goes_on(

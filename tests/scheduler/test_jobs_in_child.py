@@ -723,6 +723,67 @@ def test_a_child_killed_mid_run_is_finalised_error_and_its_progress_was_visible(
     assert not sidecar.exists()
 
 
+def test_the_apps_stop_ends_a_running_child_with_the_stop_wording(
+    template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog item 2: the lifespan's stop terminates a running job child
+    (``child_runner.stop_all``) and returns once its row is final — as a restart leaves it,
+    reason ``interrupted``, never 「工作子程序異常結束」 — with its sidecar and lock file gone,
+    so the next boot has nothing to close."""
+    db = _copy(template.path, tmp_path)
+    _use_db(monkeypatch, db)
+    _child_mode(monkeypatch, mode="slow", job_id="signal_scan", sleep_s=120)
+    with session() as conn:
+        run_id = start_run(conn, "signal_scan", now=NOW)
+    worker = threading.Thread(target=run_job_func, args=("signal_scan",),
+                              kwargs={"now": NOW}, daemon=True)
+    worker.start()
+    _wait_until(lambda: jobs.running_progress().get("signal_scan") == stubs.STUB_PROGRESS)
+    assert child_runner.stop_all(30) == []
+    row = _row(db, run_id=run_id)                     # final when stop_all returned
+    assert (row["status"], row["detail"], row["reason"]) == (
+        "error", jobs.STOPPED_AT_SHUTDOWN, "interrupted")
+    worker.join(30)
+    assert not worker.is_alive()
+    assert jobs._CHILD_RUNS == {} and jobs.running_progress() == {}
+    data = proc_lock.data_dir()
+    assert not jobs.progress_sidecar_path(run_id, data).exists()
+    assert not proc_lock.job_lock_path(run_id, data).exists()
+    with session() as conn:
+        assert jobs.close_abandoned_runs(conn, now=NOW) == []
+
+
+def test_the_apps_stop_ends_a_run_waiting_for_the_gate_before_it_starts(
+    template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run still queued behind the heavy gate when the stop comes: its process never
+    starts — not even as the gate frees — and its row reads the stop, not
+    「工作子程序無法啟動」."""
+    db = _copy(template.path, tmp_path)
+    _use_db(monkeypatch, db)
+    _child_mode(monkeypatch, mode="pid", job_id="signal_scan")
+    with session() as conn:
+        run_id = start_run(conn, "signal_scan", now=NOW)
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(), timeout=5)  # another heavy child
+    worker = threading.Thread(target=run_job_func, args=("signal_scan",),
+                              kwargs={"now": NOW}, daemon=True)
+    try:
+        worker.start()
+        _wait_until(lambda: run_id in jobs._CHILD_RUNS
+                    and jobs._CHILD_RUNS[run_id].handle is not None)
+        assert jobs.queued_progress() == {"signal_scan": jobs.QUEUED_BEHIND_GATE}
+        assert child_runner.stop_all(30) == []
+    finally:
+        gate.release()
+    worker.join(30)
+    assert not worker.is_alive()
+    row = _row(db, run_id=run_id)
+    assert (row["status"], row["detail"], row["reason"]) == (
+        "error", jobs.STOPPED_AT_SHUTDOWN, "interrupted")
+    assert not jobs.progress_sidecar_path(run_id).exists()   # the child never wrote one
+    assert jobs._CHILD_RUNS == {}
+
+
 def test_a_run_waiting_for_the_heavy_gate_reads_as_queued_with_the_servers_sentence(
     template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -823,7 +884,8 @@ def test_the_job_details_of_a_lost_worker_speak_chinese() -> None:
     from tests.contract.test_def073_job_details_speak_chinese import english_words
 
     for text in (jobs.WORKER_DIED, jobs.WORKER_NOT_STARTED, jobs.ABANDONED_AT_BOOT,
-                 jobs.QUEUED_BEHIND_GATE, jobs.SPAWN_FAILED.format(error="RuntimeError"),
+                 jobs.STOPPED_AT_SHUTDOWN, jobs.QUEUED_BEHIND_GATE,
+                 jobs.SPAWN_FAILED.format(error="RuntimeError"),
                  jobs.JOB_TIMED_OUT.format(limit=jobs._limit_text(jobs.JOB_TIME_LIMIT_S)),
                  jobs.busy_sentence("signal_scan", "洞察組合 3")):
         assert text and not english_words(text), text

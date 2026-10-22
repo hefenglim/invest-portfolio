@@ -279,8 +279,10 @@ sudo systemctl start portfolio-dash
 holds COMMITTED changes not yet folded back into `portfolio.db`: SQLite folds them in on the
 next open, so never delete the `-wal` of the database you keep.
 - **Clean stop** (`systemctl stop` / restart, v0.1.32+): the app checkpoints on the way out, so
-  `data/` holds ONE file, `portfolio.db`. It first waits up to 15 s for a background pre-warm
-  still reading the database. If `app.log` shows `the WAL checkpoint could not complete` or
+  `data/` holds ONE file, `portfolio.db`. It first stops its own child processes (a running
+  re-settlement or background job: up to 30 s; a re-settlement reads 中斷 and resumes at the
+  next start) and waits up to 15 s for a background pre-warm still reading the database. If
+  `app.log` shows `the WAL checkpoint could not complete`, `child(ren) not done` or
   `pre-warm(s) still running` for that stop, `-wal` / `-shm` may remain, as after a crash.
 - **Crash** (an OOM kill, a power loss, a `kill -9`): `data/portfolio.db-wal` and
   `data/portfolio.db-shm` may remain.

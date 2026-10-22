@@ -767,14 +767,18 @@ def bind_scheduler(scheduler: Any) -> None:
 def shutdown() -> None:
     """App shutdown: stop the deferred push timer, and start no settle child from now on.
 
-    A settle child already running is a separate process and is left alone — boot finalises
-    whatever it leaves behind (spec §9.4). But its waiter may still finish during the stop
-    (the child ends, or systemd's SIGTERM reaches it too), and it used to start the run's
-    follow-up — a resume, a chained run, a queued nightly — as a NEW child in the middle of
-    the stop, writing a report the next boot then ended 中斷. Now :func:`start_run` refuses
-    with :class:`Stopping` and :func:`start_automatic` starts nothing: boot resumes an
-    interrupted run, and a dirty day waits for the next run (review of the v0.1.32
-    follow-ups, 2026-10-20). The lifespan's next boot (:func:`on_boot`) opens it again."""
+    A settle child already running is not stopped HERE: right after, the lifespan stops every
+    child this process spawned (``child_runner.stop_all``), and the run's waiter ends it 中斷
+    with :data:`_STOP_INTERRUPTED` — exactly as a restart leaves it, so boot resumes its range
+    (spec §9.4). It used to be left alone, still holding the database while the lifespan
+    checkpointed, and on a dev server's Ctrl+C it went on running after the app had stopped
+    (backlog item 2, 2026-10-22). Its waiter used to start the run's follow-up — a resume, a
+    chained run, a queued nightly — as a NEW child in the middle of the stop, writing a
+    report the next boot then ended 中斷. Now :func:`start_run` refuses with
+    :class:`Stopping`, :func:`start_automatic` starts nothing and no pre-warm is scheduled:
+    boot resumes an interrupted run, and a dirty day waits for the next run (review of the
+    v0.1.32 follow-ups, 2026-10-20). The lifespan's next boot (:func:`on_boot`) opens it
+    again."""
     with _S.lock:
         _S.stopping = True
         if _S.timer is not None:
@@ -1076,6 +1080,9 @@ class _Exit:
     error_class: str | None = None
     never_started: bool = False
     terminated: bool = False
+    #: The app's stop terminated the child, or cancelled it in the heavy gate's queue
+    #: (``child_runner.stop_all``, ``ChildResult.stopped``).
+    stopped: bool = False
 
 
 _EXC_LINE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))\b")
@@ -1092,7 +1099,8 @@ def _exception_class(stderr_tail: str) -> str | None:
 
 def _child_exited(run_id: int, result: child_runner.ChildResult) -> None:
     exit_info = _Exit(clean=result.ok, error_class=_exception_class(result.stderr_tail),
-                      never_started=not result.started, terminated=result.terminated)
+                      never_started=not result.started, terminated=result.terminated,
+                      stopped=result.stopped)
     _after_exit(run_id, exit_info)
 
 
@@ -1127,12 +1135,23 @@ def _consequence(conn: sqlite3.Connection, run_id: int) -> str:
     return f"{kept}，最近這段照常即時計算"
 
 
+#: Why a run the app's stop terminated ended 中斷 — the stop's twin of boot's
+#: :data:`_BOOT_INTERRUPTED`.
+_STOP_INTERRUPTED = "系統停止時結算尚未完成"
+
+
 def _abnormal_end(report: RunReport, exit_info: _Exit,
                   cancel_by: str | None) -> tuple[RunStatus, RunFailure]:
     """How to end a run its worker left ``preparing`` / ``running`` (plan §6.2 "Waiter")."""
     phase = _current_phase(report)
+    if exit_info.stopped and cancel_by is None:
+        # The app's stop terminated it (``child_runner.stop_all``), or cancelled it while it
+        # waited for the heavy gate: not the owner's cancel, but the state a restart leaves —
+        # 中斷 even before its claim, as boot ends an orphan (``_end_stale``) — so the next
+        # boot resumes the range (§9.4) instead of dropping it as 已取消 or 失敗.
+        return "interrupted", RunFailure(phase=phase, reason_text=_STOP_INTERRUPTED)
     if cancel_by is not None or exit_info.terminated:
-        # only cancel() terminates a child (``ChildHandle.terminate_and_wait``)
+        # otherwise only cancel() terminates a child (``ChildHandle.terminate_and_wait``)
         return "cancelled", RunFailure(phase=phase, reason_text="已取消（保留目前版本）",
                                        cancelled_by=cancel_by)
     suffix = f"（{exit_info.error_class}）" if exit_info.error_class else ""
@@ -1336,6 +1355,11 @@ def _start_pending(pending: _Pending) -> None:
 def _schedule_prewarm() -> None:
     if not flags.prewarm_enabled():
         return
+    with _S.lock:
+        if _S.stopping:
+            # a waiter finishing during the stop: the lifespan is about to close the result
+            # cache, which would only wait for the pre-warm before its WAL checkpoint
+            return
     from portfolio_dash.api import alert_inputs  # local: it pulls in the dashboard build
 
     result_cache.schedule_prewarm(alert_inputs.prewarm_today, PREWARM_DELAY_S)
@@ -1395,7 +1419,10 @@ def _after_exit(run_id: int, exit_info: _Exit) -> RunEnd | None:
             _start_pending(queued)
         return None
     follow = _follow_up(ended)
-    if _is_automatic(ended.reason) and (
+    # The stop's own interruption is no failure to push: the next boot resumes the range, a
+    # resumed run's included (``_on_boot`` step 3), or settles in full.
+    stop_interrupted = exit_info.stopped and ended.status == "interrupted"
+    if _is_automatic(ended.reason) and not stop_interrupted and (
             ended.status == "failed"
             or (ended.status == "interrupted" and (follow is None or follow.reason != "resume"))):
         try:

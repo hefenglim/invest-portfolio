@@ -25,6 +25,14 @@ Used by the settlement service (the settle child) and by the job dispatcher (job
 - :meth:`ChildHandle.terminate_and_wait` terminates, waits, kills if still alive and waits
   again; for a child still in the queue it cancels it instead. It returns once the process
   is gone AND ``on_exit`` has returned.
+- :func:`stop_all` is the app's stop (``api/app.py``'s lifespan, before its WAL checkpoint):
+  every child this runner spawned that is still alive is cancelled and terminated at once —
+  none that is queued starts when the gate passes the turn on — and waited for, within ONE
+  bound, until its process is gone and its ``on_exit`` has returned. Each result says so
+  (:attr:`ChildResult.stopped`), so its owner records an interruption, not a cancel or a
+  crash. A child left running would keep the database open (a TRUNCATE checkpoint cannot
+  delete ``-wal`` / ``-shm`` under it) and outlive the process: where the service manager
+  does not kill the whole process group (a dev server's Ctrl+C), it went on running.
 
 **The child runs this checkout's code.** ``cwd`` and the front of ``PYTHONPATH`` are the root
 the parent's own ``portfolio_dash`` was imported from (``Path(portfolio_dash.__file__)
@@ -65,6 +73,7 @@ and, on Linux, ``SCHED_IDLE``; a no-op on Windows) and :func:`apply_test_stubs_f
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import os
@@ -87,6 +96,11 @@ DEFAULT_STDERR_TAIL_BYTES = 16 * 1024
 
 #: How often a heavy child waiting for the cross-process lock retries (and re-checks cancel).
 _GATE_POLL_S = 0.05
+
+#: How long :func:`stop_all` lets a terminated child exit before it kills it. The children
+#: install no SIGTERM handler (a terminate ends them at once; on Windows it IS the kill): this
+#: only bounds a child stuck where a signal cannot reach it yet.
+STOP_KILL_AFTER_S = 5.0
 
 ChildState = Literal["queued", "running", "exited"]
 
@@ -127,6 +141,10 @@ class ChildResult:
     queued_s: float
     #: Why the process could not be started (``Popen`` raised), else None.
     error: str | None = None
+    #: The app's stop ended it (:func:`stop_all`): its process was terminated, or it never
+    #: started — cancelled in the queue or as its turn came. ``terminated`` is then true too.
+    #: Its owner records the run as interrupted by the stop, never as a cancel or a crash.
+    stopped: bool = False
 
     @property
     def ok(self) -> bool:
@@ -279,6 +297,7 @@ class ChildHandle:
         self._proc: subprocess.Popen[bytes] | None = None
         self._cancel = False
         self._terminated = False
+        self._stopped = False              # set only by the app's stop (:func:`stop_all`)
         self._result: ChildResult | None = None
         self._exited = threading.Event()   # the process is gone (or never ran)
         self._done = threading.Event()     # ... and on_exit has returned
@@ -369,6 +388,23 @@ class ChildHandle:
                 f"child {self.module} (pid {proc.pid}) survived kill for {max(timeout, 5.0)} s"
             ) from exc
 
+    def _request_stop(self) -> subprocess.Popen[bytes] | None:
+        """:func:`stop_all`'s first step for this child: cancel it — a queued child, or one
+        whose turn is coming, never starts its process — and return the process to terminate
+        when one is running. A child that has started and already exited keeps its own result
+        (not stopped); one that never started is recorded stopped."""
+        with self._lock:
+            self._cancel = True
+            proc = self._proc
+            if proc is None:
+                self._stopped = True
+                return None
+            if proc.poll() is not None:
+                return None
+            self._stopped = True
+            self._terminated = True
+            return proc
+
     # -- the waiter thread ------------------------------------------------------------------
     def _start(self) -> None:
         self._thread.start()
@@ -438,22 +474,26 @@ class ChildHandle:
         reader.join(timeout=5.0)
         with self._lock:
             terminated = self._terminated
+            stopped = self._stopped
         self._result = ChildResult(
             module=self.module, args=self.args, heavy=self.heavy, started=True,
             pid=proc.pid, returncode=returncode,
             signal=-returncode if returncode < 0 else None,
             terminated=terminated, stderr_tail=tail.text(), duration_s=duration,
-            queued_s=queued_s,
+            queued_s=queued_s, stopped=stopped,
         )
         if returncode != 0 and not terminated:
             log.warning("child %s (pid %s) exited with %s; stderr tail:\n%s",
                         self.module, proc.pid, returncode, self._result.stderr_tail[-2000:])
 
     def _never_ran(self, *, error: str | None, terminated: bool) -> ChildResult:
+        # Read without the lock (some callers hold it): a stop sets ``_stopped`` together with
+        # ``_cancel``, so by the time a cancel is seen here the flag is too.
         return ChildResult(
             module=self.module, args=self.args, heavy=self.heavy, started=False, pid=None,
             returncode=None, signal=None, terminated=terminated, stderr_tail="",
             duration_s=0.0, queued_s=time.monotonic() - self._spawned_at, error=error,
+            stopped=terminated and self._stopped,
         )
 
     def _finish(self, result: ChildResult) -> None:
@@ -468,6 +508,7 @@ class ChildHandle:
             log.exception("child runner: on_exit for %s raised", self.module)
         finally:
             self._done.set()
+            self._runner._forget(self)   # after the event: stop_all never misses a callback
 
     def __repr__(self) -> str:
         return f"ChildHandle({self.module!r}, heavy={self.heavy}, state={self.state!r})"
@@ -481,6 +522,11 @@ class ChildRunner:
                  stderr_tail_bytes: int = DEFAULT_STDERR_TAIL_BYTES) -> None:
         self.gate = _HeavyGate(heavy_lock_path)
         self._tail_bytes = stderr_tail_bytes
+        #: Every child spawned and not yet done (its ``on_exit`` has not returned) — what
+        #: :meth:`stop_all` stops. The gate alone does not know a child whose process has
+        #: exited while its ``on_exit`` still writes, nor a non-heavy one.
+        self._live: set[ChildHandle] = set()
+        self._live_lock = threading.Lock()
 
     def spawn(self, module: str, args: Sequence[str] = (), *,
               env: Mapping[str, str] | None = None,
@@ -490,6 +536,8 @@ class ChildRunner:
         """Start ``python -m <module> <args>`` (queued behind the gate when *heavy*)."""
         handle = ChildHandle(self, module, tuple(args), heavy, child_env(env), on_exit,
                              self._tail_bytes, on_start)
+        with self._live_lock:
+            self._live.add(handle)
         if heavy:
             self.gate.enqueue(handle)       # the ticket is taken HERE, so FIFO = spawn order
         try:
@@ -500,8 +548,54 @@ class ChildRunner:
             # before the caller hears of the failure.
             if heavy:
                 self.gate.discard(handle)
+            self._forget(handle)
             raise
         return handle
+
+    def _forget(self, handle: ChildHandle) -> None:
+        with self._live_lock:
+            self._live.discard(handle)
+
+    def stop_all(self, timeout: float) -> list[ChildHandle]:
+        """Stop every child of this runner that is still alive — the app is stopping — and
+        wait for each until its process is gone and its ``on_exit`` has returned, *timeout*
+        seconds at most in all. Returns the children not done by then (logged).
+
+        1. Every child is cancelled FIRST, all of them, so none that is queued starts when the
+           gate passes the turn on, nor one whose turn is coming (its ``on_start`` may still
+           run; its process never starts).
+        2. Every running process is terminated, and killed if it is still alive
+           :data:`STOP_KILL_AFTER_S` later.
+        3. Each child's ``on_exit`` receives a result with ``stopped`` (and ``terminated``)
+           set — except a child whose process had already exited on its own, whose result
+           stands.
+
+        A child spawned after the call began is not stopped (the lifespan calls this after
+        the scheduler and the settlement service stopped starting new work). Never raises."""
+        deadline = time.monotonic() + timeout
+        with self._live_lock:
+            handles = list(self._live)
+        if not handles:
+            return []
+        procs = [proc for proc in (h._request_stop() for h in handles) if proc is not None]
+        self.gate.wake()                    # a queued child sees its cancel and leaves
+        log.info("child runner: stopping %d child(ren), %d running", len(handles), len(procs))
+        for proc in procs:
+            with contextlib.suppress(OSError):
+                proc.terminate()            # it may have exited since the poll
+        kill_at = min(deadline, time.monotonic() + STOP_KILL_AFTER_S)
+        for proc in procs:
+            try:
+                proc.wait(max(kill_at - time.monotonic(), 0.0))
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+        left = [h for h in handles
+                if not h._done.wait(max(deadline - time.monotonic(), 0.0))]
+        if left:
+            log.warning("child runner: %d child(ren) not done %.0f s into the stop: %s",
+                        len(left), timeout, ", ".join(repr(h) for h in left))
+        return left
 
 
 def _popen(cmd: list[str], env: dict[str, str]) -> subprocess.Popen[bytes]:
@@ -550,6 +644,11 @@ def spawn(module: str, args: Sequence[str] = (), *, env: Mapping[str, str] | Non
     """Start ``python -m <module> <args>`` on the process-wide runner (see the module doc)."""
     return _default_runner.spawn(module, args, env=env, on_exit=on_exit, heavy=heavy,
                                  on_start=on_start)
+
+
+def stop_all(timeout: float) -> list[ChildHandle]:
+    """:meth:`ChildRunner.stop_all` on the process-wide runner: the app's stop."""
+    return _default_runner.stop_all(timeout)
 
 
 # -- called inside a child's main() ----------------------------------------------------------
