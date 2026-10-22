@@ -2338,3 +2338,21 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
   active). The stress harness accepted it because it read the derived status BEFORE the record that
   proves the end. Rule: a multi-read endpoint reads in one snapshot; a waiter reads the proof of the
   end first, then a view that must be at or after it.
+
+## The v0.1.33 release and the archive on prod (2026-10-22)
+
+- **A command after a failed step still runs when the steps are separate lines (the tag slip).**
+  The release ran `git merge --no-ff … -F -` (git cannot read a message from `-` there), then the
+  tag and the push as their own commands. The merge failed, so `main` had not moved: the tag landed
+  on its unchanged tip (v0.1.32's commit) and was pushed as v0.1.33. It was caught before any deploy: the tag was
+  deleted locally and on origin, the merge redone with a message FILE, the tag recreated on the
+  merge commit, and `git rev-parse vX^{commit}` was compared with the merge commit and the tree with
+  the branch's. Rule: cut a release as ONE chained command (`merge && tag && push`), and before any
+  deploy prove the tag names the merge commit — a deploy checks out the tag, not the branch.
+- **A verification digest over objects whose `repr` carries an address always differs (prod
+  archive).** The archive script hashed `repr()` of `sqlite3.Row` lists before and after and
+  reported every ledger table as changed; the rows were identical. The alarm was resolved by
+  comparing plain tuples against the pre-write backup (only the six `archived` flags and six
+  action-log rows differed). Rule: a before/after check hashes VALUES (tuples, or the backup file
+  against the live one), and its first run is checked against a known no-op before it is trusted
+  on a write.
