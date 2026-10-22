@@ -2356,3 +2356,10 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
   action-log rows differed). Rule: a before/after check hashes VALUES (tuples, or the backup file
   against the live one), and its first run is checked against a known no-op before it is trusted
   on a write.
+- **A stop handler is dead code if the process manager kills its subjects first (review of the
+  backlog fixes).** `child_runner.stop_all` terminated and recorded the children cleanly — in the
+  tests and on a dev Ctrl+C. On the deployed units systemd's default `KillMode=control-group` sent
+  SIGTERM to every process at once, so the children were already dead, and finalised as crashes
+  (with a failure push), before uvicorn reached the lifespan's stop. Fixed by `KillMode=mixed`.
+  Rule: a fix to stop / restart behaviour states which process manager runs the code and how it
+  signals, and is verified against that manager, not only against an in-process test.

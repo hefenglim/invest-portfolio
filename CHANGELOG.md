@@ -9,13 +9,20 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
-The six backlog items recorded with v0.1.33, each fixed on its own branch and reviewed.
+## [v0.1.34] - 2026-10-22
+
+The six backlog items recorded with v0.1.33, each fixed on its own branch and reviewed, plus the
+two findings of the branch review (a child spawned during the stop; the systemd stop mode).
 
 ### Owner sign-off
 
 - **Session touch (2026-10-22): 「續期延後，記完立刻預熱」** — the touch waits for the page load to
   settle, and the pre-warm runs at once after it records (chosen over a 0 s pre-warm alone, which
   could run a second build beside the page's own, and over leaving it as it was).
+- **Stop mode (2026-10-22): `KillMode=mixed` on both units** — under the default `control-group`
+  the unit's SIGTERM killed the settle / job children together with uvicorn, so the stop handling
+  below never ran on a deployed site and a restart read as a crash with a failure push. The
+  drop-in is applied at this release's deploy.
 
 ### Fixed
 
@@ -33,9 +40,7 @@ The six backlog items recorded with v0.1.33, each fixed on its own branch and re
   ends is 中斷 「系統停止時結算尚未完成」 (resumed at boot, no failure push, no pre-warm during the
   stop); a job run reads 「系統停止時此工作尚未完成」 (reason `interrupted`). A child spawned after the
   stop began (a job thread already past the scheduler's shutdown) never starts its process; the
-  next lifespan reopens the runner (`child_runner.reopen`). Under systemd's default
-  `KillMode=control-group` the children usually die from the unit's SIGTERM first and keep their
-  earlier wording.
+  next lifespan reopens the runner (`child_runner.reopen`).
 - **Schedule history** (`scheduler/jobs.py::update_schedule`): `previous_schedule` is the STAMP —
   the schedule the live scheduler ran — not a row hand-edited since the last boot, which was never
   in effect; saving a hand edit as it stands now counts as a change, saving the stamp back does not.
@@ -47,6 +52,13 @@ The six backlog items recorded with v0.1.33, each fixed on its own branch and re
   still current, so the next `/api/dashboard` is a hit.
 - **Trend subtitle** (`web/index.html`, `web/charts.js`): 「日線」 until the payload names its
   reporting currency (it read 「TWD・日線」 on a USD ledger until the chart script ran).
+
+### Changed
+
+- **Deployment** (`docs/DEPLOYMENT.md` §5): the unit carries `KillMode=mixed`; an install made
+  before v0.1.34 adds it as a drop-in (`portfolio-dash.service.d/killmode.conf`).
+- What's new: three catalog entries (trend subtitle, the renewal no longer slowing a page, a
+  restart resuming the settlement without a failure notice).
 
 ### Backlog
 

@@ -118,6 +118,11 @@ Restart=always
 RestartSec=3
 # 1 GB box: cap memory so a runaway never takes down the VM (restarts instead).
 MemoryMax=700M
+# Stop: SIGTERM goes to uvicorn only; its lifespan terminates the settle / job children itself
+# and records their runs as stopped (resumed at boot). The default (control-group) killed them
+# together with uvicorn, so a stop read as a crash. systemd still SIGKILLs every process left
+# after TimeoutStopSec (90 s).
+KillMode=mixed
 # Settlement store + job workers (v0.1.32) — the PROD values; see "Process flags" below.
 # PD_STATIC_IMMUTABLE=1 belongs on an instance that runs released tags ONLY (never a test/demo).
 Environment=PD_SETTLE=on
@@ -132,6 +137,13 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now portfolio-dash
+# An install made before v0.1.34 adds the stop mode as a drop-in instead of editing the unit:
+#   sudo mkdir -p /etc/systemd/system/portfolio-dash.service.d
+#   printf '[Service]
+KillMode=mixed
+' | sudo tee /etc/systemd/system/portfolio-dash.service.d/killmode.conf
+#   sudo systemctl daemon-reload      # takes effect at the next stop / restart
+#   systemctl show -p KillMode portfolio-dash      # KillMode=mixed
 sudo systemctl status portfolio-dash --no-pager      # should be "active (running)"
 curl -s http://127.0.0.1:8400/api/health             # -> {"status":"ok"}
 ```

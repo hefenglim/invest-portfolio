@@ -319,8 +319,14 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       until then). Each result carries `stopped`, and its owner records the run as a restart
       leaves it: a settle run 中斷 (「系統停止時結算尚未完成」, which boot resumes), a job row
       `error` 「系統停止時此工作尚未完成」 with reason `interrupted`. A child left running held the
-      database through the checkpoint (its `-wal` / `-shm` stayed), and outside systemd's
-      `KillMode=control-group` (a dev server's Ctrl+C) it went on running after the app stopped.
+      database through the checkpoint (its `-wal` / `-shm` stayed), and on a dev server's Ctrl+C
+      it went on running after the app stopped. **The units run `KillMode=mixed`** (owner ruling
+      2026-10-22, `docs/DEPLOYMENT.md` §5): with systemd's default `control-group` the unit's
+      SIGTERM reached every child together with uvicorn, so each was already dead and finalised
+      as a crash (「結算程序異常結束」, a failure push) before the lifespan's stop ran, and this
+      step found nothing to stop. `mixed` signals only the main process; the stop terminates the
+      children itself, and systemd's SIGKILL after `TimeoutStopSec` (90 s) still ends whatever
+      is left.
       From the call on, a child spawned anyway (a job thread already past the scheduler's
       shutdown) never starts its process and is recorded `stopped`; the lifespan's start
       reopens the runner (`child_runner.reopen`).

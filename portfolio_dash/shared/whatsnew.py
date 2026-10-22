@@ -66,6 +66,39 @@ class Feature(BaseModel):
 # the full release story; those older entries carry href=None (the ✦ panel caps at the
 # newest 6 versions, so they surface only in 版本發佈資訊, which renders title/desc/area).
 CATALOG: list[Feature] = [
+    # --- v0.1.34 (the v0.1.33 backlog: session touch, clean stop, cache filing, subtitle) ----
+    Feature(
+        version="0.1.34",
+        id="trend-subtitle-no-static-currency",
+        title="走勢圖標題不再先顯示 TWD",
+        desc="「總市值 vs 累計淨投入」旁的小標題，在資料載入前只顯示「日線」，"
+        "載入後才標上報告幣別；以前報告幣別是美元時，會先閃一下「TWD・日線」",
+        href="index.html",
+        area="儀表板 → 總市值 vs 累計淨投入",
+        target="#trend-sub",
+    ),
+    Feature(
+        version="0.1.34",
+        id="login-renewal-no-slow-page",
+        title="每天第一次使用時，換頁不再因登入續期而變慢",
+        desc="登入每天自動續期一次。續期現在等頁面載入完才記錄，記錄後立刻在背景把首頁算好；"
+        "續期前後換頁都直接使用已算好的結果，不會再遇到一次要重算約一秒的換頁。從月度成績回到"
+        "首頁，也不會因為剛好有新資料而重算兩次",
+        href="index.html",
+        area="儀表板",
+        target="#kpi-band",
+    ),
+    Feature(
+        version="0.1.34",
+        id="settlement-stop-interrupted",
+        title="系統重新啟動時，進行中的結算會在開機後續跑，不再發失敗通知",
+        desc="更新版本或重新啟動時，若結算或排程工作正在進行，系統會先把它們停好再關閉：結算報告標示"
+        "「系統停止時結算尚未完成」並在開機後自動續跑，排程紀錄標示「系統停止時此工作尚未完成」，"
+        "不再顯示「結算程序異常結束」或發出重新結算失敗的通知",
+        href="index.html",
+        area="頂端列 → 結算狀態",
+        target="#settle-chip",
+    ),
     # --- v0.1.33 (post-v0.1.32 fixes: review follow-ups, PERF-F2, split edge, minors) -------
     Feature(
         version="0.1.33",
@@ -2146,6 +2179,7 @@ CATALOG: list[Feature] = [
 # version -> ISO delivery date (from the CHANGELOG headings). A not-yet-shipped version's
 # date is added here when it ships; a version missing from this map serializes as date: null.
 VERSION_DATES: dict[str, str] = {
+    "0.1.34": "2026-10-22",
     "0.1.33": "2026-10-22",
     "0.1.32": "2026-10-20",
     "0.1.31": "2026-10-14",

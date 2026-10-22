@@ -8,10 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.33"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.33"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.34"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.34"></link>
 <!-- defer (PERF spec §13): the chart code awaits window.pdEchartsReady() before its first init. -->
-<script src="echarts.min.js?v=0.1.33" defer="defer"></script>
+<script src="echarts.min.js?v=0.1.34" defer="defer"></script>
 <style>
   .mode-pane { display: none; }
   .mode-pane.active { display: block; }
@@ -244,20 +244,20 @@
 <!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
      tokens through window.pdNames on every response, so the resolver must exist before the
      first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
-<script src="names.js?v=0.1.33"></script>
-<script src="api.js?v=0.1.33"></script>
-<script src="shell.js?v=0.1.33"></script>
-<script src="format.js?v=0.1.33"></script>
-<script src="pager.js?v=0.1.33"></script>
-<script src="export.js?v=0.1.33"></script>
-<script src="alerts.js?v=0.1.33"></script>
+<script src="names.js?v=0.1.34"></script>
+<script src="api.js?v=0.1.34"></script>
+<script src="shell.js?v=0.1.34"></script>
+<script src="format.js?v=0.1.34"></script>
+<script src="pager.js?v=0.1.34"></script>
+<script src="export.js?v=0.1.34"></script>
+<script src="alerts.js?v=0.1.34"></script>
 <!-- G-02: loaded ONLY for window.ppSkipReason — the gate-code -> zh table (SKIP_REASONS).
      This page rendered a run's `reason` raw, so a skipped 產生洞察 read 「持倉週報：R6_quota」
      while the 管線 hub's diagnose modal spelled the same code out in Chinese. Copying the
      table here would make two tables for one enum, which is what test_skip_reason_coverage.py
      exists to prevent; pipeline.js's init() no-ops on a page with no #pp-list, so importing
      the page controller costs nothing but the file. -->
-<script src="pipeline.js?v=0.1.33"></script>
+<script src="pipeline.js?v=0.1.34"></script>
 <script>
 /* AI 洞察 — async-booted from the REAL API (decision B, spec 19/04).
    洞察卡 + 持倉健診 ← GET /api/insights (stored cards; cost_usd is a Decimal STRING).
