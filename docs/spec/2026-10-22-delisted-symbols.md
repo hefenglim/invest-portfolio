@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | REVISED after the accountant review (READY-WITH-FIXES, 2026-10-22); awaiting the owner's answers to §7 |
+| Status | REVISED after the accountant review (READY-WITH-FIXES); the owner answered §7 on 2026-10-22 (Q1 = value at 0, Q2–Q5 as recommended) |
 | Date | 2026-10-22 |
 | Base | `fix/post-v0132` (v0.1.32 + the post-release fixes) |
 | Owner rulings | 2026-10-22 (multiple choice, recorded in §2) |
@@ -134,11 +134,16 @@ never returns it: no figure as at today contains an estimate (review M3, with a 
 ### 3.5 A marked symbol still held after its date (owner ruling 2)
 
 "As if cleared" is already true for every position a ledger row closed — all of prod. For a
-position still held after `delisted_on` the ledger is incomplete. Proposed (§7 Q1): a
-**valuation-layer** 待釐清 (never a replay refusal, so 重算 and the tax package are untouched):
-`pending_positions` kind `delisted_held` and a 檢查帳本 finding, the holding's value omitted, the day
-`incomplete`, XIRR and B withheld with the reason named — and the drawer offers the remedies that
-match what the statement shows:
+position still held after `delisted_on` the ledger is incomplete. **Owner ruling (§7 Q1, 2026-10-22):
+such a position is valued at 0** from the day after `delisted_on` — "as if cleared" — on every day
+(trend, closes as at D, and today's KPIs). It is a valuation rule only, never a booked disposal: no
+realized row, the cost stays, so its unrealized P&L reads −cost and its whole cost is in the loss;
+the strict replay (重算, the tax package) is untouched. Today's 總市值, A and XIRR are computed with
+it (the accountant review recommended withholding instead; the owner chose 0 knowing that a
+position that was in fact cashed out reads understated until its outcome is recorded). It stays
+flagged until the real outcome is booked: `pending_positions` kind `delisted_held` (「已下市・帳上仍
+持有：以 0 計價，請依對帳單登錄處分」), a 檢查帳本 finding, the list badge of §3.3, and the drawer offers
+the remedies that match what the statement shows:
 
 - **sale / cash-out** (take-private, SPAC redemption, liquidation, ETF liquidation): a SELL dated by
   the statement, with fee and tax **as supplied** — pre-filled 0, editable — never the engine's
@@ -213,9 +218,10 @@ not print it as if it were an old dated correction.
 - Settle worker ≡ live build with a marked symbol (prefix property).
 - Closes: `estimated_prices`, `estimated_in_period`, basis per holding row, KPIs as at D, 累計 XIRR,
   當期報酬; the TWR note; the drawdown alert never fires from an estimated peak.
-- §3.5: still held after the date → `delisted_held`, value omitted, XIRR/B withheld, strict replay
-  (重算, tax package) unchanged; the three remedies (supplied fee/tax; EXCHANGE; the write-off row
-  and its refusals: never opens a lot, fee/tax 0).
+- §3.5: still held after the date → valued at 0 from the next day (trend, closes, today's KPIs and
+  XIRR terminal value), `delisted_held` flagged, no realized row, strict replay (重算, tax package)
+  unchanged; recording the outcome clears the flag and replaces the 0; the three remedies
+  (supplied fee/tax; EXCHANGE; the write-off row and its refusals: never opens a lot, fee/tax 0).
 - The door: set / clear, future date refused, default date rules, the held-after ack, option
   refused, the trail row's changed input, TRACKED_SQL and every bypass refusal, the list toggle.
 - e2e: mark, see the badge, the confirm text, the 估計 notes on 月度成績 and the tooltip.
@@ -234,15 +240,17 @@ CHANGELOG, a whatsnew entry.
 Typing month-end statement prices; a provider other than the configured chain; re-keying a reused
 ticker (flagged, not fixed).
 
-## 7. Questions for the owner
+## 7. The owner's answers (2026-10-22)
 
-- **Q1** A marked symbol still held after its date: 待釐清, value omitted, until the statement's
-  outcome is recorded (recommended) / keep valuing at the last trade price, 估計 / value it at 0.
-- **Q2** How quotes stop: the 已下市 mark itself stops them, 封存 stays separate (recommended) / also
-  set 封存 (undone by the next booking) / keep quoting.
-- **Q3** Default date: the ledger's last exit, editable; future dates refused; an ack when the
-  ledger holds the symbol after it (recommended) / no default / today.
-- **Q4** Successor pre-merger closes: use them where the provider has them, ranked above the ledger
-  price and labelled (recommended — the check found them for every EXCHANGE exit) / ledger price only.
-- **Q5** Build the stock write-off close row (`worthless`) in this change: yes (recommended; Q1's
-  remedy needs it) / later.
+- **Q1** A marked symbol still held after its date → **valued at 0** ("as if cleared"), flagged
+  until the real outcome is recorded (§3.5). (Offered: 待釐清 with the value omitted — the
+  accountant's recommendation; keep valuing at the last trade price; value at 0.)
+- **Q2** How quotes stop → **the 已下市 mark itself stops them; 封存 stays separate** (§3.1).
+- **Q3** Default date → **the ledger's last exit, editable; future dates refused; an ack when the
+  ledger holds the symbol after it** (§3.2).
+- **Q4** Successor pre-merger closes → **used where the provider has them, ranked above the ledger
+  price and labelled** (§3.4).
+- **Q5** The stock write-off close row (`worthless`) → **built in this change** (§3.5).
+
+§3.4's "never for today" and §3.2's refused future date still hold: the only figure as at today that
+a mark can move is the Q1 rule's value of 0 for a position still held after its date.
