@@ -375,6 +375,23 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   The settlement store is no exception. A GET never writes it, never creates or recreates a
   trigger, and never gets the change actor's TEMP trigger. A status read never starts,
   resumes or ends a run. The store's triggers are installed and verified at boot only.
+  **The one reviewed exception: the session touch** (owner ruling 2026-10-22, review L5). Login
+  sessions expire after `auth_store.SESSION_IDLE_EXPIRY` (30 d) without use. `require_session`
+  only reads: an expired (idle > 30 d, a stamp more than `SESSION_CLOCK_SKEW` in the future, or an
+  unreadable stamp), locked or unknown session is refused, and the login it lets through goes on
+  `request.state` (`LOGIN_STATE_ATTR`) for the action log. A use is recorded by
+  `auth_store.touch_after_response`, a background task the gate schedules only when the stored
+  `last_seen_at` is `SESSION_TOUCH_INTERVAL` (24 h) old and the in-process guard has no touch of
+  that session in flight or recorded within the interval: after the response, on its own
+  connection, a 100 ms busy timeout, one autocommit compare-and-set UPDATE (`TOUCH_SQL`), skipped
+  when the lock is busy, a WARNING (and a 10 min back-off) on any other failure. A recorded touch
+  moves `data_version`, so it schedules `alert_inputs.prewarm_today` with the write window's delay
+  (the owner chose 24 h + pre-warm over 6 h for the cache's sake; a session lapses 29–30 days after
+  its last use). The request's own connection still writes nothing and takes no write lock:
+  `tests/contract/test_def065_get_never_writes.py` section 5 holds the touch to its statement, its
+  own connection and once per interval. `/api/auth/logout` is an open path, so an expired cookie
+  can be cleared. The boot (`prepare_sessions_at_boot`) dates unstamped sessions from the boot and
+  purges expired, locked and orphaned ones.
   **`get_conn` is function-scoped** (PERF-S10, 2026-10-18). Every route declares
   `Depends(get_conn, scope="function")`, and so does the gate, `auth_store.require_session`. A
   request therefore holds ONE cached connection, and its session commits when the path function

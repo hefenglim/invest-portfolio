@@ -13,7 +13,7 @@ Changes after v0.1.32, each built on its own branch, reviewed independently, its
 its own author, then cherry-picked onto `fix/post-v0132`: the two defects the settlement-store work
 reproduced and the owner deferred (ruling 2026-10-19); the v0.1.32 code-review follow-ups and its
 performance backlog; the accountant review's minor findings; the trend tooltip's figure from the
-server. Every `.py` under `portfolio/`, `pricing/` and `shared/` is in the settlement calc version,
+server; login sessions that expire. Every `.py` under `portfolio/`, `pricing/` and `shared/` is in the settlement calc version,
 so the release that carries them re-settles in full at its first boot.
 
 ### Owner sign-off
@@ -34,7 +34,22 @@ so the release that carries them re-settles in full at its first boot.
   everything for now; the delisted-symbols spec is approved in substance but parked on branch
   `feat/delisted-symbols` (merge the latest main into it when the build starts); the unbuilt
   blueprint phases (decision ledger, external-report feed, quarterly / behaviour cards) are parked;
-  prod AI stays off until the owner enables it.
+  prod AI stays off until the owner enables it. Login sessions expire after 30 days without use
+  (review L5, deferred since 2026-07-07); the use is recorded once a day with a cache pre-warm
+  (chosen over every 6 h, which would empty the result cache up to twice a day).
+
+### Security
+- **Login sessions expire after 30 days without use**, and each use extends them. An expired session
+  answers 401 「登入已逾期（30 天未使用），請重新登入」 and the login page says why the form is back.
+  A use is recorded at most once a day per session, after the response, on its own connection,
+  skipped while the write lock is held — so a GET still never writes on its own connection (DEF-065;
+  a new protected-mode section of `test_def065_get_never_writes.py`); the record empties the result
+  cache, so it schedules the ordinary pre-warm at once. A session lapses 29–30 days after its last
+  use; stamps dated in the future or unreadable count as expired; logout is an open path so an
+  expired cookie can be cleared; the action log names only a login the gate let through. The boot
+  adds `auth_sessions.last_seen_at` (an additive ALTER), dates existing sessions from the first boot
+  of this release (nobody is logged out on deploy day), and purges expired, locked and orphaned
+  sessions, logging the counts.
 
 ### Fixed
 - **PERF-F2: the trend no longer disappears over a cash cost in a currency no holding is quoted
@@ -140,6 +155,8 @@ so the release that carries them re-settles in full at its first boot.
 - The dashboard rebuilt inside a late periods snapshot is not filed in the cache (the next
   `/api/dashboard` after such a race builds once).
 - `web/index.html` keeps a static 「TWD・日線」 subtitle until the chart script runs.
+- A navigation landing within the 3 s pre-warm delay of a session touch still misses the cache once
+  (about 0.9 s on the VM) and rebuilds it itself.
 
 ## [v0.1.32] - 2026-10-20
 

@@ -2307,3 +2307,28 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
 - **A stop must also stop follow-ups (review of finding 2's fix).** A settle waiter finishing
   during the stop started the run's resume as a new child. Rule: once shutdown began, nothing
   starts; boot picks up what was left.
+
+## The second post-v0.1.32 round: perf backlog, tooltip, accountant minors, sessions (2026-10-22)
+
+- **A stronger invalidation signal makes older guards redundant — re-derive which (perf item 1).**
+  The result cache's "no cache while ANY write window is open" dated from the in-flight key, which
+  had only the write generation; once the key gained `PRAGMA data_version` (it moves at the commit
+  itself), the process-wide `None` outlived its reason by a release. Rule: when a key gains a signal,
+  list the guards it subsumes and prove each with an interleaving, not a reading.
+- **Every write is a cache invalidation — price it before adding one (session touch).** A sliding
+  idle expiry needs "last used" written; each write moved `data_version` and emptied the dashboard
+  cache, discarding the 06:40 pre-warm on the first navigation of the morning. The owner chose a
+  24 h touch plus an immediate pre-warm over a 6 h touch. Rule: a feature that writes on reads states
+  what it invalidates and what it costs per day, before it is proposed.
+- **Measure a perf-sensitive proposal on prod-sized data before asking (tooltip).** The owner
+  worried a server-side field would slow the page. The answer came from a prod-sized copy: hover
+  unaffected, +8.6 KB gzip compact vs +18.8 KB full precision. A question asked with the numbers was
+  decided in one round.
+- **A public repository's spec must not carry the owner's tickers (delisted spec).** The first draft
+  listed real symbols and holding dates; it was caught before commit. Real facts go in
+  `docs/human_noted/`; the spec says "several symbols" and points there.
+- **Stress-harness waits must target the last step of the thing they wait for.** The unquoted-ccy
+  checkpoint waited for the status to read idle, which turns true at the swap — before the waiter
+  finalises — so a write landed in between and started a chained run (3 transient failures). The
+  barrier is the settlement `job_runs` row being finished. The same gap let an owner's back-dated
+  edit bypass the PERF-D2 prompt; fixing the product fixed the flake.
