@@ -9,8 +9,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"></link>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"></link>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem("pd_theme")||"dark"}catch(e){}</script>
-<link rel="stylesheet" href="styles.css?v=0.1.32"></link>
-<link rel="stylesheet" href="settings.css?v=0.1.32"></link>
+<link rel="stylesheet" href="styles.css?v=0.1.33"></link>
+<link rel="stylesheet" href="settings.css?v=0.1.33"></link>
 <style>
   .login-wrap {
     min-height: 100vh;
@@ -46,6 +46,7 @@
   <form class="login-card" data-screen-label="登入卡" onsubmit="return false;">
     <div class="login-logo">portfolio<span class="tld">-dash</span></div>
     <div class="login-sub">個人多市場投資管理</div>
+    <div class="login-hint" id="login-notice" role="status" hidden="hidden"></div>
     <div class="login-hint" id="login-hint" hidden="hidden"></div>
     <a class="login-guest-link" id="login-guest-link" href="index.html" hidden="hidden">前往儀表板</a>
     <div class="login-error" id="login-error" hidden="hidden">帳號或密碼錯誤</div>
@@ -63,8 +64,8 @@
 <!-- names.js FIRST, before api.js (DEF-044): api.js resolves the backend's {account:<id>}
      tokens through window.pdNames on every response, so the resolver must exist before the
      first request can land. tests/contract/test_names_js_before_api_js.py pins this. -->
-<script src="names.js?v=0.1.32"></script>
-<script src="api.js?v=0.1.32"></script>
+<script src="names.js?v=0.1.33"></script>
+<script src="api.js?v=0.1.33"></script>
 <script>
   /* Backend-driven auth (spec 9.1). Submit POSTs /api/auth/login through the single
      pdApi fetch layer; on success the server sets the HttpOnly pd_session cookie and
@@ -78,18 +79,27 @@
      finds no user and answers 401 by design — so the hint sends the visitor to the
      dashboard and says the form will not pass (L22b, second re-verification 2026-09-17:
      the first hint promised 「任何帳號密碼都能進入」 and contradicted the 401). A failed
-     probe leaves the form exactly as before; empty-field validation stays client-side. */
+     probe leaves the form exactly as before; empty-field validation stays client-side.
+     The same probe says WHY the form is back (session idle expiry, 2026-10-22): a cookie
+     that no longer opens a session comes back with the server's own sentence in `notice`
+     (expired after 30 days without use, or a login the store no longer knows), shown in
+     #login-notice. The api.js 401 redirect is what brings an expired session here. */
   (function () {
     var userInput = document.getElementById('login-user');
     var passInput = document.getElementById('login-pass');
     var errEl = document.getElementById('login-error');
     var btn = document.getElementById('login-btn');
     var hintEl = document.getElementById('login-hint');
+    var noticeEl = document.getElementById('login-notice');
     var guestLink = document.getElementById('login-guest-link');
 
     function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
 
     window.pdApi.get('/api/auth/session').then(function (s) {
+      if (s && s.mode === 'user' && s.notice && noticeEl) {
+        noticeEl.textContent = s.notice;
+        noticeEl.hidden = false;
+      }
       if (s && s.mode === 'guest' && hintEl) {
         hintEl.textContent = '目前為訪客模式：尚未設定授權用戶，無需登入即可使用，'
           + '請直接前往儀表板（此頁送出帳密不會通過）。資料未受登入保護；'

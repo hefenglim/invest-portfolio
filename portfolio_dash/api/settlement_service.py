@@ -15,7 +15,7 @@ The PARENT of every run:
   OOM, a child that died before it claimed), finalises ``job_runs`` per DEF-067
   (``settlement_models.job_status_for``), pushes on a failed AUTOMATIC run (P4, Q-P1 = (a)),
   calls ``flight.note_write()``, pre-warms, then starts the follow-up (chained / resume /
-  queued);
+  queued — chained only for what the run itself left, :func:`_follow_up`);
 - :func:`cancel` terminates, waits, and ends the run as cancelled unless it published;
 - :func:`on_boot` + :func:`start_after_boot` are the boot hook (see their docstrings);
 - :func:`status` is the chip's read — it never writes and never starts anything.
@@ -175,6 +175,15 @@ class CannotCancel(SettlementError):
 
     def __init__(self) -> None:
         super().__init__("這次重新結算在同步模式下執行，無法中途取消")
+
+
+class Stopping(SettlementError):
+    """The app is stopping (:func:`shutdown` ran): no settle child starts any more."""
+
+    code = "stopping"
+
+    def __init__(self) -> None:
+        super().__init__("系統正在停止，重新結算將於下次啟動後處理")
 
 
 # =============================================================================================
@@ -482,16 +491,71 @@ def final_through(conn: sqlite3.Connection, now: datetime, *,
     *since* bounds the fires examined (:data:`SINCE_GO_LIVE` = every quote run since go-live,
     what a run's ``unconfirmed_closes`` needs); without it only the days that can still block
     are examined (the status poll).
+
+    A caller that asks several times for one *now* (the 暫定 walk of ``api/snapshots.py``)
+    uses :class:`FinalThroughReader`, which reads the two tables once.
     """
+    return FinalThroughReader(conn, now)(since=since)
+
+
+class FinalThroughReader:
+    """:func:`final_through` for ONE *now*, asked any number of times (post-v0.1.32 item 3).
+
+    ``schedule_config`` is read on the first call; the quote jobs' ``job_runs`` rows once,
+    from the earliest *since* asked so far (a later call asking for an EARLIER window reads
+    them again, from there). Every answer is computed from those rows and equals
+    ``final_through(conn, now, since=...)``: the rows a wider read adds start more than two
+    days before the call's own window (:func:`_quote_runs`' margin), and no answer reads a
+    row started before its window's first fire — :func:`_verdict` starts at the fire, and the
+    unknown-schedule days start at the window. Answers are kept per *since* (they are a pure
+    function of the rows and *now*); callers must not mutate one.
+
+    Scoped to one request: the rows are a snapshot of the moment they were read, and the
+    answer depends on *now* beyond its date (a fire later than *now* is not ``ok``), so a
+    reader is never kept across requests.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, now: datetime) -> None:
+        self._conn = conn
+        self._now = now
+        self._schedule: list[_Schedule] | None = None
+        self._runs: tuple[dict[str, list[_JobRun]], dict[str, datetime]] | None = None
+        self._runs_from: date | None = None
+        self._answers: dict[date | None, FinalThrough] = {}
+
+    def __call__(self, *, since: date | None = None) -> FinalThrough:
+        answer = self._answers.get(since)
+        if answer is None:
+            answer = self._answers[since] = self._compute(since)
+        return answer
+
+    def _compute(self, since: date | None) -> FinalThrough:
+        now = self._now
+        today = _today(now)
+        yesterday = today - _ONE_DAY
+        if os.environ.get("PD_DISABLE_SCHEDULER") == "1":
+            return FinalThrough(through=yesterday)
+        window_from = since if since is not None else today - timedelta(days=STALE_AGE_DAYS + 1)
+        if self._schedule is None:
+            self._schedule = _schedule_rows(self._conn, now)
+        schedule = self._schedule
+        if not schedule:
+            return FinalThrough(through=yesterday)
+        if self._runs is None or self._runs_from is None or window_from < self._runs_from:
+            self._runs = _quote_runs(self._conn, window_from)
+            self._runs_from = window_from
+        runs_by_job, go_lives = self._runs
+        return _final_through(schedule, runs_by_job, go_lives, now=now,
+                              window_from=window_from)
+
+
+def _final_through(schedule: Sequence[_Schedule], runs_by_job: dict[str, list[_JobRun]],
+                   go_lives: dict[str, datetime], *, now: datetime,
+                   window_from: date) -> FinalThrough:
+    """:func:`final_through`'s judgement over rows already read (the reads are
+    :class:`FinalThroughReader`'s)."""
     today = _today(now)
     yesterday = today - _ONE_DAY
-    if os.environ.get("PD_DISABLE_SCHEDULER") == "1":
-        return FinalThrough(through=yesterday)
-    window_from = since if since is not None else today - timedelta(days=STALE_AGE_DAYS + 1)
-    schedule = _schedule_rows(conn, now)
-    if not schedule:
-        return FinalThrough(through=yesterday)
-    runs_by_job, go_lives = _quote_runs(conn, window_from)
     blocked: dict[date, set[str]] = {}
     unconfirmed: dict[date, set[str]] = {}
 
@@ -674,6 +738,8 @@ class _State:
         self.queue: list[_Pending] = []
         self.scheduler: Any = None
         self.timer: threading.Timer | None = None
+        #: Set by :func:`shutdown`, cleared by :func:`on_boot` and :func:`reset_for_tests`.
+        self.stopping = False
 
 
 _S = _State()
@@ -688,6 +754,7 @@ def reset_for_tests() -> None:
         _S.queue = []
         _S.scheduler = None
         _S.timer = None
+        _S.stopping = False
 
 
 def bind_scheduler(scheduler: Any) -> None:
@@ -698,9 +765,18 @@ def bind_scheduler(scheduler: Any) -> None:
 
 
 def shutdown() -> None:
-    """App shutdown: stop the deferred push timer. A settle child is a separate process and
-    is left alone — boot finalises whatever it leaves behind (spec §9.4)."""
+    """App shutdown: stop the deferred push timer, and start no settle child from now on.
+
+    A settle child already running is a separate process and is left alone — boot finalises
+    whatever it leaves behind (spec §9.4). But its waiter may still finish during the stop
+    (the child ends, or systemd's SIGTERM reaches it too), and it used to start the run's
+    follow-up — a resume, a chained run, a queued nightly — as a NEW child in the middle of
+    the stop, writing a report the next boot then ended 中斷. Now :func:`start_run` refuses
+    with :class:`Stopping` and :func:`start_automatic` starts nothing: boot resumes an
+    interrupted run, and a dirty day waits for the next run (review of the v0.1.32
+    follow-ups, 2026-10-20). The lifespan's next boot (:func:`on_boot`) opens it again."""
     with _S.lock:
+        _S.stopping = True
         if _S.timer is not None:
             _S.timer.cancel()
             _S.timer = None
@@ -713,14 +789,35 @@ def active_run_id() -> int | None:
         return None if _S.active is None else _S.active.run_id
 
 
+def _worker_alive(active: _Active) -> bool:
+    if active.inline:
+        return True
+    return active.handle is not None and active.handle.state != "exited"
+
+
 def _in_process_alive(run_id: int) -> bool:
     with _S.lock:
         active = _S.active
-        if active is None or active.run_id != run_id:
-            return False
-        if active.inline:
-            return True
-        return active.handle is not None and active.handle.state != "exited"
+        return active is not None and active.run_id == run_id and _worker_alive(active)
+
+
+@dataclass(frozen=True)
+class _Liveness:
+    """What was alive at ONE moment: the run whose worker this process started and that had
+    not exited, and whether any process held the settle lock."""
+
+    in_process: int | None
+    locked: bool
+
+    def alive(self, run_id: int) -> bool:
+        return self.locked or self.in_process == run_id
+
+
+def _liveness() -> _Liveness:
+    with _S.lock:
+        active = _S.active
+        run_id = active.run_id if active is not None and _worker_alive(active) else None
+    return _Liveness(in_process=run_id, locked=proc_lock.is_held(_lock_path()))
 
 
 def _enqueue(pending: _Pending) -> None:
@@ -746,6 +843,10 @@ class RunEnd:
     scope: RunScope
     resumed: bool = False
     dirty_after: date | None = None
+    #: The day its OWN follow-up starts from, as its swap decided it (``StateResult.
+    #: chained_from``): a partial publish's hand-over, or a change committed while it was
+    #: active. ``None`` on a clean full publish — see :func:`_follow_up`.
+    chained_from: date | None = None
 
 
 @dataclass(frozen=True)
@@ -758,11 +859,13 @@ class Started:
 
 @dataclass(frozen=True)
 class AutoStart:
-    """An automatic start: started, queued behind the active run, or nothing (settling off)."""
+    """An automatic start: started, queued behind the active run, or nothing (settling off,
+    or the app is stopping — :attr:`stopping`)."""
 
     run_id: int | None = None
     queued_behind: int | None = None
     ended: RunEnd | None = None
+    stopping: bool = False
 
 
 def _active_run_ids(conn: sqlite3.Connection) -> list[int]:
@@ -868,11 +971,14 @@ def start_run(*, scope: RunScope, reason: str, started_by: str | None = None,
     (``PD_SETTLE_MODE=child``, the call returns at once) or inline (the call returns after the
     run and its follow-ups). Raises :class:`SettlementOff` with ``PD_SETTLE=off`` and
     :class:`AlreadyRunning` while a run is active (this process's, or any ``preparing`` /
-    ``running`` report — boot ends every orphan first)."""
+    ``running`` report — boot ends every orphan first), and :class:`Stopping` once the app's
+    stop began (:func:`shutdown`)."""
     if not flags.settle_enabled():
         raise SettlementOff
     now = now or _now()
     with _S.lock:
+        if _S.stopping:
+            raise Stopping
         if _S.active is not None:
             raise AlreadyRunning(_S.active.run_id)
         # A report left active by a waiter that could not finish it (its lock free, no run
@@ -941,13 +1047,17 @@ def start_automatic(*, scope: RunScope, reason: str, now: datetime | None = None
                     previous_run_id: int | None = None, why: str | None = None,
                     mark_resumed: bool = False) -> AutoStart:
     """An automatic start (boot, nightly, self-check, a job's, chained, resume): queued behind
-    the active run instead of refused, nothing at all with settling off."""
+    the active run instead of refused, nothing at all with settling off or while the app
+    stops (boot resumes or settles what is left)."""
     try:
         started = start_run(scope=scope, reason=reason, started_by=None, now=now,
                             previous_run_id=previous_run_id, why=why,
                             mark_resumed=mark_resumed)
     except SettlementOff:
         return AutoStart()
+    except Stopping:
+        logger.info("settlement %s run not started: the app is stopping", reason)
+        return AutoStart(stopping=True)
     except AlreadyRunning as busy:
         _enqueue(_Pending(scope=scope, reason=reason, why=why,
                           previous_run_id=previous_run_id, mark_resumed=mark_resumed))
@@ -1175,11 +1285,20 @@ def _finalise(conn: sqlite3.Connection, run_id: int, *, exit_info: _Exit | None,
     dirty_after = store.store_state(conn, reporting=_reporting()).dirty_from
     return RunEnd(run_id=run_id, status=status, job_status=job_status, detail=detail,
                   reason=ended.summary.reason, scope=ended.inputs.scope,
-                  resumed=ended.summary.resumed, dirty_after=dirty_after)
+                  resumed=ended.summary.resumed, dirty_after=dirty_after,
+                  chained_from=None if ended.state is None else ended.state.chained_from)
 
 
 def _follow_up(ended: RunEnd) -> _Pending | None:
-    """The run that follows *ended* (spec §9.1 "chained", §9.4 resume)."""
+    """The run that follows *ended* (spec §9.1 "chained", §9.4 resume).
+
+    A ``chained`` run follows only what the ended run itself left (review 2026-10-22, PERF-D2):
+    a ``partial`` publish's hand-over, a ``superseded`` run's put-back claim, or a change
+    committed WHILE a published run was active (its swap found it: ``chained_from``, spec Q3).
+    A change committed AFTER the swap — in the window before this waiter finalises, when the
+    status already reads idle — is nobody's follow-up: dated before the live window it takes
+    the ordinary prompt (``needs_prompt``), inside it it is live and waits for the nightly run.
+    Chaining it ran an owner's back-dated edit without the prompt the owner ruled for."""
     if not flags.settle_enabled():
         return None
     if ended.status == "cancelled":
@@ -1196,7 +1315,10 @@ def _follow_up(ended: RunEnd) -> _Pending | None:
     with _S.lock:
         if _S.queue:
             return _S.queue.pop(0)
-    if ended.status in ("published", "partial", "superseded") and ended.dirty_after is not None:
+    if ended.dirty_after is None:
+        return None
+    if ended.status in ("partial", "superseded") or (
+            ended.status == "published" and ended.chained_from is not None):
         return _Pending(scope="dirty", reason="chained", previous_run_id=ended.run_id)
     return None
 
@@ -1584,6 +1706,8 @@ _JOB_LABEL: dict[str, str] = {"nightly": "每晚例行結算", "selfcheck": "每
 def trigger_outcome(label: str, started: AutoStart) -> JobOutcome:
     """The trigger job's own ``job_runs`` verdict (DEF-067 / DEF-073): what it started. The
     run itself has its own row (``job_id = 'settlement'``)."""
+    if started.stopping:
+        return JobOutcome("skipped", f"系統正在停止，{label}未執行")
     if started.queued_behind is not None:
         return JobOutcome("ok", f"重新結算 #{started.queued_behind} 正在進行，{label}排在其後")
     if started.ended is not None:
@@ -1609,24 +1733,43 @@ def scheduled_run(conn: sqlite3.Connection, scope: str, *, now: datetime) -> Job
 
 @dataclass(frozen=True)
 class TrailMark:
-    """Where the change trail stood before a job (review E #9): the last log row, and every
-    PENDING price / FX counter's count and earliest day."""
+    """Where the change trail stood before a job (review E #9): the last log row, and per
+    price / FX counter KEY ``(table_name, key)`` the summed changes and the earliest day of
+    every UNSETTLED counter — pending or claimed (:func:`_unsettled_counters`)."""
 
     seq: int
     last_log_id: int
-    counters: dict[int, tuple[int, str]]
+    counters: dict[tuple[str, str], tuple[int, str]]
+
+
+#: Per counter key, over every counter no run has settled — pending AND claimed. A run's
+#: put-back (cancel, failure, crash: ``store._put_back``) un-claims a counter in place or
+#: merges it into the pending counter of its key (changes summed, earliest the min), so these
+#: sums do not move when it happens; the job's own writes still raise them.
+_UNSETTLED_COUNTERS_SQL = (
+    "SELECT table_name, key, SUM(changes), MIN(earliest) FROM settle_change_agg "
+    "WHERE settled_run_id IS NULL GROUP BY table_name, key")
+
+
+def _unsettled_counters(conn: sqlite3.Connection) -> dict[tuple[str, str], tuple[int, str]]:
+    return {(str(r[0]), str(r[1])): (int(r[2]), str(r[3]))
+            for r in conn.execute(_UNSETTLED_COUNTERS_SQL)}
 
 
 def trail_mark(conn: sqlite3.Connection) -> TrailMark | None:
     """Read the mark (``None`` without a store). Reads the store's ``settle_dirty``,
     ``settle_change_log`` and ``settle_change_agg`` by direct SQL (``portfolio/
-    settlement_store.py`` owns them; the cross-layer read convention)."""
+    settlement_store.py`` owns them; the cross-layer read convention).
+
+    The counters include the CLAIMED ones: a job queued behind a re-settlement takes its mark
+    once the settle child's turn ends — and the waiter puts a cancelled or dead run's claimed
+    counters back only after that (``child_runner`` runs ``on_exit`` after releasing the heavy
+    gate). A mark of the pending counters alone read the owner's put-back counter as the job's
+    change (review of the v0.1.32 follow-ups, 2026-10-20)."""
     try:
         seq = int(conn.execute("SELECT seq FROM settle_dirty WHERE id = 1").fetchone()[0])
         last = conn.execute("SELECT MAX(id) FROM settle_change_log").fetchone()[0]
-        counters = {int(r[0]): (int(r[1]), str(r[2])) for r in conn.execute(
-            "SELECT id, changes, earliest FROM settle_change_agg "
-            "WHERE claimed_run_id IS NULL AND settled_run_id IS NULL")}
+        counters = _unsettled_counters(conn)
     except (sqlite3.OperationalError, TypeError):
         return None
     return TrailMark(seq=seq, last_log_id=int(last or 0), counters=counters)
@@ -1635,21 +1778,21 @@ def trail_mark(conn: sqlite3.Connection) -> TrailMark | None:
 def job_earliest_change(conn: sqlite3.Connection, job_id: str,
                         mark: TrailMark) -> date | None:
     """The earliest day among the changes THIS job recorded since *mark*: its own trail rows
-    (actor ``job:<id>``) and the price / FX counters it created or moved earlier. A counter
-    that only grew keeps an earliest day older changes set, so it is not the job's — and that
-    older day was already pending, prompting the owner, before the job ran."""
+    (actor ``job:<id>``) and the price / FX counter keys it created or moved earlier — per
+    key, summed over every unsettled counter, as :func:`trail_mark` reads them. A key that
+    only grew keeps an earliest day older changes set, so it is not the job's — and that
+    older day was already pending, prompting the owner, before the job ran. A put-back since
+    the mark moves neither the sum nor the earliest day of its key."""
     days: list[date] = []
     row = conn.execute(
         f"SELECT MIN({store._AFFECTED_SQL}) FROM settle_change_log WHERE id > ? AND actor = ?",
         (mark.last_log_id, f"job:{job_id}")).fetchone()
     if row is not None and row[0]:
         days.append(date.fromisoformat(str(row[0])))
-    for counter_id, changes, earliest in conn.execute(
-            "SELECT id, changes, earliest FROM settle_change_agg "
-            "WHERE claimed_run_id IS NULL AND settled_run_id IS NULL"):
-        before = mark.counters.get(int(counter_id))
-        if before is None or (int(changes) > before[0] and str(earliest) < before[1]):
-            days.append(date.fromisoformat(str(earliest)))
+    for key, (changes, earliest) in _unsettled_counters(conn).items():
+        before = mark.counters.get(key)
+        if before is None or (changes > before[0] and earliest < before[1]):
+            days.append(date.fromisoformat(earliest))
     return min(days) if days else None
 
 
@@ -1792,12 +1935,16 @@ def on_boot(conn: sqlite3.Connection, *, trigger_check: TriggerCheck) -> BootPla
        after rows arrive settles it in full).
     5. An identical boot starts nothing.
 
-    Starting is :func:`start_after_boot`'s, once this session has committed.
+    Starting is :func:`start_after_boot`'s, once this session has committed. A boot also
+    opens the service again: an earlier lifespan's :func:`shutdown` in this process (a test)
+    left it refusing every start.
 
     **Never raises** (review E #8): every write runs under one SAVEPOINT; on any error it is
     rolled back, logged, and an empty plan returned — a settlement fault must not stop the
     app from booting, with ``PD_SETTLE=off`` least of all.
     """
+    with _S.lock:
+        _S.stopping = False
     try:
         with _savepoint(conn, "settle_boot"):
             return _on_boot(conn, trigger_check)
@@ -1931,9 +2078,35 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
            reporting: Currency) -> SettlementStatus:
     """``GET /api/settlement/status`` (spec §15). Reads only: the store, the trail, the run
     reports, ``job_runs`` / ``schedule_config`` (``final_through``), the progress file and a
-    non-blocking probe of the settle lock. Never writes, never starts or resumes anything."""
+    non-blocking probe of the settle lock. Never writes, never starts or resumes anything.
+
+    **One answer, one database state** (stress audit phase 1, 2026-10-22). Every table is read
+    inside ONE read transaction (``result_cache.read_snapshot``: a deferred ``BEGIN``, a WAL
+    reader that no writer blocks — DEF-065). The answer had been assembled from a dozen
+    autocommit SELECTs, each on its own snapshot, so a swap committing between
+    ``store_state`` and ``active_or_unfinished_runs`` read as the OLD generation with the
+    run's claimed day as a stale range (待結算) and no run at all — a combination the
+    database never holds, since the swap clears ``settle_meta.run_*`` and publishes the
+    report in one transaction.
+
+    The settle lock and the progress file are not in the database, so no snapshot covers
+    them. The lock is observed BEFORE the snapshot opens and again after its reads, and a
+    ``running`` report is alive when either observation says so: a child that swaps and exits
+    while the status reads is alive in the state the snapshot shows (reading 已中斷 there
+    would pair the pre-swap database with the post-exit process), and a child that takes the
+    lock and claims just before the snapshot opens is seen by the later probe. Only a report
+    whose lock was free at both moments reads 已中斷. The progress file is display only and
+    is taken only when it names the snapshot's run (:func:`read_progress`)."""
     if not flags.settle_enabled():
         return SettlementStatus(state="off")
+    seen = _liveness()  # BEFORE the snapshot opens (docstring)
+    with result_cache.read_snapshot(conn):
+        return _status(conn, viewer=viewer, now=now, reporting=reporting, seen=seen)
+
+
+def _status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
+            reporting: Currency, seen: _Liveness) -> SettlementStatus:
+    """:func:`status`'s reads, all inside its one snapshot."""
     state = store.store_state(conn, reporting=reporting)
     today = _today(now)
     window = store.window_start(today)
@@ -1951,7 +2124,8 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
     if current is not None:
         if current.status == "preparing":
             run_state = "preparing"
-        elif _in_process_alive(current.run_id) or proc_lock.is_held(_lock_path()):
+        elif (seen.alive(current.run_id) or _in_process_alive(current.run_id)
+              or proc_lock.is_held(_lock_path())):
             run_state = "running"
         else:
             run_state = "interrupted"
@@ -2012,13 +2186,17 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
 
 
 # =============================================================================================
-# Report reads for the API (spec §15)
+# Report reads for the API (spec §15) — each inside ONE read snapshot, as :func:`status`: a
+# page's COUNT and its rows, or a report's JSON and its columns, describe one database state
+# (a run created, a swap or a diff written between two of them was mixed into the answer —
+# ``tests/settlement/test_service_status_snapshot.py``)
 # =============================================================================================
 
 
 def runs_page(conn: sqlite3.Connection, *, viewer: str | None, limit: int, offset: int,
               only_changes: bool) -> dict[str, Any]:
-    page = store.list_runs(conn, limit=limit, offset=offset, only_changes=only_changes)
+    with result_cache.read_snapshot(conn):
+        page = store.list_runs(conn, limit=limit, offset=offset, only_changes=only_changes)
     return {"rows": [_render_summary(s, viewer).model_dump(mode="json", by_alias=True)
                      for s in page.items], "total_count": page.total_count}
 
@@ -2026,12 +2204,13 @@ def runs_page(conn: sqlite3.Connection, *, viewer: str | None, limit: int, offse
 def run_report(conn: sqlite3.Connection, run_id: int, *,
                viewer: str | None) -> dict[str, Any] | None:
     """One run's full report, with the restatements it wrote (§9.6 Result — closes)."""
-    report = store.get_run(conn, run_id)
-    if report is None:
-        return None
+    with result_cache.read_snapshot(conn):
+        report = store.get_run(conn, run_id)
+        if report is None:
+            return None
+        restatements = store.restatements_of_run(conn, run_id)
     body = _render_report(report, viewer).model_dump(mode="json", by_alias=True)
-    body["restatements"] = [r.model_dump(mode="json", by_alias=True)
-                            for r in store.restatements_of_run(conn, run_id)]
+    body["restatements"] = [r.model_dump(mode="json", by_alias=True) for r in restatements]
     return body
 
 
@@ -2062,13 +2241,14 @@ def changes_page(conn: sqlite3.Connection, *, state: str, viewer: str | None, li
                  offset: int) -> dict[str, Any] | None:
     """``state = pending`` or ``run:<id>``; ``None`` for a run with no report (pruned)."""
     run_id: int | None = None
-    if state == "pending":
-        page = store.pending_changes(conn, limit=limit, offset=offset)
-    else:
-        run_id = int(state.split(":", 1)[1])
-        if store.get_run(conn, run_id) is None:
-            return None
-        page = store.run_changes(conn, run_id, limit=limit, offset=offset)
+    with result_cache.read_snapshot(conn):
+        if state == "pending":
+            page = store.pending_changes(conn, limit=limit, offset=offset)
+        else:
+            run_id = int(state.split(":", 1)[1])
+            if store.get_run(conn, run_id) is None:
+                return None
+            page = store.run_changes(conn, run_id, limit=limit, offset=offset)
     return {
         "rows": [_record_row(r, viewer=viewer, run_id=run_id) for r in page.records],
         "total_count": page.total_count,
@@ -2080,10 +2260,11 @@ def changes_page(conn: sqlite3.Connection, *, state: str, viewer: str | None, li
 
 def diff_rows(conn: sqlite3.Connection, run_id: int, *, field_name: str | None,
               kind: str | None, limit: int, offset: int) -> dict[str, Any] | None:
-    if store.get_run(conn, run_id) is None:
-        return None
-    page = store.diff_page(conn, run_id, field=field_name, kind=kind, limit=limit,
-                           offset=offset)
+    with result_cache.read_snapshot(conn):
+        if store.get_run(conn, run_id) is None:
+            return None
+        page = store.diff_page(conn, run_id, field=field_name, kind=kind, limit=limit,
+                               offset=offset)
     return {"rows": [r.model_dump(mode="json", by_alias=True) for r in page.items],
             "total_count": page.total_count}
 
@@ -2096,6 +2277,7 @@ __all__ = [
     "CancelResult",
     "CannotCancel",
     "FinalThrough",
+    "FinalThroughReader",
     "NotRunning",
     "RunEnd",
     "SettlementError",

@@ -1488,6 +1488,43 @@ Owner items for W4, **ruled 2026-10-20** (「XIRR 沒問題、時間成本沒問
 
 `/api/snapshots` rose because v0.1.31 read the 23:50 freeze table, while v0.1.32 computes the live current period. The 首頁 flow is dashboard, alerts, snapshots, TWR and cash, in that order.
 
+*W5 — released and measured on the VM (2026-10-20, VM log #371–#391):*
+- **Release.** v0.1.32 = ce7267e on both sites. Prod's first boot settled 2,185 days in a child in
+  23.1 s. A read-only `build_dashboard` on prod took 0.2 s (v0.1.31: 64.2 s, VM log #359).
+- **WP8 before/after.** Same VM, copies of the prod pre-deploy backup in `/tmp` with the auth rows
+  deleted on the copies, measured in process at nice 10. Wall seconds, CPU in brackets:
+
+| Measure | v0.1.31 | v0.1.32 | v0.1.32, tuned |
+| --- | --- | --- | --- |
+| import | 13.4 (8.5) | 3.7 (2.8) | 3.0 (2.4) |
+| boot, incl. the first full settlement (v0.1.32) | 0.5 | 3.3 | 2.8 |
+| `/api/dashboard`, cold | 5.0 | 0.52 | 0.48 |
+| `/api/alerts`, cold | 24.0 | 0.17 | 0.15 |
+| `/api/snapshots`, cold | 0.5 | 0.31 | 0.29 |
+| `/api/performance/twr`, cold | 90.5 | 0.15 | 0.13 |
+| `/api/cash`, cold | 1.0 | 0.05 | 0.05 |
+| 首頁 flow, cold | 121.0 (106.1) | 1.21 | 1.10 |
+| 首頁 flow, reload | (no cache: another cold flow) | 0.22 | 0.19 |
+| peak RSS of the process, MB | 342 | 140 | 139 |
+
+  v0.1.31's dashboard ran first, on a full burst credit. Its alerts and TWR ran after the credit
+  was drained, with swap-out and I/O wait up to 54% (vmstat): what the owner saw as the spinner.
+- **Live services, idle** (MB): prod RSS / swap went from 253 / 84 on 2026-10-16 to 50 / 89 after
+  the deploy, demo from 43 / 234 to 35 / 74; available memory from 234 to 463; swap used from 552
+  to 265. From outside, each new HTTPS connection to the demo costs 0.4–0.6 s of connect + TLS
+  through the funnel, and the first request after idle took 3.0 s (page-in from the disk swap).
+- **VM tuning applied** (owner approval 2026-10-20: items 1–5 of spec §16; journald keeps its
+  existing 200M cap, and compileall was not adopted):
+  - prod `CPUWeight=1000`, demo `CPUWeight=100`, demo `MemoryHigh=250M` (its measured peak was
+    145M);
+  - `MALLOC_ARENA_MAX=2` and `LITELLM_LOCAL_MODEL_COST_MAP=True` on both units;
+  - zram: `systemd-zram-generator`, `ram / 2`, zstd, swap priority 100, the disk swap file kept at
+    −2, `vm.swappiness` 10 → 100.
+
+  The host paths are in the git-ignored host note; `docs/DEPLOYMENT.md` has the placeholders. The
+  page-in effect of zram shows only after hours idle, and is checked then.
+- **Scratch DBs** (PERF-D9): the owner chose to keep both for now (2026-10-20).
+
 *Post-release backlog:*
 - PERF-F2 and the price-basis split edge (owner ruling: after the deploy);
 - the accountant's MINORs:

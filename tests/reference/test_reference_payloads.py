@@ -13,6 +13,18 @@ A corpus fingerprint is checked FIRST, so a seed edited since the payloads were 
 fails as "the corpus changed", not as a money difference. The only intended payload
 differences of the PERF program are listed in the plan's invariant 1; anything else here is a
 regression.
+
+**One intended difference since: PERF-F2** (``tests/reference/perf_f2.py``). On
+``unquoted_ccy_cash`` the fixed trend loads the rebate's currency, so its ``dashboard.json`` and
+its month ends from the rebate's month on differ from v0.1.31 on exactly the listed paths, each
+carrying the value derived from ``golden``'s own v0.1.31 file; every other byte of those files,
+and every other file, is v0.1.31's.
+
+**One more since: the trend points' ``pnl``** (owner ruling 2026-10-22,
+``tests/reference/trend_pnl.py``). Every served trend point gains one key, appended after
+``net_worth``: its own ``total_value − net_invested`` at the reporting currency's minor unit,
+``null`` on an incomplete day. It composes with PERF-F2 — ``trend_pnl.expected_bytes`` starts
+from ``perf_f2.expected_bytes`` — and changes nothing else.
 """
 
 import json
@@ -21,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from tests.reference import perf_f2, trend_pnl
 from tests.reference.canon import first_difference
 from tests.reference.corpora import CORPUS_NAMES, ensure_template, fingerprint, open_db
 from tests.reference.payload_gen import render_corpus
@@ -72,9 +85,69 @@ def test_current_code_reproduces_the_v0131_payloads(
     assert sorted(files) == sorted(entry["files"]), "the set of reference files changed"
     problems: list[str] = []
     for rel, actual in files.items():
-        expected = (_PAYLOADS / name / rel).read_bytes()
+        expected = trend_pnl.expected_bytes(name, rel)
         if actual != expected:
             where = _json_diff(expected, actual) if rel.endswith(".json") else None
             problems.append(f"{name}/{rel}: bytes differ"
                             + (f" — first difference at {where}" if where else ""))
     assert not problems, "\n".join(problems)
+
+
+def test_perf_f2_changes_exactly_the_listed_paths() -> None:
+    """The intended difference is exactly :data:`perf_f2.DASHBOARD_CHANGES` /
+    :data:`perf_f2.MONTH_END_CHANGES` on exactly the affected files: every listed path really
+    differs from v0.1.31, and no other path does (the test above then pins the values)."""
+    files = _manifest()["corpora"][perf_f2.CORPUS]["files"]
+    affected = [rel for rel in files if perf_f2.is_affected(perf_f2.CORPUS, rel)]
+    assert sorted(affected) == ["dashboard.json", "month_end/2026-03.json",
+                                "month_end/2026-04.json", "month_end/2026-05.json"]
+    for rel in affected:
+        old = json.loads(perf_f2.v0131_bytes(perf_f2.CORPUS, rel))
+        new = json.loads(perf_f2.expected_bytes(perf_f2.CORPUS, rel))
+        assert perf_f2.changed_paths(old, new) == list(perf_f2.changes(rel)), rel
+    for name in CORPUS_NAMES:
+        for rel in _manifest()["corpora"][name]["files"]:
+            if not perf_f2.is_affected(name, rel):
+                assert perf_f2.expected_bytes(name, rel) == (
+                    _PAYLOADS / name / rel).read_bytes(), f"{name}/{rel}"
+
+
+def test_trend_pnl_adds_exactly_one_key_to_every_point() -> None:
+    """The ``pnl`` difference is additive and nothing else: against PERF-F2's expectation, a
+    file with trend points differs only at ``trend.points``, where every point gains ``pnl`` as
+    its LAST key and keeps every other key and value; a file without them (the tax package) is
+    PERF-F2's byte for byte. The test above then pins every value against what is served."""
+    seen = 0
+    for name in CORPUS_NAMES:
+        for rel in _manifest()["corpora"][name]["files"]:
+            before = perf_f2.expected_bytes(name, rel)
+            after = trend_pnl.expected_bytes(name, rel)
+            if not trend_pnl.carries_points(rel):
+                assert after == before, f"{name}/{rel}"
+                continue
+            old, new = json.loads(before), json.loads(after)
+            points = old["trend"]["points"]
+            assert perf_f2.changed_paths(old, new) == (["trend.points"] if points else []), \
+                f"{name}/{rel}"
+            for p, q in zip(points, new["trend"]["points"], strict=True):
+                assert list(q) == [*p, trend_pnl.KEY], f"{name}/{rel} {p['date']}"
+                assert {k: v for k, v in q.items() if k != trend_pnl.KEY} == p
+                seen += 1
+    assert seen > 2000, seen   # every corpus's whole series and every month end's point D
+
+
+@pytest.mark.parametrize(("total", "invested", "ccy", "incomplete", "expected"), [
+    ("1234567.8", "1000000.3", "TWD", False, "234568"),
+    ("100", "100.5", "TWD", False, "-1"),
+    ("100", "100.3", "TWD", False, "0"),
+    ("100", "100.003", "USD", False, "0.00"),
+    ("1000.005", "0", "USD", False, "1000.01"),
+    ("4082.123", "4000", "MYR", False, "82.12"),
+    ("1000", "900", "TWD", True, None),
+    ("1000", "900", "USD", True, None),
+])
+def test_the_transcribed_rounding_rule(total: str, invested: str, ccy: str, incomplete: bool,
+                                       expected: str | None) -> None:
+    """The oracle's own rule, pinned: ROUND_HALF_UP at the minor unit, no ``-0``, ``null`` on
+    an incomplete day."""
+    assert trend_pnl.point_pnl(total, invested, ccy, incomplete=incomplete) == expected

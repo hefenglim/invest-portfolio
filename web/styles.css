@@ -2809,4 +2809,7 @@ select.ai-edit { padding-right: 2px; }
 .snap-mark-cutover { color: var(--text-3); }
 .snap-mark-current { color: var(--text-3); }
 .snap-row-stale td { color: var(--text-2); }
+/* 累計 XIRR's short-window hint (the KPI card's `.badge-window-mini`), on its own line under
+   the figure so the number keeps its column alignment. */
+.snap-window { margin-top: 2px; line-height: 1; white-space: nowrap; }
 .snap-note { padding: 6px 2px 0; font-size: 11px; color: var(--amber); }

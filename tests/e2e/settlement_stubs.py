@@ -238,6 +238,7 @@ def snapshot_row(month: str, **kw: Any) -> dict[str, Any]:
         "total_value": "1234567.89", "total_return": "234567.8", "total_return_rate": "0.2345",
         "xirr": "0.1234", "by_currency": {"TWD": "1234567.89"}, "kind": "M",
         "provisional": None, "stale": False, "notes": notes, "xirr_reason": None,
+        "xirr_window_days": 400,
         "period_twr": "0.0123", "period_twr_reason": None, "restated": None,
         "current": False,
     }

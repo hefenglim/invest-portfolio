@@ -73,6 +73,9 @@ from portfolio_dash.data_ingestion.store import (
     delete_transaction,
     list_corporate_actions,
 )
+
+# its home is store.py (the settlement's restatement reason reads it too); re-exported here
+from portfolio_dash.data_ingestion.store import undo_source as undo_source
 from portfolio_dash.shared.clock import app_now
 
 #: import kind -> the ledger table its writer inserts into. ``openings`` is absent on
@@ -344,11 +347,6 @@ _ROW_DELETERS: dict[str, _RowDeleter] = {
     "fx_conversions": delete_fx_conversion,
     "cash_movements": delete_cash_movement,
 }
-
-
-def undo_source(batch_id: int) -> str:
-    """The ``ledger_audit.source`` every row of this undo is tagged with."""
-    return f"批次復原 #{batch_id}"
 
 
 def delete_batch(

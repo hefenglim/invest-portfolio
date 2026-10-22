@@ -3,10 +3,12 @@
 PERF spec 2026-10-18 §12.1. A stale hit would serve an answer computed before a write — the
 one thing the cache must never do — so every way a write can reach the file is pinned to a
 miss: another connection, another PROCESS, two commits inside one timer tick, a commit after
-a checkpoint reused the ``-wal`` at the same size, a write window, the caller's own open
-transaction. A commit landing between the version read and the computation's snapshot may
-only make an entry NEWER than its key, never older. Stub computations only; the dashboard
-itself is exercised in ``test_result_cache_dashboard.py``.
+a checkpoint reused the ``-wal`` at the same size, a write window's opening and closing, the
+caller's own open transaction. A commit landing between the version read and the
+computation's snapshot may only make an entry NEWER than its key, never older. While another
+request's write window is open, readers keep caching and sharing (post-v0.1.32 item 1): the
+window's commit is a commit like any other. Stub computations only; the dashboard itself is
+exercised in ``test_result_cache_dashboard.py``.
 """
 
 from __future__ import annotations
@@ -291,17 +293,31 @@ def test_version_connections_are_bounded_and_an_evicted_file_misses(
 # --- when nothing is cached ----------------------------------------------------------------
 
 
-def test_a_write_window_computes_alone_and_keeps_nothing(reader: Reader) -> None:
+def test_another_requests_write_window_still_caches_and_its_commit_misses(
+    db: Path, reader: Reader,
+) -> None:
+    """Post-v0.1.32 item 1: a write window open elsewhere in the process no longer makes every
+    reader compute alone (before: two runs inside the window, both uncached). The window's
+    commit moves ``data_version`` at the commit itself, and its closing moves the generation,
+    so nothing read before the commit is served after it, nor anything filed inside the window
+    after the window."""
+    reader.read()
     flight.begin_write()
     try:
-        reader.read()
-        reader.read()
+        assert reader.read() == {"x": 1}         # the window's opening moved the key
+        assert reader.read() == {"x": 1}         # ... and the window does not stop a hit
         assert reader.runs == 2
+        _commit(db)                              # the window's own commit
+        assert reader.read() == {"x": 2}
+        assert reader.runs == 3
+        assert reader.read() == {"x": 2}
+        assert reader.runs == 3
     finally:
         flight.end_write()
-    reader.read()                               # nothing was stored inside the window
-    assert reader.runs == 3
-    assert result_cache.stats()["probe"].uncached == 2
+    assert reader.read() == {"x": 2}             # the window's closing moved the key again
+    assert reader.runs == 4
+    stats = result_cache.stats()["probe"]
+    assert (stats.hits, stats.misses, stats.uncached) == (2, 4, 0)
 
 
 def test_a_write_window_closing_moves_the_key(reader: Reader) -> None:
@@ -492,6 +508,75 @@ def test_a_commit_during_the_computation_makes_the_entry_unreachable(
     assert reader.read() == {"x": 2}             # the commit made the entry unreachable
 
 
+def _late_snapshot_read(reader: Reader, *, before: Callable[[], None] = lambda: None,
+                        inside: Callable[[], None] = lambda: None) -> dict[str, int]:
+    """A ``snapshot=False`` computation that opens its OWN snapshot late, as the closes of
+    ``api/snapshots.py`` do (after a dashboard build), and marks it: *before* runs ahead of
+    the snapshot, *inside* after its read."""
+    marks: list[result_cache.SnapshotMark | None] = []
+
+    def compute() -> dict[str, int]:
+        before()
+        with result_cache.marked_snapshot(reader.conn) as mark:
+            marks.append(mark)
+            value = reader.compute()
+            inside()
+        return value
+
+    return result_cache.cached(reader.conn, name="probe", now=NOW, compute=compute,
+                               copy=_own, snapshot=False,
+                               mark=lambda: marks[-1] if marks else None)
+
+
+def test_a_commit_before_a_marked_snapshot_files_the_entry_under_the_new_state(
+    db: Path, reader: Reader,
+) -> None:
+    """Post-v0.1.32 item 4: a commit landing between the key and the computation's own late
+    snapshot is IN the result; the entry is filed under the state it was read from, so the
+    next caller — whose key is past that commit — hits (before: a miss, everything again)."""
+    assert _late_snapshot_read(reader, before=lambda: _commit(db)) == {"x": 2}
+    assert reader.read() == {"x": 2}
+    assert reader.runs == 1
+
+
+def test_a_commit_after_the_marked_snapshot_opened_keeps_the_entry_unreachable(
+    db: Path, reader: Reader,
+) -> None:
+    """The snapshot predates that commit, so its result is older than the current state: the
+    entry stays under the key taken before, which no later caller takes."""
+    assert _late_snapshot_read(reader, inside=lambda: _commit(db)) == {"x": 1}
+    assert reader.read() == {"x": 2}
+    assert reader.runs == 2
+
+
+def test_a_write_window_or_an_own_write_since_the_mark_refuses_it(reader: Reader) -> None:
+    """In-process signals refuse the re-key too: a write window opening after the snapshot
+    (the generation), the caller's own connection writing after it (``total_changes``)."""
+    with result_cache.marked_snapshot(reader.conn) as mark:
+        reader.conn.execute("SELECT x FROM t").fetchone()
+    key = result_cache.key_for(reader.conn, name="probe", now=NOW)
+    assert key is not None
+    current = result_cache._current_key(reader.conn, key, mark)
+    assert current == key
+    flight.note_write()
+    assert result_cache._current_key(reader.conn, key, mark) is None
+    with result_cache.marked_snapshot(reader.conn) as mark:
+        pass
+    reader.conn.execute("CREATE TEMP TABLE own (x)")
+    reader.conn.execute("INSERT INTO own VALUES (1)")
+    reader.conn.commit()
+    key = result_cache.key_for(reader.conn, name="probe", now=NOW)
+    assert key is not None
+    assert result_cache._current_key(reader.conn, key, mark) is None
+
+
+def test_a_mark_inside_an_open_transaction_is_none(reader: Reader) -> None:
+    reader.conn.execute("UPDATE t SET x = 5")
+    with result_cache.marked_snapshot(reader.conn) as mark:
+        assert mark is None
+    reader.conn.rollback()
+
+
 def test_a_miss_runs_inside_one_read_transaction_and_ends_it(reader: Reader) -> None:
     seen: list[bool] = []
 
@@ -516,7 +601,20 @@ def test_a_key_taken_inside_a_snapshot_is_none(reader: Reader) -> None:
 # --- in-flight sharing ---------------------------------------------------------------------
 
 
-def test_two_concurrent_identical_requests_compute_once(db: Path) -> None:
+@pytest.mark.parametrize("window", [False, True], ids=["no-window", "another-write-window"])
+def test_two_concurrent_identical_requests_compute_once(db: Path, window: bool) -> None:
+    """Also while another request's write window is open (post-v0.1.32 item 1; before, each
+    computed alone)."""
+    if window:
+        flight.begin_write()
+    try:
+        _two_concurrent_identical_requests_compute_once(db)
+    finally:
+        if window:
+            flight.end_write()
+
+
+def _two_concurrent_identical_requests_compute_once(db: Path) -> None:
     release = threading.Event()
     started = threading.Event()
     runs = [0]
@@ -614,3 +712,141 @@ def test_a_failing_prewarm_is_logged_not_raised(monkeypatch: pytest.MonkeyPatch,
     result_cache.schedule_prewarm(boom, 0.0)
     assert done.wait(5)
     _wait_for(lambda: any("pre-warm failed" in r.getMessage() for r in caplog.records))
+
+
+# --- the stop: shutdown() ------------------------------------------------------------------
+
+
+class BlockedPrewarm:
+    """A pre-warm shaped like ``api/alert_inputs.prewarm_today``: its own connection, a cached
+    "dashboard" build that reads (so its read snapshot holds the WAL) and then blocks until
+    released, then the "alerts" key. It records that second key (``None`` = computed
+    uncached, no version connection touched)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.alerts_keys: list[result_cache.CacheKey | None] = []
+
+    def __call__(self) -> None:
+        conn = connect_path(self.path)
+        try:
+            def build() -> dict[str, int]:
+                # read FIRST: the snapshot's read lock is held from the first read on
+                value = {"x": int(conn.execute("SELECT x FROM t").fetchone()[0])}
+                self.started.set()
+                assert self.release.wait(30), "never released"
+                return value
+
+            result_cache.cached(conn, name="dashboard", now=NOW, compute=build, copy=_own)
+            self.alerts_keys.append(result_cache.key_for(conn, name="alerts", now=NOW))
+        finally:
+            conn.close()
+            self.finished.set()
+
+
+@pytest.fixture
+def prewarm(db: Path) -> Iterator[BlockedPrewarm]:
+    """A :class:`BlockedPrewarm` on the app's database, always released at teardown (before
+    the autouse fixture checks that no flight outlived its computation)."""
+    blocked = BlockedPrewarm(db)
+    yield blocked
+    blocked.release.set()
+    if blocked.started.is_set():
+        assert blocked.finished.wait(30), "the blocked pre-warm never finished"
+
+
+@pytest.fixture
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every version connection the cache opens, by path."""
+    seen: list[str] = []
+    real = result_cache._open_version_conn
+
+    def spy(path: str, identity: tuple[int, int]) -> object:
+        seen.append(path)
+        return real(path, identity)
+
+    monkeypatch.setattr(result_cache, "_open_version_conn", spy)
+    return seen
+
+
+def _side_files(path: Path) -> list[str]:
+    return [s for s in ("-wal", "-shm") if path.with_name(path.name + s).exists()]
+
+
+def test_shutdown_waits_for_a_running_prewarm_then_the_checkpoint_truncates(
+    db: Path, prewarm: BlockedPrewarm, opened: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-warm blocked mid-build when the stop begins: shutdown waits for it, the pre-warm
+    opens no version connection after the stop began (its alerts read computes uncached),
+    and the lifespan's TRUNCATE checkpoint completes — ONE file left (docs/DEPLOYMENT.md)."""
+    monkeypatch.setenv("PD_PREWARM", "1")
+    assert result_cache.schedule_prewarm(prewarm, 0.0)
+    assert prewarm.started.wait(5)
+    _commit(db)  # WAL frames the pre-warm's snapshot predates: a checkpoint must wait for it
+    assert opened == [str(db)]                       # the dashboard key, before the stop
+    returned: list[bool] = []
+    stopper = threading.Thread(target=lambda: returned.append(result_cache.shutdown(10.0)))
+    stopper.start()
+    time.sleep(0.3)
+    assert stopper.is_alive(), "shutdown returned while a pre-warm still ran"
+    assert not result_cache.schedule_prewarm(lambda: None, 0.0), "a pre-warm after the stop"
+    prewarm.release.set()
+    stopper.join(10)
+    assert returned == [True]
+    assert prewarm.finished.is_set() and prewarm.alerts_keys == [None]
+    assert opened == [str(db)], "a version connection was reopened after the stop began"
+    assert result_cache._versions == {}
+    conn = connect_path(db)
+    try:
+        busy, _log, _done = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    finally:
+        conn.close()
+    assert busy == 0
+    assert _side_files(db) == []
+
+
+def test_a_prewarm_that_outlives_the_wait_is_logged_and_reopens_nothing(
+    db: Path, prewarm: BlockedPrewarm, opened: list[str], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bounded wait runs out: shutdown says so (``False`` and a warning naming the
+    consequence), closes the version connections anyway, and never hangs. The late pre-warm
+    then finishes uncached — no version connection, no entry kept."""
+    monkeypatch.setenv("PD_PREWARM", "1")
+    assert result_cache.schedule_prewarm(prewarm, 0.0)
+    assert prewarm.started.wait(5)
+    started = time.monotonic()
+    assert result_cache.shutdown(0.2) is False
+    assert time.monotonic() - started < 5
+    assert result_cache._versions == {}
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("pre-warm" in m and "-wal" in m for m in warned), warned
+    prewarm.release.set()
+    assert prewarm.finished.wait(10)
+    assert prewarm.alerts_keys == [None]
+    assert opened == [str(db)] and result_cache._versions == {}
+    assert result_cache._entries == {}, "the late pre-warm kept an entry after the stop"
+
+
+def test_shutdown_cancels_a_pending_prewarm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PD_PREWARM", "1")
+    ran: list[int] = []
+    assert result_cache.schedule_prewarm(lambda: ran.append(1), 0.2)
+    assert result_cache.shutdown(1.0) is True
+    time.sleep(0.4)
+    assert ran == []
+
+
+def test_reset_opens_the_cache_again_after_a_shutdown(reader: Reader) -> None:
+    """``shutdown`` is final for a stopping process; ``reset`` gives a working cache back —
+    the conftest calls it around every test, and the lifespan at its start (a second
+    lifespan in one process: ``tests/settlement/test_boot.py``)."""
+    assert result_cache.shutdown(1.0) is True
+    assert reader.read() == reader.read() == {"x": 1}
+    assert reader.runs == 2                          # closed: every read computes
+    result_cache.reset()
+    assert reader.read() == reader.read() == {"x": 1}
+    assert reader.runs == 3                          # open again: the second read is a hit

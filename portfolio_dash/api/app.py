@@ -1,5 +1,6 @@
 """FastAPI app factory: lifespan (DB + scheduler), /api routers, static web/ frontend."""
 
+import logging
 import os
 import sqlite3
 import time
@@ -11,7 +12,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Request, Response
 
 from portfolio_dash.api import action_log, alert_inputs, settlement_service
-from portfolio_dash.api.auth_store import ensure_auth_seeded, require_session, session_user
+from portfolio_dash.api.auth_store import (
+    LOGIN_STATE_ATTR,
+    ensure_auth_seeded,
+    prepare_sessions_at_boot,
+    require_session,
+)
 from portfolio_dash.api.composition import bind_runtime
 from portfolio_dash.api.deps import get_conn
 from portfolio_dash.api.dividend_inbox import ensure_tables as ensure_dividend_inbox_tables
@@ -113,6 +119,34 @@ _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 #: Seconds after the last write window closes before today's result is pre-warmed (plan W4).
 WRITE_PREWARM_DELAY_S = 3.0
 
+logger = logging.getLogger(__name__)
+
+
+def checkpoint_on_stop(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """``PRAGMA wal_checkpoint(TRUNCATE)`` at a clean stop: ``(busy, log, checkpointed)``.
+
+    ``busy = 1`` means a connection of this process or another still held the database past
+    the busy timeout. At a stop that can be:
+
+    - a pre-warm that outlived ``result_cache.shutdown``'s wait;
+    - a request thread still computing after its client disconnected;
+    - an inline-mode job thread still running after ``scheduler.shutdown(wait=False)``;
+    - a settle or job child process still running — ``settlement_service.shutdown`` leaves a
+      running settle child alone, though it starts no new one from then on.
+
+    The WAL was not truncated, so ``-wal`` / ``-shm`` may remain beside the database, and the
+    ``-wal`` may hold COMMITTED changes: logged, never raised (the stop goes on).
+    """
+    row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    busy, log, done = int(row[0]), int(row[1]), int(row[2])
+    if busy:
+        logger.warning(
+            "clean stop: the WAL checkpoint could not complete (busy; %d of %d frames "
+            "checkpointed) — -wal / -shm may remain beside the database and the -wal may hold "
+            "committed changes: never delete it on its own (docs/DEPLOYMENT.md, WAL files)",
+            done, log)
+    return busy, log, done
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -123,6 +157,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The PD_* flags (shared/flags.py) are read per call; read them all once here so a bad
     # value stops the boot with its own message instead of answering 500 on each request.
     flags.current()
+    # The result cache starts empty and OPEN: a no-op in a fresh process, and it reopens what
+    # an earlier lifespan's stop closed for good (`result_cache.shutdown`) when one process
+    # runs several lifespans (the test suite).
+    result_cache.reset()
     # Every boot write is stamped `system:boot` in the settlement store's change trail
     # (spec §7 "Who made the change"): a no-op on a fresh database until the trail exists,
     # installed again right after the settle DDL below.
@@ -152,7 +190,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_scheduler_seeded(conn)  # also seeds the 5 ingest jobs' schedule rows
         ensure_alert_rules_seeded(conn)
         ensure_target_weights_seeded(conn)  # per-symbol target weights (P3 batch 2, D8)
-        ensure_auth_seeded(conn)
+        ensure_auth_seeded(conn)  # also adds auth_sessions.last_seen_at to an older table
+        # Session idle expiry (owner ruling 2026-10-22): date every session that has no
+        # recorded use from this boot (the upgrade rule), then purge the expired, locked and
+        # orphaned ones. auth_sessions is not a settlement trigger table.
+        session_boot = prepare_sessions_at_boot(conn, now=app_now())
+        logger.info(
+            "boot: auth sessions: %d purged (%d expired, %d locked, %d orphaned); "
+            "%d dated from this boot", session_boot.purged, session_boot.expired,
+            session_boot.locked, session_boot.orphaned, session_boot.dated)
         ensure_system_prompt_seeded(conn)
         ensure_news_prompt_seeded(conn)  # editable news-organizer prompt (batch ④)
         ensure_composer_seeded(conn)  # insight-composer tables (spec 04a)
@@ -206,6 +252,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         settlement_store.record_schema_version(conn)
     # What the boot's trigger check found (read by tests and diagnostics; never by a route).
     app.state.settle_trigger_check = trigger_check
+    # What the boot did to the login sessions (same: tests and diagnostics only).
+    app.state.session_boot = session_boot
     # The news library lives in its own file (news/store.py); its first open creates and
     # migrates it, so open it once here rather than inside the first GET /api/news.
     get_news_connection().close()
@@ -225,17 +273,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # From here on no settle child starts: a waiter that finishes during the stop leaves
+        # its follow-up (a resume, a chained run) to the next boot.
         settlement_service.shutdown()
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         # The result cache holds a READ-ONLY connection per database for the life of the
         # process, and a read-only connection cannot checkpoint: left open, the last close no
-        # longer folds the WAL back and deletes it. Close them, then checkpoint, so a clean
-        # stop leaves the database in one file (a backup restored by file copy must never meet
-        # a stale `-wal`; fold verification 2026-10-19).
-        result_cache.reset()
+        # longer folds the WAL back and deletes it. Close it for good — it also waits (bounded)
+        # for a pre-warm still running, whose read transaction would keep the checkpoint from
+        # finishing and which would otherwise reopen a version connection — then checkpoint,
+        # so a clean stop leaves the database in one file (a backup restored by file copy must
+        # never meet a stale `-wal`; fold verification 2026-10-19, review 2026-10-20).
+        result_cache.shutdown()
         with session() as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # What the stop's checkpoint found (read by tests and diagnostics, never a route).
+            app.state.stop_checkpoint = checkpoint_on_stop(conn)
 
 
 def create_app() -> FastAPI:
@@ -260,8 +313,10 @@ def create_app() -> FastAPI:
             duration_ms = int((time.perf_counter() - start) * 1000)
 
             def _write(conn_w: sqlite3.Connection) -> None:
-                token = request.cookies.get("pd_session")
-                username = session_user(conn_w, token) if token else None
+                # The login the gate let through (or the login / logout route named), never
+                # the cookie looked up again: a request refused as expired, locked or unknown
+                # names nobody (session idle expiry, 2026-10-22).
+                username = getattr(request.state, LOGIN_STATE_ATTR, None)
                 action_log.record(
                     conn_w, ts=datetime.now(UTC), username=username,
                     method=request.method, path=request.url.path,
@@ -284,15 +339,19 @@ def create_app() -> FastAPI:
         return response
 
     # Shared builds and the result cache (`shared/flight.py` 2026-10-13, `shared/
-    # result_cache.py` PERF 2026-10-18): no request joins or caches a dashboard build while a
-    # mutating request runs, and none joins one that started before it — so a page reloaded
-    # right after 儲存 never receives an answer computed before the save. Every method but
-    # GET / HEAD / OPTIONS counts, except the declared read-only POSTs (`api/read_only.py`:
-    # 試算, rebalance preview, prompt preview), which write nothing and so share like a GET.
-    # Since PERF-S10 (2026-10-18) `get_conn` is function-scoped, so the request's commit runs
-    # before the response starts, inside this window; `shared/db.session()` still brackets its
-    # own commit in a window, which covers the sessions opened outside a request (threads,
-    # jobs).
+    # result_cache.py` PERF 2026-10-18): the window moves the write generation at both of its
+    # edges, so nothing cached before a mutating request or during it is served after it, and
+    # it skips a pre-warm that fires while it is open. A page reloaded right after 儲存 never
+    # receives an answer computed before the save: the save committed before its response,
+    # and that commit moved the cache key's `data_version`. Readers keep caching and sharing
+    # WHILE the window is open (post-v0.1.32 item 1, `result_cache` "Write windows"): one long
+    # request such as 更新報價 no longer leaves every concurrent page computing alone. Every
+    # method but GET / HEAD / OPTIONS counts, except the declared read-only POSTs
+    # (`api/read_only.py`: 試算, rebalance preview, prompt preview), which write nothing and so
+    # share like a GET. Since PERF-S10 (2026-10-18) `get_conn` is function-scoped, so the
+    # request's commit runs before the response starts, inside this window;
+    # `shared/db.session()` still brackets its own commit in a window, which covers the
+    # sessions opened outside a request (threads, jobs).
     @app.middleware("http")
     async def _write_window_middleware(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]

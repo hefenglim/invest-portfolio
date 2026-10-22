@@ -8,8 +8,9 @@ with a copy instead of a fresh build. In-flight sharing still goes through
 **The key** — :class:`CacheKey` ``(name, db_path, write_generation, data_version, day,
 reporting, extra)``:
 
-* ``write_generation`` is :func:`flight.write_generation`: it moves on every write window
-  (``api/app.py``'s mutating requests, every ``shared.db.session`` that changed a row);
+* ``write_generation`` is :func:`flight.generation`: it moves at both edges of every write
+  window (``api/app.py``'s mutating requests, every ``shared.db.session`` that changed a row)
+  — the process-local signal — and is read whether or not a window is open;
 * ``data_version`` is ``PRAGMA data_version`` read on ONE dedicated, never-writing connection
   per database file, held by this module. SQLite changes that value whenever ANY OTHER
   connection commits — another request, a job or settlement child process, a script, the
@@ -42,12 +43,40 @@ identity ``(st_dev, st_ino)`` is checked on every read: a file replaced under th
 between the two can only make an entry NEWER than its key (the next caller reads the moved
 version and misses); read the other way round, an entry built from the old data would sit
 under the new version and be served after the commit. A commit DURING the computation makes
-the entry unreachable for the same reason: the key is the one taken at compute START.
+the entry unreachable for the same reason: the key is the one taken at compute START —
+unless the computation opened its own snapshot late and marked it (:func:`marked_snapshot`,
+:func:`serve`'s ``mark``): a commit that landed BEFORE that snapshot is in the result, and
+when no commit has landed since, the entry is filed under the current key instead
+(post-v0.1.32 item 4, the closes of ``api/snapshots.py``).
 
-**No caching** (the key is ``None`` and the computation runs alone, exactly as before) while
-a write window is open anywhere in the process, when the caller's connection is in a
-transaction (its own uncommitted changes must be in its answer), for a database with no
-file (``:memory:``, a temp database), or for a file that is not the application's database.
+**No caching** (the key is ``None`` and the computation runs alone, exactly as before) when
+the caller's connection is in a transaction (its own uncommitted changes must be in its
+answer), for a database with no file (``:memory:``, a temp database), or for a file that is
+not the application's database.
+
+**Write windows** (post-v0.1.32 item 1). Until then a write window open ANYWHERE in the
+process also made every key ``None``, so one long mutating request (``POST
+/api/actions/refresh-quotes`` runs the quote jobs in the web process) left every concurrent
+reader computing alone, uncached and unshared. That rule predates this module: the in-flight
+key of 2026-10-13 had only the generation, which does not move AT a commit inside a window.
+The key here does not need it:
+
+* an answer served under a key contains every commit visible when its caller read that key.
+  ``data_version`` moves when any other connection commits (a request, a job or settlement
+  child, a script) and the version connection never writes, so two reads of one version saw
+  no commit between them; the computation's snapshot opens after its leader's read, so it
+  holds the state every caller of that key saw (or a newer one);
+* hence a client reads its own write on its next request: its request committed before the
+  response (PERF-S10, inside the window), so the next key's version is past that commit;
+  and no joiner receives a result computed before a commit it could see: a commit before
+  its arrival moved its version, so it is another key, another flight;
+* a connection with uncommitted changes computes alone: ``in_transaction`` above;
+* the generation still moves at both edges of every window and at every session commit, so
+  nothing filed during a window is reachable once it closes: a request's effect outside the
+  database (none feeds a cached computation today — settings are environment-only) is still
+  seen by the next request after its response.
+
+The windows still skip a pre-warm that fires while one is open (:func:`schedule_prewarm`).
 
 **Entries:** the latest one per ``name``. Every reader receives its own deep copy (``copy``),
 made from a stored value nobody mutates; then the caller's ``restamp`` sets the sub-day
@@ -63,6 +92,13 @@ compute it afresh.
 
 **Pre-warm:** :func:`schedule_prewarm` runs a computation on a background thread after a
 quiet delay (``PD_PREWARM=1``), debounced, so the next page load is a hit.
+
+**The stop:** :func:`shutdown` closes the cache for the rest of the process, BEFORE the
+lifespan's ``wal_checkpoint(TRUNCATE)``: no pre-warm starts and no version connection opens
+again, a pre-warm already running is waited for (bounded), then the version connections are
+closed — a read-only connection cannot checkpoint, and a reader still in a read transaction
+keeps a TRUNCATE checkpoint from finishing, so either would leave ``-wal`` / ``-shm`` beside
+the database after a clean stop. :func:`reset` opens it again (the lifespan's start; tests).
 
 Imports nothing above ``shared/``.
 """
@@ -126,12 +162,30 @@ class Stats:
 #: database files; the bound only matters to a test session that opens hundreds.
 MAX_VERSION_CONNECTIONS = 4
 
+#: How long :func:`shutdown` waits for a pre-warm already running. A pre-warm is one dashboard
+#: build and one alerts evaluation — about a second on the VM while the settlement store is
+#: usable (W4). It does NOT cover a pre-warm while the store is unusable (the first boot of a
+#: release re-settles in full; ``PD_SETTLE=off``): that one is a full live build, 16–64 s on
+#: the VM, and a stop in that window outlives the wait — logged, the stop goes on, and the
+#: ``-wal`` it may leave holds nothing a later open does not fold back. Waiting that long
+#: instead would run a stop into systemd's default 90 s stop timeout, whose SIGKILL is a real
+#: crash; skipping the pre-warm while the store is unusable would make the owner's next page
+#: after an edit wait for that build instead.
+SHUTDOWN_PREWARM_WAIT_S = 15.0
+
 _lock = threading.Lock()
 _versions: dict[str, _VersionConn] = {}
 _epoch = 0
 _entries: dict[str, _Entry] = {}
 _stats: dict[str, Stats] = {}
 _prewarm_timer: threading.Timer | None = None
+#: Set by :func:`shutdown`, cleared by :func:`reset`: no pre-warm starts, no version
+#: connection opens and no entry is kept while it is set.
+_closed = False
+#: Pre-warms running now (a debounced timer can fire while an earlier one still runs), and
+#: the condition :func:`shutdown` waits on until they are done.
+_prewarms_running = 0
+_prewarms_done = threading.Condition(_lock)
 
 _MISS = object()
 
@@ -179,11 +233,14 @@ def _open_version_conn(path: str, identity: tuple[int, int]) -> _VersionConn:
 
 def data_version(path: str) -> tuple[int, int] | None:
     """``(epoch, PRAGMA data_version)`` of the file at *path*, read on the dedicated
-    connection; ``None`` when the file cannot be read (no caching)."""
+    connection; ``None`` when the file cannot be read, or once :func:`shutdown` closed the
+    cache (no caching — and no version connection is opened again)."""
     identity = _identity(path)
     if identity is None:
         return None
     with _lock:
+        if _closed:
+            return None
         try:
             held = _versions.pop(path, None)  # re-inserted below: most recently used last
             if held is not None and held.identity != identity:
@@ -217,9 +274,10 @@ def key_for(
     """
     if conn.in_transaction:
         return None
-    generation = flight.write_generation()
-    if generation is None:
-        return None
+    # The generation, open window or not: the version below moves at the commit itself, so
+    # another request's write window does not stop this caller caching (module docstring,
+    # "Write windows").
+    generation = flight.generation()
     path = db_file(conn)
     if path is None or not is_app_database(path):
         return None
@@ -254,6 +312,57 @@ def read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
         conn.execute("COMMIT")
 
 
+class SnapshotMark(NamedTuple):
+    """Which committed state a read snapshot holds (:func:`marked_snapshot`): the write
+    generation read before it opened; its connection's own ``PRAGMA data_version`` read
+    inside it — that value holds still for the rest of the transaction, and moves after it
+    only when ANOTHER connection has committed since; and the connection's own
+    ``total_changes``, which moves when it writes itself."""
+
+    generation: int
+    conn_version: int
+    conn_changes: int
+
+
+@contextmanager
+def marked_snapshot(conn: sqlite3.Connection) -> Iterator[SnapshotMark | None]:
+    """:func:`read_snapshot`, yielding the :class:`SnapshotMark` of the state it reads —
+    ``None`` when *conn* is already in a transaction (its reads are that transaction's, which
+    may hold its own changes: nothing to mark). A caller that computed a cached result from
+    this snapshot hands the mark to :func:`serve` (``mark=``), so the entry is filed under
+    the state it was computed from when that state is still the current one."""
+    if conn.in_transaction:
+        yield None
+        return
+    generation = flight.generation()
+    with read_snapshot(conn):
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()  # opens the snapshot
+        yield SnapshotMark(generation, int(conn.execute("PRAGMA data_version").fetchone()[0]),
+                           conn.total_changes)
+
+
+def _current_key(conn: sqlite3.Connection, key: CacheKey,
+                 mark: SnapshotMark | None) -> CacheKey | None:
+    """*key* with the CURRENT version when the state *mark* describes is still the current
+    one, else ``None``: no write window has opened or closed and no session has committed in
+    this process (the generation), no other connection has committed (the connection's own
+    ``data_version``) and the connection has written nothing (``total_changes``) since the
+    snapshot opened. The version is read AFTER the first check and BEFORE the others, so any
+    change from the snapshot's opening up to the last check refuses: the version read is
+    the version of exactly the marked state."""
+    if (mark is None or conn.in_transaction or flight.generation() != mark.generation
+            or conn.total_changes != mark.conn_changes):
+        return None
+    version = data_version(key.db_path)
+    if version is None:
+        return None
+    if int(conn.execute("PRAGMA data_version").fetchone()[0]) != mark.conn_version:
+        return None
+    if flight.generation() != mark.generation or conn.total_changes != mark.conn_changes:
+        return None
+    return key._replace(write_generation=mark.generation, data_version=version)
+
+
 # --- entries -------------------------------------------------------------------------------
 
 
@@ -279,6 +388,8 @@ def _lookup(key: CacheKey) -> object:
 
 def _store(key: CacheKey, value: object) -> None:
     with _lock:
+        if _closed:  # a computation that outlived shutdown()'s wait keeps nothing
+            return
         _entries[key.name] = _Entry(key, value)
 
 
@@ -293,6 +404,7 @@ def cached[T](
     extra: Hashable = (),
     restamp: Callable[[T], T] | None = None,
     snapshot: bool = True,
+    mark: Callable[[], SnapshotMark | None] | None = None,
 ) -> T:
     """``compute()``'s result for this request — from the cache, from an identical
     computation already running, or computed now (and kept as the latest entry of *name*).
@@ -304,6 +416,9 @@ def cached[T](
       and the leader's own result alike.
     * *snapshot* runs a miss inside :func:`read_snapshot` (see the module docstring for when
       to pass ``False``).
+    * *mark* (with ``snapshot=False``) answers, once the computation returned, the
+      :class:`SnapshotMark` of the read snapshot it opened itself (:func:`marked_snapshot`);
+      see :func:`serve`.
 
     An uncacheable request (:func:`key_for` is ``None``) runs ``compute()`` directly, as the
     code did before the cache — no snapshot, no sharing. :func:`cached_keyed` also returns
@@ -311,7 +426,7 @@ def cached[T](
     """
     value, _key = cached_keyed(
         conn, name=name, now=now, compute=compute, copy=copy, reporting=reporting,
-        extra=extra, restamp=restamp, snapshot=snapshot)
+        extra=extra, restamp=restamp, snapshot=snapshot, mark=mark)
     return value
 
 
@@ -326,6 +441,7 @@ def cached_keyed[T](
     extra: Hashable = (),
     restamp: Callable[[T], T] | None = None,
     snapshot: bool = True,
+    mark: Callable[[], SnapshotMark | None] | None = None,
 ) -> tuple[T, CacheKey | None]:
     """:func:`cached`, plus the :class:`CacheKey` the answer was served under (``None`` when
     it was computed uncached).
@@ -334,11 +450,13 @@ def cached_keyed[T](
     snapshot taken after that key's version was read, so it is never older than the key. A
     second cached result derived from this one may be filed under its own key only when the
     two keys agree on the state (:func:`same_state`) — otherwise it would sit under a
-    version newer than the data it was computed from.
+    version newer than the data it was computed from. With *mark* the returned key is still
+    the one taken before the computation (the conservative answer), even when the entry was
+    filed under a newer one (:func:`serve`).
     """
     key = key_for(conn, name=name, now=now, reporting=reporting, extra=extra)
     return serve(conn, key, name=name, compute=compute, copy=copy, restamp=restamp,
-                 snapshot=snapshot), key
+                 snapshot=snapshot, mark=mark), key
 
 
 def serve[T](
@@ -350,11 +468,21 @@ def serve[T](
     copy: Callable[[T], T],
     restamp: Callable[[T], T] | None = None,
     snapshot: bool = True,
+    mark: Callable[[], SnapshotMark | None] | None = None,
 ) -> T:
     """Serve *compute*'s result under a key the caller already took (:func:`key_for`) —
     for a caller that must inspect the key BEFORE deciding what to compute. A key taken
     earlier is the conservative choice: a commit since then only makes the entry
-    unreachable. ``None`` computes directly, uncached."""
+    unreachable. ``None`` computes directly, uncached.
+
+    *mark* (post-v0.1.32 item 4) is for a computation that opens its OWN read snapshot late
+    (``snapshot=False``) — ``api/snapshots.py``'s closes open theirs after a dashboard build
+    that may take seconds on a miss. A commit landing between the key and that snapshot (a
+    job writing meanwhile) is IN the result, yet the entry sat under the older key and was
+    unreachable, so the next request computed it all again. After the computation, *mark*
+    answers the :class:`SnapshotMark` of the snapshot it read (or ``None``): when that state
+    is still the current one (:func:`_current_key`) the entry is filed under the CURRENT key
+    instead — the key the next caller will take. Otherwise, under the key taken before."""
     if key is None:
         with _lock:
             _count(name, "uncached")
@@ -378,7 +506,8 @@ def serve[T](
                 value = compute()
         else:
             value = compute()
-        _store(key, copy(value))
+        filed = (_current_key(conn, key, mark()) if mark is not None else None) or key
+        _store(filed, copy(value))
         return value
 
     return _finish(flight.coalesce(key, lead, copy=copy), restamp)
@@ -415,22 +544,78 @@ def stats() -> dict[str, Stats]:
         return {k: Stats(v.hits, v.misses, v.uncached) for k, v in _stats.items()}
 
 
+def _close_versions() -> None:
+    """Close every version connection (the caller holds ``_lock``)."""
+    for held in _versions.values():
+        try:
+            held.conn.close()
+        except sqlite3.Error:  # pragma: no cover - closing an idle connection
+            pass
+    _versions.clear()
+
+
+def _cancel_pending_prewarm() -> None:
+    """Cancel a pre-warm timer that has not fired (the caller holds ``_lock``)."""
+    global _prewarm_timer
+    if _prewarm_timer is not None:
+        _prewarm_timer.cancel()
+        _prewarm_timer = None
+
+
 def reset() -> None:
     """Forget everything: entries, counters, a pending pre-warm, and close every version
-    connection (tests; a process that is about to replace or delete a database file)."""
-    global _prewarm_timer
+    connection (tests; a process that is about to replace or delete a database file). The
+    cache is open afterwards — also after :func:`shutdown`: the lifespan calls it at START,
+    so a second lifespan in one process (the test suite) caches again. A pre-warm already
+    running is not waited for: a stopping process calls :func:`shutdown`."""
+    global _closed
     with _lock:
         _entries.clear()
         _stats.clear()
-        for held in _versions.values():
-            try:
-                held.conn.close()
-            except sqlite3.Error:  # pragma: no cover - closing an idle connection
-                pass
-        _versions.clear()
-        if _prewarm_timer is not None:
-            _prewarm_timer.cancel()
-            _prewarm_timer = None
+        _close_versions()
+        _cancel_pending_prewarm()
+        _closed = False
+
+
+def shutdown(timeout: float = SHUTDOWN_PREWARM_WAIT_S) -> bool:
+    """Close the cache for a stopping process — the lifespan calls it right BEFORE its
+    ``wal_checkpoint(TRUNCATE)``, so a clean stop leaves the database in ONE file
+    (``docs/DEPLOYMENT.md``, "WAL files — check before you copy"):
+
+    1. from now on no pre-warm starts (a pending timer is cancelled; one that already fired
+       finds the cache closed), no version connection is opened again (:func:`key_for`
+       answers ``None``, so every later read computes uncached) and no entry is kept;
+    2. a pre-warm already RUNNING is waited for, up to *timeout* seconds — it holds a read
+       transaction on its own connection, under which a TRUNCATE checkpoint cannot finish;
+    3. the version connections are closed (read-only: they cannot checkpoint, and while one
+       is open the last writable close no longer folds the WAL back) and the entries
+       dropped.
+
+    Returns ``True`` when no pre-warm was running at the end of the wait. A pre-warm that
+    outlives the wait is never waited for longer: shutdown logs a warning and returns
+    ``False``, and the stop goes on. The late pre-warm then finishes uncached and opens
+    nothing, but its read transaction may keep the checkpoint from truncating the WAL (the
+    lifespan logs that result too), and a daemon thread still reading at interpreter exit
+    leaves ``-wal`` / ``-shm`` behind exactly as a crash does. Never hangs.
+
+    Final for the lifespan: only :func:`reset` opens the cache again (the next lifespan's
+    start calls it).
+    """
+    global _closed
+    with _prewarms_done:
+        _closed = True
+        _cancel_pending_prewarm()
+        finished = _prewarms_done.wait_for(lambda: _prewarms_running == 0, timeout)
+        late = _prewarms_running
+        _close_versions()
+        _entries.clear()
+    if not finished:
+        logger.warning(
+            "result cache: %d pre-warm(s) still running %.0f s into the stop; the stop goes "
+            "on — the WAL checkpoint may not complete, and -wal / -shm may remain beside the "
+            "database with committed changes in the -wal: never delete it on its own "
+            "(docs/DEPLOYMENT.md, WAL files)", late, timeout)
+    return finished
 
 
 # --- pre-warm ------------------------------------------------------------------------------
@@ -440,9 +625,10 @@ def schedule_prewarm(fn: Callable[[], object], delay: float) -> bool:
     """Run ``fn()`` on a daemon thread *delay* seconds from now, debounced: a later call
     replaces a pending one, so a burst of writes pre-warms once, after the last.
 
-    Off unless ``PD_PREWARM=1`` (returns ``False``; the unit tests' default). At fire time a
-    write window still open skips the run — its end schedules the next one. A failing
-    ``fn`` is logged, never raised: a pre-warm only saves the next reader a build.
+    Off unless ``PD_PREWARM=1`` (returns ``False``; the unit tests' default), and after
+    :func:`shutdown` (``False``). At fire time a write window still open skips the run — its
+    end schedules the next one. A failing ``fn`` is logged, never raised: a pre-warm only
+    saves the next reader a build.
     """
     global _prewarm_timer
     if not flags.prewarm_enabled():
@@ -451,28 +637,38 @@ def schedule_prewarm(fn: Callable[[], object], delay: float) -> bool:
     timer.daemon = True
     timer.name = "result-cache-prewarm"
     with _lock:
-        if _prewarm_timer is not None:
-            _prewarm_timer.cancel()
+        if _closed:
+            return False
+        _cancel_pending_prewarm()
         _prewarm_timer = timer
     timer.start()
     return True
 
 
 def _run_prewarm(fn: Callable[[], object]) -> None:
-    global _prewarm_timer
+    global _prewarm_timer, _prewarms_running
     with _lock:
         if _prewarm_timer is threading.current_thread():
             _prewarm_timer = None
-    if flight.write_generation() is None:
-        return
+        if _closed:  # fired as shutdown() began: it does not run at all
+            return
+        _prewarms_running += 1
     try:
-        fn()
-    except Exception:  # noqa: BLE001 - see schedule_prewarm
-        logger.warning("result cache: pre-warm failed", exc_info=True)
+        if flight.write_generation() is None:
+            return
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - see schedule_prewarm
+            logger.warning("result cache: pre-warm failed", exc_info=True)
+    finally:
+        with _prewarms_done:
+            _prewarms_running -= 1
+            _prewarms_done.notify_all()
 
 
 __all__ = [
     "CacheKey",
+    "SnapshotMark",
     "Stats",
     "cached",
     "cached_keyed",
@@ -481,10 +677,12 @@ __all__ = [
     "invalidate",
     "is_app_database",
     "key_for",
+    "marked_snapshot",
     "read_snapshot",
     "reset",
     "same_state",
     "schedule_prewarm",
     "serve",
+    "shutdown",
     "stats",
 ]

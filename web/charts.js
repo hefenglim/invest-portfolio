@@ -83,6 +83,10 @@
       host.style.height = 'auto';
       return;
     }
+    /* The series' own reporting currency formats every figure of the card (decimals: TWD 0,
+       USD / MYR 2). It read a hard-coded 'TWD' until 2026-10-22, which printed a USD ledger
+       without its cents and rounded the server's 2-dp `pnl` a second time. */
+    const ccy = t.reporting_currency;
     const dates = t.points.map((p) => p.date);
     const incompletePts = t.points.filter((p) => p.incomplete);
     trendHasIncomplete = incompletePts.length > 0;
@@ -98,7 +102,7 @@
         if (t.points[i].net_worth != null) { curNw = t.points[i].net_worth; break; }
       }
       if (curNw != null) {
-        nwEl.textContent = '含現金 ' + f.money(curNw, 'TWD');
+        nwEl.textContent = '含現金 ' + f.money(curNw, ccy);
         nwEl.hidden = false;
       } else {
         nwEl.hidden = true;
@@ -124,19 +128,23 @@
           const date = params[0].axisValue;
           const pt = t.points.find((p) => p.date === date);
           if (!pt) return date;
-          const spread = pt.total_value - pt.net_invested;
-          const spreadColor = spread > 0 ? C.up : spread < 0 ? C.down : C.text;
+          /* The SERVER's figure (`pnl`, owner rulings 2026-10-22): total_value − net_invested,
+             already at the reporting currency's minor unit — formatted here, never derived —
+             and null on an incomplete day, which prints 「—」 in the neutral colour. The colour
+             reads the sign off the Decimal string (`f.signClass`), no arithmetic. */
+          const pnlSign = f.signClass(pt.pnl);
+          const pnlColor = pnlSign === 'sign-up' ? C.up : pnlSign === 'sign-down' ? C.down : C.text;
           let html = '<div style="font-size:11px;color:' + C.faint + '">' + date + '</div>';
-          html += '<div>總市值&nbsp;&nbsp;<b>' + f.money(pt.total_value, 'TWD') + '</b></div>';
-          html += '<div>累計淨投入&nbsp;&nbsp;<b>' + f.money(pt.net_invested, 'TWD') + '</b></div>';
+          html += '<div>總市值&nbsp;&nbsp;<b>' + f.money(pt.total_value, ccy) + '</b></div>';
+          html += '<div>累計淨投入&nbsp;&nbsp;<b>' + f.money(pt.net_invested, ccy) + '</b></div>';
           if (pt.net_worth != null) {
             html += '<div>總淨值（含現金）&nbsp;&nbsp;<b style="color:' + C.netWorth + '">' +
-                    f.money(pt.net_worth, 'TWD') + '</b></div>';
+                    f.money(pt.net_worth, ccy) + '</b></div>';
           }
-          /* AI-D41: this spread converts every flow at its own trade-date rate, so it is
-             the FX-COMPLETE lifetime result — NOT the 浮動損益 it was labelled. */
-          html += '<div>累計總損益（含匯兌）&nbsp;&nbsp;<b style="color:' + spreadColor + '">' +
-                  f.signed(spread, 'TWD') + '</b></div>';
+          /* AI-D41: `pnl` converts every flow at its own trade-date rate, so it is the
+             FX-COMPLETE lifetime result — NOT the 浮動損益 it was labelled. */
+          html += '<div>累計總損益（含匯兌）&nbsp;&nbsp;<b style="color:' + pnlColor + '">' +
+                  f.signed(pt.pnl, ccy) + '</b></div>';
           if (pt.incomplete) {
             html += '<div style="color:' + C.amber + ';font-size:11px">部分標的當日無價格</div>';
           }
@@ -337,7 +345,8 @@
     if (note) note.hidden = isTwr || !trendHasIncomplete;
     document.getElementById('trend-title').textContent =
       isTwr ? '績效比較（時間加權報酬）' : '總市值 vs 累計淨投入';
-    document.getElementById('trend-sub').textContent = isTwr ? '重定基準＝100' : 'TWD・日線';
+    document.getElementById('trend-sub').textContent =
+      isTwr ? '重定基準＝100' : ((D && D.reporting_currency) || 'TWD') + '・日線';
     if (isTwr) {
       if (refetch) { twrData = null; loadTwr(); }
       else if (twrData) renderTwr(twrData);

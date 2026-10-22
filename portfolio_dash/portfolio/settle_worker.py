@@ -56,21 +56,28 @@ day — ``value_series`` over books from ONE ``iter_books`` pass, ``compose_net_
 ``sorted(event days ∪ period ends)`` feeds both; a book is never rebuilt per month end.
 
 **A series that is unavailable from some day U** (a flow dated U has no on-or-before FX rate in
-the trend's pair set — v0.1.31 then shows no trend at all; PERF-F2 is the confirmed case): the
-days before U are valued over the ledger cut at U − 1 (every point there is what the truncated
-world shows); a day from U on has no value in any v0.1.31 view, so it is stored as a
-PLACEHOLDER (``SettledDay.placeholder``: ``total_value = net_invested = 0``, ``incomplete``,
-``net_worth`` and ``cash_total`` NULL, ``cash_incomplete``) and the closes from U on carry no
-trend figure and no 當期報酬 (``notes.trend_unavailable``). A placeholder carries no figure:
+the trend's pair set — the live build then shows no trend at all. Since PERF-F2's fix the pair
+set, ``timeseries.trend_fx_currencies``, holds every converted flow's own currency, so this is
+a rate genuinely missing on or before U): the days before U are valued over the ledger cut at
+U − 1 (every point there is what the truncated world shows); a day from U on has no value in
+any v0.1.31 view, so it is stored as a PLACEHOLDER (``SettledDay.placeholder``:
+``total_value = net_invested = 0``, ``incomplete``, ``net_worth`` and ``cash_total`` NULL,
+``cash_incomplete``) and the closes from U on carry no trend figure and no 當期報酬
+(``notes.trend_unavailable``). A placeholder carries no figure:
 
 - **it never outlives the condition that made it** — every run computes its own U first. When
   the published generation's first placeholder day P lies before the run's start and U is not
   P (the series is available again, or unavailable from another day), the run starts at
   ``min(P, U)`` instead and values every placeholder day again (the change that makes the
-  series available may be dated after U: PERF-F2's pair-set edge, a later row in a new quote
-  currency, marks the store dirty only from its own date); the claim's range is widened
-  accordingly (``settle_run.range_from``). With U = P the placeholders stand: a nightly run
-  on a ledger unavailable since U settles its one new day, never a re-run from U;
+  series available may be dated after U and mark the store dirty only from its own date);
+  the claim's range is widened accordingly (``settle_run.range_from``). **This widening is
+  defense in depth with no known production trigger since PERF-F2's fix.** Before it, a later
+  row in a new quote currency was one; now every flow's own currency is in the pair set, so
+  every change that can end a missing-rate cause — a rate on or before U, or an edit or
+  deletion of the flow itself — is dated on or before U and marks the store dirty from there.
+  Its test reaches the branch by handing the worker v0.1.31's pair set (a monkeypatch,
+  ``tests/settlement/test_worker_placeholders.py``). With U = P the placeholders stand: a
+  nightly run on a ledger unavailable since U settles its one new day, never a re-run from U;
 - **it is never a figure in a report**: a day with a value on one side and a placeholder on
   the other is ``value_to_none`` / ``none_to_value``, a placeholder on both is no change, a
   placeholder day is never counted as a valued 「新結算」 / 「移除」 day, and a run that adds
@@ -126,7 +133,7 @@ from portfolio_dash.portfolio.dashboard import (
     bounded_closes,
     closes_in,
 )
-from portfolio_dash.portfolio.dashboard_models import TrendPoint
+from portfolio_dash.portfolio.dashboard_models import TrendPoint, UnconvertibleFlow
 from portfolio_dash.portfolio.ledger_findings import LedgerReview, review_ledger
 from portfolio_dash.portfolio.networth import CashDay, compose_net_worth, daily_cash_series
 from portfolio_dash.portfolio.results import Book
@@ -156,9 +163,13 @@ from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
     build_reporting_flows,
+    first_unconvertible_flow,
     holds_open_option,
     trend_book_days,
+    trend_fx_currencies,
     trend_start,
+    trend_symbols,
+    trend_unavailable_reason,
     value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes, twr_index
@@ -260,6 +271,103 @@ def _moved(old: Decimal | None, new: Decimal | None, unit: str) -> bool:
                         max(abs(old), abs(new)) * RATIO_RESTATE_RELATIVE)
             return diff > bound
     return _text(old) != _text(new)
+
+
+#: A restated close's reason names at most this many changes, then 「等 N 筆」.
+REASON_NAMED_MAX = 3
+#: The reason of a restatement no claimed change explains (a 重新結算 that found a moved
+#: figure with nothing claimed on or before the close's day).
+REASON_RESETTLED_ZH = "重新結算"
+#: The reason of a run whose code or calc version changed (unchanged since §14.6).
+REASON_CALC_ZH = "計算規則更新"
+
+
+def _by_import(c: st.ClaimedChange) -> bool:
+    """A row an import batch wrote or its UNDO removed (``batch_undo``) — never an UPDATE, nor a
+    hand delete: both carry the row's batch id, and both are hand corrections."""
+    return c.import_batch_id is not None and (
+        c.op == "insert" or (c.op == "delete" and c.batch_undo))
+
+
+def correction_reason(changes: Sequence[st.ClaimedChange], through: date, *,
+                      calc_changed: bool) -> tuple[str, str | None]:
+    """A restated close's ``(reason, source)`` (§14.6; accountant MINOR 2, owner ruling
+    2026-10-22): every change behind the run's restatements (``claimed_changes`` +
+    ``inherited_changes``) whose affected day is on or before the close's end day *through*,
+    earliest first — 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A run names, per close,
+    only what can have moved THAT close: one reason per run named its earliest change on every
+    close, so a May dividend correction read as a February trade.
+
+    - **An entry** is one ledger or reference record (「2026-02-05 交易」), one price / FX
+      counter with its symbol or pair (「2026-06-09 價格（2330）」), one import batch — the rows
+      of two or more distinct records an import inserted or its undo deleted
+      (:func:`_by_import`), dated by its earliest row on or before *through*
+      (「2026-01-03 匯入批次（交易／股利）」) — or the rebuilt triggers, one entry for every table
+      (「觸發器重建（交易／股利）」, undated: the line's day is the store's first day, not a
+      change of anyone's). An UPDATE of an imported row, and a hand delete of one, are
+      corrections of that row and stay their own entries.
+    - **At most** :data:`REASON_NAMED_MAX` distinct texts are named; when there are more
+      entries than texts named (more entries, or two the same day and table), the total follows
+      as 「等 N 筆」 — N counts entries, an import batch and a symbol's counter each one.
+    - 「…更正後重新結算」, or 「…後重新結算」 when the only entry is the rebuilt triggers. The
+      vocabulary is ``CHANGE_TABLE_ZH``'s. :data:`REASON_CALC_ZH` when the calc version changed;
+      :data:`REASON_RESETTLED_ZH` when no change is on or before *through*.
+
+    ``source`` is a machine reference, never shown: the named entries' ``table:key`` (an import
+    batch ``import_batch:<id>``, the rebuilt triggers ``trigger_rebuilt:<tables>``),
+    comma-joined, or ``None``."""
+    records: dict[str, set[tuple[str, str]]] = {}
+    for c in changes:
+        if _by_import(c):
+            assert c.import_batch_id is not None
+            records.setdefault(c.import_batch_id, set()).add((c.table, c.row_key))
+    entries: dict[tuple[str, str, str], tuple[date, list[str]]] = {}
+    for c in changes:
+        if c.day > through:
+            continue
+        if c.kind == st.TRIGGER_REBUILT_KIND:
+            key = ("rebuilt", "", "")
+        elif _by_import(c) and len(records[c.import_batch_id or ""]) >= 2:
+            key = ("batch", c.import_batch_id or "", "")
+        else:
+            key = ("counter" if c.is_counter else "record", c.table, c.row_key)
+        if key not in entries:
+            entries[key] = (c.day, [])
+        tables = entries[key][1]
+        if c.table not in tables:
+            tables.append(c.table)
+    order = list(CHANGE_TABLE_ZH)
+
+    def label(table: str) -> str:
+        return CHANGE_TABLE_ZH.get(table, table)
+
+    def labels(tables: list[str]) -> str:
+        return "／".join(label(t) for t in sorted(
+            tables, key=lambda t: (order.index(t) if t in order else len(order), t)))
+
+    texts: list[str] = []
+    refs: list[str] = []
+    for (kind, a, b), (day, tables) in entries.items():
+        if kind == "rebuilt":
+            text = f"觸發器重建（{labels(tables)}）"
+            ref = f"{st.TRIGGER_REBUILT_KIND}:{'/'.join(sorted(tables))}"
+        elif kind == "batch":
+            text, ref = f"{day.isoformat()} 匯入批次（{labels(tables)}）", f"import_batch:{a}"
+        elif kind == "counter":
+            text, ref = f"{day.isoformat()} {label(a)}（{b}）", f"{a}:{b}"
+        else:
+            text, ref = f"{day.isoformat()} {label(a)}", f"{a}:{b}"
+        if text not in texts and len(texts) < REASON_NAMED_MAX:
+            texts.append(text)
+            refs.append(ref)
+    source = ",".join(refs) if refs else None
+    if calc_changed:
+        return REASON_CALC_ZH, source
+    if not entries:
+        return REASON_RESETTLED_ZH, None
+    more = f"等 {len(entries)} 筆" if len(entries) > len(texts) else ""
+    only_rebuilt = all(kind == "rebuilt" for kind, _a, _b in entries)
+    return f"{'、'.join(texts)}{more}{'' if only_rebuilt else '更正'}後重新結算", source
 
 
 def _changes_phrase(tables: Sequence[Any]) -> str:
@@ -521,19 +629,19 @@ def _first_row(cut: LedgerBundle, movements: Sequence[StoredCashMovement],
 
 
 def _histories(conn: sqlite3.Connection, cache: FxSeriesCache, cut: LedgerBundle,
-               first_day: date, through: date, reporting: Currency
-               ) -> tuple[PriceHistory, FxHistory, int, int]:
+               movements: Sequence[StoredCashMovement], first_day: date, through: date,
+               reporting: Currency) -> tuple[PriceHistory, FxHistory, int, int]:
     """The trend's price and FX histories exactly as ``_build_dashboard`` step 9 reads them:
-    every symbol of the ledger and BOTH ends of every corporate action (audit F-50), from the
-    last close on or before the first day (never before 1900); FX for the ledger's quote
-    currencies only, both directions — the pair set v0.1.31 reads (PERF-F2 is its edge)."""
-    symbols = sorted({t.symbol for t in cut.transactions} | {d.symbol for d in cut.dividends}
-                     | {o.symbol for o in cut.opening}
-                     | {a.from_symbol for a in cut.actions} | {a.to_symbol for a in cut.actions})
+    every symbol of the ledger and BOTH ends of every corporate action (``trend_symbols``),
+    from the last close on or before the first day (never before 1900); FX for the trend's
+    pair set (``trend_fx_currencies``: the quote currencies and the currency of every cash
+    movement the trend converts — PERF-F2), both directions. *movements* are the run's, cut
+    at *through*."""
+    symbols = trend_symbols(cut)
     prices: PriceHistory = {sym: bounded_closes(conn, sym, first_day, through, floor=_EPOCH)
                             for sym in symbols}
     fx: FxHistory = {}
-    for ccy in {cut.instruments[sym].quote_ccy for sym in symbols}:
+    for ccy in trend_fx_currencies(cut, movements):
         if ccy == reporting:
             continue
         for base, quote in ((ccy, reporting), (reporting, ccy)):
@@ -557,30 +665,13 @@ def _cash_fx(cache: FxSeriesCache, ccys: set[Currency], reporting: Currency,
     return out
 
 
-def _first_unconvertible_day(cut: LedgerBundle, movements: Sequence[StoredCashMovement],
-                             fx: FxHistory, reporting: Currency, refused: Sequence[Any],
-                             first: date, through: date) -> date | None:
-    """The first day ``U`` whose prefix ledger has a flow without an on-or-before rate — by
-    ``build_reporting_flows`` itself (the one definition of a flow), bisected over the day
-    range: the predicate only turns true as the cut grows."""
-    def bad(day: date) -> bool:
-        return build_reporting_flows(
-            cut.valued_as_of(day), fx, reporting,
-            cash_movements=valued_rows_as_of(movements, day), refused_dividends=refused) is None
-
-    if build_reporting_flows(cut, fx, reporting, cash_movements=movements,
-                             refused_dividends=refused) is not None:
-        return None  # every flow converts: the series is available
-    lo, hi = first, through
-    if bad(lo):
-        return lo
-    while (hi - lo).days > 1:
-        mid = lo + timedelta(days=(hi - lo).days // 2)
-        if bad(mid):
-            hi = mid
-        else:
-            lo = mid
-    return hi
+def _unavailable_from(flow: UnconvertibleFlow | None, first: date) -> date | None:
+    """The first day ``U`` whose prefix ledger has a flow without an on-or-before rate: the
+    date of the first unconvertible flow (``timeseries.first_unconvertible_flow``, the ONE
+    owner), never before the trend's first day — a cost movement may precede the first trade,
+    and the series starts there. Every prefix cut on or after it holds that flow; none before
+    it holds any unconvertible flow."""
+    return None if flow is None else max(flow.on, first)
 
 
 def _bench_state(conn: sqlite3.Connection, cut: LedgerBundle, flows: Sequence[ReportingFlow],
@@ -893,8 +984,8 @@ class _Run:
         loaded.first_row = _first_row(cut, loaded.movements, loaded.conversions, through)
         if loaded.first_day is not None and loaded.first_day <= through:
             (loaded.price_history, loaded.fx_history, loaded.prices_read,
-             loaded.fx_rows_read) = _histories(read, loaded.cache, cut, loaded.first_day,
-                                               through, self.reporting)
+             loaded.fx_rows_read) = _histories(read, loaded.cache, cut, loaded.movements,
+                                               loaded.first_day, through, self.reporting)
         symbols = len(loaded.price_history)
         t.finish("load", f"{symbols} 檔 · 價格 {loaded.prices_read:,} 筆 · "
                          f"匯率 {len(loaded.fx_history)} 組 {loaded.fx_rows_read:,} 筆",
@@ -925,10 +1016,13 @@ class _Run:
         through = claim.run_through
         plan = _Plan()
         if first is not None and first <= through:
-            # this run's own U: the first day an unconvertible flow counts (None: available)
-            plan.unavailable_from = _first_unconvertible_day(
-                loaded.cut, loaded.movements, loaded.fx_history, self.reporting,
-                review.book.refused_dividends, first, through)
+            # this run's own U: the first day an unconvertible flow counts (None: available),
+            # and the flow itself — the sentence every close from U on reads
+            plan.unconvertible = first_unconvertible_flow(
+                loaded.cut, loaded.fx_history, self.reporting,
+                cash_movements=loaded.movements,
+                refused_dividends=review.book.refused_dividends)
+            plan.unavailable_from = _unavailable_from(plan.unconvertible, first)
             # the closes start at the month of the ledger's FIRST ROW (a month funded before
             # its first trade has its close: its cash, its activity, no trend point)
             plan.close_first = (first if loaded.first_row is None
@@ -1044,6 +1138,8 @@ class _Run:
                                       refused_dividends=refused)
         series.flows = flows
         series.unavailable_from = plan.unavailable_from
+        series.unavailable_reason = (None if plan.unconvertible is None
+                                     else trend_unavailable_reason(plan.unconvertible))
         if (flows is None) != (plan.unavailable_from is not None):
             raise _Failure("valuate", "逐日估值時匯率可用性判斷不一致（內部錯誤）")
         trend_end = through if series.unavailable_from is None else (
@@ -1128,9 +1224,8 @@ class _Run:
             raise _Failure("valuate", "逐日估值後仍有未使用的帳本日（內部錯誤）")
         t.progress = t.progress.model_copy(update={"current": None})
         months = len(_month_chunks(start, through))
-        tail = ("" if series.unavailable_from is None else
-                f"；{series.unavailable_from.isoformat()} 起部分投入流量缺少當日匯率，"
-                "該段沒有走勢資料")
+        tail = ("" if series.unavailable_reason is None else
+                f"；{series.unavailable_reason}")
         t.finish("valuate", f"估值 {done:,} 天，寫入 {start:%Y-%m} 至 {through:%Y-%m}"
                             f"（{months} 個月）{tail}", done=done, total=days_total)
         return series
@@ -1213,9 +1308,10 @@ class _Run:
                 if kpi.xirr is None:  # the close's own words (the engine's reason is unchanged)
                     kpi = kpi.model_copy(update={"xirr_reason": pc.XIRR_NO_POSITION_ZH})
             else:
-                twr, why = pc.period_twr(index, points, start_end=start_end, end=end)
+                twr, why = pc.period_twr(index, points, start_end=start_end, end=end,
+                                         unavailable=series.unavailable_reason)
                 kpi = pc.with_trend(kpi, point=series.points.get(end), twr=twr,
-                                    twr_reason=why)
+                                    twr_reason=why, trend_reason=series.unavailable_reason)
             # every period is its own calendar period: the closes start at the month of the
             # ledger's first row, so no row is ever outside the period it is listed in
             act = pc.activity(start=pc.period_start(kind, end), end=end, book=book,
@@ -1360,7 +1456,8 @@ class _Run:
             stale_cleared=stale is None,
             stale_reason=None if stale is None else
             f"歷史走勢與月度成績尚未包含 {stale[0].isoformat()} 起的變更",
-            pending_positions=pending, chained_from=result.handed_from)
+            pending_positions=pending,
+            chained_from=result.handed_from or result.queued_from)
         changes = stored.changes.model_copy(update={
             "handed_back": result.status == "superseded"})
         final = stored.model_copy(update={
@@ -1410,27 +1507,29 @@ class _Run:
                       state: st.StoreState) -> list[st.RestatementDraft]:
         """The closes this run moved (§14.6): compared with the previous generation's close of
         the same period when both hold it (same reporting currency, inside the range), and —
-        on a period's FIRST publish — with its retired month-end snapshot (``cutover``)."""
+        on a period's FIRST publish — with its retired month-end snapshot (``cutover``). Each
+        close's reason names the changes on or before ITS end day (:func:`correction_reason`):
+        this run's claims, and — for a chained run after a partial publish, whose closes from
+        the hand-over day still hold figures from before its predecessors' own changes — the
+        changes those predecessors settled (``settlement_store.inherited_changes``)."""
         at = datetime.now(UTC)
         drafts: list[st.RestatementDraft] = []
         old = ({(p.kind, p.period): p for p in st.read_periods(self.conn, old_gen, start=lo,
                                                                end=hi)}
                if old_gen > 0 else {})
-        source_change = st.earliest_claimed_change(self.conn, self.run_id)
-        if old_gen > 0 and not state.calc_ok:
-            reason = "計算規則更新"
-        elif source_change is not None:
-            label = CHANGE_TABLE_ZH.get(source_change.table, source_change.table)
-            reason = f"{source_change.day.isoformat()} {label}更正後重新結算"
-        else:
-            reason = "重新結算"
-        source = (None if source_change is None
-                  else f"{source_change.table}:{source_change.row_key}")
+        claimed = sorted([*st.inherited_changes(self.conn, self.run_id),
+                          *st.claimed_changes(self.conn, self.run_id)], key=lambda c: c.day)
+        calc_changed = old_gen > 0 and not state.calc_ok
+        reasons: dict[date, tuple[str, str | None]] = {}
         snapshots: dict[str, st.SnapshotRow] | None = None
         for c in closes:
             new = c.period
             before = old.get((new.kind, new.period))
             if before is not None:
+                if new.end_day not in reasons:
+                    reasons[new.end_day] = correction_reason(claimed, new.end_day,
+                                                             calc_changed=calc_changed)
+                reason, source = reasons[new.end_day]
                 a, b = _kpi_values(before, self.reporting), _kpi_values(new, self.reporting)
                 for name in [*a, *(k for k in b if k not in a)]:
                     label, unit, _value = b[name] if name in b else a[name]
@@ -1563,6 +1662,8 @@ class _Plan:
     run_from: date | None = None
     #: This run's U: the first day an unconvertible flow counts (``None``: available).
     unavailable_from: date | None = None
+    #: The first flow with no rate on or before its date (``None``: available).
+    unconvertible: UnconvertibleFlow | None = None
     #: The first day the closes cover: the month of the ledger's first row.
     close_first: date | None = None
     value_start: date | None = None
@@ -1582,6 +1683,9 @@ class _Series:
     prefix: list[st.SettledDay] = field(default_factory=list)
     flows: list[ReportingFlow] | None = None
     unavailable_from: date | None = None
+    #: Why a day from ``unavailable_from`` has no trend point (``None``: available) — the
+    #: series' ONE sentence, ``timeseries.trend_unavailable_reason``.
+    unavailable_reason: str | None = None
 
 
 # =============================================================================================

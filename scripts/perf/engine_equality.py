@@ -20,10 +20,11 @@ Two families, each against the FROZEN v0.1.31 code in ``tests/reference/``:
   fallback forced and equal") — the one-pass trend the dashboard and the settlement run use
   (``timeseries.value_series`` over ``iter_books`` books, from the trend's first day) against the
   frozen ``ref_daily_value_series``, on the inputs ``build_dashboard`` assembles
-  (``tests/reference/dashboard_inputs.load_inputs``: the trend's own FX pair set, PERF-F2's
-  shape included). Run twice: as it runs, and with ``_running_sum_is_exact`` forced ``False``
-  so ``net_invested`` takes the reference per-day sum — which must then actually have run
-  (``_reference_net_invested`` called) whenever the trend is available.
+  (``tests/reference/dashboard_inputs.load_inputs``: v0.1.31's trend FX pair set, kept for both
+  engines — PERF-F2's shape included). Run twice: as it runs, and with
+  ``_running_sum_is_exact`` forced ``False`` so ``net_invested`` takes the reference per-day
+  sum — which must then actually have run (``_reference_net_invested`` called) whenever the
+  trend is available.
 
 Comparison is :func:`tests.reference.canon.canon` (exact Decimal digits and exponents, field
 order, ``exclude=True`` fields included). The report names the FIRST differing day per engine

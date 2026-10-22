@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 import portfolio_dash
+from portfolio_dash.data_ingestion.store import undo_source
 from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.returns import DividendRefusals
 from portfolio_dash.portfolio.settlement_models import (
@@ -84,6 +85,7 @@ from portfolio_dash.portfolio.settlement_models import (
     RunStatus,
     RunSummary,
     RunVersions,
+    StateResult,
     is_run_reason,
     run_status_text,
 )
@@ -1081,8 +1083,10 @@ def window_start(today: date) -> date:
 
 def live_from(state: StoreState, today: date) -> date:
     """The first day served live (§10 step 3): ``min(H + 1, max(Dd, W))`` with ``S`` =
-    ``settled_through``, ``H`` = ``held_through``, ``Dd`` = the earlier of ``dirty_from`` and
-    ``run_from`` (∞ when both are NULL) and ``W`` = the 1st of the previous month.
+    ``settled_through``, ``H`` = ``held_through``, ``Dd`` = :attr:`StoreState.dirty_day` —
+    the earlier of ``dirty_from`` and the ``run_dirty_from`` the active run CLAIMED (∞ when
+    both are NULL), never its ``run_from``: a full run on a clean store claims no change and
+    leaves every settled day current — and ``W`` = the 1st of the previous month.
 
     An unusable store returns ``date.min``: every day is live.
     """
@@ -1097,7 +1101,8 @@ def live_from(state: StoreState, today: date) -> date:
 
 def stale_range(state: StoreState, today: date) -> tuple[date, date] | None:
     """The days served from the previous generation although they are dirty (PERF-D3):
-    ``[Dd, live_from)`` when ``Dd`` lies before it, else ``None``."""
+    ``[Dd, live_from)`` when ``Dd`` (:attr:`StoreState.dirty_day`, as in :func:`live_from`)
+    lies before it, else ``None``."""
     if not state.usable:
         return None
     dirty = state.dirty_day
@@ -1167,7 +1172,9 @@ def claim(conn: sqlite3.Connection, run_id: int, *, scope: RunScope,
     - for every CLAIMING scope (``dirty``, ``full``, ``nightly``) raises ``run_through`` to
       ``max(run_through, settled_through, held_through)`` — nothing moves back and no held day
       is left behind; :attr:`Claim.through_clamped` says so;
-    - records ``run_id`` / ``run_through`` and sets ``dirty_from = NULL``;
+    - records ``run_id`` / ``run_through`` and the ``run_dirty_from`` it claims (the
+      trail's earliest day; before anything was ever published, its whole range) — readers'
+      ``Dd`` (:attr:`StoreState.dirty_day`) — and sets ``dirty_from = NULL``;
     - tags every PENDING trail row and counter with ``claimed_run_id`` (rows are tagged, never
       moved);
     - moves the report to ``running`` with its range and its "before" versions;
@@ -2189,8 +2196,10 @@ def end_without_publish(conn: sqlite3.Connection, run_id: int, status: str) -> b
     """Every end but a publish — failure, cancel, crash, boot cleanup, ``superseded`` — as ONE
     transaction (§9.4 "Every other end"):
 
-    - ``dirty_from`` = the earlier of ``dirty_from`` and ``run_from`` — never an overwrite, so
-      an earlier change that arrived during the run is kept;
+    - ``dirty_from`` = the earlier of ``dirty_from`` and the ``run_dirty_from`` the run
+      CLAIMED (:func:`claim`: the trail's earliest day, so a cancelled full run on a clean,
+      published store leaves it clean; before anything was ever published, its whole range)
+      — never an overwrite, so an earlier change that arrived during the run is kept;
     - the run fields cleared and the generations above the published one deleted — only when
       this run is still the active one (an orphan's end never touches another run's state);
     - the claimed changes put back (:func:`put_back`);
@@ -2252,6 +2261,11 @@ class SwapResult:
     held_through: date | None
     #: A partial publish: the chained run's first day (``N``).
     handed_from: date | None = None
+    #: A full publish that found ``dirty_from`` set, after ``through`` (a change committed
+    #: WHILE the run was active, dated past its range): the chained run's first day. ``None``
+    #: on a full publish of a clean store — a change committed after this swap is not the
+    #: run's, and waits for the prompt (PERF-D2) or the nightly run.
+    queued_from: date | None = None
     settled_records: int = 0
     settled_counters: int = 0
     put_back_records: int = 0
@@ -2423,6 +2437,12 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
         report = _load_report(conn, run_id)
         if report is not None:
             update: dict[str, Any] = {}
+            if arrived is not None:
+                # the run's OWN follow-up, decided here, inside the swap: a change committed
+                # while it was active (the waiter chains a run from it). A change committed
+                # after this transaction is not the run's (PERF-D2: prompt first).
+                update["state"] = (report.state or StateResult()).model_copy(
+                    update={"chained_from": arrived})
             if not full:
                 assert arrived is not None
                 update["range"] = report.range.model_copy(
@@ -2436,7 +2456,8 @@ def swap(conn: sqlite3.Connection, run_id: int, *, calc_version: str,
         pruned = _prune(conn, KEEP_RUNS)
     return SwapResult(
         status=status, generation=new, settled_through=published, held_through=held,
-        handed_from=None if full else arrived, settled_records=settled[0],
+        handed_from=None if full else arrived, queued_from=arrived if full else None,
+        settled_records=settled[0],
         settled_counters=settled[1], put_back_records=put[0], put_back_counters=put[1],
         pruned=pruned)
 
@@ -2561,32 +2582,118 @@ def claimed_attempts(conn: sqlite3.Connection, run_id: int) -> ClaimedAttempts:
 
 @dataclass(frozen=True)
 class ClaimedChange:
-    """The earliest change a run claimed: its table, record key and affected day."""
+    """A change behind a run's restatements: a ledger or reference record (its ``op``, its
+    import batch, its trail ``kind``) or a price / FX counter (``op`` ``None``, ``row_key`` the
+    symbol or the pair), with its affected day — the earlier of the old and new day; a
+    counter's earliest."""
 
     table: str
     row_key: str
     day: date
+    #: ``insert`` / ``update`` / ``delete`` for a record; ``None`` for a counter.
+    op: str | None = None
+    import_batch_id: str | None = None
+    #: The trail line's ``detail.kind`` when it is not a ledger record's change:
+    #: :data:`TRIGGER_REBUILT_KIND` for a rebuilt trigger (「觸發器重建：<table>」).
+    kind: str | None = None
+    #: A DELETE made by an import batch's UNDO (``provenance.delete_batch``), told apart from a
+    #: hand delete of an imported row by the undo's ``ledger_audit`` tag
+    #: (``store.undo_source``); a hand delete carries the row's batch id too.
+    batch_undo: bool = False
+
+    @property
+    def is_counter(self) -> bool:
+        return self.op is None
 
 
-def earliest_claimed_change(conn: sqlite3.Connection, run_id: int) -> ClaimedChange | None:
-    """The claimed change with the earliest affected day — a ledger record, or a price / FX
-    counter by its key — the "source" a restatement names (§14.6)."""
-    best: ClaimedChange | None = None
-    row = conn.execute(
-        f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d FROM settle_change_log "
-        "WHERE claimed_run_id = ? AND d IS NOT NULL ORDER BY d, id LIMIT 1",
-        (run_id,)).fetchone()
-    if row is not None:
-        best = ClaimedChange(table=str(row[0]), row_key=str(row[1]),
-                             day=date.fromisoformat(str(row[2])))
-    agg = conn.execute(
-        "SELECT table_name, key, earliest FROM settle_change_agg WHERE claimed_run_id = ? "
-        "ORDER BY earliest, id LIMIT 1", (run_id,)).fetchone()
-    if agg is not None:
-        day = date.fromisoformat(str(agg[2]))
-        if best is None or day < best.day:
-            best = ClaimedChange(table=str(agg[0]), row_key=str(agg[1]), day=day)
-    return best
+def _undo_deletes(conn: sqlite3.Connection) -> set[tuple[str, str, str]]:
+    """``(table, row id, source)`` of every ``ledger_audit`` delete a bulk door tagged — a
+    BORROWED table (``data_ingestion/store.py`` owns it; direct SQL, architecture.md). Absent
+    table or ``source`` column (a database before DEF-049): no undo is known, every delete reads
+    as a hand delete."""
+    try:
+        return {(str(r[0]), str(r[1]), str(r[2])) for r in conn.execute(
+            "SELECT table_name, row_id, source FROM ledger_audit WHERE action = 'delete' "
+            "AND source IS NOT NULL")}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _reason_changes(conn: sqlite3.Connection, column: str, run_id: int, *,
+             before: date | None = None) -> list[ClaimedChange]:
+    """The trail rows and counters whose *column* (``claimed_run_id`` / ``settled_run_id``)
+    is *run_id*, with an affected day (before *before*, when given)."""
+    cond = "" if before is None else " AND d < ?"
+    agg_cond = "" if before is None else " AND earliest < ?"
+    extra = [] if before is None else [before.isoformat()]
+    rows = conn.execute(
+        f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d, op, import_batch_id, "
+        f"json_extract(detail, '$.kind') FROM settle_change_log WHERE {column} = ? "
+        f"AND d IS NOT NULL{cond} ORDER BY d, id", [run_id, *extra]).fetchall()
+    undone = (_undo_deletes(conn)
+              if any(r[3] == "delete" and r[4] is not None for r in rows) else set())
+
+    def by_undo(r: Sequence[Any]) -> bool:
+        batch = None if r[4] is None else str(r[4])
+        return (r[3] == "delete" and batch is not None and batch.isdigit()
+                and (str(r[0]), str(r[1]), undo_source(int(batch))) in undone)
+
+    out = [
+        ClaimedChange(
+            table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])), op=str(r[3]),
+            import_batch_id=None if r[4] is None else str(r[4]),
+            kind=None if r[5] is None else str(r[5]), batch_undo=by_undo(r))
+        for r in rows
+    ]
+    out += [
+        ClaimedChange(table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])))
+        for r in conn.execute(
+            f"SELECT table_name, key, earliest FROM settle_change_agg WHERE {column} = ?"
+            f"{agg_cond} ORDER BY earliest, id", [run_id, *extra])
+    ]
+    out.sort(key=lambda c: c.day)  # stable: records before counters on one day
+    return out
+
+
+def claimed_changes(conn: sqlite3.Connection, run_id: int) -> list[ClaimedChange]:
+    """Every change run *run_id* claimed that has an affected day, earliest first (records in
+    trail order within a day, then the counters)."""
+    return _reason_changes(conn, "claimed_run_id", run_id)
+
+
+def inherited_changes(conn: sqlite3.Connection, run_id: int) -> list[ClaimedChange]:
+    """The changes a ``chained`` (or ``resume``) run's restatements are ALSO moved by: those its
+    predecessors settled in a PARTIAL publish (review 2026-10-22). A partial publish at ``N``
+    keeps the previous generation's closes from ``N`` on, so the closes the chained run
+    restates from ``N`` still hold figures from before the predecessor's own changes — which
+    the predecessor settled (every one dated before ``N``) and the chained run never claims.
+
+    The chain is walked back through ``previous_run_id`` while each run is ``chained`` /
+    ``resume``: a ``partial`` predecessor adds the trail rows and counters it settled dated
+    before its ``handed_from``; one that published nothing (superseded, interrupted, failed)
+    adds nothing and the walk goes on; a ``published`` one ends it — its generation holds its
+    own figures. Earliest first; a pruned report ends the walk."""
+    out: list[ClaimedChange] = []
+    seen = {run_id}
+    run = _run_row(conn, run_id)
+    while (run is not None and run["reason"] in ("chained", "resume")
+           and run["previous_run_id"] is not None):
+        prev_id = int(run["previous_run_id"])
+        if prev_id in seen:
+            break
+        seen.add(prev_id)
+        prev = _run_row(conn, prev_id)
+        if prev is None or prev["status"] == "published":
+            break
+        if prev["status"] == "partial":
+            report = _load_report(conn, prev_id)
+            handed = None if report is None else report.range.handed_from
+            if handed is None:
+                break
+            out += _reason_changes(conn, "settled_run_id", prev_id, before=handed)
+        run = prev
+    out.sort(key=lambda c: c.day)
+    return out
 
 
 def discard_run_results(conn: sqlite3.Connection, run_id: int) -> int:
@@ -2736,7 +2843,8 @@ def settled_prefix(conn: sqlite3.Connection, state: StoreState, *, first_day: da
       only the reader's days);
     - the first PLACEHOLDER day (:func:`first_placeholder_day`, W2-D): a placeholder carries
       no figure, so from it on the reader values live — and when the live series is
-      unavailable the whole trend is, exactly as v0.1.31 answers (PERF-F2);
+      unavailable (a flow with no rate on or before its date) the whole trend is, exactly as
+      v0.1.31 answers;
     - the first day the generation does not hold (a gap; the series start moved earlier than
       the generation's ``first_day``): never a day served from nowhere.
 
@@ -2866,7 +2974,8 @@ __all__ = [
     "cutover_snapshots",
     "discard_run_results",
     "first_placeholder_day",
-    "earliest_claimed_change",
+    "claimed_changes",
+    "inherited_changes",
     "generation_rows",
     "last_successful_run",
     "CODE_DIGEST",

@@ -144,9 +144,16 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   `jobs.register_settlement_runner` (→ `settlement_service.scheduled_run`: the
   `settlement_nightly` run at 06:40 Taipei and the `settlement_selfcheck` run on Sundays at 04:30)
   and `jobs.register_after_job_hook` (→ `settlement_service.after_job_hook`). The hook is two-phase:
-  it is asked before a static job runs and called once the job's row is final, and it starts an
+  it is asked before a static job runs — for a job worker child, when the heavy gate grants the
+  run its turn (`child_runner`'s `on_start`, `jobs._run_static_in_child`), never before the
+  wait — and called once the job's row is final, exactly when the mark was taken (including a
+  child that died, overran its limit, or never started after the mark). It starts an
   automatic `dirty` run (reason `job:<id>`) only when the JOB'S OWN trail rows reach before the
-  live window. A direct import would point up the ladder and cycle through `start_job_run` /
+  live window. The mark sums every UNSETTLED price / FX counter per key, claimed ones included,
+  so a cancelled run's put-back after the mark is not the job's change, and the owner's
+  changes during a gate wait are not either (code review of v0.1.32, 2026-10-20). Residual: an
+  owner's price / FX change made WHILE the job runs is still indistinguishable (counters carry
+  no actor). A direct import would point up the ladder and cycle through `start_job_run` /
   `finish_job_run`. Both seams are bound, with every other scheduler seam, by ONE function,
   `api/composition.py::bind_runtime()`. The lifespan calls it, and so does the job worker child
   (`api/job_worker.py`), so a job runs against the same runners in either process.
@@ -155,7 +162,8 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   Two calls stay in the lifespan because no job reaches them: the live scheduler
   (`settlement_service.bind_scheduler`) and the boot run (`start_after_boot`). The job worker child
   clears the after-job hook right after binding, because the hook belongs to the web process,
-  where the settlement service lives (P7).
+  where the settlement service lives (P7) — pinned by
+  `tests/scheduler/test_jobs_in_child.py::test_the_worker_runs_its_job_with_the_after_job_hook_cleared`.
 - **The settle worker's import limits** (spec 2026-10-18 §9.2). `portfolio/settle_worker.py`
   runs as `python -m portfolio_dash.portfolio.settle_worker --run <id>`. It imports only
   `portfolio/`, `pricing/`, `forex/`, `data_ingestion/` and `shared/`. It never imports `fastapi`,
@@ -170,7 +178,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   owned by `api/snapshots.py`. This is an UPWARD read, done once, for the go-live restatement only.
   It is absent-safe: a fresh database never creates the table. `api/settlement_service.py` reads
   `job_runs` and `schedule_config` (scheduler-owned) for `final_through`, and reads the settle
-  tables for the after-job hook's `trail_mark`.
+  tables for the after-job hook's `trail_mark`. `settlement_store._undo_deletes` reads
+  `ledger_audit` (absent-safe) to tell an import batch's undo from hand deletes in a restatement
+  reason, spelling the undo's tag with `data_ingestion/store.py::undo_source` (the one spelling,
+  re-exported by `provenance`).
 - **Reviewed-reader guards list the settlement's readers.** Three contract tests find every reader
   of a figure by scan, and require each one to apply the rule or to be a reviewed entry with its
   reason:
@@ -181,7 +192,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 
   The settlement's readers are entries there, each checked at its call site:
   - `portfolio/period_close.py::cash_at` / `kpi_at`;
-  - `portfolio/settle_worker.py::_valuate`, `_first_unconvertible_day`, `_load` and `_Run._close`;
+  - `portfolio/settle_worker.py::_valuate`, `_plan`, `_load` and `_Run._close`;
+  - `portfolio/timeseries.py::_reporting_flows` and `first_unconvertible_flow` (the one owner of
+    "which flow cannot convert");
   - `api/snapshots.py::period_detail`.
 
   Each reads booked dividends only, and each tags positions with `asset_type`. A new settlement
@@ -189,6 +202,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 - The web layer **reads** computed results. It does not compute. No cost-basis or
   return math in routers, and none in `web/` JS: the frontend receives every number as a
   Decimal **string** and only formats it (`tests/contract/test_frontend_never_computes_money.py`).
+  The last exception, the trend tooltip's `total_value − net_invested`, was removed 2026-10-22: the
+  server sends `TrendPoint.pnl` (`dashboard_models.trend_pnl`: display-quantized, null on an
+  incomplete day), the guard scans `TrendPoint` with no known violation left, and the trend card
+  formats every figure in the series' `reporting_currency`.
 - `llm_insight` consumes the portfolio's *computed* numbers; it does not recompute
   them and does not produce numbers of its own (see `data-and-pricing.md` and
   `llm-insight.md`).
@@ -202,12 +219,13 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   gate messages and run details — a renderer never falls back to the id; and every alert
   TITLE names its rule in the rule's own words, DEF-076 2026-09-26: `tests/contract/
   test_def076_alert_titles_use_rule_vocabulary.py` derives the (rule, title) pairs from the
-  code, and a different wording must be a reviewed entry with its reason), the LLM client.
+  code, and a different wording must be a reviewed entry with its reason), the market exchange
+  timezones (`enums.MARKET_TIMEZONE`, the split window's bound), the LLM client.
   Pure, importable everywhere. **The exceptions to "pure"** are the modules that hold
   process-wide state or reach the OS:
   - **`flight.py`** (2026-10-13) lets callers asking for the SAME computation while it RUNS
     share it. Its one user is `result_cache`. It keeps nothing once the computation returns.
-    A write ends sharing through two seams that must stay wired:
+    A write moves the write generation through two seams that must stay wired:
     - `api/app.py`'s write window around every request that is not a GET / HEAD / OPTIONS or a
       declared read-only POST;
     - `shared/db.session()`, which commits any session that changed a row inside a window of its
@@ -215,7 +233,11 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
 
     Since PERF-S10 a request's own commit runs inside the HTTP window. The session's window
     still covers threads and jobs. A connection holding uncommitted changes always computes
-    alone, and each joiner receives its own deep copy. `tests/shared/test_flight.py` +
+    alone, and each joiner receives its own deep copy. A key built on the generation alone
+    (`write_generation()`, `None` while a window is open) must not share during a window;
+    `result_cache` keys on `generation()` plus `PRAGMA data_version`, which moves at the commit
+    itself, so its readers keep caching and sharing while another request's window is open
+    (post-v0.1.32, the code review's backlog item 1). `tests/shared/test_flight.py` +
     `tests/portfolio/test_dashboard_shared_build.py`.
   - **`result_cache.py`** (PERF, 2026-10-18) KEEPS results: "nothing is kept" is no longer true
     of the app, only of `flight`. It holds the latest result per name until the database
@@ -227,20 +249,34 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       read-only (`connect_path(read_only=True)`: a `mode=ro` URI and no pragma) and in
       autocommit, and it is read BEFORE the computation's read snapshot opens. So any other
       connection's commit moves the version: another request, a job or settle child, a script.
-      A commit during the computation only makes the entry unreachable. `day` is `now.date()`,
-      so no entry outlives its day.
+      A commit during the computation only makes the entry unreachable — except for a
+      computation that opens its own read snapshot after a slow step (the closes of
+      `api/snapshots.py`, after the dashboard build): it opens it with `marked_snapshot` and
+      passes `mark=`, and when no commit, window edge or own write happened since that snapshot
+      opened, the entry is filed under the CURRENT key instead of the one taken before the
+      computation. `day` is `now.date()`, so no entry outlives its day.
     - **Scope.** It caches the app's OWN database only (`get_settings().db_path`). Any other file
-      computes uncached and gets no version connection. Nothing is cached while a write window is
-      open, inside a transaction, or for a database with no file.
+      computes uncached and gets no version connection. Nothing is cached inside a transaction or
+      for a database with no file. Another request's write window does not stop caching or
+      sharing: its commit moves `data_version` and its edges move the generation, so nothing
+      cached before or during it is served after it.
     - **Copies.** Every reader receives a deep copy. The caller then re-stamps the fields that
       depend on `now` beyond its date: `portfolio/dashboard.py::SUB_DAY_FIELDS`, today `as_of`.
       A miss runs inside ONE read transaction (PERF-S12).
     - **Pre-warm** (`PD_PREWARM=1`): a debounced daemon timer computes today's dashboard and
       alerts (`api/alert_inputs.prewarm_today`). It fires 3 s after the last write window closes
       (`api/app.py::WRITE_PREWARM_DELAY_S`) and 1 s after a settlement run ends.
-    - **Shutdown.** The lifespan calls `result_cache.reset()` first, which closes the version
-      connections, and THEN runs `PRAGMA wal_checkpoint(TRUNCATE)`. A read-only connection cannot
-      checkpoint, and a clean stop must leave the database in one file.
+    - **Shutdown.** The lifespan calls `result_cache.shutdown()` first. It closes the cache for
+      the rest of the lifespan (no pre-warm starts, no version connection opens, no entry is
+      kept), waits up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running —
+      whose read snapshot would keep a TRUNCATE checkpoint from finishing and which would
+      reopen a version connection — and closes the version connections. THEN the lifespan runs
+      `PRAGMA wal_checkpoint(TRUNCATE)` (`api/app.py::checkpoint_on_stop`, result on
+      `app.state.stop_checkpoint`). A read-only connection cannot checkpoint, and a clean stop
+      must leave the database in one file. A pre-warm that outlives the wait (a full live build
+      while the store is unusable) and a busy checkpoint are logged and the stop goes on;
+      `-wal` / `-shm` may then remain, and the `-wal` holds committed changes. The lifespan
+      calls `result_cache.reset()` at START, so a second lifespan in one process caches again.
 
     `tests/shared/test_result_cache*.py`.
   - **`flags.py`** reads the five `PD_*` process flags from `os.environ` on every call, never
@@ -266,6 +302,11 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       package's own root, and `DB_PATH` is made absolute. It never uses `-I`, which would drop
       both.
     - `terminate_and_wait` returns once the process is gone AND `on_exit` has returned.
+    - **`on_start`** (optional) runs on the waiter thread once the child's turn has come (after
+      the heavy gate, for a heavy child) and before its process starts, unless the child was
+      cancelled by then. A cancel landing during or right after it still keeps the process from
+      starting, so a caller pairs it with `on_exit`, which fires either way. A raise is logged
+      and the child still starts.
 
     The runner knows nothing about settlement or jobs.
   - **`db.py`'s change actor.** `install_actor` registers a connection-local function and a
@@ -320,6 +361,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   `*_service` modules orchestrate cross-module flows, `app.py` is the composition root (its
   lifespan, its middlewares) and `composition.py::bind_runtime()` binds every scheduler seam.
   No business logic; every mutating route has an action-log label.
+  `instrument_service.restate_price_basis` is the ONE price-basis restatement seam: every
+  corporate-action door and `scripts/check_split_window.py` call it, and it owns the W6 signal
+  invalidation (`data-and-pricing.md` → the stored price basis).
   **A GET never writes** (DEF-065, 2026-09-25): no seed, no `CREATE`/`ALTER`, no write
   transaction — every table a read path touches is created (and seeded) at boot in
   `app.py`'s lifespan, and `shared/config_store.ensure_seeded` decides seed-once under the
@@ -331,6 +375,23 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   The settlement store is no exception. A GET never writes it, never creates or recreates a
   trigger, and never gets the change actor's TEMP trigger. A status read never starts,
   resumes or ends a run. The store's triggers are installed and verified at boot only.
+  **The one reviewed exception: the session touch** (owner ruling 2026-10-22, review L5). Login
+  sessions expire after `auth_store.SESSION_IDLE_EXPIRY` (30 d) without use. `require_session`
+  only reads: an expired (idle > 30 d, a stamp more than `SESSION_CLOCK_SKEW` in the future, or an
+  unreadable stamp), locked or unknown session is refused, and the login it lets through goes on
+  `request.state` (`LOGIN_STATE_ATTR`) for the action log. A use is recorded by
+  `auth_store.touch_after_response`, a background task the gate schedules only when the stored
+  `last_seen_at` is `SESSION_TOUCH_INTERVAL` (24 h) old and the in-process guard has no touch of
+  that session in flight or recorded within the interval: after the response, on its own
+  connection, a 100 ms busy timeout, one autocommit compare-and-set UPDATE (`TOUCH_SQL`), skipped
+  when the lock is busy, a WARNING (and a 10 min back-off) on any other failure. A recorded touch
+  moves `data_version`, so it schedules `alert_inputs.prewarm_today` with the write window's delay
+  (the owner chose 24 h + pre-warm over 6 h for the cache's sake; a session lapses 29–30 days after
+  its last use). The request's own connection still writes nothing and takes no write lock:
+  `tests/contract/test_def065_get_never_writes.py` section 5 holds the touch to its statement, its
+  own connection and once per interval. `/api/auth/logout` is an open path, so an expired cookie
+  can be cleared. The boot (`prepare_sessions_at_boot`) dates unstamped sessions from the boot and
+  purges expired, locked and orphaned ones.
   **`get_conn` is function-scoped** (PERF-S10, 2026-10-18). Every route declares
   `Depends(get_conn, scope="function")`, and so does the gate, `auth_store.require_session`. A
   request therefore holds ONE cached connection, and its session commits when the path function
@@ -344,7 +405,8 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   `/api/rebalance/preview` and `/api/prompts/preview`. They POST only because their input does
   not fit a query string, and they write nothing, not even an action-log row. `is_read_only()`
   treats them exactly like a GET / HEAD / OPTIONS:
-  - the write-window middleware skips them, so they share and cache like a GET;
+  - the write-window middleware skips them, so they move no write generation and leave every
+    cached entry reachable;
   - `get_conn` installs no actor on them;
   - `action_log` excludes them.
 
@@ -359,9 +421,20 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     its `preparing` report in ONE commit, then spawns the worker. Its waiter finalises what the
     child did not, sends the 「重新結算失敗」 push of a failed automatic run (P4; held through quiet
     hours and sent once they end, Q-P1 = (a)), calls `flight.note_write()`, pre-warms, and
-    starts the follow-up (chained, resume or queued). It also owns cancel, the boot hook
+    starts the follow-up (chained, resume or queued). `shutdown()` stops every new start:
+    `start_run` raises `Stopping`, `start_automatic` starts nothing, and a waiter finishing
+    during the stop leaves its follow-up to the next boot (`on_boot` opens it again). It also
+    owns cancel, the boot hook
     (`on_boot` plans inside the boot session; `start_after_boot` starts once that session has
-    committed) and the chip's `status`, which only reads.
+    committed) and the chip's `status`, which only reads. **Every settlement read is one
+    snapshot** (2026-10-22, found by the stress audit): `status` / `runs_page` / `run_report` /
+    `diff_rows` / `changes_page` read inside `result_cache.read_snapshot` (a deferred BEGIN — a
+    read transaction no writer blocks, so DEF-065 holds). Built from autocommit SELECTs, a status
+    mixed a swap into its answer (the old generation with the run's claimed day as a stale range
+    and no run active — a state the database never holds). The settle lock is outside the
+    database: `status` probes it before the snapshot opens and after its reads, and a `running`
+    report reads 已中斷 only when both probes find it free
+    (`tests/settlement/test_service_status_snapshot.py`).
   - `snapshots.py` serves 月度成績 and the period routes from ONE rule: a past close whose end
     day is before the build's `live_from` comes from the store, every other one is computed live
     with the same `period_close` functions. It no longer writes `portfolio_snapshots`.
@@ -489,5 +562,7 @@ Because implementation is AI-driven, every module must be self-verifiable:
   - byte identity against reference payloads generated by v0.1.31's OWN code, never against the
     new code with the store switched off.
 
-  The two pre-existing defects PERF-F2 and the price-basis split edge are pinned as
-  `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`.
+  The two pre-existing defects PERF-F2 and the price-basis split edge, pinned as
+  `xfail(strict=True)` through v0.1.32, were fixed after it; `tests/portfolio/test_engine_repro.py`
+  keeps their regression tests, and `tests/reference/perf_f2.py` owns PERF-F2's intended
+  payload difference.

@@ -34,6 +34,52 @@ regression to fix, never a reason to regenerate. The intended differences of the
 are listed in the plan's invariant 1 (the labelled stale range, the additive `/api/snapshots`
 fields, a teardown failure answering 500) — none of them is in these files.
 
+## Intended differences since v0.1.31
+
+**PERF-F2** (fixed after v0.1.32, owner ruling 2026-10-19; one owner:
+`tests/reference/perf_f2.py`). The trend's FX pair set now holds the currency of every cash
+movement it converts (`portfolio/timeseries.py::trend_fx_currencies`), so on `unquoted_ccy_cash`
+the 50 MYR rebate is converted and the trend exists. These files are NOT regenerated: they stay
+v0.1.31's record (`test_corpora.py::test_record_perf_f2_in_v0131` still reads them).
+`test_reference_payloads.py` compares the current code against `perf_f2.expected_bytes`, which
+is each file itself everywhere except:
+
+| File of `unquoted_ccy_cash` | Paths that change (nothing else may) |
+| --- | --- |
+| `dashboard.json` | `kpis.total_return_fx_complete`, `kpis.principal_fx_effect`, `kpis.trading_financing_cost`, `kpis.fx_complete_reason`, `trend.points`, `trend.available`, `benchmark.reason`, `benchmark.uncovered_markets`, `benchmark.uncovered_ratio`, `freshness.trend_unavailable_reason` |
+| `month_end/2026-03.json`, `2026-04`, `2026-05` (D on or after the rebate) | the same minus the three B figures, which a month end withholds in both ledgers (a held price is missing at D) |
+
+Each new value is DERIVED, not stored: from `golden`'s own v0.1.31 file of the same name (the
+same ledger without the rebate). The trend is golden's, its `net_invested` lowered from
+2026-03-16 by the rebate at its own date's rate (50 × 7.05 = 352.50) and its `net_worth` raised by
+the 50 MYR pool at each day's rate (7.05, then golden's 7 from 2026-06-09); B and
+交易與融資成本 are golden's plus 352.50; 本金匯率效果 is `B − A − 交易與融資成本` (AI-D48) with this
+corpus's own A, which the fix does not touch (111600) — so 112952.50 − 111600 − 352.50 =
+1000.00, golden's 1000 at the exponent of the operands; the benchmark block, `fx_complete_reason` and
+`trend_unavailable_reason` are golden's (a cash movement is no flow of the counterfactual,
+AI-D49, and golden stores no index closes). The January and February month ends and the tax
+package are byte-identical. `test_perf_f2_changes_exactly_the_listed_paths` checks the path
+list both ways. `make_reference_payloads.py --here` now differs from these files on exactly
+those paths.
+
+**The trend points' `pnl`** (owner rulings 2026-10-22; one owner: `tests/reference/trend_pnl.py`).
+The trend tooltip's 累計總損益（含匯兌） was `total_value − net_invested` subtracted in JS floats;
+the server now sends it. Every served trend point gains ONE key, `pnl`, appended after
+`net_worth`: its own `total_value − net_invested` at the reporting currency's minor unit (TWD 0
+dp, USD / MYR 2 dp), ROUND_HALF_UP, a rounded-away loss reading `0` (never `-0`), and `null` on a
+point marked `incomplete` (an unreliable figure is not shown, as the KPI B gate withholds B).
+These files are NOT regenerated. `trend_pnl.expected_bytes` composes with PERF-F2: it starts from
+`perf_f2.expected_bytes` and adds `pnl` to every point of `trend.points` in `dashboard.json` and
+in every `month_end/<YYYY-MM>.json` (whose one point D carries it too), derived from that point's
+own strings and `incomplete` flag and the file's own `trend.reporting_currency` with a
+transcription of the rounding rule, never a call into the code under test. Nothing else changes: the tax package and every
+other byte are PERF-F2's expectation (`test_trend_pnl_adds_exactly_one_key_to_every_point`).
+The tests that compare what the API SERVES (`test_reference_payloads`, the store's read path,
+a result-cache hit) read `trend_pnl.expected_bytes`; the tests that compare what the settlement
+WORKER stores keep `perf_f2.expected_bytes`, because `pnl` is derived when a series is served
+and is never stored. `make_reference_payloads.py --here` now also differs on every trend point
+by that key.
+
 The corpus seeds are read from `tests/conftest.py` (`_seed_golden`, `init_golden_base`,
 `GOLDEN_NOW`) and `scripts/seed_demo.py`: the generator uses the 473fe5a copies of those two
 files, the test uses the current ones. Each corpus's **fingerprint** (sha256 over its ledger,
@@ -81,7 +127,8 @@ columns) do not move it.
   `total_return_fx_complete` / `principal_fx_effect` / `trading_financing_cost` null with
   `fx_complete_reason` 「尚無趨勢資料，無法計算含匯兌損益」, and the benchmark unavailable
   (「部分投入流量缺少當日匯率，無法換算成報告幣，基準對照暫不可用」). The January and February month ends,
-  before the rebate, still have a trend. Recorded, not fixed.
+  before the rebate, still have a trend. Recorded here as v0.1.31 had it; fixed after v0.1.32
+  — see "Intended differences since v0.1.31" above.
 - **The rich corpora** (added after the wave-1 review of package A: the five above never held the
   shapes the new engine is most likely to get wrong). Three, not one, because one ledger cannot
   hold them all honestly:

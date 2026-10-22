@@ -30,7 +30,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -44,6 +44,8 @@ from portfolio_dash.api import composition, job_worker
 from portfolio_dash.api import settlement_service as service
 from portfolio_dash.api.app import create_app
 from portfolio_dash.llm_insight import composer_store as cs
+from portfolio_dash.pricing.results import PriceRow
+from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.scheduler import jobs
 from portfolio_dash.scheduler.jobs import (
     JOBS,
@@ -59,6 +61,7 @@ from portfolio_dash.scheduler.jobs import (
 from portfolio_dash.shared import child_runner, proc_lock
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import install_actor, job_actor, session
+from portfolio_dash.shared.enums import Market
 from portfolio_dash.shared.llm_config import (
     LLMRole,
     ModelConfig,
@@ -311,6 +314,48 @@ def test_the_worker_rebuilds_now_in_the_parents_zone() -> None:
     assert now == NOW and now.tzinfo == NOW.tzinfo and now.isoformat() == NOW.isoformat()
 
 
+def test_the_worker_runs_its_job_with_the_after_job_hook_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The after-job hook belongs to the WEB process, where the settlement service lives (plan
+    P7): the parent asks it before the spawn and calls it once the row is final. The worker
+    binds the same runtime as the lifespan (``bind_runtime``, which binds the hook) and must
+    then clear it, or the job would run with the settlement service's hook bound inside the
+    child — a second bracket, which could start a settlement run from the child. Drives the
+    worker's real ``main`` in this process, with the job itself replaced by a probe."""
+    _use_db(monkeypatch, tmp_path / "portfolio.db")
+    monkeypatch.setenv("PD_JOB_MODE", "inline")  # main() sets it; restored on undo
+    monkeypatch.setattr(job_worker, "lower_own_priority", lambda: None)  # not the test's
+    bound: list[object] = []
+
+    def handler_restored() -> logging.Handler:
+        handler = logging.FileHandler(tmp_path / "app.log", encoding="utf-8")
+        bound.append(handler)
+        return handler
+
+    monkeypatch.setattr(job_worker, "attach_append_log", handler_restored)
+    seen: list[object] = []
+
+    def probe(conn: sqlite3.Connection, job_id: str, run_id: int, *, now: datetime,
+              trigger: str) -> bool:
+        seen.append(jobs._AFTER_JOB_HOOK)
+        return True
+
+    monkeypatch.setattr(jobs, "run_in_worker", probe)
+    try:
+        code = job_worker.main(["quotes_tw", "41", "--now", NOW.isoformat(),
+                                "--trigger", "manual", "--tz", "Asia/Taipei"])
+    finally:
+        for handler in bound:
+            assert isinstance(handler, logging.Handler)
+            handler.close()
+    assert code == job_worker.EXIT_DONE
+    assert seen == [None]
+    # not vacuous: the composition root the worker calls DOES bind the hook
+    composition.bind_runtime()
+    assert jobs._AFTER_JOB_HOOK is service.after_job_hook
+
+
 # ------------------------------------------------------------------- what runs where
 
 
@@ -451,6 +496,186 @@ def test_a_cron_fire_brackets_the_child_with_the_hook_too(
     run_id = _dispatch("signal_scan")
     assert run_id is not None and seen == [_row(db, run_id=run_id)["finished_at"]]
     assert seen[0] is not None
+
+
+class HookRecorder:
+    """An after-job hook that records each half: the after-half with whether the job's row
+    was final when it ran, and that row's reason."""
+
+    def __init__(self, db: Path) -> None:
+        self.db = db
+        self.events: list[tuple[Any, ...]] = []
+
+    def __call__(self, job_id: str) -> Callable[[], None]:
+        self.events.append(("before", job_id))
+
+        def after() -> None:
+            row = _row(self.db, job_id=job_id)
+            self.events.append(("after", job_id, row["finished_at"] is not None,
+                                row["reason"]))
+
+        return after
+
+
+@pytest.mark.parametrize(("mode", "reason"), [("die", "worker_died"), ("slow", "timeout")])
+def test_the_hook_closes_its_bracket_once_after_a_child_dies_or_overruns(
+    template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    reason: str,
+) -> None:
+    """The after-half runs exactly once, after the row is final, on the waiter's error paths
+    too: a worker that dies mid-run and one stopped over its time limit."""
+    db = _copy(template.path, tmp_path)
+    _use_db(monkeypatch, db)
+    _child_mode(monkeypatch, mode=mode, job_id="signal_scan", sleep_s=120)
+    if mode == "slow":  # the dying child's start-up alone can outlast a 3 s limit
+        monkeypatch.setattr(jobs, "JOB_TIME_LIMIT_S", 3.0)
+    hook = HookRecorder(db)
+    jobs.register_after_job_hook(hook)
+    assert _dispatch("signal_scan") is not None
+    assert hook.events == [("before", "signal_scan"), ("after", "signal_scan", True, reason)]
+
+
+def test_a_cancel_landing_right_after_the_mark_still_closes_the_bracket(
+    template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``child_runner``'s ``on_start`` ran (the mark is taken) and a cancel lands before the
+    process starts: no child runs, and the after-half still runs exactly once, after the row
+    is final (「工作子程序無法啟動」)."""
+    db = _copy(template.path, tmp_path)
+    _use_db(monkeypatch, db)
+    _child_mode(monkeypatch, mode="pid", job_id="signal_scan")
+    hook = HookRecorder(db)
+    jobs.register_after_job_hook(hook)
+    real_spawn = child_runner.spawn
+    handles: list[child_runner.ChildHandle] = []
+
+    def spawn(module: str, args: Any = (), **kw: Any) -> child_runner.ChildHandle:
+        mark = kw.pop("on_start")
+
+        def mark_then_cancel() -> None:
+            mark()
+            canceller = threading.Thread(target=handles[0].terminate_and_wait, args=(5.0,),
+                                         daemon=True)
+            canceller.start()
+            _wait_until(lambda: handles[0].cancel_requested)
+
+        handle = real_spawn(module, args, on_start=mark_then_cancel, **kw)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(child_runner, "spawn", spawn)
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(), timeout=5)  # handle first
+    worker = threading.Thread(target=_dispatch, args=("signal_scan",), daemon=True)
+    try:
+        worker.start()
+        _wait_until(lambda: bool(handles))
+    finally:
+        gate.release()
+    worker.join(60)
+    assert not worker.is_alive()
+    assert handles[0].result is not None and not handles[0].result.started
+    assert hook.events == [("before", "signal_scan"),
+                           ("after", "signal_scan", True, "worker_not_started")]
+
+
+class SettledDb(NamedTuple):
+    path: Path
+    #: The reason of every automatic run the after-job hook asked for (none is run).
+    started: list[str]
+
+
+@pytest.fixture
+def settled_db(template: Template, tmp_path: Path,
+               monkeypatch: pytest.MonkeyPatch) -> Iterator[SettledDb]:
+    """A template copy as the configured database with a published, usable store (the service
+    tests' stub worker, inline) and the automatic starts recorded by reason instead of run.
+    The caller binds the REAL after-job hook after :func:`_child_mode` (which clears it)."""
+    from tests.settlement import service_support as sup
+
+    db = sup.prepare(_copy(template.path, tmp_path), monkeypatch)
+    assert service.start_run(scope="full", reason="button").ended is not None
+    started: list[str] = []
+
+    def record(*, scope: str, reason: str, **kw: Any) -> None:
+        started.append(reason)
+
+    monkeypatch.setattr(service, "start_automatic", record)
+    yield SettledDb(db, started)
+    service.reset_for_tests()
+
+
+def _manual_run(job_id: str) -> None:
+    """The 立即執行 door: the request inserts the row, its daemon thread runs the job."""
+    with session() as conn:
+        start_run(conn, job_id, now=NOW)
+    run_job_func(job_id, now=NOW)
+
+
+def _dispatch_behind_the_gate(db: Path, during_wait: Callable[[], None], *,
+                              door: str = "schedule") -> None:
+    """A run of ``signal_scan`` — its cron fire, or a manual 立即執行 — queued behind another
+    heavy child (the gate's lock held here), *during_wait* run while it waits, then the gate
+    released and the run finished."""
+    gate = proc_lock.lock(proc_lock.heavy_child_lock_path(), timeout=5)
+    run: Callable[[str], object] = _dispatch if door == "schedule" else _manual_run
+    worker = threading.Thread(target=run, args=("signal_scan",), daemon=True)
+    try:
+        worker.start()
+        _wait_until(lambda: any(c.handle is not None and c.waiting()
+                                for c in jobs._CHILD_RUNS.values()))
+        time.sleep(0.3)
+        during_wait()
+    finally:
+        gate.release()
+    worker.join(120)
+    assert not worker.is_alive()
+    assert _row(db, job_id="signal_scan")["status"] == "ok"
+
+
+def _owner_revises_a_close(db: Path) -> None:
+    """The owner's own price write (a new ``prices`` counter, dated before the live window):
+    counters carry no actor, so only WHEN the job's mark was taken tells it apart."""
+    conn = sqlite3.connect(db)
+    try:
+        install_actor(conn, "user:owner")
+        upsert_prices(conn, [PriceRow(instrument="2330", market=Market.TW,
+                                      as_of=date(2026, 3, 2), close=Decimal("612.5"),
+                                      source="test")], fetched_at=NOW)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("door", ["schedule", "manual"])
+def test_an_owner_change_made_while_a_job_waits_for_the_gate_is_not_the_jobs(
+    settled_db: SettledDb, monkeypatch: pytest.MonkeyPatch, door: str,
+) -> None:
+    """Code review 2026-10-20: the trail mark was taken BEFORE the job waited at the heavy
+    gate — possibly minutes, behind a settlement child — so a price counter the owner created
+    during the wait counted as the job's change and started an automatic run (reason
+    ``job:<id>``) instead of leaving it to the owner's prompt. The mark is now taken when the
+    gate grants the turn, on the cron fire and on 立即執行 alike."""
+    db = settled_db.path
+    _child_mode(monkeypatch, mode="pid", job_id="signal_scan")
+    jobs.register_after_job_hook(service.after_job_hook)
+    _dispatch_behind_the_gate(db, lambda: _owner_revises_a_close(db), door=door)
+    pending = sqlite3.connect(db)
+    try:   # the owner's change is recorded, and left pending for the owner's prompt
+        assert pending.execute(
+            "SELECT COUNT(*) FROM settle_change_agg WHERE claimed_run_id IS NULL "
+            "AND settled_run_id IS NULL").fetchone()[0] == 1
+    finally:
+        pending.close()
+    assert settled_db.started == []
+
+
+def test_a_change_the_job_itself_makes_after_the_gate_still_starts_a_run(
+    settled_db: SettledDb, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _child_mode(monkeypatch, mode="write", job_id="signal_scan")   # a cash movement, back-dated
+    jobs.register_after_job_hook(service.after_job_hook)
+    _dispatch_behind_the_gate(settled_db.path, lambda: None)
+    assert settled_db.started == ["job:signal_scan"]
 
 
 # ------------------------------------------------------------------- liveness

@@ -9,7 +9,7 @@ test_read_path_periods.py``.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi.testclient import TestClient
 
@@ -20,8 +20,8 @@ from tests.conftest import GOLDEN_NOW
 _OLD_FIELDS = {"month", "as_of", "reporting_ccy", "total_value", "total_return",
                "total_return_rate", "xirr", "by_currency"}
 #: The additive fields of §11.4.
-_NEW_FIELDS = {"kind", "provisional", "stale", "notes", "xirr_reason", "period_twr",
-               "period_twr_reason", "restated", "current"}
+_NEW_FIELDS = {"kind", "provisional", "stale", "notes", "xirr_reason", "xirr_window_days",
+               "period_twr", "period_twr_reason", "restated", "current"}
 
 
 def test_an_unusable_store_serves_every_month_live(api_client: TestClient) -> None:
@@ -50,6 +50,23 @@ def test_the_current_month_is_the_dashboards_kpis(api_client: TestClient) -> Non
     k = dash["kpis"]
     assert (row["total_value"], row["total_return"], row["total_return_rate"], row["xirr"]) == (
         k["total_market_value"], k["total_return"], k["total_return_rate"], k["xirr"])
+    # the KPI card's short-window hint and the 月度成績 cell read the same window (MINOR 7b)
+    assert row["xirr_window_days"] == k["xirr_window_days"]
+
+
+def test_a_month_row_carries_its_xirr_window(api_client: TestClient) -> None:
+    """Accountant MINOR 7b (owner ruling 2026-10-22): every month row carries its 累計 XIRR's
+    observation window, so the cell shows 「觀察期 N 天・短窗參考」 under a year. Golden's first
+    row is a buy on 2026-01-05: the live June row (as at 2026-06-11) is 157 days in, and every
+    past month with an XIRR counts the days to its own end."""
+    rows = {r["month"]: r for r in api_client.get("/api/snapshots").json()["rows"]}
+    for r in rows.values():
+        assert r["xirr_window_days"] is None or isinstance(r["xirr_window_days"], int)
+        if r["xirr"] is not None and not r["current"]:
+            end = date.fromisoformat(r["as_of"])
+            assert r["xirr_window_days"] == (end - date(2026, 1, 5)).days, r["month"]
+    june = rows["2026-06"]
+    assert june["xirr"] is not None and june["xirr_window_days"] == 157
 
 
 def test_a_blank_figure_states_its_reason(api_client: TestClient) -> None:

@@ -542,9 +542,16 @@ def _table(op: str) -> str:
     return _TABLE_OF[op.split("_", 1)[0]]
 
 
-@pytest.mark.parametrize("engine", sorted(_ENGINES))
-@pytest.mark.parametrize("name", ["golden", "demo", "doubled_demo", "rich", "rich_refusals",
-                                  "epoch1990"])
+#: Every corpus on both engines — and ``unquoted_ccy_cash`` on the shipping engine only: its
+#: MYR rebate is in a currency no instrument is quoted in, so the frozen v0.1.31 trend (the
+#: quote currencies' pairs only, PERF-F2) has no series to compare, while the fixed trend
+#: converts the rebate.
+_CASES = [(name, engine) for name in ("golden", "demo", "doubled_demo", "rich",
+                                      "rich_refusals", "epoch1990")
+          for engine in sorted(_ENGINES)] + [("unquoted_ccy_cash", "live")]
+
+
+@pytest.mark.parametrize(("name", "engine"), _CASES)
 def test_dirty_from_bounds_every_reference_change(
     corpus_db: CorpusFactory, name: str, engine: str
 ) -> None:

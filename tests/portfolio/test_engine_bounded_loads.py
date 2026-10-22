@@ -25,7 +25,7 @@ from portfolio_dash.api.routers.performance import performance_twr
 from portfolio_dash.data_ingestion.holdings import load_action_index
 from portfolio_dash.data_ingestion.store import insert_transaction, upsert_instrument
 from portfolio_dash.portfolio.dashboard import _build_dashboard
-from portfolio_dash.portfolio.dashboard_models import TrendSeries
+from portfolio_dash.portfolio.dashboard_models import TrendSeries, with_trend_pnl
 from portfolio_dash.portfolio.price_basis import series_in
 from portfolio_dash.portfolio.timeseries import FxHistory
 from portfolio_dash.portfolio.twr import build_overlay, convert_closes, twr_index
@@ -54,7 +54,8 @@ _EPOCH = date(1900, 1, 1)
 
 
 def _frozen_trend(i: DashboardInputs) -> TrendSeries:
-    """``build_dashboard`` steps 9 / 9b on the frozen v0.1.31 functions and 1900- loads."""
+    """``build_dashboard`` steps 9 / 9b on the frozen v0.1.31 functions and 1900- loads, as
+    served (``with_trend_pnl``)."""
     trend = ref.ref_daily_value_series(i.bundle, i.price_history, i.trend_fx_history,
                                        i.reporting, end=i.as_of,
                                        cash_movements=i.cash_movements)
@@ -63,7 +64,9 @@ def _frozen_trend(i: DashboardInputs) -> TrendSeries:
     cash = ref.ref_daily_cash_series(i.cash_movements, i.cash_convs, i.cash_txs, i.cash_divs,
                                      i.instruments, i.cash_fx_history, i.reporting,
                                      end=i.as_of)
-    return ref.ref_compose_net_worth(trend, cash)
+    # the series as SERVED: each point's pnl (owner ruling 2026-10-22), which the dashboard
+    # sets on every day it serves (stored and live) and the frozen engine never did
+    return with_trend_pnl(ref.ref_compose_net_worth(trend, cash))
 
 
 def _frozen_benchmark(conn: sqlite3.Connection, i: DashboardInputs) -> dict[str, Any] | None:

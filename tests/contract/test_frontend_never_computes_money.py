@@ -36,6 +36,7 @@ from portfolio_dash.portfolio.dashboard_models import (
     OptionRealizedRow,
     OptionRealizedUnderlying,
     OptionRealizedYear,
+    TrendPoint,
 )
 
 _WEB = Path(__file__).resolve().parents[2] / "web"
@@ -57,10 +58,13 @@ def _money_fields() -> set[str]:
     names: set[str] = set()
     # The 選擇權 block (options spec §7.1, 2026-10-09): premiums, 口數, the obligation and the
     # option totals are server strings too — 口 ↔ 股當量 and every premium total included.
+    # TrendPoint (the trend card, ``pnl`` included — owner ruling 2026-10-22) was not in the list
+    # until then, which is how the tooltip's float subtraction went unseen until 2026-10-19, and
+    # was then caught only because a settlement model happens to have a ``net_invested`` too.
     models: list[type[BaseModel]] = [
         HoldingRow, KpiSummary, OptionOpenRow, OptionObligationSubtotal, OptionContractRealized,
         OptionRealizedRow, OptionMoney, OptionRealizedYear, OptionRealizedUnderlying,
-        *_settlement_models()]
+        TrendPoint, *_settlement_models()]
     for model in models:
         names |= {n for n, f in model.model_fields.items()
                   if "Decimal" in str(f.annotation)}
@@ -116,16 +120,11 @@ def _hits() -> list[tuple[str, int, str]]:
 
 
 #: KNOWN violations, kept visible rather than hidden — each one a finding with an owner, not a
-#: permission. (file, the stripped line) → why it is not fixed in place.
-_KNOWN: dict[tuple[str, str], str] = {
-    ("charts.js", "const spread = pt.total_value - pt.net_invested;"):
-        "PRE-EXISTING, found 2026-10-19 when the field list gained the settlement models: the "
-        "trend tooltip's 累計總損益（含匯兌） is total_value − net_invested in JS floats. "
-        "TrendPoint was never in the list, so the guard could not see it. A server field would "
-        "change the dashboard payload, which PERF invariant 1 freezes byte for byte against "
-        "v0.1.31 this release; dropping the line removes a figure the owner reads. Reported "
-        "to the main session for an owner ruling (PERF plan §6.3 package F report).",
-}
+#: permission. (file, the stripped line) → why it is not fixed in place. Empty since 2026-10-22:
+#: its one entry, the trend tooltip's ``pt.total_value - pt.net_invested`` (found 2026-10-19),
+#: was fixed by the owner's ruling — the server sends each point's ``pnl`` and the tooltip only
+#: formats it (``test_the_trend_tooltip_formats_the_servers_pnl``).
+_KNOWN: dict[tuple[str, str], str] = {}
 
 
 def test_no_js_arithmetic_on_a_money_field() -> None:
@@ -154,6 +153,8 @@ def test_the_field_list_is_real_and_the_pattern_bites() -> None:
     # PERF spec §15: a period close's KPI block, the per-day diff and a restatement.
     assert {"total_market_value", "period_twr", "net_worth", "before", "after",
             "old_value", "new_value", "balance"} <= fields, fields
+    # The trend card's points as served, ``pnl`` included (owner ruling 2026-10-22).
+    assert {"total_value", "net_invested", "net_worth", "pnl"} <= fields, fields
     assert len(_settlement_models()) >= 20, _settlement_models()
     assert len(fields) >= 20, len(fields)
 
@@ -161,6 +162,12 @@ def test_the_field_list_is_real_and_the_pattern_bites() -> None:
     after = re.compile(rf"\.(?:{names})\s*[*/-]\s*(?![/*])")
     # the exact line that shipped the bug
     assert after.search("f.signedPct(h.unrealized_pnl / h.adjusted_cost_total)")
+    # and the trend tooltip's (2026-10-22), seen from either side of the operator — so a
+    # reintroduced subtraction fails even if one of the two names left the list
+    spread = "const spread = pt.total_value - pt.net_invested;"
+    assert after.search(spread)
+    assert re.search(rf"[*/-]\s*[A-Za-z_$][\w$]*\.(?:{names})\b", spread)
+    assert after.search("const back = pt.pnl - 0;")
     assert after.search("(h.weight / maxWeight) * 100")
     # and things that must NOT trip it
     assert not after.search("tdPnl.appendChild(el('span', null, f.signed(h.unrealized_pnl)))")
@@ -176,3 +183,16 @@ def test_comments_quoting_the_banned_expression_do_not_trip_it() -> None:
     clean = _strip_noise(src)
     names = "|".join(sorted(_money_fields()))
     assert not re.search(rf"\.(?:{names})\s*[*/-]\s*(?![/*])", clean), clean
+
+
+def test_the_trend_tooltip_formats_the_servers_pnl() -> None:
+    """The positive half of the 2026-10-22 fix: it is not enough that the subtraction is gone.
+
+    The tooltip's 累計總損益（含匯兌） must be the server's ``pnl`` string handed straight to
+    ``fmt``, and its colour must come from the string's sign (``f.signClass``), not from a
+    comparison that coerces it to a float."""
+    clean = _strip_noise((_WEB / "charts.js").read_text(encoding="utf-8"))
+    assert "f.signed(pt.pnl, " in clean, "the tooltip must format the server's pnl"
+    assert "f.signClass(pt.pnl)" in clean, "the colour must read the sign off the string"
+    assert not re.search(r"pt\.pnl\s*[<>]", clean), "a numeric comparison coerces the string"
+    assert "pt.total_value - pt.net_invested" not in clean

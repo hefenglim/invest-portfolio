@@ -158,6 +158,34 @@ the flag unset on such an instance.
 Set the flags as `Environment=` lines in the unit (above), then
 `sudo systemctl daemon-reload && sudo systemctl restart portfolio-dash`.
 
+### Small-VM tuning (optional, a 1 GB `e2-micro`; v0.1.32)
+
+What the reference deployment runs, measured and adopted on 2026-10-20. Put each set in a drop-in
+(`sudo systemctl edit <unit>` writes one), so the unit file itself stays as above.
+
+- **Both instances:** `Environment=MALLOC_ARENA_MAX=2` (fewer glibc malloc arenas in a threaded
+  Python) and `Environment=LITELLM_LOCAL_MODEL_COST_MAP=True` (litellm uses the cost table bundled
+  with the installed version instead of fetching one from GitHub in every job child; a model newer
+  than that version has no price until litellm is upgraded).
+- **Two instances on one VM:** `CPUWeight=1000` on prod and `CPUWeight=100` on the test/demo
+  instance, so prod wins the CPU when both are busy. Give the test/demo instance a
+  `MemoryHigh=<about 1.5× its measured peak>` below its `MemoryMax`, so the kernel reclaims it
+  first. Read the peak from `/sys/fs/cgroup/system.slice/<demo-unit>.service/memory.peak` after
+  its first full settlement.
+- **zram swap**, so swapped pages stay compressed in RAM instead of on the persistent disk:
+  ```bash
+  sudo apt-get install -y systemd-zram-generator
+  sudo tee /etc/systemd/zram-generator.conf >/dev/null <<'EOF'
+  [zram0]
+  zram-size = ram / 2
+  compression-algorithm = zstd
+  swap-priority = 100
+  EOF
+  sudo systemctl daemon-reload && sudo systemctl start systemd-zram-setup@zram0
+  echo 'vm.swappiness=100' | sudo tee /etc/sysctl.d/99-<app>-swap.conf && sudo sysctl --system
+  cat /proc/swaps        # /dev/zram0 at priority 100, the disk swap file below it as overflow
+  ```
+
 ---
 
 ## 6. Reach it from your laptop (pick ONE — both keep it private)
@@ -223,9 +251,11 @@ append-only ledgers — your data is never rewritten).
 - **Automatic:** the scheduler runs a **daily backup at 01:30 (Asia/Taipei)** →
   `data/backups/portfolio_YYYY-MM-DD.db.gz` (keeps the latest 30; runs `PRAGMA
   integrity_check`).
-- **Manual snapshot anytime:**
+- **Manual snapshot anytime** — SQLite's online backup, safe while the service runs. A plain
+  `cp data/portfolio.db` is safe only with the service stopped AND `data/` holding one file:
+  committed changes may still sit in `portfolio.db-wal` (see "WAL files" below).
   ```bash
-  cp ~/invest-portfolio/data/portfolio.db ~/portfolio-$(date +%F).db
+  cd ~/invest-portfolio && ./.venv/bin/python -c "import sqlite3, sys; s = sqlite3.connect('data/portfolio.db'); d = sqlite3.connect(sys.argv[1]); s.backup(d); d.close(); s.close()" ~/portfolio-$(date +%F).db
   ```
 - **Off-VM (do this — a VM can die):** copy the newest backup to a GCS bucket weekly.
   ```bash
@@ -245,21 +275,36 @@ sudo systemctl start portfolio-dash
 (`make` uses the repo venv; if `make` isn't installed: `sudo apt -y install make`, or just
 `cp <backup> data/portfolio.db` while the service is stopped.)
 
-**WAL files — check before you copy.** The database runs in WAL mode.
+**WAL files — check before you copy.** The database runs in WAL mode. `data/portfolio.db-wal`
+holds COMMITTED changes not yet folded back into `portfolio.db`: SQLite folds them in on the
+next open, so never delete the `-wal` of the database you keep.
 - **Clean stop** (`systemctl stop` / restart, v0.1.32+): the app checkpoints on the way out, so
-  `data/` holds ONE file, `portfolio.db`.
+  `data/` holds ONE file, `portfolio.db`. It first waits up to 15 s for a background pre-warm
+  still reading the database. If `app.log` shows `the WAL checkpoint could not complete` or
+  `pre-warm(s) still running` for that stop, `-wal` / `-shm` may remain, as after a crash.
 - **Crash** (an OOM kill, a power loss, a `kill -9`): `data/portfolio.db-wal` and
-  `data/portfolio.db-shm` may remain. A file-copy restore must DELETE both before the service
-  starts. Otherwise SQLite replays the stale WAL into the restored file. `make restore` does not
-  delete them.
+  `data/portfolio.db-shm` may remain.
 
-```bash
-sudo systemctl stop portfolio-dash
-ls -l ~/invest-portfolio/data/portfolio.db*           # any -wal / -shm left?
-rm -f ~/invest-portfolio/data/portfolio.db-wal ~/invest-portfolio/data/portfolio.db-shm
-make restore FILE=data/backups/portfolio_YYYY-MM-DD.db
-sudo systemctl start portfolio-dash
-```
+When `-wal` / `-shm` remain, what is right depends on what you do next:
+- **Copy the database (a backup by `cp`):** fold the WAL back first. Start the service and stop
+  it again (a clean stop checkpoints), or, with the service stopped, run the line below. Copy
+  only once `data/` holds one file. A copy of `portfolio.db` alone misses the changes in the
+  `-wal`.
+  ```bash
+  cd ~/invest-portfolio && ./.venv/bin/python -c "import sqlite3; c = sqlite3.connect('data/portfolio.db'); print(c.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()); c.close()"
+  ls -l data/portfolio.db*                             # one file left?
+  ```
+- **Restore a backup over it** (`make restore`, `cp <backup> data/portfolio.db`): the old
+  `-wal` / `-shm` belong to the file being REPLACED, so DELETE both before the service starts.
+  Otherwise SQLite replays that stale WAL into the restored file. `make restore` does not delete
+  them.
+  ```bash
+  sudo systemctl stop portfolio-dash
+  ls -l ~/invest-portfolio/data/portfolio.db*           # any -wal / -shm left?
+  rm -f ~/invest-portfolio/data/portfolio.db-wal ~/invest-portfolio/data/portfolio.db-shm
+  make restore FILE=data/backups/portfolio_YYYY-MM-DD.db
+  sudo systemctl start portfolio-dash
+  ```
 
 The settlement store needs no restore of its own. It is derived from the ledgers, and a backup
 carries its own store, consistent with its own ledger. The boot after a restore settles in full

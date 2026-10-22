@@ -11,7 +11,7 @@
 > **byte-identical** with the zh manual (they are machine identifiers); formula bodies
 > are reproduced verbatim; only prose is translated.
 
-> **Version**: `v1.13` (2026-10-20)
+> **Version**: `v1.15` (2026-10-22)
 > **Code baseline**: `v0.1.28 + feat/corporate-actions` (corporate actions
 > SPLIT / EXCHANGE / SPINOFF; incl. the 2026-08-13 **seven cash-movement kinds / two-axis
 > table** and the **US cash dividend, P1b**)
@@ -1273,6 +1273,11 @@ Verification anchor: `holding.unrealized_pnl / holding.market_value schwab|TSLA`
 - **Missing current price**: `price is None` → `market_value / unrealized_pnl /
   capital_gain` all set to `None`, `price_stale = True`; **never fabricate a price**. Any
   rollup gated on `market_value is not None` automatically excludes it.
+  **The limit case, every price missing**: when every held stock lacks a price on the valuation
+  day (D for a close, §7.1b), 總市值 and the unrealized part of 總報酬 hold none of them, so they
+  read 0 (with nothing realized, 月度成績 shows 0 / +0 / +0.00% and marks ⚠ 缺價格). That is the
+  limit case of the partial-sum rule, not a fabricated price; only XIRR is all-or-nothing and
+  reads `None`.
 - **Oversell (sell quantity > holdings)**: a distinction between **input error vs short
   sale**, with semantics of **"blocked pending ack"** (blocked-pending-ack):
   - Validation path (`allow_oversell=False`): `build_book` raises `OversellError`; the API
@@ -1646,11 +1651,19 @@ for "on or before D":
 | Option contract | its last ordinary trade price on or before D (§4.5) |
 | FX | the latest rate on or before D (direct pair, else the inverse pair); the rates used and their dates are stored in `fx_used` |
 
+**Every price missing**: when every held stock lacks a price at D, 總市值 and the unrealized part
+of 總報酬 hold none of them and read 0 (with nothing realized, 月度成績 shows 0 / +0 / +0.00% and
+marks ⚠ 缺價格) — the limit case of the partial-sum rule; only XIRR is all-or-nothing (`None`).
+
 **(b) Every KPI is "cumulative since inception", as at D**: `total_market_value` (總市值 = the
 stock subtotal + options), `total_return` (cumulative total return A, §7.1a),
 `total_return_rate` (cumulative return rate), `xirr` with `xirr_window_days` / `xirr_reason`
 (cumulative XIRR, the same gates as §7.2 / §7.2.1), and `by_currency_value` (§7.3). **None of
 them is the period's own return.** A year row must never be read as "that year's return".
+Over an observation window shorter than 365 days the 月度成績 累計 XIRR cell carries the KPI
+card's own hint 「觀察期 N 天・短窗參考」 (§7.2.1; the 30-day gate is unchanged; a month row's days
+are `xirr_window_days` of `/api/snapshots`, a year row's the same field of its `kpi`; owner
+ruling 2026-10-22).
 
 **(c) The period return (TWR)**:
 
@@ -1678,9 +1691,15 @@ release**: its absence is not a zero.
 - `missing_fx` / `stale_fx`; `pending_positions` (the 待釐清 on the book at D: 賣超, an unapplied
   corporate action, a refused dividend, a refused close row); `options_value_excluded`,
   `options_past_expiry`;
-- `trend_unavailable`: D has no trend point. Either part of the invested flows has no rate on or
-  before its own date (「部分投入流量缺少當日匯率，該日沒有走勢資料」), or the trend has not
-  started yet (「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」);
+- `trend_unavailable`: D has no trend point. Either an invested flow has no rate on or before its
+  own date, and the reason names the **first** such flow's date and pair
+  (「2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算」; one owner,
+  `timeseries.trend_unavailable_reason`, read by the dashboard's
+  `freshness.trend_unavailable_reason`, this field and the period-return reason of a live and a
+  stored close, and the run report's daily-valuation step; owner ruling 2026-10-22. A close
+  computed live and dated **before** that flow reads the same owner's variant
+  「即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算」, see (m)), or the trend has not started
+  yet (「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」);
 - `missing_cash_fx`: a non-empty cash pool at D with no rate to the reporting currency;
 - `dividends_receivable`: **computed when the close is read, never stored**. It holds every
   non-STOCK dividend with `ex_date ≤ D < payment date` (the price has already dropped, while the
@@ -1713,6 +1732,10 @@ reporting value `None`:
 > contains** the cash dividends folded into that position's cost (§6.1). So "realized" +
 > "dividends" is **not** "what the period earned"; the system neither forms nor shows any
 > cross-line total (in the spirit of I4: a dividend enters total return once). See E31 below.
+
+**A corporate action is not an activity line; its effect is in the holdings at the period end**
+((i); owner ruling 2026-10-22). The line will be added when the period activity first appears on
+screen.
 
 **(h) Tie-out with the tax package, sheet by sheet**: realized sales and short covers (both the
 adjusted and the original column) ≡ `realized_gains_<year>.csv`; booked CASH / NET / DRIP
@@ -1750,7 +1773,22 @@ range is marked `stale: true` and shows 「更新前版本」.
 `settle_restatement` row. The row holds the field's Chinese label (總市值 / 累計總報酬 /
 累計報酬率 / 累計 XIRR / 當期報酬（TWR） / 證券市值 / 淨投入 / 淨資產 / `<currency> 市值`), the unit,
 the old value → the new value, the notes before and after, the reason and the time. The row is
-**never deleted**, and the period row is marked 「已重述」. **The go-live restatement (上線重述)**: on
+**never deleted**, and the period row is marked 「已重述」. **The reason**: 「計算規則更新」 when the
+calc version changed; otherwise every change that moved the period whose affected day is **on or
+before that close's end day D**, earliest first, at most 3 named and then 「等 N 筆」 (N counts all
+of them) — e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A close names only what can have
+moved it; with no such change it reads 「重新結算」. "The changes that moved the period" are the
+ones the run claimed plus, for a run chained after a **partial** publish, those its predecessor
+(and the chain before it) settled: after a partial publish the closes from the hand-over day
+still hold an earlier version's figures, moved by both runs' changes. Counting: two or more
+**records** an import inserted, or its **undo** deleted (told by the 「批次復原 #n」 tag in
+`ledger_audit`), are one entry, 「匯入批次（交易／股利）」; an edit or a hand delete of an imported
+row is a correction of its own; a price or a rate is one entry per symbol or pair, e.g.
+「價格（2330）」; the rebuilt triggers are one undated entry, 「觸發器重建（交易）」, and alone they
+read 「觸發器重建（交易）後重新結算」 (owner ruling 2026-10-22 and the review after it; before it,
+every row of one run named that run's earliest change. Stored restatement rows are never
+rewritten).
+**The go-live restatement (上線重述)**: on
 each month's first publish, if the old `portfolio_snapshots` holds that month's freeze **written
 on the month's last day** (the go-live month's row was never a close and is not compared), every
 field that differs is recorded with `cutover = 1` and the reason
@@ -1759,21 +1797,41 @@ months before a ledger import reflect an empty ledger, so a one-time restatement
 The activity lines and the holdings are recomputed on every run and never recorded as
 restatements.
 
-**(m) Known defects the owner ruled to defer** (ruling 2026-10-19: v0.1.32 first keeps its
-byte-for-byte identity with v0.1.31, and each is fixed as its own change after the release; both
-are pinned `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`):
-- **PERF-F2**: the trend's FX pairs hold only the ledger's **quote currencies**. If an XIRR-kind
-  cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) is in a currency no instrument is quoted
-  in, **the whole trend** (net worth, B, B−A, the index comparison) is unavailable, although its
-  rate is stored and XIRR already counts that movement. A close stored for a day before that flow
-  keeps its trend fields. A close from that flow on carries `notes.trend_unavailable` and no
-  period return. On such a ledger, a past close computed live has no trend fields at all.
-- **The price-basis split edge**: `upsert_prices` folds in the splits in `(as_of, fetched_at]`,
-  with `fetched_at` the **Taipei** date. A US quote fetched on the split's effective date in
-  Taipei, before the New York open (the provider still delivers the previous session's raw
-  close), is multiplied by the split ratio. The next day's fetch, after the provider has
-  restated, restores the correct value. In between, a day or a close valued from that row is off
-  by one ratio.
+**(m) Two defects fixed after v0.1.32** (ruling 2026-10-19: v0.1.32 first kept its
+byte-for-byte identity with v0.1.31, and each was fixed as its own change after the release;
+until then both were pinned `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`, and
+they are plain regression tests now):
+- **PERF-F2 (fixed)**: the trend's FX pairs held only the ledger's **quote currencies**. If an
+  XIRR-kind cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) was in a currency no
+  instrument is quoted in, **the whole trend** (net worth, B, B−A, the trading and financing
+  cost, the index comparison) was unavailable, although its rate was stored and XIRR already
+  counted that movement. The trend's FX pairs are now the quote currencies ∪ the currency of
+  every cash movement the trend converts (`timeseries.trend_fx_currencies`, with XIRR's own
+  predicate `returns.is_return_movement`; the live build and the settlement worker share this
+  one source). When a flow genuinely has no rate on or before its date, the whole trend is
+  still unavailable (its reason names the first such flow's date and pair, see (e); before v1.15
+  it read 「帳本中有交易日期缺少匯率資料」): a close stored for a day before that flow
+  keeps its trend fields, a close from that flow on carries `notes.trend_unavailable` and no
+  period return, and on such a ledger a past close computed live (the live trend being wholly
+  unavailable) has no trend fields at all — one dated before that flow reads the same owner's
+  variant 「即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算」 (same date and pair): the live series
+  as a whole is unavailable, not that day's rate (the figures are unchanged; whether a live
+  computation should cut its own trend at the day before the flow is an owner's decision).
+- **The price-basis split edge (fixed, owner ruling 2026-10-20)**: the upper bound `T` of the
+  write window `(as_of, T]` was the fetch's **Taipei** date. When the US quote job fetched a
+  split's last pre-split session at 16:30 New York, it was already the next day (the ex-date) in
+  Taipei, so the old rule multiplied a close the provider had not restated by the split ratio,
+  until `history_daily` re-fetched it about 20 hours later; in between, a day or a close valued
+  from that row was off by one ratio. `T` is now the fetch's date on the **exchange's** calendar
+  (New York's for US stocks; `pricing/store.split_window_through`, shared by the write and the
+  reconcile): that fetch's New York date is still the session's own day, the window holds no
+  split, and the close is stored as traded. TW and MY rows (UTC+8, no DST) stamped +08:00 or
+  with no timezone are unaffected. Residuals, each healed by the next fetch after the split takes
+  effect: ① a manual fetch on the ex-date between New York's midnight and its open (12:00–21:30
+  Taipei, 13:00–22:30 in winter) still folds the ratio if the provider has not restated yet;
+  ② if the provider restates before the exchange's local midnight, that fetch stores an
+  un-folded post-split price — for a Monday ex-date, the weekend `history_daily` runs (Taipei
+  Saturday to Monday 02:00) fall in this range.
 
 **Verification anchors (E30, E31; both hand-checkable)**
 
@@ -1973,7 +2031,8 @@ simply not readable as a return rate. Therefore:
 - `xirr_window_days` is **reported whenever `xirr_reporting` actually runs**, including when
   the rate is `None` (a missing current price, a cashflow series with no sign change,
   non-convergence) and under this section's "below 30 days, not annualized" rule. The existing
-  short-window hint still applies over 30–365 days. **It is `null` when XIRR is withheld before
+  short-window hint still applies over 30–365 days (the KPI card and the 月度成績 累計 XIRR cell
+  carry the same hint, 「觀察期 N 天・短窗參考」, v1.15). **It is `null` when XIRR is withheld before
   it is computed** (owner ruling 2026-10-20: keep v0.1.31's behaviour). That happens in three
   cases:
   ① the ledger carries a 待釐清 that withholds XIRR: a 賣超 (one netted back to zero included),
@@ -2829,6 +2888,7 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | 股利收入彙總 (dividend-income summary) | `dividend_total` / `total_by_currency` | §7.4 |
 | 年度股利預估 (annual dividend projection) | `declared_gross` / `declared_net` | §7.4 |
 | 淨值趨勢市值／累計淨投入 (net-value trend / cumulative net invested) | `total_value` / `net_invested` (`TrendPoint`) | §7.5 |
+| 趨勢圖提示 累計總損益（含匯兌） (trend tooltip: lifetime P&L incl. FX) | `pnl` (`TrendPoint`, rounded half-up to the reporting currency's display places; null on an incomplete day, where the tooltip prints 「—」) | §7.5 |
 | 配息偵測估算 (dividend-detection estimate) | `est_gross` / `est_net` / `est_reinvest_shares` | §6.5 |
 | 配股面額換股常數 (stock-dividend par-value conversion constant) | `TW_STOCK_PAR = 10` | §6.5 |
 | 再平衡週轉／費用／預估餘額 (rebalance turnover / fees / projected balance) | `turnover_reporting` / `total_fees_reporting` / `cash_after` | §11.4 |
@@ -2865,6 +2925,8 @@ $$\text{new\_original\_avg} = \frac{\text{held\_orig\_total} + \text{total\_cost
 | `v1.11` | 2026-10-05 | **New §6.6 Refused Dividends** (owner rulings 2026-10-05; baseline `feat/corporate-actions` after the pre-merge code review CR-01..14 / R1..R12 / S1..S11): the three refusal kinds (no position / open short / exchanged away) recorded on the book, contributing 0 to every money figure, listed and marked 「未入帳（待釐清）」 but left out of every total, the trend day marked incomplete while a held carrier keeps its value, and one owner for the remedy wording; the verification anchor matches the current run (phase-1 137 ops / 11,406 assertions / 0 fail). Mirror regenerated in the same change set. **No existing formula or accounting definition changed other than §6.6.** |
 | `v1.12` | 2026-10-10 | **New §4.5 US Equity Options** (owner rulings R1–R7, OPT-D1..D22; baseline `feat/options-ledger`): a contract as an instrument, share-equivalents, sell-to-open as the declared short, price-0 close rows (expiry / assignment / exercise) and R5, the option fee branch, §4.4 a close row never opens a lot, `OPTION_ADJUST`, last-trade valuation and the point-in-time / trend-derived split, OPT-D20; worked examples and anchors from the current run (phase-1 164 ops / 19,948 assertions / 0 fail). Mirror regenerated in the same change set. **No formula or accounting definition of a stock changed.** |
 | `v1.13` | 2026-10-20 | **Month and year closes replace the monthly snapshot** (PERF-D7, spec `docs/spec/2026-10-18-settlement-store.md` §11; baseline `perf/settlement-store`, v0.1.32). ① **New §7.1b**: the end day D (a calendar day), prices and FX "on or before D", cumulative KPIs (the same gates as live), `period_twr` = I(D) / I(previous end) − 1 and 「待結算」 across the seam between the old and the new version, the trend fields named apart from KPI 總市值, the `notes` (including `trend_unavailable`, `missing_cash_fx` and the `dividends_receivable` computed when read), the first period as the month of the ledger's first row in any table, the eight kinds of period-activity line (**not additive**) and the sheet-by-sheet tie-out with the tax package, the holdings at the period end and the cash at the period end counting booked dividends only, the year close ≡ the December close, provisional / the pre-update version, restatements and the one-time go-live restatement, and the two known defects the owner ruled to defer, PERF-F2 and the price-basis split edge; added §12.1 **E30 / E31** and five §12.2 glossary rows. ② **The §7.1 monthly-snapshot paragraph is rewritten as a retirement note**: the 23:50 freeze (the previous day's US close, never corrected afterwards) is no longer written, and the basis for arbitrating a month-end historical amount is now §7.1b; the §7.3 `by_currency` note is synchronized. ③ **§7.2.1 `xirr_window_days` corrected** (owner ruling 2026-10-20: keep v0.1.31's behaviour): the original "reported in every case" did not match the implementation — it is `null` when XIRR is withheld before it is computed (a 待釐清, a missing rate, no flow). ④ §7.1b added to the §12.4 locating list. Verification anchors match the current run (phase-1 257 ops / 152,086 assertions / 0 fail). Mirror re-translated by hand in the same change set. **No formula or accounting definition of the live KPIs, cost, P&L, XIRR or cash changed**: with the settlement store clean, the dashboard is byte-identical to v0.1.31. |
+| `v1.14` | 2026-10-21 | **Two fixes after v0.1.32** (owner rulings 2026-10-19 and 2026-10-20): §7.1b (m) now records them as fixed. ① **PERF-F2**: the trend's FX pairs are the quote currencies ∪ the currency of every cash movement the trend converts (`timeseries.trend_fx_currencies`), so a REBATE / INTEREST_EXPENSE / BROKER_FEE in a currency no instrument is quoted in no longer makes the whole trend, B, B−A, the trading and financing cost and the index comparison unavailable; a genuinely missing rate still does. ② **The price-basis split edge**: the write window's bound is the exchange-local date. Stress phase 1 gains the `run_unquoted_ccy_cash` checkpoint (on a copy, with its own server). Mirror re-translated by hand in the same change set. **No formula or accounting definition of XIRR, cost, P&L or cash changed**; what moves is only the trend-derived figures that were unavailable for want of an FX pair, and the temporarily wrong close of a split's last pre-split session. |
+| `v1.15` | 2026-10-22 | **The accountant review's five minor findings** (owner rulings 2026-10-22). ① **The restatement reason, per close** (§7.1b (l)): each restatement now names the changes the run claimed whose affected day is on or before that close's end day D (earliest first, at most 3 then 「等 N 筆」, an import batch as one entry), e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」; before it, every row of one run named that run's earliest change. Only restatement rows written from now on change. ② **One owner for the trend-unavailable sentence** (§7.1b (e), (m)): 「2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算」 names the first flow with no rate and its pair (`timeseries.first_unconvertible_flow` / `trend_unavailable_reason`), shared by the dashboard, a live and a stored close, the period-return reason and the run report; it replaces 「帳本中有交易日期缺少匯率資料」 and 「部分投入流量缺少當日匯率，該日沒有走勢資料」. ③ **The short-window hint on 月度成績** (§7.1b (b), §7.2.1): the 累計 XIRR cell carries the KPI card's 「觀察期 N 天・短窗參考」 under 365 days, and `/api/snapshots` month rows gain `xirr_window_days`; the 30-day gate is unchanged. The independent review the same day: a run chained after a partial publish also names its predecessor's settled changes; an import batch counts records and groups deletes only from its undo; the rebuilt triggers read 「觸發器重建（交易）」; a live close dated before the missing-rate flow reads the variant 「即時走勢因 … 而無法計算」; outside a partial publish, a change written after a run's swap no longer starts an automatic chained run (it takes the prompt or the nightly run, PERF-D2). ④ **Every price missing** (§5.3, §7.1b (a)): documented only — 總市值 and the unrealized part read 0, only XIRR is all-or-nothing. ⑤ **A corporate action is not a period-activity line** (§7.1b (g)): documented only. Mirror re-translated by hand in the same change set. **No formula or accounting definition of XIRR, cost, P&L or cash changed**; what changes is the wording of the restatement reason and of an unavailable trend, and one hint on 月度成績. |
 
 ### 12.4 How to Arbitrate a Disputed Amount
 

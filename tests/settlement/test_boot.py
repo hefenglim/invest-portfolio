@@ -5,16 +5,23 @@ depends on an ordinary boot leaving ``schema_version`` alone)."""
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
-from portfolio_dash.api.app import create_app
+from portfolio_dash.api import alert_inputs
+from portfolio_dash.api import app as app_module
+from portfolio_dash.api.app import checkpoint_on_stop, create_app
 from portfolio_dash.portfolio.settlement_store import SETTLE_TABLES
+from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.config import get_settings
+from portfolio_dash.shared.db import connect_path, session
 
 
 @pytest.fixture
@@ -80,6 +87,112 @@ def test_a_clean_stop_leaves_the_database_in_one_file(boot_db: Path) -> None:
         assert client.get("/api/dashboard").status_code == 200
         assert client.get("/api/dashboard").status_code == 200  # a cache hit: the version
     assert not boot_db.with_name(boot_db.name + "-wal").exists()  # connection was open
+    assert app.state.stop_checkpoint[0] == 0
+
+
+def test_a_second_lifespan_in_one_process_caches_again(boot_db: Path) -> None:
+    """The first stop closed the result cache for good (``result_cache.shutdown``); the next
+    lifespan's start opens it again — the test suite runs many lifespans in one process."""
+    _boot()
+    assert result_cache._closed
+    with TestClient(create_app()) as client:
+        assert client.get("/api/dashboard").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200
+        assert result_cache.stats()["dashboard"].hits == 1
+
+
+def test_a_clean_stop_waits_for_a_running_prewarm_and_still_leaves_one_file(
+    boot_db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-warm blocked mid-build — its read snapshot open — when the stop begins
+    (review 2026-10-20): the lifespan waits for it (``result_cache.shutdown``), the pre-warm
+    reopens no version connection afterwards, and the TRUNCATE checkpoint completes (busy 0)
+    with no ``-wal`` / ``-shm`` left. ``reset()`` alone closed the connections under the
+    running pre-warm, which reopened one, and the checkpoint met its reader."""
+    started, release = threading.Event(), threading.Event()
+    alerts_keys: list[result_cache.CacheKey | None] = []
+    opened_after_stop: list[str] = []
+    real_open = result_cache._open_version_conn
+
+    def spy(path: str, identity: tuple[int, int]) -> object:
+        if result_cache._closed:
+            opened_after_stop.append(path)
+        return real_open(path, identity)
+
+    def prewarm_today() -> None:  # alert_inputs.prewarm_today's shape: its own session
+        now = datetime.now(UTC)
+        with session() as conn:
+            def build() -> int:
+                n = int(conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0])
+                started.set()
+                assert release.wait(30), "never released"
+                return n
+
+            result_cache.cached(conn, name="dashboard", now=now, compute=build, copy=int)
+            alerts_keys.append(result_cache.key_for(conn, name="alerts", now=now))
+
+    def release_once_the_stop_began() -> None:
+        deadline = time.monotonic() + 30
+        while not result_cache._closed and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.3)  # the stop is now waiting on the pre-warm
+        release.set()
+
+    monkeypatch.setenv("PD_PREWARM", "1")
+    monkeypatch.setattr(app_module, "WRITE_PREWARM_DELAY_S", 0.0)
+    monkeypatch.setattr(alert_inputs, "prewarm_today", prewarm_today)
+    monkeypatch.setattr(result_cache, "_open_version_conn", spy)
+    app = create_app()
+    releaser = threading.Thread(target=release_once_the_stop_began, daemon=True)
+    with TestClient(app) as client:
+        # any non-read request closes a write window, which schedules the pre-warm
+        assert client.post("/api/stop-probe-no-such-route").status_code in (404, 405)
+        assert started.wait(10)
+        # a commit after the pre-warm's snapshot began: the WAL now holds frames that the
+        # snapshot predates, which a TRUNCATE checkpoint cannot fold back under it
+        other = sqlite3.connect(boot_db)
+        try:
+            other.execute("CREATE TABLE stop_probe (x INTEGER)")
+            other.execute("INSERT INTO stop_probe VALUES (1)")
+            other.commit()
+        finally:
+            other.close()
+        releaser.start()
+    releaser.join(30)
+    assert alerts_keys == [None]          # the pre-warm finished after the stop began ...
+    assert opened_after_stop == []        # ... and opened no version connection
+    assert app.state.stop_checkpoint[0] == 0
+    assert [s for s in ("-wal", "-shm")
+            if boot_db.with_name(boot_db.name + s).exists()] == []
+
+
+def test_a_checkpoint_a_reader_blocks_is_logged_and_the_stop_goes_on(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """What a stop does when a reader outlived ``result_cache.shutdown``'s wait (or a child
+    still holds the file): the checkpoint answers busy within the busy timeout, never hangs,
+    and the lifespan logs that ``-wal`` / ``-shm`` may remain."""
+    path = tmp_path / "held.db"
+    writer = connect_path(path)
+    writer.execute("CREATE TABLE t (x INTEGER)")
+    writer.execute("INSERT INTO t VALUES (1)")
+    writer.commit()
+    reader = connect_path(path)
+    reader.execute("BEGIN")
+    reader.execute("SELECT x FROM t").fetchone()        # a read snapshot holds the WAL
+    stopper = sqlite3.connect(path, timeout=0.2)
+    try:
+        started = time.monotonic()
+        busy, _log, _done = checkpoint_on_stop(stopper)
+        assert time.monotonic() - started < 5
+    finally:
+        stopper.close()
+        reader.rollback()
+        reader.close()
+        writer.close()
+    assert busy == 1
+    assert any("checkpoint could not complete" in r.getMessage() and "-wal" in r.getMessage()
+               for r in caplog.records if r.levelname == "WARNING")
 
 
 #: Tables the app does NOT create in its own database at boot, each for a stated reason.

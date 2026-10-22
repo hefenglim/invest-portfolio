@@ -1379,7 +1379,18 @@
   }
 
   /* ==================================================================== boot */
-  document.addEventListener('pd-mutated', () => {
+  /* The settlement's own controls — 立即重新結算 / 重試 / 重新結算 and 取消 — announce
+     `pd-mutated` like every write, but never re-arm the prompt: after a cancel the restored
+     dirty day makes `needs_prompt` true again, and 「要重新結算歷史資料嗎？」 popped right after
+     the owner said stop (code review 2026-10-20). startRun and cancelRun re-read the status
+     themselves. Every other write still re-arms it (api.js's `detail` is {method, path}). */
+  const SETTLEMENT_CONTROLS = ['/api/settlement/run', '/api/settlement/cancel'];
+  function isSettlementControl(detail) {
+    const path = detail && typeof detail.path === 'string' ? detail.path : '';
+    return SETTLEMENT_CONTROLS.indexOf(path.split('?')[0].replace(/\/+$/, '')) >= 0;
+  }
+  document.addEventListener('pd-mutated', (ev) => {
+    if (isSettlementControl(ev && ev.detail)) return;
     if (mutatedTimer) clearTimeout(mutatedTimer);
     mutatedTimer = setTimeout(() => {
       mutatedTimer = null;

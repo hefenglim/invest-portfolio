@@ -36,17 +36,17 @@ from portfolio_dash.portfolio.cost_basis import (
     _uncomputable_message,
     build_book,
 )
-from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries
+from portfolio_dash.portfolio.dashboard_models import TrendPoint, TrendSeries, UnconvertibleFlow
 from portfolio_dash.portfolio.price_basis import price_in
 from portfolio_dash.portfolio.results import Book
 
 # ONE definition of both, shared with the metric that already takes these kinds: an oracle
 # of B that re-derived either would be free to disagree with XIRR about which flows exist.
 from portfolio_dash.portfolio.returns import (
-    XIRR_CASH_KINDS,
     CashMovementFlow,
     DividendIdentity,
     booked_dividends,
+    is_return_movement,
     replay_refusals,
 )
 from portfolio_dash.shared.cash_kinds import movement_sign
@@ -266,6 +266,58 @@ class _GivenBooks:
         return self._current[1]
 
 
+#: Why the trend is unavailable for want of a rate (zh, server-owned; accountant MINOR 4, owner
+#: ruling 2026-10-22): the FIRST flow with no rate on or before its own date, by its date and
+#: its pair. ONE sentence, read by every surface that says the trend cannot be computed — the
+#: dashboard's ``freshness.trend_unavailable_reason``, a close's ``notes.trend_unavailable``
+#: and 當期報酬 reason (live and stored), and the settlement run's report.
+TREND_FX_MISSING_ZH = "{day} 起缺少 {pair} 匯率（當日或之前無匯率），走勢無法計算"
+#: The same when no flow can be named — never reached while a missing rate is the cause
+#: (:func:`first_unconvertible_flow` names it); a caller holding every point passes no reason.
+TREND_FX_MISSING_UNNAMED_ZH = "部分投入流量缺少當日或之前的匯率，走勢無法計算"
+#: Its variant for a close dated BEFORE that flow, computed live (review 2026-10-22): the day
+#: itself would have a trend point, but the LIVE series is all-or-nothing and is unavailable
+#: as a whole — the close says so, never that its own day lacks a rate.
+TREND_FX_MISSING_LIVE_ZH = "即時走勢因 {day} 起缺少 {pair} 匯率而無法計算"
+
+
+def trend_unavailable_reason(flow: UnconvertibleFlow | None, *,
+                             as_at: date | None = None) -> str:
+    """The ONE sentence of an unavailable trend (:data:`TREND_FX_MISSING_ZH`), from
+    :func:`first_unconvertible_flow`'s answer — the flow's date and pair. With *as_at* before
+    that date (a live close of a day before the flow, ``api/snapshots.py``) its variant
+    :data:`TREND_FX_MISSING_LIVE_ZH`, from the same date and pair."""
+    if flow is None:
+        return TREND_FX_MISSING_UNNAMED_ZH
+    template = (TREND_FX_MISSING_LIVE_ZH if as_at is not None and as_at < flow.on
+                else TREND_FX_MISSING_ZH)
+    return template.format(day=flow.on.isoformat(), pair=flow.pair)
+
+
+def first_unconvertible_flow(
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
+) -> UnconvertibleFlow | None:
+    """The earliest flow of :func:`build_reporting_flows` with no rate on or before its own
+    date (ties: the currency code), or ``None`` when every flow converts — the ONE owner of
+    "which flow and pair cannot convert". It runs the flow builder itself (the same flows, the
+    same ``is_return_movement`` predicate, the same carry-forward lookup), so it names a flow
+    exactly when :func:`build_reporting_flows` returns ``None``.
+
+    The settlement worker's first unconvertible day U is this flow's date (never before the
+    trend's first day): every prefix of the ledger cut on or after it holds the flow."""
+    _flows, failed = _reporting_flows(bundle, fx_history, reporting,
+                                      cash_movements=cash_movements,
+                                      refused_dividends=refused_dividends)
+    if not failed:
+        return None
+    return min(failed, key=lambda f: (f.on, f.ccy.value))
+
+
 def build_reporting_flows(
     bundle: LedgerBundle,
     fx_history: FxHistory,
@@ -291,7 +343,8 @@ def build_reporting_flows(
     stream on an index instead. Two copies would let the portfolio and its counterfactual
     quietly disagree about which flows exist, and the whole comparison rests on them being the
     same money on the same dates. Each flow carries its ``market`` so the counterfactual can
-    route it to that market's benchmark; the trend simply ignores that field.
+    route it to that market's benchmark; the trend simply ignores that field. Which flow made
+    it ``None`` is :func:`first_unconvertible_flow`'s answer, from the same loop.
 
     **Cash movements are included since AI-D48** (owner ruling 2026-08-27), on exactly the
     three kinds ``xirr_reporting`` has taken since AI-D42: ``REBATE`` / ``INTEREST_EXPENSE`` /
@@ -324,6 +377,24 @@ def build_reporting_flows(
     same phantom withdrawal. Required with no default, like ``cash_movements``: a default
     would ship the old figure in silence.
     """
+    flows, failed = _reporting_flows(bundle, fx_history, reporting,
+                                     cash_movements=cash_movements,
+                                     refused_dividends=refused_dividends)
+    return None if failed else flows
+
+
+def _reporting_flows(
+    bundle: LedgerBundle,
+    fx_history: FxHistory,
+    reporting: Currency,
+    *,
+    cash_movements: Sequence[CashMovementFlow],
+    refused_dividends: Iterable[DividendIdentity],
+) -> tuple[list[ReportingFlow], list[UnconvertibleFlow]]:
+    """:func:`build_reporting_flows`' loop: the converted flows, and every flow with no rate on
+    or before its date. Once one flow fails, the rest are only looked up, never converted — so
+    a ledger it refuses for a missing rate converts (and can raise on) exactly the rows the
+    first-failure return always converted."""
     def quote_ccy(symbol: str) -> Currency:
         inst = bundle.instruments.get(symbol)
         if inst is None:
@@ -368,25 +439,44 @@ def build_reporting_flows(
                 raw.append((dv.date, dv.symbol, -dv.net, dv))
 
         out: list[ReportingFlow] = []
+        failed: list[UnconvertibleFlow] = []
+
+        def rate_on(on: date, ccy: Currency) -> Decimal | None:
+            if not failed:
+                return _fx_at(fx_history, on, ccy, reporting)
+            # past the first failure a row is only looked up — the first-failure return never
+            # reached it, so nothing here may raise: a stored rate is a rate, whatever it is
+            try:
+                return _fx_at(fx_history, on, ccy, reporting)
+            except ArithmeticError:
+                return _ONE
+
         for d, symbol, amount, source in raw:
             booking = source
-            rate = _fx_at(fx_history, d, quote_ccy(symbol), reporting)
+            if failed and symbol not in bundle.instruments:
+                continue  # the first-failure return never reached this row's KeyError
+            ccy = quote_ccy(symbol)
+            rate = rate_on(d, ccy)
             if rate is None:
-                return None
-            out.append(ReportingFlow(d, market_of(symbol), convert(amount, rate), symbol))
+                failed.append(UnconvertibleFlow(d, ccy, reporting))
+                continue
+            if not failed:
+                out.append(ReportingFlow(d, market_of(symbol), convert(amount, rate), symbol))
         # AI-D48. Each movement carries its OWN currency (there is no symbol to look one up
         # from) and its sign comes from the shared table, so a kind can never be a credit here
         # and a debit in the pool balance.
         for mv in cash_movements:
             booking = mv
-            if mv.kind.upper() not in XIRR_CASH_KINDS:
+            if not is_return_movement(mv):
                 continue
-            rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
+            rate = rate_on(mv.date, mv.ccy)
             if rate is None:
-                return None
-            out.append(ReportingFlow(
-                mv.date, None, convert(-movement_sign(mv.kind) * mv.amount, rate), ""))
-        return out
+                failed.append(UnconvertibleFlow(mv.date, mv.ccy, reporting))
+                continue
+            if not failed:
+                out.append(ReportingFlow(
+                    mv.date, None, convert(-movement_sign(mv.kind) * mv.amount, rate), ""))
+        return out, failed
     except ArithmeticError as exc:
         # The CLASS, not one cause — ``decimal.Overflow`` and ``decimal.DivisionByZero`` are
         # SIBLINGS of ``InvalidOperation``, not subclasses, and ``ZeroDivisionError`` is in it
@@ -424,7 +514,7 @@ def trading_financing_cost(
         total = _ZERO
         for mv in cash_movements:
             booking = mv
-            if mv.kind.upper() not in XIRR_CASH_KINDS:
+            if not is_return_movement(mv):
                 continue
             rate = _fx_at(fx_history, mv.date, mv.ccy, reporting)
             if rate is None:
@@ -437,6 +527,44 @@ def trading_financing_cost(
         # symbol nor account, so ``_uncomputable_message`` renders the GENERAL sentence — it
         # never invents an identity it cannot read off the row.
         raise UnbookableLedgerError(_uncomputable_message(booking)) from exc
+
+
+def trend_symbols(bundle: LedgerBundle) -> list[str]:
+    """Every symbol the trend reads a price history for, sorted: the symbol of each trade,
+    dividend and opening, and BOTH ends of every corporate action (audit F-50: a SPINOFF child
+    appears in no other ledger, so omitting it loaded no price for a position the replay
+    booked correctly, and every day after the spinoff read ``incomplete``). The live build
+    (``dashboard.py`` step 9) and the settlement worker load the trend's histories over this
+    one set. ``bundle.instruments`` holds each of them once the bundle is
+    ``without_unregistered()``."""
+    return sorted({t.symbol for t in bundle.transactions} | {d.symbol for d in bundle.dividends}
+                  | {o.symbol for o in bundle.opening}
+                  | {a.from_symbol for a in bundle.actions} | {a.to_symbol for a in bundle.actions})
+
+
+def trend_fx_currencies(bundle: LedgerBundle,
+                        cash_movements: Iterable[CashMovementFlow]) -> set[Currency]:
+    """The currencies the trend converts into the reporting currency: its FX pair set (each
+    against the reporting currency, in both directions). The live build (``dashboard.py``
+    step 9, whose ``trend_fx_history`` B, 交易與融資成本 and the benchmark counterfactual read
+    too) and the settlement worker both load this set, each over the ledger and the movements
+    cut at the last day it values (the live build at ``as_of``, the worker at its run's
+    ``through``), so over the same day range they convert the same flows at the same rates
+    and agree on ``available``:
+
+    - the quote currency of every :func:`trend_symbols` symbol — every trade, dividend and
+      opening flow, and every position valued on a day;
+    - the currency of every cash movement the trend takes as a flow — the movements
+      :func:`build_reporting_flows` and :func:`trading_financing_cost` admit, by the same
+      predicate (:func:`~portfolio_dash.portfolio.returns.is_return_movement`).
+
+    PERF-F2: the set used to hold the quote currencies only, so a REBATE / INTEREST_EXPENSE /
+    BROKER_FEE in a currency no instrument is quoted in found no rate, and the WHOLE trend was
+    unavailable (and with it net worth, B, B − A, 交易與融資成本 and the benchmark) although its
+    rate was stored and XIRR counted it. A movement with no rate on or before its date still
+    makes the series unavailable: that is a missing rate, not a missing pair."""
+    quoted = {bundle.instruments[sym].quote_ccy for sym in trend_symbols(bundle)}
+    return quoted | {mv.ccy for mv in cash_movements if is_return_movement(mv)}
 
 
 def trend_start(bundle: LedgerBundle) -> date | None:

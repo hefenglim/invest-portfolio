@@ -72,7 +72,9 @@ def db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         get_settings.cache_clear()
 
 
-def test_the_key_shares_only_a_committed_file_database_outside_a_write(db_file: Path) -> None:
+def test_the_key_shares_a_committed_file_database_and_moves_with_every_write(
+    db_file: Path,
+) -> None:
     conn = _connect(db_file)
     try:
         key = _key(conn, GOLDEN_NOW, TWD)
@@ -91,12 +93,23 @@ def test_the_key_shares_only_a_committed_file_database_outside_a_write(db_file: 
         other.commit()
         other.close()
         assert _key(conn, GOLDEN_NOW, TWD) != key
-        # a write in progress anywhere: nobody shares
+        # another request's write window: the key still exists — readers keep caching and
+        # sharing (post-v0.1.32 item 1) — and the window's opening, a commit inside it and its
+        # closing each move it
+        key = _key(conn, GOLDEN_NOW, TWD)
         begin_write()
         try:
-            assert _key(conn, GOLDEN_NOW, TWD) is None
+            inside = _key(conn, GOLDEN_NOW, TWD)
+            assert inside is not None and inside != key
+            other = _connect(db_file)
+            other.execute("INSERT INTO commit_probe VALUES (2)")
+            other.commit()
+            other.close()
+            committed = _key(conn, GOLDEN_NOW, TWD)
+            assert committed is not None and committed != inside
         finally:
             end_write()
+        assert _key(conn, GOLDEN_NOW, TWD) not in (None, key, inside, committed)
         # the caller's own uncommitted change must be in its answer: it builds alone
         conn.execute("UPDATE accounts SET name = name")
         assert conn.in_transaction
@@ -251,6 +264,77 @@ def test_a_requests_own_commit_lands_inside_a_write_window(
         get_settings.cache_clear()
     assert seen, "the request committed nothing"
     assert all(g is None for g in seen), seen
+
+
+def test_readers_keep_sharing_during_a_long_write_and_then_read_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-v0.1.32 item 1, through the real middleware stack. While one mutating request
+    holds its write window open (a long 更新報價 runs the quote jobs in this process), two
+    reads of one cached computation are served by ONE run — before, each computed alone,
+    uncached. Neither sees the write, which has not committed; the read after its response
+    does: the save committed before the response, and the commit moved ``data_version``."""
+    path = tmp_path / "portfolio.db"
+    monkeypatch.setenv("DB_PATH", str(path))
+    monkeypatch.setenv("PD_DISABLE_SCHEDULER", "1")
+    get_settings.cache_clear()
+    setup = _connect(path)
+    setup.execute("CREATE TABLE probe_value (x INTEGER)")
+    setup.execute("INSERT INTO probe_value VALUES (1)")
+    setup.commit()
+    setup.close()
+    app = create_app()
+    runs = [0]
+    writing = threading.Event()
+    release = threading.Event()
+
+    def read(conn: sqlite3.Connection = Depends(get_conn, scope="function")
+             ) -> dict[str, int]:
+        def compute() -> dict[str, int]:
+            runs[0] += 1
+            return {"x": int(conn.execute("SELECT x FROM probe_value").fetchone()[0])}
+
+        return result_cache.cached(conn, name="probe", now=GOLDEN_NOW, compute=compute,
+                                   copy=dict)
+
+    def write(conn: sqlite3.Connection = Depends(get_conn, scope="function")
+              ) -> dict[str, bool]:
+        conn.execute("UPDATE probe_value SET x = x + 1")   # committed when this returns
+        writing.set()
+        assert release.wait(30)
+        return {"ok": True}
+
+    app.add_api_route("/api/test-probe-read", read, methods=["GET"])
+    app.add_api_route("/api/test-probe-write", write, methods=["POST"])
+    for _ in range(2):                                     # ahead of the static mount at "/"
+        app.router.routes.insert(0, app.router.routes.pop())
+    posted: dict[str, int] = {}
+
+    def post() -> None:
+        posted["status"] = TestClient(app).post("/api/test-probe-write").status_code
+
+    enable_socket()
+    writer = threading.Thread(target=post)
+    try:
+        assert TestClient(app).get("/api/test-probe-read").json() == {"x": 1}
+        writer.start()
+        assert writing.wait(30)
+        assert write_generation() is None                  # the window is open
+        first = TestClient(app).get("/api/test-probe-read").json()
+        second = TestClient(app).get("/api/test-probe-read").json()
+        assert first == second == {"x": 1}
+        assert runs[0] == 2       # the window's opening moved the key; then one run for both
+        release.set()
+        writer.join(30)
+        assert posted == {"status": 200}
+        assert TestClient(app).get("/api/test-probe-read").json() == {"x": 2}
+        assert runs[0] == 3
+    finally:
+        release.set()
+        if writer.ident is not None:
+            writer.join(30)
+        disable_socket(allow_unix_socket=True)
+        get_settings.cache_clear()
 
 
 def test_every_mutating_request_opens_the_write_window_and_a_get_does_not(

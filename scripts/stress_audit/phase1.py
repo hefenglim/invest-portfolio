@@ -921,6 +921,16 @@ class _TrendOracle:
         return index, anchor, incomplete, broken
 
 
+def _shown_pnl(total_value: Decimal, net_invested: Decimal) -> Decimal:
+    """A trend point's ``pnl`` as the app must serve it (owner rulings 2026-10-22) — the
+    harness's OWN rounding, not an import: ``total_value − net_invested`` at the reporting
+    currency's minor unit (``oracle.MINOR_UNITS``), ROUND_HALF_UP, a loss rounded away to zero
+    as ``0`` (never ``-0``). An incomplete day serves none (the caller's rule)."""
+    shown = (total_value - net_invested).quantize(D(1).scaleb(-O.MINOR_UNITS[REPORTING]),
+                                                  rounding=ROUND_HALF_UP)
+    return shown.copy_abs() if shown.is_zero() else shown
+
+
 def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, point: dict,
                        phase: str) -> None:
     """Compare one published trend point with the oracle's."""
@@ -930,6 +940,10 @@ def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, po
         return
     ev.check(f"{prefix}.incomplete", day_iso, want["incomplete"], bool(point["incomplete"]),
              phase)
+    served_pnl = point.get("pnl")
+    if want["incomplete"]:
+        # owner ruling 2026-10-22: an incomplete day's 累計總損益 is not shown (null, 「—」)
+        ev.check(f"{prefix}.pnl", day_iso, None, served_pnl, phase)
     if "total_value" not in want:
         return
     ev.check(f"{prefix}.total_value", day_iso, want["total_value"],
@@ -937,6 +951,14 @@ def _check_trend_point(ev: C.Evidence, prefix: str, day_iso: str, want: dict, po
     ev.check(f"{prefix}.net_worth", day_iso, want["net_worth"],
              dec(point.get("net_worth")) if point.get("net_worth") is not None else None,
              phase)
+    if not want["incomplete"]:
+        shown = _shown_pnl(want["total_value"], want["net_invested"])
+        ev.check(f"{prefix}.pnl", day_iso, shown,
+                 dec(served_pnl) if served_pnl is not None else None, phase)
+        # the TEXT too: the minor unit's places and no "-0" (the value check above compares
+        # numerically, where "13" == "13.0" and "-0" == "0")
+        ev.check(f"{prefix}.pnl_text", day_iso, repr(format(shown, "f")), repr(served_pnl),
+                 phase)
 
 
 def _reconcile_trend(ev: C.Evidence, dash, oracle_trend: _TrendOracle, phase: str) -> None:
@@ -1488,19 +1510,38 @@ def _wait_idle(api: C.Api, timeout: float = SETTLE_TIMEOUT_S) -> dict:
 
 def _wait_run(api: C.Api, run_id: int,
               timeout: float = SETTLE_TIMEOUT_S) -> tuple[dict | None, dict, bool]:
-    """Poll until no run is active AND run *run_id*'s report has ended (the task's rule): the
-    status alone could read idle in the instant before a chained follow-up starts. The last
-    element says whether it ended in time."""
+    """Poll run *run_id*'s REPORT until it has ended, THEN the status until it reads idle
+    in a state at or after that end: no run active and, when the run published, a generation
+    at least the report's ``generation_after``. The last element says whether it ended in
+    time.
+
+    Report first, status after (2026-10-22): the status used to be read FIRST and the report
+    after it, so a status read in the instant before the run ended was accepted whenever the
+    report, read later, had ended — the harness then judged a pre-swap status as the run's
+    result (a status torn across the swap, since fixed in the service, read generation 3 with
+    the claimed day stale while run #4 had published generation 4). Idle alone is still not
+    enough: the status can read idle in the instant before a chained follow-up starts, and
+    the generation floor keeps a status from before this run's swap from passing."""
     deadline = time.monotonic() + timeout
     report: dict | None = None
+    summary: dict = {}
+    while time.monotonic() < deadline:
+        rr = api.get(f"/api/settlement/runs/{run_id}")
+        if rr.status_code == 200:
+            report = rr.json()
+            summary = (report or {}).get("summary") or {}
+            if summary.get("status") not in _ACTIVE:
+                break
+        time.sleep(0.5)
+    else:
+        return report, _status(api), False
+    floor = (int(summary.get("generation_after") or 0)
+             if summary.get("status") in ("published", "partial") else 0)
     while time.monotonic() < deadline:
         st = _status(api)
-        if st.get("state") not in _ACTIVE and st.get("run") is None:
-            rr = api.get(f"/api/settlement/runs/{run_id}")
-            if rr.status_code == 200:
-                report = rr.json()
-                if ((report or {}).get("summary") or {}).get("status") not in _ACTIVE:
-                    return report, st, True
+        if (st.get("state") not in _ACTIVE and st.get("run") is None
+                and int(st.get("generation") or 0) >= floor):
+            return report, st, True
         time.sleep(0.5)
     return report, _status(api), False
 

@@ -6,8 +6,9 @@ Three readers share ONE rule for which close is served from where:
 - ``GET /api/snapshots`` — the month rows of 月度成績 (:func:`snapshot_rows`): the row fields
   of the retired 23:50 snapshot (``month, as_of, reporting_ccy, total_value, total_return,
   total_return_rate, xirr, by_currency``) plus the additive ``kind``, ``provisional``,
-  ``stale``, ``notes``, ``xirr_reason``, ``period_twr``, ``period_twr_reason`` and
-  ``restated``. MONTHS ONLY — a year row must never crowd a month out of ``limit=12``;
+  ``stale``, ``notes``, ``xirr_reason``, ``xirr_window_days``, ``period_twr``,
+  ``period_twr_reason``, ``restated`` and ``current``. MONTHS ONLY — a year row must never
+  crowd a month out of ``limit=12``;
 - ``GET /api/settlement/periods?kind=M|Y`` — the closes themselves (:func:`period_rows`);
 - ``GET /api/settlement/periods/{kind}/{period}`` — one close with its holdings and cash at
   its day (:func:`period_detail`).
@@ -54,7 +55,12 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from portfolio_dash.api.routers.cash import CashLedgers, load_cash_ledgers
-from portfolio_dash.api.settlement_service import SINCE_GO_LIVE, FinalThrough, final_through
+from portfolio_dash.api.settlement_service import (
+    SINCE_GO_LIVE,
+    FinalThrough,
+    FinalThroughReader,
+    final_through,
+)
 from portfolio_dash.data_ingestion.store import list_accounts, load_ledger_bundle
 from portfolio_dash.portfolio import period_close as pc
 from portfolio_dash.portfolio import settlement_store as st
@@ -71,7 +77,12 @@ from portfolio_dash.portfolio.settlement_models import (
     PriceDate,
     Restatement,
 )
-from portfolio_dash.portfolio.timeseries import holds_open_option, trend_book_days, trend_start
+from portfolio_dash.portfolio.timeseries import (
+    holds_open_option,
+    trend_book_days,
+    trend_start,
+    trend_unavailable_reason,
+)
 from portfolio_dash.portfolio.twr import twr_index
 from portfolio_dash.pricing.store import FxSeriesCache
 from portfolio_dash.shared import flags, result_cache
@@ -262,25 +273,22 @@ def _data_version(conn: sqlite3.Connection) -> int | None:
     return int(conn.execute("PRAGMA data_version").fetchone()[0])
 
 
-def _snapshot_version(conn: sqlite3.Connection) -> int:
-    """``PRAGMA data_version`` as at this request's read snapshot: a read starts the snapshot
-    first, and the value then holds still for the rest of the transaction."""
-    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-    return int(conn.execute("PRAGMA data_version").fetchone()[0])
-
-
 def _inputs(conn: sqlite3.Connection, data: DashboardData, *, now: datetime,
-            reporting: Currency, before: int | None) -> _Inputs:
-    """Read inside this request's ONE read snapshot. *data* is the (cached) build taken before
-    it, and *before* the connection's ``data_version`` read before that build. The build is
-    redone inside the snapshot — uncached, consistent — when it may describe another state
-    than the snapshot (review G #8): another connection committed since *before* (a ledger
-    write lands between the cached build and this transaction; under ``PD_SETTLE=off`` the
-    store views below are both ``None`` and cannot see it), or the store this snapshot sees
-    is not the one the build saw (a run published in between). The pool ledgers come through
-    the cash API's one reviewed read (``load_cash_ledgers``, ⑪); a live close's cash at D
-    re-applies its own book's refusals (``cash_at``)."""
-    moved = before is not None and _snapshot_version(conn) != before
+            reporting: Currency, before: int | None,
+            mark: result_cache.SnapshotMark | None) -> _Inputs:
+    """Read inside this request's ONE read snapshot, whose *mark* carries the connection's
+    ``data_version`` as at the snapshot (``result_cache.marked_snapshot``; ``None`` when the
+    connection was already in a transaction, and then *before* is ``None`` too). *data* is
+    the (cached) build taken before it, and *before* the connection's ``data_version`` read
+    before that build. The build is redone inside the snapshot — uncached, consistent — when
+    it may describe another state than the snapshot (review G #8): another connection
+    committed since *before* (a ledger write lands between the cached build and this
+    transaction; under ``PD_SETTLE=off`` the store views below are both ``None`` and cannot
+    see it), or the store this snapshot sees is not the one the build saw (a run published
+    in between). The pool ledgers come through the cash API's one reviewed read
+    (``load_cash_ledgers``, ⑪); a live close's cash at D re-applies its own book's refusals
+    (``cash_at``)."""
+    moved = before is not None and mark is not None and mark.conn_version != before
     if moved or _store_view(data.history_state) != _state_view(conn, reporting):
         data = build_dashboard(conn, now=now, reporting=reporting)
     today = now.date()
@@ -309,16 +317,18 @@ _Select = Callable[[date | None], list[_Period]]
 
 
 def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
-            reporting: Currency, detail: bool) -> tuple[list[_Served], list[_Period]]:
-    """The closes of the periods *select* picks (in its order) and the periods it picked,
-    inside ONE read snapshot opened after the dashboard's cached build (PERF-S12): stored
-    where :func:`_from_store` says, live otherwise, each with the read-time fields of
-    §11.2 / §14.6."""
+            reporting: Currency, detail: bool
+            ) -> tuple[list[_Served], list[_Period], result_cache.SnapshotMark | None]:
+    """The closes of the periods *select* picks (in its order), the periods it picked and
+    the mark of the state they were read from, inside ONE read snapshot opened after the
+    dashboard's cached build (PERF-S12): stored where :func:`_from_store` says, live
+    otherwise, each with the read-time fields of §11.2 / §14.6. The mark lets the listing
+    file its cache entry under that state (post-v0.1.32 item 4, ``result_cache.serve``)."""
     today = now.date()
     before = _data_version(conn)
     data, _key = build_dashboard_keyed(conn, now=now, reporting=reporting)
-    with result_cache.read_snapshot(conn):
-        inputs = _inputs(conn, data, now=now, reporting=reporting, before=before)
+    with result_cache.marked_snapshot(conn) as mark:
+        inputs = _inputs(conn, data, now=now, reporting=reporting, before=before, mark=mark)
         history = inputs.history
         periods = select(inputs.first_row)
         served: dict[tuple[str, str], _Served] = {}
@@ -348,7 +358,7 @@ def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
             s.restatements = st.restatements_for(conn, p.kind, p.period)
             _read_time_fields(s, history=history, stale=stale, inputs=inputs, today=today)
             out.append(s)
-    return out, periods
+    return out, periods, mark
 
 
 def _read_time_fields(s: _Served, *, history: HistoryState, stale: tuple[date, date] | None,
@@ -454,10 +464,11 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
     """The trend figures at D and the period's TWR, as the worker sets them, from the build's
     composed trend (the stored days before ``live_from``, live after).
 
-    While the LIVE series is unavailable (a flow without a rate, PERF-F2's shape) a close
+    While the LIVE series is unavailable (a flow with no rate on or before its date) a close
     computed here carries no trend figure and no 當期報酬, although the close the worker stores
-    for a day before the unconvertible flow has them: deferred with PERF-F2 (owner ruling
-    2026-10-19), which fixes the series itself after the release."""
+    for a day before the unconvertible flow has them — the live trend card shows none either.
+    Since PERF-F2's fix the trend's pair set holds every converted flow's own currency
+    (``timeseries.trend_fx_currencies``), so only a genuinely missing rate does this."""
     if first is None or as_at < first:
         kpi = pc.with_trend(kpi, point=None, twr=None, twr_reason=pc.TWR_NOT_STARTED_ZH,
                             trend_reason=pc.TREND_NOT_STARTED_ZH)
@@ -466,14 +477,23 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
         return kpi
     if not data.trend.available:
         # the live series is unavailable (a flow without a rate): no trend figure — in the
-        # build's own words — exactly as the trend card shows none
-        reason = data.freshness.trend_unavailable_reason or pc.TREND_UNAVAILABLE_ZH
+        # build's own words (``timeseries.trend_unavailable_reason``: the first flow with no
+        # rate, its date and its pair) — exactly as the trend card shows none. A close dated
+        # BEFORE that flow reads the sentence's variant: the live series as a whole is
+        # unavailable from the flow on, not this day (review 2026-10-22; the stored close of
+        # the same day has its trend point — a live cut at U − 1 would be an owner's decision)
+        flow = data.freshness.trend_unconvertible
+        reason = (trend_unavailable_reason(flow, as_at=as_at) if flow is not None
+                  else data.freshness.trend_unavailable_reason
+                  or trend_unavailable_reason(None))
         return pc.with_trend(kpi, point=None, twr=None, twr_reason=reason,
                              trend_reason=reason)
     prev = p.start - _ONE_DAY
     start_end = prev if prev >= first else None
-    twr, why = pc.period_twr(index, points, start_end=start_end, end=as_at)
-    return pc.with_trend(kpi, point=points.get(as_at), twr=twr, twr_reason=why)
+    # an available live series holds every day from its first through today
+    twr, why = pc.period_twr(index, points, start_end=start_end, end=as_at, unavailable=None)
+    return pc.with_trend(kpi, point=points.get(as_at), twr=twr, twr_reason=why,
+                         trend_reason=None)
 
 
 # =============================================================================================
@@ -481,7 +501,7 @@ def _with_live_trend(kpi: PeriodKpi, p: _Period, *, as_at: date, first: date | N
 # =============================================================================================
 
 
-def _end_day_jobs(conn: sqlite3.Connection, now: datetime, ft: FinalThrough,
+def _end_day_jobs(final: FinalThroughReader, ft: FinalThrough,
                   end: date) -> tuple[str, ...]:
     """The quote jobs whose close the period ending on *end* is not yet confirmed by (review
     G #6): those blocking the LATEST blocked day on or before *end* — the end day's own fire,
@@ -489,10 +509,11 @@ def _end_day_jobs(conn: sqlite3.Connection, now: datetime, ft: FinalThrough,
     only the jobs of the FIRST blocked day (``blocked_jobs``), which can be another market's
     earlier day (台股 partial on 09-29 and 美股 on 09-30: September's close is the US one).
     ``final_through(since=d)`` answers per day — its first blocked day on or after *d* — so
-    walking back from *end* to ``through`` finds the latest. ``ft.blocked_jobs`` when none."""
+    walking back from *end* to ``through`` finds the latest. ``ft.blocked_jobs`` when none.
+    Every probe is answered by the request's one *final* (its rows read once)."""
     day = end
     while day > ft.through:
-        probe = final_through(conn, now, since=day)
+        probe = final(since=day)
         if probe.blocked_on == day:
             return probe.blocked_jobs
         day -= _ONE_DAY
@@ -511,12 +532,18 @@ def _provisional_note(p: _Period, jobs: Sequence[str]) -> str:
 def _labelled(served: Sequence[_Served], conn: sqlite3.Connection,
               now: datetime) -> list[_Served]:
     """暫定 for a past period whose end day lies after ``final_through``; ``None`` otherwise
-    (and for the current period, which is live)."""
-    ft = final_through(conn, now)
+    (and for the current period, which is live).
+
+    Per request, never cached: the labels depend on *now* beyond its date. ONE
+    :class:`FinalThroughReader` answers ``final_through`` and every probe of the walk back
+    from an end day (:func:`_end_day_jobs`), so ``schedule_config`` and ``job_runs`` are read
+    once per request — they were read again for every day walked (post-v0.1.32 item 3)."""
+    final = FinalThroughReader(conn, now)
+    ft = final()
     for s in served:
         p = s.period
         note = (None if p.current or p.end <= ft.through
-                else _provisional_note(p, _end_day_jobs(conn, now, ft, p.end)))
+                else _provisional_note(p, _end_day_jobs(final, ft, p.end)))
         s.close = s.close.model_copy(update={"provisional": note})
     return list(served)
 
@@ -533,6 +560,8 @@ def _listing(conn: sqlite3.Connection, *, kind: Kind, limit: int, now: datetime,
     this request's clock."""
     today = now.date()
 
+    marks: list[result_cache.SnapshotMark | None] = []
+
     def compute() -> tuple[list[_Served], int]:
         total = 0
 
@@ -542,13 +571,19 @@ def _listing(conn: sqlite3.Connection, *, kind: Kind, limit: int, now: datetime,
             total = len(periods)
             return periods[:limit]
 
-        served, _picked = _closes(conn, select, now=now, reporting=reporting, detail=False)
+        served, _picked, mark = _closes(conn, select, now=now, reporting=reporting,
+                                        detail=False)
+        marks.append(mark)
         return served, total
 
+    # The closes open their snapshot only after the dashboard build — seconds on a miss —
+    # so a job committing meanwhile is in the result although the key predates it: the mark
+    # files the entry under the state it was read from, when that is still current
+    # (post-v0.1.32 item 4: the next listing used to compute everything again).
     served, total = result_cache.cached(
         conn, name=f"periods:{kind}", now=now, reporting=reporting,
         extra=(limit, flags.settle_enabled()), compute=compute, copy=copy.deepcopy,
-        snapshot=False)
+        snapshot=False, mark=lambda: marks[-1] if marks else None)
     return _labelled(served, conn, now), total
 
 
@@ -581,6 +616,9 @@ def _month_row(s: _Served, now: datetime) -> dict[str, Any]:
         "stale": s.close.stale,
         "notes": wire["notes"],
         "xirr_reason": kpi.xirr_reason,
+        # the 累計 XIRR's observation window in days — the cell's 「觀察期 N 天・短窗參考」
+        # under a year (accountant MINOR 7b, owner ruling 2026-10-22), as the KPI card shows it
+        "xirr_window_days": kpi.xirr_window_days,
         "period_twr": wire["period_twr"],
         "period_twr_reason": kpi.period_twr_reason,
         "restated": restated,
@@ -611,7 +649,7 @@ def period_detail(conn: sqlite3.Connection, *, kind: Kind, period: str, now: dat
             return []
         return [p for p in _periods(first, today, kind) if p.period == period]
 
-    closes, picked = _closes(conn, select, now=now, reporting=reporting, detail=True)
+    closes, picked, _mark = _closes(conn, select, now=now, reporting=reporting, detail=True)
     if not picked:
         return None
     (served,) = _labelled(closes, conn, now)

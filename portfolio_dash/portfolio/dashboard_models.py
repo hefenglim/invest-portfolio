@@ -4,11 +4,18 @@ All money/quantity/rate fields are Decimal at full precision; display formatting
 (thousands separators, decimal places) is a template concern, never done here.
 """
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 from portfolio_dash.forex.results import FXSummary
 from portfolio_dash.portfolio.results import (
@@ -25,6 +32,7 @@ from portfolio_dash.portfolio.results import (
 )
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.ledger import Dividend
+from portfolio_dash.shared.money import quantize_amount
 
 
 class HoldingRow(BaseModel):
@@ -225,6 +233,49 @@ class TrendPoint(BaseModel):
     # trend is built. None on a cash-incomplete day (a non-zero pool lacked FX) so the
     # frontend draws an honest gap. Never a money-of-record input.
     net_worth: Decimal | None = None
+    # 累計總損益（含匯兌） as SERVED (owner rulings 2026-10-22): ``total_value − net_invested`` at
+    # the reporting currency's minor unit (:func:`trend_pnl`), so the trend tooltip only
+    # formats it — and None (the tooltip's 「—」) on an ``incomplete`` day, whose value is not
+    # one to show. The name is short on purpose: the dashboard serves one point per day of the
+    # ledger's life (2,179 on a prod-sized ledger). Set on the dashboard's SERVED series only,
+    # once per build — on the days from the settlement store as they are built
+    # (``dashboard._stored_point``) and on the live days by :func:`with_trend_pnl`; None on
+    # every internal series too (the replay, the net-worth composition, the settlement worker),
+    # which the engine-equality pins compare with v0.1.31's own. Display-only: never an input,
+    # never stored.
+    pnl: Decimal | None = None
+
+
+def trend_pnl(total_value: Decimal, net_invested: Decimal, reporting: Currency, *,
+              incomplete: bool) -> Decimal | None:
+    """A trend day's 累計總損益（含匯兌）: ``total_value − net_invested``, quantized to the
+    reporting currency's minor unit for DISPLAY (``quantize_amount``: TWD 0 dp, USD / MYR 2 dp,
+    ROUND_HALF_UP). The ONE owner of the tooltip's figure (owner ruling 2026-10-22): the
+    tooltip used to subtract the two Decimal strings in JS floats.
+
+    **None on an ``incomplete`` day** (owner ruling 2026-10-22, the KPI B gate's own rule: an
+    unreliable figure is not shown). Such a day's ``total_value`` leaves out a holding whose
+    value is unknown or 待釐清 — a missing price, a 賣超, a dividend the replay refused, a
+    corporate action it could not apply, an option close it refused — so the difference is not
+    the day's result. The tooltip prints 「—」 and keeps its 「部分標的當日無價格」 note.
+
+    AI-D41: every flow in ``net_invested`` is converted at its own date's rate and the value at
+    that day's, so this is figure B as of that day — the FX-COMPLETE lifetime result, never the
+    浮動損益 it was once labelled. Its relation to the KPI (``kpis.total_return_fx_complete``,
+    ``dashboard.fx_complete_return``): the SAME subtraction on the trend's LAST point, which B
+    keeps at full precision and this rounds for display. B is withheld when that point is
+    incomplete — and then this is None too — and also whenever the book records a refused
+    option close; the trend marks every day from such a close's date incomplete, so on the last
+    day the two gates agree. A 賣超, a refused dividend and an unapplied action withhold B only
+    through that same last-day ``incomplete`` (they choose the reason, not the gate). So: on the
+    last point this is either B quantized, or None exactly when B is withheld. On earlier days
+    there is no KPI to compare with. A loss rounded away to zero reads ``0``, never ``-0``: a
+    minus sign in front of a zero is noise, and every sign test would colour it as a loss.
+    """
+    if incomplete:
+        return None
+    pnl = quantize_amount(total_value - net_invested, reporting)
+    return abs(pnl) if pnl.is_zero() else pnl
 
 
 class TrendSeries(BaseModel):
@@ -238,6 +289,24 @@ class TrendSeries(BaseModel):
     # the wire (the golden payload is unchanged); the dashboard copies it into
     # ``options.trend_excludes_value``, the one place the note is published.
     options_value_excluded: bool = Field(default=False, exclude=True)
+
+
+def with_trend_pnl(series: TrendSeries) -> TrendSeries:
+    """*series* with every point's ``pnl`` set (:func:`trend_pnl`, in the series' own reporting
+    currency; None on an incomplete day): the series as SERVED. A copy; *series* is not
+    changed.
+
+    The dashboard applies it to its LIVE days, once per build; the days it serves from the
+    settlement store get theirs as they are built (``dashboard._stored_point``), so the
+    prefix — most of a long ledger's days — is never copied a second time. Derived per build
+    rather than while the payload is dumped because a dump runs on EVERY request (a
+    result-cache hit included): measured 2026-10-22 at 2,179 points, a serializer deriving it
+    per dump added about three times what a precomputed field adds to a request."""
+    ccy = series.reporting_currency
+    return series.model_copy(update={"points": [
+        p.model_copy(update={"pnl": trend_pnl(p.total_value, p.net_invested, ccy,
+                                              incomplete=p.incomplete)})
+        for p in series.points]})
 
 
 class PriceFreshness(BaseModel):
@@ -342,6 +411,21 @@ class BenchmarkComparison(BaseModel):
     by_market: list[BenchmarkMarketLeg] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class UnconvertibleFlow:
+    """A flow of the trend (``timeseries.build_reporting_flows``) with no rate on or before its
+    own date: the flow's date and its currency, against the reporting currency. Found by
+    ``timeseries.first_unconvertible_flow``; its sentences are ``timeseries``' too."""
+
+    on: date
+    ccy: Currency
+    reporting: Currency
+
+    @property
+    def pair(self) -> str:
+        return f"{self.ccy.value}/{self.reporting.value}"
+
+
 class FreshnessReport(BaseModel):
     prices: list[PriceFreshness]
     fx: list[FxFreshness]
@@ -376,6 +460,20 @@ class FreshnessReport(BaseModel):
     # router's scheduler_state(). False means nothing on this instance refreshes on a
     # schedule — every 「最後更新」 stamp on the page is only as new as the last manual run.
     scheduler_running: bool | None = None
+    # NOT on the wire (a private attribute: never serialized, so every payload is unchanged):
+    # the flow ``trend_unavailable_reason`` names, for the 月度成績 live closes, which word a
+    # close dated before it differently (``timeseries.trend_unavailable_reason(as_at=)``).
+    # Set by the build (``dashboard._build_dashboard``); kept by every copy of the model.
+    _trend_unconvertible: UnconvertibleFlow | None = PrivateAttr(default=None)
+
+    @property
+    def trend_unconvertible(self) -> UnconvertibleFlow | None:
+        """The first flow with no rate on or before its date, when the trend is unavailable
+        for want of one (``None`` otherwise, and on a model not built by the dashboard)."""
+        return self._trend_unconvertible
+
+    def set_trend_unconvertible(self, flow: UnconvertibleFlow | None) -> None:
+        self._trend_unconvertible = flow
 
 
 class InsightCardStub(BaseModel):

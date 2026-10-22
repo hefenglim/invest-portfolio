@@ -12,10 +12,11 @@ This module introduces the one-way edge ``portfolio -> forex`` (recorded in the
 import json
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from itertools import chain, islice
 from typing import Protocol
 
 from portfolio_dash.data_ingestion.store import (
@@ -58,6 +59,9 @@ from portfolio_dash.portfolio.dashboard_models import (
     PriceFreshness,
     TrendPoint,
     TrendSeries,
+    UnconvertibleFlow,
+    trend_pnl,
+    with_trend_pnl,
 )
 from portfolio_dash.portfolio.dividends import project_dividends
 from portfolio_dash.portfolio.networth import compose_net_worth, daily_cash_series
@@ -96,9 +100,13 @@ from portfolio_dash.portfolio.timeseries import (
     FxHistory,
     PriceHistory,
     build_reporting_flows,
+    first_unconvertible_flow,
     trading_financing_cost,
     trend_book_days,
+    trend_fx_currencies,
     trend_start,
+    trend_symbols,
+    trend_unavailable_reason,
     value_series,
 )
 from portfolio_dash.portfolio.twr import convert_closes
@@ -833,7 +841,9 @@ def _stored_bench(state: settlement_store.StoreState | None,
     """The store's benchmark state and its day ``S``, under the conditions of PERF spec §10
     step 5 that do not need the flows (:func:`_benchmark_comparison` checks the last one — no
     flow dated after ``S``): a usable store, nothing pending and nothing claimed by a run
-    (``Dd`` is ∞), a state that was published (a partial publish stores none), and no
+    (:attr:`~settlement_store.StoreState.claimed_day` is ∞: the active run's whole
+    ``run_from`` counts here, where ``Dd`` counts only the dirty day it claimed), a state that
+    was published (a partial publish stores none), and no
     corporate action on a benchmark storage key dated after ``S`` — ``series_in``
     re-expresses every level into the valuation day's terms, and ``0050`` is both a benchmark
     and a stock the owner can hold. *bundle* is the build's registered ledger cut at today
@@ -1240,8 +1250,9 @@ def build_dashboard(
     which replaced the in-flight-only sharing of 2026-10-13): one entry per database file,
     ``data_version``, write generation, DAY and reporting currency, so any commit — this
     process, another one, the settlement child — makes the next read build afresh, and
-    identical builds that run at the same time still run once. Nothing is cached while a
-    write is in progress, inside a transaction, or for a database with no file. Every reader
+    identical builds that run at the same time still run once — also while another request's
+    write window is open (post-v0.1.32 item 1: the commit itself moves ``data_version``).
+    Nothing is cached inside a transaction or for a database with no file. Every reader
     receives its own deep copy with the fields that depend on *now* beyond its date
     (:data:`SUB_DAY_FIELDS`) set to its own clock.
 
@@ -1293,6 +1304,92 @@ def _own_copy(data: DashboardData) -> DashboardData:
     return data.model_copy(deep=True)
 
 
+#: The most trend books :func:`_replay_once` holds to replay the ledger only once. A build
+#: over a usable settlement store values only the days from ``live_from``: today on a clean
+#: store (one or two books), the dirty day on a store dirty inside the window — never before
+#: the 1st of the previous month, so at most 62 calendar days and one book per event day in
+#: them, plus the one before — which this covers. A longer trend (no usable store, or a store
+#: far behind: every event day of the history) streams its books and keeps its two replays:
+#: holding them would cost far more memory than the replay costs time (measured 2026-10-22, a
+#: synthetic 1,092-event ledger, ``PD_SETTLE=off``: its 213 books held raised the build's
+#: ``tracemalloc`` peak from 5.3 MB to 14.5 MB, to save a 6 ms replay of a 130 ms build).
+_ONE_REPLAY_MAX_BOOKS = 64
+
+#: ...and the most book ENTRIES it holds — each held book's holdings plus its opened
+#: positions (a held position is in both) — projected from the books read so far, so a
+#: ledger with very many positions streams too. About 2.6 KB per entry (measured as above:
+#: 9.4 MB for 3,557 entries), so this bounds what is held at about 21 MB.
+_ONE_REPLAY_HELD_ENTRIES = 8_000
+
+
+def _replay_once(cut: LedgerBundle, book_days: list[date], as_of: date
+                 ) -> tuple[Book | None, Iterator[tuple[date, Book]]]:
+    """Today's book and the trend's ``(day, book)`` pairs from ONE replay of *cut* (the
+    valuation cut at *as_of*) — post-v0.1.32 item 2.
+
+    The build replayed the whole ledger twice: ``build_book(cut)`` for today's book
+    (``kpis_as_of``), then ``iter_books(cut, book_days)`` for the trend, which replays every
+    event again from the first. Here ``iter_books`` is asked for *book_days* and then
+    *as_of*: its last book IS ``build_book(cut, allow_oversell=True)``, field for field
+    (``iter_books``' contract — ``cut.through(as_of)`` holds the same rows as *cut*; pinned
+    by ``tests/portfolio/test_engine_iter_books.py``), and the pairs before it are the very
+    pairs the trend read. Today's book is needed BEFORE the trend reads any (its flows leave
+    out today's book's refused payouts), so the trend's books are HELD until it does — and
+    released one by one as it reads them (:func:`_drained`): a book the trend has passed is
+    referenced by nothing here.
+
+    **Bounded** (:data:`_ONE_REPLAY_MAX_BOOKS`, :data:`_ONE_REPLAY_HELD_ENTRIES`). Past either
+    bound this answers ``None`` for today's book (``kpis_as_of`` replays it itself, as
+    before) and the trend reads the books held so far, then the REST of the same replay
+    lazily — never past its own last day: the two replays it always cost, and no more.
+
+    **A failure falls back to the two replays, from scratch.** When the replay raises while
+    its books are held — a row that cannot be booked, a day whose holdings cannot be
+    assembled, or a ``MemoryError`` — what it holds is dropped, today's book is ``None``
+    (``kpis_as_of`` replays and raises whatever it raised before) and the trend gets its own
+    replay, started only when it first asks for a book (:func:`_replay_later`), where the
+    build started it before item 2: a ledger error is raised again on the same day, in the
+    same sentence. ``MemoryError`` is not re-raised at once because the hold may be what
+    exhausted the memory: the old path holds at most two books, so shedding the hold gives
+    the build the chance it had before item 2 instead of failing one that used to succeed.
+    """
+    if len(book_days) > _ONE_REPLAY_MAX_BOOKS:
+        return None, _replay_later(cut, book_days)
+    days = [*book_days, as_of]
+    held: list[tuple[date, Book]] = []
+    entries = 0
+    try:
+        pairs = zip(days, iter_books(cut, days), strict=True)
+        for day, book in pairs:
+            held.append((day, book))
+            remaining = len(book_days) - len(held)
+            if remaining < 0:
+                break  # today's book, after every trend book
+            size = len(book.holdings) + len(book.opened_positions)
+            entries += size
+            if remaining and entries + size * remaining > _ONE_REPLAY_HELD_ENTRIES:
+                return None, chain(_drained(held), islice(pairs, remaining))
+    except Exception:  # noqa: BLE001 - every failure takes the two-replay path (docstring)
+        held.clear()
+        return None, _replay_later(cut, book_days)
+    today = held.pop()[1]
+    return today, _drained(held)
+
+
+def _drained(held: list[tuple[date, Book]]) -> Iterator[tuple[date, Book]]:
+    """*held*'s pairs in order, each removed from *held* as it is handed out, so a book the
+    consumer has moved past is no longer referenced from here."""
+    held.reverse()
+    while held:
+        yield held.pop()
+
+
+def _replay_later(cut: LedgerBundle, book_days: list[date]) -> Iterator[tuple[date, Book]]:
+    """The trend's own replay of *cut* over *book_days*, started only when the trend first
+    asks for a book — where the build started it before item 2 (the two-replay path)."""
+    yield from zip(book_days, iter_books(cut, book_days), strict=True)
+
+
 def _build_dashboard(
     conn: sqlite3.Connection, *, now: datetime, reporting: Currency
 ) -> DashboardData:
@@ -1334,9 +1431,34 @@ def _build_dashboard(
     # (one query per directed pair; measured before: 1,059 `fx_rates` queries per build).
     source = LatestStored(conn, now=now, fx_cache=FxSeriesCache(conn))
 
+    # PERF spec §10 steps 2–4, decided BEFORE the book so that one replay can serve both
+    # today's book and the trend's (post-v0.1.32 item 2, :func:`_replay_once`): the settlement
+    # store, when it may be read (``None`` = every day live — ``PD_SETTLE=off``, or a store
+    # not usable for this reporting currency and code); the days before `live` come from it
+    # (contiguous from the series' own first day, never a placeholder — `settled_prefix`);
+    # `live` is the first day valued here. Without a usable store it is the first day: all
+    # live. Reads only, inside the build's one read snapshot, so reading them first changes
+    # nothing they read. `cut` is the valuation cut `kpis_as_of` takes (step 1c) — the same
+    # rows, so `trend_start` and the book days are the ones the trend branch below reads.
+    cut = bundle.valued_as_of(as_of)
+    store = _usable_store(conn, reporting)
+    prefix: settlement_store.SettledPrefix | None = None
+    first_day: date | None = None
+    live: date | None = None
+    book_days: list[date] = []
+    if cut.transactions or cut.dividends or cut.opening:
+        first_day = trend_start(cut)
+        assert first_day is not None  # the ledger has a trade, a dividend or an opening
+        if store is not None:
+            prefix = settlement_store.settled_prefix(conn, store, first_day=first_day,
+                                                     today=as_of)
+        live = first_day if prefix is None else prefix.live_from
+        book_days = trend_book_days(cut, start=live, end=as_of)
+    today_book, trend_books = _replay_once(cut, book_days, as_of)
+
     # 1c, 2, 3 and 4: the valuation cut, the book, the valuation, the returns, XIRR and the
     # KPI blend — the ONE computation a period close repeats as at its own day (§11.2).
-    kpi = kpis_as_of(bundle, book=None, cash_movements=cash_movements, prices=source,
+    kpi = kpis_as_of(bundle, book=today_book, cash_movements=cash_movements, prices=source,
                      fx=source, as_of=as_of, reporting=reporting)
     has_options = kpi.has_options
     bundle = kpi.bundle
@@ -1534,35 +1656,20 @@ def _build_dashboard(
 
     # 9. Trend — bulk-load histories, then the ONE-pass daily replay (PERF spec §8).
     trend_reason: str | None = None
+    # the flow `trend_reason` names (kept off the wire; 月度成績's live closes read it)
+    trend_flow: UnconvertibleFlow | None = None
     # Declared OUT here (empty by default) because step 10's benchmark counterfactual reads
     # it as well, and on a ledger with no events the trend branch below never runs. Empty is
     # the honest value there: no flows to convert, so the counterfactual refuses.
     trend_fx_history: FxHistory = {}
-    # PERF spec §10 steps 2–3: the settlement store, when it may be read (``None`` = every day
-    # live — ``PD_SETTLE=off``, or a store not usable for this reporting currency and code).
-    store = _usable_store(conn, reporting)
-    # The days served from the store (step 4), decided in the trend branch below.
-    prefix: settlement_store.SettledPrefix | None = None
+    # The store, the stored prefix, `first_day`, `live` and the trend's books were decided
+    # before the book (above), on the same cut and the same condition as this branch.
     if txs or divs or opening:
-        # BOTH ends of every corporate action (audit F-50): a SPINOFF child appears in no
-        # other ledger, so omitting it loaded no price history for a position the replay
-        # booked CORRECTLY — `daily_value_series` then found no price and marked every day
-        # after the spinoff `incomplete`, flattening the trend. `without_unregistered()`
-        # above guarantees both symbols have an Instrument row, so the `instruments[sym]`
-        # lookup below stays total.
-        ledger_symbols = sorted({t.symbol for t in txs} | {d.symbol for d in divs}
-                                | {o.symbol for o in opening}
-                                | {a.from_symbol for a in bundle.actions}
-                                | {a.to_symbol for a in bundle.actions})
-        first_day = trend_start(bundle)
-        assert first_day is not None  # the ledger has a trade, a dividend or an opening
-        # PERF spec §10 step 4: the days before `live` come from the store (contiguous from
-        # the series' own first day, never a placeholder — `settled_prefix`); `live` is the
-        # first day valued here. Without a usable store it is the first day: all live.
-        if store is not None:
-            prefix = settlement_store.settled_prefix(conn, store, first_day=first_day,
-                                                     today=as_of)
-        live = first_day if prefix is None else prefix.live_from
+        assert first_day is not None and live is not None  # set above for this same cut
+        # BOTH ends of every corporate action (audit F-50, `trend_symbols`): a SPINOFF child
+        # appears in no other ledger. `without_unregistered()` above guarantees every symbol
+        # has an Instrument row, so the quote-currency lookups stay total.
+        ledger_symbols = trend_symbols(bundle)
         # RAW on purpose (W6c): this is the ONE series read that must NOT be re-expressed
         # here. Its consumer is `daily_value_series`, which values a DIFFERENT day on every
         # iteration and therefore applies §5.1(d) itself, per point, at its `_entry_at_or_
@@ -1580,8 +1687,10 @@ def _build_dashboard(
         # (``trend_fx_history`` is declared before this branch so step 10's benchmark
         # counterfactual can read it on an EMPTY ledger too — where it is simply empty and
         # the counterfactual refuses honestly instead of raising UnboundLocalError.)
+        # The pair set has ONE owner, shared with the settlement worker (PERF-F2): the quote
+        # currencies AND the currency of every cash movement the trend converts.
         fx_history = trend_fx_history
-        for ccy in {instruments[sym].quote_ccy for sym in ledger_symbols}:
+        for ccy in trend_fx_currencies(bundle, cash_movements):
             if ccy == reporting:
                 continue
             for base, quote in ((ccy, reporting), (reporting, ccy)):
@@ -1589,22 +1698,30 @@ def _build_dashboard(
                 if rows:
                     fx_history[(base, quote)] = [(r.as_of, r.rate) for r in rows]
         # ONE replay feeds every day (PERF spec §8.1): `iter_books` yields the book of each
-        # day a row counts from, and the payouts the flows leave out are this request's
-        # book's refusals — the same rows a second whole-bundle replay would refuse.
+        # day a row counts from — the replay that also gave today's book, when it held them
+        # (`_replay_once`) — and the payouts the flows leave out are this request's book's
+        # refusals — the same rows a second whole-bundle replay would refuse.
         # `available` is decided over EVERY flow whatever the start (§4: a series-level
         # aggregate, never settled). The options flag of the days before `live` is the
         # store's per day (`options_open`, §10 step 4 — never a series-level stored flag);
         # with no day before the start there is none.
         options_before = (prefix is not None and live > first_day
                           and any(d.options_open for d in prefix.days))
-        book_days = trend_book_days(bundle, start=live, end=as_of)
         trend = value_series(
             bundle, price_history, fx_history, reporting, start=live, end=as_of,
             cash_movements=cash_movements, refused_dividends=book.refused_dividends,
-            books=zip(book_days, iter_books(bundle, book_days), strict=True),
-            options_open_before=options_before)
+            books=trend_books, options_open_before=options_before)
+        # The trend has read its books (or returned without them): drop the iterator, which
+        # still holds any it did not read, before the rest of the build (review of item 2).
+        del trend_books
         if not trend.available:
-            trend_reason = "帳本中有交易日期缺少匯率資料"
+            # the series' ONE sentence: the first flow with no rate on or before its date,
+            # by its date and its pair (accountant MINOR 4, owner ruling 2026-10-22) — the
+            # same flows `value_series` converts, the same refusals
+            trend_flow = first_unconvertible_flow(
+                bundle, fx_history, reporting, cash_movements=cash_movements,
+                refused_dividends=book.refused_dividends)
+            trend_reason = trend_unavailable_reason(trend_flow)
         else:
             # 9b. Total net worth (FU-D29 / deferred C8): compose the UNCHANGED trend
             # with a daily cash series. Cash is read from the SAME Stored rows the 資金管理
@@ -1637,10 +1754,15 @@ def _build_dashboard(
                 cash_movements, cash_convs, cash_txs, cash_divs, instruments,
                 cash_fx_history, reporting, end=as_of,
                 start=None if prefix is None else live)
-            trend = compose_net_worth(trend, cash_by_date)
+            # The series as SERVED carries each point's 累計總損益（含匯兌）, the tooltip's figure
+            # (owner ruling 2026-10-22, `dashboard_models.trend_pnl`): set on the live days
+            # here and on the stored days as they are built (`_stored_point`), so neither part
+            # is copied a second time.
+            trend = with_trend_pnl(compose_net_worth(trend, cash_by_date))
             if prefix is not None and prefix.days:
                 trend = trend.model_copy(update={
-                    "points": [_stored_point(d) for d in prefix.days] + trend.points})
+                    "points": [_stored_point(d, reporting) for d in prefix.days]
+                    + trend.points})
     else:
         trend = TrendSeries(points=[], reporting_currency=reporting, available=False)
         trend_reason = "尚無任何帳本紀錄"
@@ -1756,6 +1878,7 @@ def _build_dashboard(
         fx_triangulation=_fx_triangulation(resolver.reads, history=resolver.history,
                                            valued_on=as_of),
     )
+    freshness.set_trend_unconvertible(trend_flow)
 
     return DashboardData(
         as_of=now,
@@ -1803,11 +1926,15 @@ def _usable_store(conn: sqlite3.Connection,
     return state if state.usable else None
 
 
-def _stored_point(day: settlement_store.SettledDay) -> TrendPoint:
-    """A settled day as the trend point it was settled from, with its stored ``net_worth``."""
+def _stored_point(day: settlement_store.SettledDay, reporting: Currency) -> TrendPoint:
+    """A settled day as the trend point it was settled from, with its stored ``net_worth``,
+    as SERVED: with its ``pnl`` (``trend_pnl``, derived here — the store keeps no such
+    column)."""
     return TrendPoint(date=day.day, total_value=day.total_value,
                       net_invested=day.net_invested, incomplete=day.incomplete,
-                      net_worth=day.net_worth)
+                      net_worth=day.net_worth,
+                      pnl=trend_pnl(day.total_value, day.net_invested, reporting,
+                                    incomplete=day.incomplete))
 
 
 def _history_state(store: settlement_store.StoreState | None,

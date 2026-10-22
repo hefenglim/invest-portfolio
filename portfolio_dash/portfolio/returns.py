@@ -147,6 +147,15 @@ class CashMovementFlow(Protocol):
     def amount(self) -> Decimal: ...
 
 
+def is_return_movement(mv: CashMovementFlow) -> bool:
+    """Whether *mv* is one of the :data:`XIRR_CASH_KINDS` — the ONE predicate every reader of
+    those kinds admits a movement by: XIRR here, and in ``timeseries`` the trend's flows (so
+    ``net_invested``, B and the benchmark counterfactual's stream), 交易與融資成本 and the
+    trend's FX pair set (``trend_fx_currencies``). A reader that re-derived it could convert a
+    movement it loaded no rate for, or load a rate for a movement it never converts."""
+    return mv.kind.upper() in XIRR_CASH_KINDS
+
+
 class DividendIdentity(Protocol):
     """The six fields :func:`dividend_key` reads.
 
@@ -378,7 +387,7 @@ def xirr_reporting(
     # (no symbol to look one up from) and its sign comes from the shared cash_kinds
     # table, so it can never be a credit here and a debit in the pool balance.
     for mv in cash_movements:
-        if mv.kind.upper() in XIRR_CASH_KINDS:
+        if is_return_movement(mv):
             add(mv.date, mv.ccy, movement_sign(mv.kind) * mv.amount)
 
     # Observation window: as_of minus the earliest INPUT flow date (measured before the

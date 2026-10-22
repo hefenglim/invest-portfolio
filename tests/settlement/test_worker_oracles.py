@@ -7,8 +7,9 @@ compare the code with itself).
   value at the ``fx_rates`` row on or before D;
 - **the non-tax activity lines** (fees and tax, every cash-movement kind, FX conversions,
   openings) ≡ direct SQL sums, each converted at its own date's ``fx_rates`` row;
-- **the days before the unconvertible flow of** ``unquoted_ccy_cash`` ≡ the v0.1.31 trend of
-  ``golden`` (the same ledger until the rebate) on EVERY day, not only at month ends;
+- **every day of** ``unquoted_ccy_cash`` ≡ the v0.1.31 trend of ``golden`` (the same ledger
+  until the rebate) on EVERY day, not only at month ends — before the rebate as it is, from it
+  shifted by the rebate (PERF-F2's fix, ``tests/reference/perf_f2.py``);
 - **the benchmark state** ≡ the v0.1.31 ``benchmark`` block: the uncovered markets and ratio,
   each market's invested amount, and each terminal value as units × the last stored close at
   the stored rate.
@@ -19,7 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -221,20 +222,27 @@ def test_the_non_tax_activity_lines_are_the_ledger_sums(corpus_db: CorpusFactory
         conn.close()
 
 
-def test_the_days_before_the_unconvertible_flow_are_goldens_trend(
+def test_every_day_of_the_unquoted_rebate_corpus_is_goldens_trend(
         corpus_db: CorpusFactory) -> None:
     """``unquoted_ccy_cash`` is ``golden`` plus a MYR rate and a 50 MYR rebate on 2026-03-16;
     before the rebate the two ledgers are the same, so every settled day before it ≡ v0.1.31's
-    golden trend point — on EVERY day."""
+    golden trend point — on EVERY day. From the rebate on (PERF-F2 fixed: the trend loads the
+    MYR pair) every day ≡ golden's point shifted by the rebate (``perf_f2``), and none is a
+    placeholder."""
     db = corpus_db("unquoted_ccy_cash")
     conn, g = _run(db)
     try:
         rebate = date(2026, 3, 16)
-        days = {d.day: d for d in st.read_days(conn, g, end=rebate - timedelta(days=1))}
+        days = {d.day: d for d in st.read_days(conn, g)}
         golden = [p for p in reference("golden", "dashboard.json")["trend"]["points"]
                   if p["date"] < rebate.isoformat()]
-        assert len(golden) == len(days) > 60
-        assert [wire_day(days[date.fromisoformat(p["date"])]) for p in golden] == golden
+        before = {k: d for k, d in days.items() if k < rebate}
+        assert len(golden) == len(before) > 60
+        assert [wire_day(before[date.fromisoformat(p["date"])]) for p in golden] == golden
+        shifted = [p for p in reference("unquoted_ccy_cash", "dashboard.json")["trend"]["points"]
+                   if rebate.isoformat() <= p["date"] <= yesterday(db).isoformat()]
+        assert len(shifted) == len(days) - len(before) > 60
+        assert [wire_day(days[date.fromisoformat(p["date"])]) for p in shifted] == shifted
     finally:
         conn.close()
 

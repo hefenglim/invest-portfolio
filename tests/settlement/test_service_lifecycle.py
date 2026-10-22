@@ -176,6 +176,67 @@ def test_a_change_during_a_run_chains_a_follow_up_from_its_day(path: Path) -> No
     assert sup.job_row(path, first.run_id)["status"] == "ok"  # nothing was lost
 
 
+def test_a_back_dated_edit_after_the_swap_prompts_and_never_chains(path: Path) -> None:
+    """Review 2026-10-22, item 2 (PERF-D2: prompt first). A back-dated trade committed AFTER a
+    full publish's swap, before the waiter finalises — the status already reads idle — is not
+    the run's: no automatic 「接續」 run starts; the store reads pending with the prompt from the
+    trade's day, as for any old edit. (It chained a run without asking, and the stress harness
+    hit it as a flake.)"""
+    service.start_run(scope="full", reason="button")  # generation 1
+    stub.PLAN.append("change_after_swap")
+    started = service.start_run(scope="full", reason="button")
+    assert started.ended is not None and started.ended.status == "published"
+    assert started.ended.dirty_after == date(2026, 2, 2)
+    assert started.ended.chained_from is None
+    assert [r.run_id for r in sup.runs(path)][-1] == started.run_id  # nothing followed
+    state = sup.state(path)
+    assert state.dirty_from == date(2026, 2, 2) and state.run_id is None
+    conn = open_db(path)
+    try:
+        s = service.status(conn, viewer="user:guest", now=service._now(),
+                           reporting=get_settings().reporting_currency)
+    finally:
+        conn.close()
+    assert s.state == "pending" and s.needs_prompt
+    assert s.prompt is not None and s.prompt.from_ == date(2026, 2, 2)
+
+
+def test_an_edit_inside_the_window_after_the_swap_stays_live(path: Path) -> None:
+    """The same race with a trade dated inside the live window: it is live at once, so nothing
+    runs and nothing asks — the nightly run settles it."""
+    service.start_run(scope="full", reason="button")
+    stub.PLAN.append("change_after_swap_inside")
+    started = service.start_run(scope="full", reason="button")
+    assert started.ended is not None and started.ended.status == "published"
+    assert [r.run_id for r in sup.runs(path)][-1] == started.run_id
+    conn = open_db(path)
+    try:
+        s = service.status(conn, viewer="user:guest", now=service._now(),
+                           reporting=get_settings().reporting_currency)
+    finally:
+        conn.close()
+    assert s.state == "pending" and not s.needs_prompt
+
+
+def test_a_run_follows_only_what_the_ended_run_left() -> None:
+    """``_follow_up``: a partial or superseded end chains; a published end chains only when
+    its swap found a change committed while it was active (``chained_from``, spec Q3)."""
+    service.reset_for_tests()
+
+    def end(status: Any, *, chained: date | None = None,
+            dirty: date | None = date(2026, 2, 2)) -> service.RunEnd:
+        return service.RunEnd(run_id=4, status=status, job_status="ok", detail="",
+                              reason="button", scope="full", dirty_after=dirty,
+                              chained_from=chained)
+
+    chained = service._Pending(scope="dirty", reason="chained", previous_run_id=4)
+    assert service._follow_up(end("partial", chained=date(2026, 2, 2))) == chained
+    assert service._follow_up(end("superseded")) == chained
+    assert service._follow_up(end("published", chained=date(2026, 8, 12))) == chained
+    assert service._follow_up(end("published")) is None  # committed after the swap
+    assert service._follow_up(end("partial", chained=date(2026, 2, 2), dirty=None)) is None
+
+
 def test_a_scheduled_run_while_one_is_active_waits_for_it(
     path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -396,6 +457,103 @@ def test_a_job_that_changed_history_before_the_window_starts_a_run(
     assert service.settle_after_job("history_daily", mark=mark) is not None
     monkeypatch.setenv("PD_SETTLE", "off")
     assert service.after_job_hook("history_daily") is None
+
+
+def _owner_price(path: Path, day: date, close: str = "612.5") -> None:
+    """The owner revises a 2330 close (a ``prices`` counter: counters carry no actor)."""
+    conn = open_db(path)
+    try:
+        install_actor(conn, "user:owner")
+        upsert_prices(conn, [PriceRow(instrument="2330", market=Market.TW, as_of=day,
+                                      close=Decimal(close), source="test")],
+                      fetched_at=service._now())
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cancel(path: Path, run_id: int) -> None:
+    """What the waiter does for a cancelled (or dead) run: the claimed changes go back."""
+    conn = open_db(path)
+    try:
+        assert st.end_without_publish(conn, run_id, "cancelled")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("merge", [False, True], ids=["unclaimed", "merged"])
+def test_a_counter_put_back_after_the_jobs_mark_is_not_the_jobs(
+    path: Path, merge: bool
+) -> None:
+    """Review of the v0.1.32 follow-ups: the owner cancels a re-settlement while a job waits
+    behind it. The settle child's turn ends, the job's mark is taken, and only THEN does the
+    waiter put the cancelled run's claimed counters back (``on_exit`` runs after the gate is
+    released). A mark of PENDING counters alone read the owner's put-back counter as the
+    job's change. The mark now sums every unsettled counter per key, claimed ones included,
+    so a put-back — un-claimed in place, or merged into a pending counter of the same key —
+    changes nothing, while an earlier day the job writes still counts."""
+    service.start_run(scope="full", reason="button")
+    window = st.window_start(service._now().date())
+    _owner_price(path, date(2026, 3, 2))                 # the owner's pending revision ...
+    run_id = sup.fake_preparing_run(path, claim=True)    # ... claimed by a re-settlement
+    if merge:
+        _owner_price(path, date(2026, 4, 1), "613")      # a pending counter of the same key
+    mark = _mark(path)                                   # the queued job's turn comes
+    _cancel(path, run_id)                                # the waiter puts the claim back
+    _job_writes(path, price_day=window + timedelta(days=1))   # the job revises a close
+    assert service.settle_after_job("history_daily", mark=mark) is None
+    runs = len(sup.runs(path))
+    # the job's own revision dated BEFORE every pending day is still the job's
+    mark = _mark(path)
+    _job_writes(path, price_day=date(2026, 2, 2))
+    started = service.settle_after_job("history_daily", mark=mark)
+    assert started is not None and started.run_id is not None
+    assert len(sup.runs(path)) == runs + 1
+
+
+def test_no_run_starts_once_the_app_is_stopping(path: Path) -> None:
+    """Review of the v0.1.32 follow-ups: ``shutdown()`` began the stop, so no settle child
+    may start any more — not the owner's, not an automatic one, not a scheduled one. Boot
+    resumes or settles what is left."""
+    service.start_run(scope="full", reason="button")
+    sup.back_dated_trade(path, date(2026, 2, 2))
+    service.shutdown()
+    with pytest.raises(service.Stopping) as refused:
+        service.start_run(scope="dirty", reason="prompt", started_by="user:guest")
+    assert refused.value.code == "stopping"
+    assert service.start_automatic(scope="dirty", reason="job:history_daily") == \
+        service.AutoStart(stopping=True)
+    outcome = service.scheduled_run(None, "nightly", now=service._now())  # type: ignore[arg-type]
+    assert (outcome.status, outcome.detail) == ("skipped", "系統正在停止，每晚例行結算未執行")
+    assert len(sup.runs(path)) == 1
+    service.reset_for_tests()  # a new process (or test) starts open
+    assert service.start_run(scope="dirty", reason="prompt").ended is not None
+
+
+@pytest.mark.parametrize("plan", ["die_after_claim", "change_during"])
+def test_a_run_ending_during_the_stop_starts_no_follow_up(
+    path: Path, monkeypatch: pytest.MonkeyPatch, plan: str
+) -> None:
+    """A settle child that ends while the app stops (systemd's SIGTERM reaches it too, or it
+    simply finishes) is finalised by its waiter — which used to start the follow-up, a resume
+    or a chained run, as a NEW settle child in the middle of the stop. Now the follow-up is
+    left: boot resumes an interrupted run, and the dirty day waits for the next run."""
+    service.start_run(scope="full", reason="button")  # generation 1
+
+    def run_then_stop(run_id: int, *, db_path: Path) -> None:
+        try:
+            stub.run(run_id, db_path=db_path)
+        finally:
+            service.shutdown()  # the stop begins before this run's waiter finishes
+
+    monkeypatch.setattr(settle_worker, "run", run_then_stop)
+    stub.PLAN.append(plan)
+    started = service.start_run(scope="full", reason="button")
+    runs = sup.runs(path)
+    assert [r.run_id for r in runs][-1] == started.run_id and len(runs) == 2
+    assert runs[-1].status in ("interrupted", "partial", "superseded")
+    assert service.active_run_id() is None
 
 
 def test_a_busy_database_is_retried_by_the_waiter(

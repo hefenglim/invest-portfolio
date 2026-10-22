@@ -195,6 +195,7 @@ def test_the_wired_predicate_opens_no_write_window_for_a_read_only_post() -> Non
     for method, path in sorted(READ_ONLY_POSTS):
         assert client.request(method, path).json()["generation"] is not None, path
     assert client.get("/api/dashboard").json()["generation"] is not None
-    # an ordinary POST still runs inside a window: no result is shared or kept meanwhile
+    # an ordinary POST still runs inside a window, whose edges move the write generation (so
+    # nothing cached before it or during it is served after it); a read-only POST moves none
     assert client.post("/api/input/manual").json()["generation"] is None
     assert flight.write_generation() is not None

@@ -135,6 +135,58 @@ def test_monthly_marks_the_real_backend_cannot_produce_cheaply(
         assert "2025-06-16 交易更正後重新結算" in title and "transactions:" not in title, title
 
 
+_HINT_TITLE = "觀察期不足一年，年化 XIRR 波動較大，僅供參考。"
+
+
+@pytest.mark.e2e
+def test_a_first_year_xirr_carries_the_short_window_hint(
+    live_server: str, fresh_page: Page
+) -> None:
+    """Accountant MINOR 7b (owner ruling 2026-10-22): the 30-day gate stays, and a 累計 XIRR
+    over a window shorter than a year carries the KPI card's own hint 「觀察期 N 天・短窗參考」 —
+    on a month row (``xirr_window_days`` of ``GET /api/snapshots``) and on a year row (the
+    close's ``kpi``) alike; a window of a year or more, or a blank XIRR, carries none."""
+    stub = SettleStub(status("clean"))
+    stub.periods = [period("2026", source="live", current=True,
+                           kpi={"xirr": "0.21", "xirr_window_days": 157}),
+                    period("2025", kpi={"xirr": "0.18", "xirr_window_days": 400})]
+    snaps = SnapStub([
+        snapshot_row("2026-06", xirr="0.2345", xirr_window_days=157),
+        snapshot_row("2026-05", xirr="0.1234", xirr_window_days=365),
+        snapshot_row("2026-01", xirr=None, xirr_window_days=26,
+                     xirr_reason="觀察期 26 天・不足以年化"),
+    ])
+    with stubbed(fresh_page, stub, [(_SNAPSHOTS, snaps.handle)]):
+        _dashboard(fresh_page, live_server)
+        # the KPI card reads the same helper: its hint follows the dashboard's own figures
+        k = fresh_page.evaluate("() => window.pdDashboard.then((d) => d.kpis)")
+        card_hint = fresh_page.locator("#kpi-band .badge-window-mini")
+        if k["xirr"] is not None and k["xirr_window_days"] is not None \
+                and k["xirr_window_days"] < 365:
+            expect(card_hint).to_have_text(f"觀察期 {k['xirr_window_days']} 天・短窗參考")
+        else:
+            expect(card_hint).to_have_count(0)
+        rows = fresh_page.locator("#snapshots-body tr")
+        expect(rows).to_have_count(3)
+        first_year = rows.nth(0).locator("td").nth(4)
+        hint = first_year.locator(".snap-window .badge-window-mini")
+        expect(hint).to_have_text("觀察期 157 天・短窗參考")
+        assert hint.get_attribute("title") == _HINT_TITLE
+        expect(first_year).to_contain_text("+23.45%")
+        assert hint.get_attribute("style") is None   # DEF-077: a class, never inline
+        # a year's window (365 days) reads no hint; a blank XIRR keeps its reason, no hint
+        expect(rows.nth(1).locator(".badge-window-mini")).to_have_count(0)
+        blank = rows.nth(2).locator("td").nth(4)
+        expect(blank.locator(".badge-window-mini")).to_have_count(0)
+        assert blank.get_attribute("title") == "觀察期 26 天・不足以年化"
+        # the year rows: the same hint from the close's own kpi
+        fresh_page.locator("#snapshots-kind .range-btn[data-kind='Y']").click()
+        expect(rows).to_have_count(2)
+        expect(rows.nth(0).locator("td").nth(4).locator(".badge-window-mini")).to_have_text(
+            "觀察期 157 天・短窗參考")
+        expect(rows.nth(1).locator(".badge-window-mini")).to_have_count(0)
+
+
 @pytest.mark.e2e
 def test_a_server_without_the_year_closes_reads_an_empty_state(
     live_server: str, fresh_page: Page

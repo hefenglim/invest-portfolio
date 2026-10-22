@@ -598,11 +598,20 @@ _POOL_READERS = {
     "build_reporting_flows": {
         "portfolio/dashboard.py::_benchmark_comparison",
         "portfolio/timeseries.py::daily_value_series",
-        # the settlement's trend flows and its search for the first unconvertible day, each
-        # passed the replay's `refused_dividends`
+        # the settlement's trend flows, passed the replay's `refused_dividends`
         "portfolio/settle_worker.py::_valuate",
-        "portfolio/settle_worker.py::_first_unconvertible_day",
-        "portfolio/settle_worker.py::bad",
+    },
+    # the flow builder's loop, shared by the flows and the search for the first flow with no
+    # rate (MINOR 4, 2026-10-22): one definition of which flows exist
+    "_reporting_flows": {
+        "portfolio/timeseries.py::build_reporting_flows",
+        "portfolio/timeseries.py::first_unconvertible_flow",
+    },
+    # the first unconvertible flow (the trend's ONE unavailable sentence), each passed the
+    # replay's `refused_dividends`: the live build's and the settlement's
+    "first_unconvertible_flow": {
+        "portfolio/dashboard.py::_build_dashboard",
+        "portfolio/settle_worker.py::_plan",
     },
 }
 

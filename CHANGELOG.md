@@ -9,6 +9,165 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+## [v0.1.33] - 2026-10-22
+
+Changes after v0.1.32, each built on its own branch, reviewed independently, its findings fixed by
+its own author, then cherry-picked onto `fix/post-v0132`: the two defects the settlement-store work
+reproduced and the owner deferred (ruling 2026-10-19); the v0.1.32 code-review follow-ups and its
+performance backlog; the accountant review's minor findings; the trend tooltip's figure from the
+server; login sessions that expire. Every `.py` under `portfolio/`, `pricing/` and `shared/` is in the settlement calc version,
+so the release that carries them re-settles in full at its first boot.
+
+### Owner sign-off
+- **2026-10-19** — PERF-F2 and the price-basis split edge are fixed after the v0.1.32 deploy, each as
+  its own change.
+- **2026-10-20** — the split window's upper bound is the EXCHANGE-LOCAL date of the fetch (not its
+  open). Of the nine v0.1.32 code-review candidates (one refuted on reading), findings 2, 4, 6 and
+  8 are fixed now; 1, 5, 7 and 9 go to the backlog. The three changes are built in parallel, each
+  reviewed independently, its findings fixed by its own author, then folded.
+- **2026-10-22** (multiple choice) — the code review's backlog items 1, 7 and 9, the extra
+  `/api/snapshots` rebuild and the missing job-worker hook test are fixed now (no figure changes);
+  item 5 stays in the backlog. The trend tooltip's 累計總損益（含匯兌） comes from the server as a
+  COMPACT field (measured on a prod-sized copy before the ruling: +8.6 KB gzip at 2,179 points) and
+  reads 「—」 on an incomplete day. Accountant review minors: a restated close names every change
+  that moved it; one sentence names the missing rate's date and pair; 月度成績 shows the
+  short-window XIRR hint; an all-unpriced month end (0) and the absent corporate-action activity
+  line are documented, not changed; all ship in this batch. Also recorded: data retention — keep
+  everything for now; the delisted-symbols spec is approved in substance but parked on branch
+  `feat/delisted-symbols` (merge the latest main into it when the build starts); the unbuilt
+  blueprint phases (decision ledger, external-report feed, quarterly / behaviour cards) are parked;
+  prod AI stays off until the owner enables it. Login sessions expire after 30 days without use
+  (review L5, deferred since 2026-07-07); the use is recorded once a day with a cache pre-warm
+  (chosen over every 6 h, which would empty the result cache up to twice a day).
+
+### Security
+- **Login sessions expire after 30 days without use**, and each use extends them. An expired session
+  answers 401 「登入已逾期（30 天未使用），請重新登入」 and the login page says why the form is back.
+  A use is recorded at most once a day per session, after the response, on its own connection,
+  skipped while the write lock is held — so a GET still never writes on its own connection (DEF-065;
+  a new protected-mode section of `test_def065_get_never_writes.py`); the record empties the result
+  cache, so it schedules the ordinary pre-warm at once. A session lapses 29–30 days after its last
+  use; stamps dated in the future or unreadable count as expired; logout is an open path so an
+  expired cookie can be cleared; the action log names only a login the gate let through. The boot
+  adds `auth_sessions.last_seen_at` (an additive ALTER), dates existing sessions from the first boot
+  of this release (nobody is logged out on deploy day), and purges expired, locked and orphaned
+  sessions, logging the counts.
+
+### Fixed
+- **PERF-F2: the trend no longer disappears over a cash cost in a currency no holding is quoted
+  in.** A MYR rebate on a ledger without MY stocks removed the whole trend, and with it net worth,
+  含匯兌總損益 (B), 本金匯率效果 (B − A), 交易與融資成本 and the index comparison, although the
+  rate was stored and XIRR counted it. The trend's FX pair set now has one owner,
+  `portfolio/timeseries.py::trend_fx_currencies` (the quote currencies ∪ the currency of every
+  movement the trend converts, by XIRR's own predicate `returns.is_return_movement`), shared by the
+  dashboard and the settlement worker. A genuinely missing rate still withholds the trend. The
+  v0.1.31 reference payloads are kept; `tests/reference/perf_f2.py` owns the intended difference on
+  the `unquoted_ccy_cash` corpus, and every other corpus stays byte-identical. Stress: new
+  checkpoint `run_unquoted_ccy_cash`, isolated on a scratch copy with its own server (phase 1
+  ops=261 pass=155146 fail=0; with the old pair set fail=94, all at that checkpoint).
+- **Price basis: the split window closes on the exchange's own date** (the price-basis split edge,
+  spec 2026-10-18 §20 row 9). The write seam folded the splits in `(as_of, fetched_at.date()]` with
+  `fetched_at` on the app clock (Asia/Taipei). The US quote job fires at 16:30 New York, already the
+  next day in Taipei, so every scheduled fetch of a split's last pre-split session stored its
+  as-traded close × the ratio until `history_daily` re-fetched it about 20 hours later. The bound
+  is now the fetch's date in the market's exchange timezone (`pricing/store.split_window_through`;
+  `shared/enums.MARKET_TIMEZONE`), for the write seam and the reconcile alike. TW and MY rows
+  stamped +08:00 are unchanged. Every restatement now goes through one seam
+  (`api/instrument_service.restate_price_basis`), which also clears the symbols' derived signal
+  rows, and the reconcile reads and writes in one `BEGIN IMMEDIATE` transaction (a concurrent quote
+  write could leave a close derived from the old raw value beside the new one). New
+  `scripts/check_split_window.py` lists stored rows the new window disagrees with (read-only; US
+  and TW / MY apart; SUSPECT rows marked and skipped unless `--include-suspect`) and restates them
+  with `--apply` after a verified backup (exit codes 0 / 1 / 2 / 3 / 4).
+- **A clean stop no longer leaves `-wal` / `-shm` beside the database when a pre-warm is running**
+  (review finding 2). `result_cache.shutdown()` closes the cache for the rest of the lifespan,
+  waits up to 15 s for a running pre-warm, then closes the version connections before the TRUNCATE
+  checkpoint (`api/app.py::checkpoint_on_stop`). An outlived wait and a busy checkpoint are logged.
+  The lifespan reopens the cache at start.
+- **No settle child starts during a stop.** A run that ended while the app stopped used to start
+  its resume, chained or queued follow-up as a new child mid-stop; `settlement_service.shutdown()`
+  now refuses every start (`Stopping`, 409 on the run route) until the next boot.
+- **Cancelling a re-settlement no longer pops 「要重新結算歷史資料嗎？」** (review finding 4): the
+  settlement's own run / cancel POSTs never re-arm the prompt; every other write still does.
+- **A job queued behind a settlement no longer starts an automatic run for the owner's changes**
+  (review finding 6). A job worker child takes its after-job change-trail mark when the heavy gate
+  grants its turn (`child_runner.spawn(on_start=…)`), not before the wait, and the mark sums every
+  unsettled price / FX counter per key (claimed ones included), so a cancelled run's put-back is not
+  the job's change either. A child cancelled as its turn comes gets neither `on_start` nor a
+  process.
+- Docstrings (`live_from`, `stale_range`, `claim`, `end_without_publish`,
+  `dashboard._stored_bench`) now describe `Dd` = `dirty_day` and the benchmark's `claimed_day` as
+  built (review finding 8).
+- **The trend tooltip's 累計總損益（含匯兌） is the server's figure.** Every `GET /api/dashboard` trend
+  point carries `pnl` = `total_value − net_invested` at the reporting currency's minor unit (TWD 0
+  dp, USD / MYR 2 dp, ROUND_HALF_UP; a rounded-away loss reads `0`, never `-0`), `null` on an
+  incomplete day, where the tooltip prints 「—」 beside its 「部分標的當日無價格」 note (the KPI B gate
+  withholds B there too). The tooltip formats and colours it by the string's sign; the last JS
+  float subtraction of money is gone and `test_frontend_never_computes_money.py` scans
+  `TrendPoint`. The tooltip, the 含現金 header and the 「<幣別>・日線」 subtitle format in the
+  ledger's reporting currency instead of a hard-coded TWD. Additive payload change: 11–16 B raw and
+  0.05–3.4 B gzip per point on the reference corpora; the spec-17 golden gained `pnl`
+  (`tests/reference/trend_pnl.py` owns the difference); the stress harness checks `trend.pnl`.
+- **A restated close names the changes that moved it** (accountant MINOR 2): every claimed change
+  on or before its own end day, earliest first, at most three then 「等 N 筆」 — after a partial
+  publish including what the predecessor chain settled; an import batch (inserted together, or
+  deleted by its undo) is one entry; a price / FX change names its symbol or pair; rebuilt triggers
+  read 「觸發器重建（…）後重新結算」. Stored rows are never rewritten.
+- **One sentence says why the trend is unavailable** (MINOR 4): 「YYYY-MM-DD 起缺少 XXX/YYY 匯率（當日
+  或之前無匯率），走勢無法計算」 on the dashboard, live and stored closes, 當期報酬 and the run report
+  (`timeseries.first_unconvertible_flow` / `trend_unavailable_reason`); a live close dated before
+  that flow reads 「即時走勢因 … 而無法計算」.
+- **月度成績's 累計 XIRR shows 「觀察期 N 天・短窗參考」 under 365 days** (MINOR 7b), as the KPI card does;
+  `/api/snapshots` month rows gain `xirr_window_days`.
+- **PERF-D2 held at the edge:** a write landing between a full publish's swap and its waiter's
+  finalisation started an automatic chained run although the status already read idle — bypassing
+  the owner's prompt for a back-dated edit (and the root of a stress-harness flake). The waiter now
+  chains only what the run itself left (a partial publish, a superseded run, or a change the swap
+  found queued); a later change takes the prompt or the nightly run.
+- **Settlement status no longer mixes two database states** (found by the stress audit, 2026-10-22).
+  `GET /api/settlement/status` was assembled from a dozen autocommit SELECTs; a run's swap
+  committing between them read as the previous generation with the run's claimed day as a stale
+  range and no run active, so the chip and banner could flash 待結算 / 更新前版本 at the end of a
+  run. Every settlement read (status, run history, one run's report, its diff, the change trail)
+  now reads inside one read transaction (DEF-065 unchanged). The settle lock is probed before the
+  snapshot opens and after its reads, so a child that publishes and exits during the read is not
+  shown 已中斷. The stress harness waits for the run's report before it reads the status.
+
+### Performance
+- Readers keep caching and sharing during another request's write window (the review's backlog
+  item 1): the result-cache key already carries `PRAGMA data_version`, which moves at the commit
+  itself, so the process-wide "no cache while any write is open" was redundant.
+- A cache-miss dashboard build replays the ledger once (`dashboard._replay_once`), holding at most
+  64 trend books / ~8,000 entries and releasing each as the trend reads it; past the bound, or on
+  any failure while holding, it falls back to the two replays.
+- One 月度成績 / periods request reads `job_runs` and `schedule_config` once for its 暫定 labels
+  (`FinalThroughReader`; 8 → 2 and 4 → 1 reads in the test scenario).
+- A job writing during a periods listing's miss no longer forces the next listing to recompute
+  (`result_cache.marked_snapshot` / `mark=`: filed under the current key when nothing changed since
+  the late snapshot opened).
+- Test: the job worker child runs its job with the after-job hook cleared.
+
+### Changed
+- `docs/DEPLOYMENT.md`: the manual snapshot uses SQLite's online backup. A `-wal` left beside the
+  database holds committed changes: fold it back before a copy, and delete it only when a restore
+  replaces the file.
+- Accounting manual `v1.14` (zh + hand-translated en mirror): §7.1b (m) records both defects as
+  fixed; `v1.15`: the accountant review's five minor findings (§5.3, §7.1b (a)(b)(e)(g)(l)(m),
+  §7.2.1) and the field-table row for the tooltip's `pnl`.
+
+### Backlog
+- `update_schedule` records the live row as the previous schedule even after an unrecorded hand
+  edit of `schedule_config` (v0.1.32 code review, item 5).
+- A settle or job child still running at stop can keep the TRUNCATE checkpoint busy; logged, not
+  waited for.
+- A REPLACE that moves a ledger row to a later day leaves the old day dirty without a trail line
+  (outside writers only — the app never REPLACEs the id-keyed ledgers).
+- The dashboard rebuilt inside a late periods snapshot is not filed in the cache (the next
+  `/api/dashboard` after such a race builds once).
+- `web/index.html` keeps a static 「TWD・日線」 subtitle until the chart script runs.
+- A navigation landing within the 3 s pre-warm delay of a session touch still misses the cache once
+  (about 0.9 s on the VM) and rebuilds it itself.
+
 ## [v0.1.32] - 2026-10-20
 
 The settlement store: history is settled ahead of time and served from it, results are kept in a

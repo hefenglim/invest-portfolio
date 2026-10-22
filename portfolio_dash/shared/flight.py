@@ -17,11 +17,14 @@ What a caller can rely on:
 * **A write closes the window.** A caller never joins a computation that may have started
   before a write it could otherwise observe. Two signals feed :func:`write_generation`:
   every mutating HTTP request brackets itself with :func:`begin_write` / :func:`end_write`
-  (``api/app.py``) — no sharing at all while one runs — and every ``shared.db.session``
+  (``api/app.py``) — no sharing at all while one runs, for a key built on
+  :func:`write_generation` (see "Two readings" below) — and every ``shared.db.session``
   that changed a row commits inside a write window of its own and calls :func:`note_write`
-  when it closes, which covers the scheduler and the background runners too. The session's
-  window is not redundant: a request's connection commits in its dependency's exit, after
-  the HTTP window has already closed. A background writer's commit that lands DURING someone
+  when it closes, which covers the scheduler and the background runners too. Since PERF-S10
+  (2026-10-18) ``get_conn`` is function-scoped, so a request's own commit runs before its
+  response starts, INSIDE the HTTP window; the session's window is what covers every commit
+  made outside a request (a scheduler job, a background runner, a thread a request starts).
+  A background writer's commit that lands DURING someone
   else's build is seen by that build's joiners as it would be by a caller who had arrived
   a moment earlier — the same answer, a few seconds older — never as a lost write of
   their own.
@@ -38,8 +41,19 @@ The key decides what "identical" means; ``None`` means "do not share" and simply
 **The result cache sits on top** (PERF 2026-10-18, ``shared/result_cache.py``): it KEEPS
 the latest result per name until the database changes, and delegates its in-flight sharing
 to :func:`coalesce` with its own key — which adds the database's ``PRAGMA data_version`` to
-:func:`write_generation`. The write windows here stay the cache's process-local signal.
-"Nothing is kept" remains true of this module.
+the write generation. "Nothing is kept" remains true of this module.
+
+**Two readings of the generation** (post-v0.1.32 item 1). :func:`write_generation` is
+``None`` while any write window is open: a key built on the generation ALONE must stop
+sharing for the whole window, because the generation does not move AT the commit inside it —
+a caller arriving just after the commit would join a computation started just before it.
+The result cache's key also carries ``data_version``, read on its own connection before the
+computation's snapshot opens; that counter moves at the commit itself, from any connection or
+process, so the cache keys on :func:`generation` instead and keeps caching and sharing while
+another request's window is open (``result_cache.key_for`` gives the argument). The windows
+still move the generation at both edges and at every session commit, so nothing filed during
+a window is reachable once it closes, and they still gate the pre-warm. No caller of
+:func:`coalesce` keys on the generation alone today.
 """
 
 from __future__ import annotations
@@ -94,6 +108,15 @@ def write_generation() -> int | None:
     """The current write generation, or ``None`` while a write is in progress (no sharing)."""
     with _lock:
         return None if _writes_in_progress else _generation
+
+
+def generation() -> int:
+    """The current write generation, whether or not a write window is open — for a key that
+    also carries the database's own change counter (``result_cache``: ``PRAGMA
+    data_version``), which moves AT every commit, so an open window need not stop sharing
+    (post-v0.1.32 item 1; the module docstring)."""
+    with _lock:
+        return _generation
 
 
 def coalesce[T](key: Hashable | None, compute: Callable[[], T], *,

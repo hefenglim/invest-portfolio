@@ -124,7 +124,7 @@ result, and it was labelled 「浮動損益」. Three figures, one decomposition
 | | figure | what it is |
 | --- | --- | --- |
 | **A** | `total_return` — 資產損益（不含本金匯率） | each currency's native P&L at today's spot |
-| **B** | 含匯兌總損益 = `total_value − net_invested` | flows at trade-date FX, value at spot → FX-complete |
+| **B** | 含匯兌總損益 = `total_value − net_invested` | flows at trade-date FX, value at spot → FX-complete; per day in the trend tooltip as `TrendPoint.pnl` (display-quantized, null on an incomplete day — on the last day null exactly when B is withheld) |
 | **B − A** | 本金匯率效果 | `cost × (spot_now − acq_rate)` — the 換匯損益 card's content |
 
 ⚠ **Adding the 換匯損益 card to A double-counts the cross term** `(MV − C)(spot − acq)`. A, B and
@@ -477,9 +477,11 @@ corrected afterwards. Owner `portfolio/period_close.py`; the worker, the read pa
   - `pending_positions` — the 待釐清 on the book at D: 賣超, an unapplied action, a refused
     dividend, a refused close;
   - `options_value_excluded`, and `options_past_expiry`;
-  - `trend_unavailable` — no trend point at D. Either a flow has no on-or-before rate (「部分投入
-    流量缺少當日匯率，該日沒有走勢資料」), or the series has not started yet (「走勢自第一筆交易、股
-    利或期初庫存起算，此日尚無走勢資料」);
+  - `trend_unavailable` — no trend point at D. Either a flow has no on-or-before rate, in the
+    series' ONE sentence naming the first such flow's date and pair (「2026-03-16 起缺少 MYR/TWD
+    匯率（當日或之前無匯率），走勢無法計算」, `timeseries.trend_unavailable_reason`; a live close dated
+    before that flow reads the variant 「即時走勢因 … 而無法計算」), or the series has not started yet
+    (「走勢自第一筆交易、股利或期初庫存起算，此日尚無走勢資料」);
   - `missing_cash_fx` — a non-empty cash pool at D with no rate to the reporting currency;
   - `dividends_receivable` — computed when the close is READ, never stored. It lists every
     non-STOCK row with `ex_date ≤ D < payment date`: shown, never counted. A refused one is
@@ -541,13 +543,21 @@ corrected afterwards. Owner `portfolio/period_close.py`; the worker, the read pa
 - **暫定 (provisional)** marks a past period whose D is after `final_through`: a market quote job
   due on D has not ended `ok`. The note reads 「月底收盤價尚未確定：<市場>報價工作未完成」
   (「年底…」 for a year). It depends on the price data, never on the store. After 4 days the
-  close settles anyway, with `notes.unconfirmed_closes`.
+  close settles anyway, with `notes.unconfirmed_closes`. It is judged per request by one
+  `FinalThroughReader`: `schedule_config` and the quote `job_runs` rows are read once per request,
+  whatever the number of days walked.
 - **Restatements.**
   - **已重述:** when a run changes a published close's KPI, it writes a `settle_restatement` row.
     The row records the field's zh label (總市值 / 累計總報酬 / 累計報酬率 / 累計 XIRR /
     當期報酬（TWR） / 證券市值 / 淨投入 / 淨資產 / `<ccy> 市值`), the unit, before → after, the
-    notes before and after, the reason (e.g. 「計算規則更新」, or a dated correction) and the
-    time. Restatement rows are never pruned, so the row's 已重述 mark always explains itself.
+    notes before and after, the reason and the time. The reason is 「計算規則更新」, or EVERY change
+    that moved the close, on or before its end day, earliest first — this run's claims plus, after a
+    partial publish, what its predecessor chain settled (`settlement_store.inherited_changes`) — at
+    most three then 「等 N 筆」 (an import batch, two or more records inserted together or deleted by
+    its undo, is one entry; a price / FX change names its symbol or pair; rebuilt triggers are one
+    undated entry 「觸發器重建（…）」), e.g. 「2026-02-05 交易、2026-05-08 股利更正後重新結算」
+    (`settle_worker.correction_reason`); 「重新結算」 when none. Restatement rows are never pruned,
+    so the row's 已重述 mark always explains itself.
   - **上線重述 at go-live:** on a month's FIRST publish, its close is compared with the retired
     `portfolio_snapshots` freeze, but only when that freeze was written on the month's last day
     (the go-live month's row was never a close). Every difference is recorded with `cutover = 1`
@@ -556,20 +566,25 @@ corrected afterwards. Owner `portfolio/period_close.py`; the worker, the read pa
     restatement is expected.
 
   Activity lines and holdings are recomputed on every run but not restated.
-- **Known, owner-deferred defects** (ruling 2026-10-19: v0.1.32 keeps its byte identity
-  against v0.1.31, and each is fixed as its own change AFTER the release; each is pinned
-  `xfail(strict=True)` in `tests/portfolio/test_engine_repro.py`):
-  - **PERF-F2.** The trend's FX pair set holds only the ledger's QUOTE currencies. An XIRR-kind
+- **Two defects found during the store work, fixed after v0.1.32** (ruling 2026-10-19:
+  v0.1.32 kept its byte identity against v0.1.31, and each was fixed as its own change after
+  the release; their former `xfail(strict=True)` tests in `tests/portfolio/test_engine_repro.py`
+  are plain regression tests now):
+  - **PERF-F2.** The trend's FX pair set held only the ledger's QUOTE currencies, so an XIRR-kind
     cash movement (REBATE / INTEREST_EXPENSE / BROKER_FEE) in a currency no instrument is quoted
-    in makes the WHOLE trend unavailable (net worth, B, B − A, the benchmark), although its rate
-    is stored and XIRR counts it.
-    - A close stored for a day before that flow keeps its trend figures.
-    - A close from it on carries `notes.trend_unavailable` and no 當期報酬.
-    - A past close computed LIVE on such a ledger has no trend figure at all.
-  - **The price-basis split edge.** `upsert_prices` folds in the splits dated in
-    `(as_of, fetched_at]`, with `fetched_at` the TAIPEI date. A US fetch made in Taipei on a
-    split's ex-date but before the New York open (the provider still delivers the previous
-    session's as-traded close) multiplies that close by the ratio. The next day's restated
-    fetch stores the right value again. A day or close valued from that row in between is wrong
-    by the ratio. If that day is already settled, the corrected row's `prices` trigger marks it
-    dirty and the next run settles it again; otherwise it is live and simply heals.
+    in made the WHOLE trend unavailable (net worth, B, B − A, 交易與融資成本, the benchmark),
+    although its rate was stored and XIRR counted it. The set now has ONE owner,
+    `portfolio/timeseries.py::trend_fx_currencies`: the quote currencies of
+    `trend_symbols(bundle)` plus the currency of every movement the trend converts, by
+    `returns.is_return_movement` (XIRR's own predicate). The live build and the settlement
+    worker both read it. Only a rate genuinely missing on or before a flow's date still makes
+    the trend unavailable (the one sentence, `timeseries.trend_unavailable_reason`); on such a
+    ledger a past close computed live has no trend figure at all. The worker's placeholder widening is now defense
+    in depth with no known production trigger; its test reaches it through v0.1.31's pair set.
+    `tests/reference/perf_f2.py` owns the intended payload difference on the
+    `unquoted_ccy_cash` corpus (the v0.1.31 reference files are never regenerated).
+  - **The price-basis split edge.** The write window's bound was the TAIPEI date of the fetch,
+    so every scheduled US fetch of a split's last pre-split session (16:30 New York, already
+    the ex-date in Taipei) stored its as-traded close × the ratio until `history_daily`
+    re-fetched it about 20 hours later. The bound is now the fetch's date on the exchange's
+    calendar (owner ruling 2026-10-20; `data-and-pricing.md` → the stored price basis).

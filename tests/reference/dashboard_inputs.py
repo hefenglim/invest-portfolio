@@ -5,7 +5,10 @@ trend's price and FX histories — ONLY the ledger's quote currencies), 9b (the 
 rows and FX histories — the cash pools' currencies) and 10 (the benchmark closes), so the
 frozen functions and the live ones can be handed IDENTICAL inputs. Each consumer keeps exactly
 the FX pair set it reads in v0.1.31 (spec §8 item 5): handing the trend a pair it does not read
-would change ``available`` on the ``unquoted_ccy_cash`` corpus.
+would change ``available`` on the ``unquoted_ccy_cash`` corpus. The shipping dashboard reads a
+wider trend set since PERF-F2's fix (``timeseries.trend_fx_currencies``: the quote currencies
+and every converted cash movement's currency); these inputs keep v0.1.31's ON PURPOSE, because
+the engine-equality tests compare two engines on one set of inputs, not two pair sets.
 
 The one book this needs (for the cash series' booked dividends) is the FROZEN engine's, so the
 inputs depend on no live replay. Read-only over the connection.

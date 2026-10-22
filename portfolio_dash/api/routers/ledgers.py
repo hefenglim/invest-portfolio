@@ -198,7 +198,6 @@ from portfolio_dash.shared.options import (
     strike_products,
 )
 from portfolio_dash.shared.wire import decimal_str
-from portfolio_dash.strategy import signal_history, signal_states
 from portfolio_dash.strategy.target_weights import (
     WeightRestoreVerdict,
     move_target_weight,
@@ -1267,36 +1266,19 @@ def reconcile_split_prices(conn: sqlite3.Connection, symbols: Iterable[str]) -> 
     """Run the §5.1(c) price-basis reconcile for *symbols*; returns rows restated.
 
     **Call on any insert / edit / delete of a corporate-action row**, after the CRUD has
-    committed, on the same connection. Passing a non-SPLIT symbol is a provable no-op
-    (``split_factor`` is SPLIT-scoped), which is why an edit may simply pass both ends of
+    committed, on the same connection. Passing a non-SPLIT symbol is a provable no-op for
+    its prices (``split_factor`` is SPLIT-scoped), which is why an edit may simply pass both ends of
     the row rather than discriminating — and why the OLD ``from_symbol`` must be included
     when an edit moves the action, or that symbol keeps a basis from an action which no
     longer references it.
 
-    A database with no ``prices`` table (a ledger-only DB: the CSV/AI parse paths and most
-    unit tests) has nothing to restate, so this degrades to 0 rather than raising an
-    ``OperationalError`` out of a write path. Same table probe, same reason, as
-    ``validate._has_prices``.
-
-    W6 (AI-D27): the restatement also invalidates the symbol's DERIVED signal rows, and
-    that delete happens BEFORE the prices probe — it must run even in a prices-less DB
-    (both stores degrade on a missing table). ``signal_history``: every stored evaluation
-    is wrong under the new basis (the next scan's replay rebuilds it). ``signal_states``:
-    the stale comparison row would diff against a post-restatement evaluation on the next
-    scan and fire PHANTOM transition events into ``alert_events`` — a basis restatement is
-    not a market event; with the row gone the next scan silently reseeds, zero events.
+    Delegates to the ONE restatement seam, ``api.instrument_service.restate_price_basis``,
+    which also deletes the symbols' DERIVED signal rows (W6 / AI-D27) before its prices
+    probe, and degrades to 0 in a database with no ``prices`` table. The script
+    ``scripts/check_split_window.py --apply`` calls the same seam, so no restatement path
+    can skip the invalidation.
     """
-    wanted = sorted({s for s in symbols if s})
-    if not wanted:
-        return 0
-    for s in wanted:
-        signal_history.delete_symbol(conn, s)
-        signal_states.delete_symbol(conn, s)
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prices'"
-    ).fetchone() is None:
-        return 0
-    return reconcile_price_basis(conn, wanted)
+    return reconcile_price_basis(conn, symbols)
 
 
 class ActionBody(BaseModel):
@@ -2420,9 +2402,11 @@ def _seed_child_price(
     wall clock made a claim about the row that is not true, and the claim is load-bearing.
     ``pricing/`` reads ``fetched_at`` as the upper bound of the window ``(as_of, fetched_at]``
     — "which splits had the provider already folded into this delivered number?" — and
-    multiplies them back OUT (``data-and-pricing.md``, the as-traded invariant). With the row
-    dated the action day, ``as_of == fetched_at.date()``, so that window is EMPTY by
-    construction, on the write **and on every later**
+    multiplies them back OUT (``data-and-pricing.md``, the as-traded invariant). The bound is
+    ``fetched_at``'s date on the exchange's calendar (``pricing.store.split_window_through``,
+    owner ruling 2026-10-20), which for TW / US / MY is never later than the app clock's own
+    date. With the row dated the action day, the bound is at most ``as_of``, so that window is
+    EMPTY by construction, on the write **and on every later**
     ``pricing.reconcile.reconcile_prices`` pass: ``split_basis`` can only ever be the
     identity, and ``factor_of`` may safely stay at ``_no_factor``.
 

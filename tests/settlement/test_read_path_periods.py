@@ -3,7 +3,8 @@ plan §7.1, package G): ``GET /api/snapshots`` and ``GET /api/settlement/periods
 
 Stores are built by the REAL worker (inline) on the reference corpora. The oracles:
 
-- v0.1.31's truncated-world dashboards (``tests/reference/payloads/<corpus>/month_end``) for
+- v0.1.31's truncated-world dashboards (``tests/reference/payloads/<corpus>/month_end``, with
+  PERF-F2's intended difference on ``unquoted_ccy_cash``, ``tests/reference/perf_f2.py``) for
   every close the read path computes LIVE — ``PD_SETTLE=off``, every past month live;
 - the worker's own published closes for the same periods: a close served live and the close
   the worker stores for it are the same close, field for field (only ``source`` differs), so
@@ -17,7 +18,8 @@ join; 更新前版本 and no ``dividends_receivable`` on a stale row; the restat
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterator
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from itertools import count
@@ -39,8 +41,11 @@ from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.dashboard import build_dashboard_keyed
 from portfolio_dash.portfolio.returns import DividendRefusals, dividend_key
 from portfolio_dash.portfolio.settlement_models import PeriodHolding, PeriodKpi
+from portfolio_dash.shared import result_cache
+from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.models.enums import DividendType
 from portfolio_dash.shared.models.ledger import valued_rows_as_of
+from tests.reference import perf_f2
 from tests.reference.corpora import (
     CORPORA,
     CORPUS_NAMES,
@@ -96,8 +101,10 @@ def settled(tmp_path_factory: pytest.TempPathFactory) -> Settled:
 
 
 def _get(app: FastAPI, db: CorpusDB, url: str, *, now: datetime | None = None,
-         params: dict[str, Any] | None = None) -> Any:
+         params: dict[str, Any] | None = None,
+         trace: Callable[[str], None] | None = None) -> Any:
     conn = open_db(db.path)
+    conn.set_trace_callback(trace)
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_now] = lambda: now or db.now
     app.dependency_overrides[get_reporting] = lambda: db.reporting
@@ -177,11 +184,6 @@ def test_every_live_month_is_the_v0131_truncated_world(
             row = rows[f"{d:%Y-%m}"]
             assert row["end_day"] == text
             ref = reference(name, f"month_end/{d:%Y-%m}.json")
-            if name == "unquoted_ccy_cash":
-                # PERF-F2 (deferred, owner 2026-10-19): the LIVE series is unavailable, so a
-                # live close shows no trend figure — the trend card shows none either — while
-                # the truncated world of Jan / Feb has one. The KPIs are the world's.
-                ref = {**ref, "trend": {**ref["trend"], "points": []}}
             detail = _get(app, db, f"/api/settlement/periods/M/{d:%Y-%m}")
             holdings = [PeriodHolding.model_validate(h) for h in detail["holdings"]]
             assert_close_is_truncated_world(f"{name} {d}", _kpi(row), ref, d, conn=conn,
@@ -192,7 +194,7 @@ def test_every_live_month_is_the_v0131_truncated_world(
         conn.close()
 
 
-@pytest.mark.parametrize("name", [n for n in CORPUS_NAMES if n != "unquoted_ccy_cash"])
+@pytest.mark.parametrize("name", CORPUS_NAMES)
 @pytest.mark.parametrize("kind", ["M", "Y"])
 def test_a_close_served_live_is_the_close_the_worker_stores(
         app: FastAPI, settled: Settled, name: str, kind: str,
@@ -217,15 +219,30 @@ def test_a_close_served_live_is_the_close_the_worker_stores(
 
 
 def test_the_unavailable_live_series_is_named_on_a_live_close(
-        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
-    """PERF-F2's shape, served live: no trend figure and no 當期報酬, in the build's own words
-    (帳本中有交易日期缺少匯率資料) — never a figure, never an empty reason."""
-    db = settled("unquoted_ccy_cash")
+        app: FastAPI, corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live series unavailable for a MISSING rate (``unquoted_ccy_cash`` with its rebate's
+    rate dropped, ``perf_f2.drop_rebate_rate``), served live: no trend figure and no 當期報酬,
+    in the build's own words — the series' ONE sentence, naming the first flow with no rate
+    and its pair (MINOR 4, owner ruling 2026-10-22) — never a figure, never an empty
+    reason."""
+    db = corpus_db("unquoted_ccy_cash")
+    perf_f2.drop_rebate_rate(db.path)
+    prepare(db)
+    assert start_run(db, 1) == "published"
     monkeypatch.setenv("PD_SETTLE", "off")
+    sentence = "2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算"
+    # a close dated BEFORE the flow names it as the live series' cause, never its own day's
+    # (review 2026-10-22: its stored twin has a trend point)
+    before = "即時走勢因 2026-03-16 起缺少 MYR/TWD 匯率而無法計算"
+    seen = set()
     for row in _periods(app, db, "M"):
         kpi = row["kpi"]
+        want = before if row["end_day"] < "2026-03-16" else sentence
+        seen.add(want)
         assert kpi["trend_total_value"] is None and kpi["period_twr"] is None
-        assert kpi["notes"]["trend_unavailable"] and kpi["period_twr_reason"]
+        assert kpi["notes"]["trend_unavailable"] == want, row["period"]
+        assert kpi["period_twr_reason"] == want, row["period"]
+    assert seen == {before, sentence}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -251,6 +268,8 @@ def test_the_snapshot_rows_are_the_month_closes(app: FastAPI, settled: Settled) 
         assert r["by_currency"] == k["by_currency_value"]
         assert (r["xirr_reason"], r["period_twr"], r["period_twr_reason"]) == (
             k["xirr_reason"], k["period_twr"], k["period_twr_reason"])
+        # 累計 XIRR's observation window — the 月度成績 cell's 「觀察期 N 天・短窗參考」 (MINOR 7b)
+        assert r["xirr_window_days"] == k["xirr_window_days"]
         assert r["notes"] == k["notes"]
         assert r["provisional"] is None and r["stale"] is False and r["restated"] is None
         if r is not current:
@@ -505,6 +524,44 @@ def test_the_provisional_note_names_the_end_days_market(
     assert july["provisional"] == "月底收盤價尚未確定：美股報價工作未完成"
 
 
+def test_one_listing_reads_the_quote_runs_and_the_schedule_once(
+        app: FastAPI, corpus_db: CorpusFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-v0.1.32 item 3: the 暫定 walk asks ``final_through`` once per day from the end day
+    back to ``through`` — here three probes (07-31, 07-30, 07-29) after the first answer — and
+    each answer read ``job_runs`` (its rows and the go-lives) and ``schedule_config`` again,
+    on every listing request, cache hits included. One request now reads each once, and the
+    label is the same."""
+    db = corpus_db("demo")
+    _quote_jobs(db, partial_on=date(2026, 7, 29), first=date(2026, 7, 1),
+                last=date(2026, 7, 31))
+    monkeypatch.delenv("PD_DISABLE_SCHEDULER", raising=False)
+    monkeypatch.setenv("PD_SETTLE", "off")
+    # the corpus is the app's database, so the closes are cached: a hit computes nothing and
+    # the labelling is the only reader of the two tables
+    monkeypatch.setenv("DB_PATH", str(db.path))
+    get_settings.cache_clear()
+    result_cache.reset()
+    saturday = datetime(2026, 8, 1, 10, 0, tzinfo=TPE)
+    expected = "月底收盤價尚未確定：台股報價工作未完成"
+    try:
+        miss = _get(app, db, "/api/snapshots", now=saturday)
+        reads: Counter[str] = Counter()
+
+        def trace(sql: str) -> None:
+            for table in ("job_runs", "schedule_config"):
+                if table in sql:
+                    reads[table] += 1
+
+        hit = _get(app, db, "/api/snapshots", now=saturday, trace=trace)
+        assert result_cache.stats()["periods:M"].hits == 1
+    finally:
+        result_cache.reset()
+        get_settings.cache_clear()
+    assert hit == miss
+    assert next(r for r in hit["rows"] if r["month"] == "2026-07")["provisional"] == expected
+    assert reads == {"job_runs": 2, "schedule_config": 1}
+
+
 # ---------------------------------------------------------------------------------------------
 # Review G: the served live_from never lies after the store's; the boundary; refused payouts;
 # a write between the cached build and the read transaction
@@ -642,6 +699,83 @@ def test_a_write_between_the_cached_build_and_the_read_transaction_rebuilds(
     truth = _periods(app, db, "M")[0]
     assert injected and raced["period"] == truth["period"] == f"{db.now:%Y-%m}"
     assert raced == truth
+
+
+@pytest.fixture
+def cached_app_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[CorpusDB], None]]:
+    """Make a corpus copy the app's database, so the listings are cached (the result cache
+    serves only that file)."""
+    def use(db: CorpusDB) -> None:
+        monkeypatch.setenv("DB_PATH", str(db.path))
+        get_settings.cache_clear()
+        result_cache.reset()
+
+    yield use
+    result_cache.reset()
+    get_settings.cache_clear()
+
+
+_TODAYS_BUY = ("INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
+               "trade_date) VALUES ('tw_broker', '2330', 'BUY', '1000', '600', '855', '0', ?)")
+
+
+def test_a_job_writing_during_a_listing_miss_leaves_the_listing_cached(
+        app: FastAPI, settled: Settled, cached_app_db: Callable[[CorpusDB], None],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-v0.1.32 item 4. The listing's key is taken before its computation, whose closes
+    open their read snapshot only after the dashboard build — seconds on a miss on prod. A
+    job committing in between is IN the closes (the build is redone inside the snapshot,
+    review G #8), yet the entry was filed under the older key, so the next listing computed
+    everything again (~7 s on prod). It is now filed under the state it was read from: the
+    next listing is a hit, and the same answer."""
+    db = settled("rich")
+    cached_app_db(db)
+    real = build_dashboard_keyed
+    injected: list[bool] = []
+
+    def build_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real(*a, **kw)
+        if not injected:
+            injected.append(True)
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", build_then_a_job_writes)
+    first = _get(app, db, "/api/snapshots")
+    second = _get(app, db, "/api/snapshots")
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", real)
+    stats = result_cache.stats()["periods:M"]
+    assert injected and (stats.misses, stats.hits) == (1, 1)
+    assert second == first
+    result_cache.reset()                               # the truth, computed afresh
+    assert _get(app, db, "/api/snapshots") == first
+
+
+def test_a_job_writing_after_the_closes_snapshot_opened_is_computed_again(
+        app: FastAPI, settled: Settled, cached_app_db: Callable[[CorpusDB], None],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side: a commit AFTER the closes' snapshot opened is not in them, so the
+    entry stays under the key taken before — the next listing computes the new state."""
+    db = settled("rich")
+    cached_app_db(db)
+    monkeypatch.setenv("PD_SETTLE", "off")             # every close live, so _live_closes runs
+    real = snapshots._live_closes
+    injected: list[bool] = []
+
+    def closes_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real(*a, **kw)
+        if not injected:
+            injected.append(True)
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "_live_closes", closes_then_a_job_writes)
+    before = _get(app, db, "/api/snapshots")["rows"][0]
+    after = _get(app, db, "/api/snapshots")["rows"][0]
+    stats = result_cache.stats()["periods:M"]
+    assert injected and (stats.misses, stats.hits) == (2, 0)
+    assert before["month"] == after["month"] == f"{db.now:%Y-%m}"
+    assert before["total_value"] != after["total_value"]   # the buy is in the second only
 
 
 # ---------------------------------------------------------------------------------------------

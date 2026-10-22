@@ -132,7 +132,8 @@ def write_seed_price(
     is returned instead.
 
     ``upsert_prices`` is called with its identity ``factor_of`` on purpose: with ``fetched_at``
-    on the action day the window ``(as_of, fetched_at]`` is empty, so no split can apply to
+    on the action day the window ``(as_of, fetched_at]`` is empty (its bound,
+    :func:`pricing.store.split_window_through`, is at most the action day), so no split can apply to
     this row now or on any later reconcile (see ``api/routers/ledgers.py::_seed_child_price``
     for the measured back-dated case). Raises ``sqlite3.OperationalError`` on a ledger-only
     database with no ``prices`` table; the caller degrades.

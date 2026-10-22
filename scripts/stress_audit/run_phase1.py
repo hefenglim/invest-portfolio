@@ -6,6 +6,7 @@ import argparse
 import io
 import sqlite3
 import sys
+import time
 import zipfile
 from datetime import timedelta
 
@@ -70,6 +71,9 @@ def run_scenario(ev: C.Evidence, api: C.Api, db_path, ui=None):
     buy("B10", "moomoo_my", "NVDA", "2026-01-25", 30, 500)     # US: moomoo_us fees + USD FX pool
     buy("B19", "moomoo_my", "NVDA", "2026-02-12", 10, 520)
     buy("B11", "moomoo_my", "NVDA", "2026-03-10", 20, 550)
+    # PERF-F2: a MYR cash cost while no ledger instrument is quoted in MYR yet (the MY buys
+    # below are the first) — on a scratch copy with its own server; this ledger is untouched.
+    run_unquoted_ccy_cash(ev, db_path)
     buy("B12", "moomoo_my", "1155", "2026-01-30", 1000, "9.50")   # MY: moomoo_my fees (MYR)
     buy("B13", "moomoo_my", "1155", "2026-02-25", 500, "10.20")
     buy("B18", "moomoo_my", "1155", "2026-03-15", 200, "10.50")
@@ -519,6 +523,121 @@ def run_live_window(ev: C.Evidence, api: C.Api, db_path, op: Ops):
              r.get("status") in (200, 201), "phase1:live_window")
     P1.check_live_window_row(ev, api, db_path, "live_window_correction", day)
     reconcile(ev, api, db_path, "live_window", valuation=True)
+
+
+def _settlement_rows_finished(db_path) -> bool:
+    """Every ``job_runs`` row of the settlement (``job_id = 'settlement'``) has its
+    ``finished_at`` — the service's waiter has finalised the run, follow-up decided — and
+    there is at least one."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        total, open_rows = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(finished_at IS NULL), 0) FROM job_runs "
+            "WHERE job_id = 'settlement'").fetchone()
+    finally:
+        conn.close()
+    return int(total) > 0 and int(open_rows) == 0
+
+
+def run_unquoted_ccy_cash(ev: C.Evidence, db_path):
+    """PERF-F2 (fixed after v0.1.32): a 50 MYR ``REBATE`` — an XIRR cash kind (AI-D42) — on
+    moomoo_my dated 2026-01-28, while NO ledger instrument is quoted in MYR (the MY buys come
+    next). The trend used to load FX only for the ledger's quote currencies, so the rebate found
+    no rate and the WHOLE trend was unavailable — net worth, B, B − A, 交易與融資成本 and the
+    benchmark with it — although the MYR/TWD rate is stored (from the fixture's first row) and
+    XIRR counted the rebate. The oracle's trend has always converted every flow at its own
+    date's stored rate (``_TrendOracle``, ``oracle.net_invested_through`` /
+    ``oracle.trading_financing_cost``), so on the unfixed engine this checkpoint is red on
+    ``trend.available`` and every family riding on it, and green once the trend's pair set
+    holds the currency of every cash movement it converts.
+
+    **Isolated: the scenario's database and server never see it.** It runs on a SCRATCH COPY
+    of the scenario's database as it stands here (``sqlite3`` backup API, which reads through
+    the WAL), in its own data folder (``evidence/unquoted_ccy_cash/``: its own settlement lock,
+    progress file and logs), served by its OWN uvicorn. So ``checkpoint1`` still settles a
+    never-published store (generation 0 → 1) over exactly the ledger it always did, no
+    ``settle_restatement`` row or run report reaches the scenario's database, and the
+    harness's settlement record (``SETTLE.last``) and seeded-series record are restored after.
+
+    The copy's server settles at BOOT (a never-published store with a ledger: a full run), over
+    the daily closes written before it starts; that generation is this checkpoint's "previous"
+    one. The rebate is then written through the real door, back-dated before the live window,
+    so :func:`reconcile`'s settlement first asserts the stale range it opens and serves
+    (``settle.*``, ``stale.*``) — a back-dated cost in an unquoted currency on a settled store —
+    then runs, and the whole oracle family reconciles the converted rebate."""
+    ph = "phase1:unquoted_ccy_cash"
+    folder = db_path.parent / "unquoted_ccy_cash"
+    folder.mkdir(exist_ok=True)
+    scratch = folder / "phase1.db"
+    for old in folder.iterdir():
+        if old.is_file():
+            old.unlink()
+    src, dst = sqlite3.connect(str(db_path)), sqlite3.connect(str(scratch))
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    conn = sqlite3.connect(str(scratch))
+    try:
+        quoted = sorted({r[0] for r in conn.execute(
+            "SELECT DISTINCT quote_ccy FROM instruments WHERE symbol IN (SELECT symbol FROM "
+            "transactions UNION SELECT symbol FROM dividends UNION SELECT symbol FROM "
+            "opening_inventory)")})
+        generation = conn.execute("SELECT generation FROM settle_meta").fetchone()[0]
+    finally:
+        conn.close()
+    ev.check("unquoted_ccy_cash.precondition",
+             "the copy: no ledger instrument quoted in MYR yet, never settled",
+             [False, 0], ["MYR" in quoted, generation], ph)
+    raw0 = C.load_facts_from_db(scratch)
+    P1._ensure_daily_prices(scratch, raw0)   # the closes the boot settlement values
+    saved = (P1.SETTLE.last, set(P1.SEEDED_SERIES))
+    srv = C.LocalServer(scratch)
+    api = C.Api(srv.start(), verify=False)
+    try:
+        deadline = time.monotonic() + P1.SETTLE_TIMEOUT_S
+        st = P1._status(api)
+        while time.monotonic() < deadline and not (
+                int(st.get("generation") or 0) >= 1 and st.get("state") not in P1._ACTIVE
+                and st.get("run") is None):
+            time.sleep(0.5)
+            st = P1._status(api)
+        gen = int(st.get("generation") or 0)
+        ev.check("unquoted_ccy_cash.boot_published", "the copy's boot settlement published",
+                 True, gen >= 1 and st.get("state") == "clean", ph)
+        if gen < 1:
+            return
+        # The status reads idle from the SWAP on, before the service's waiter finalises the
+        # boot run (review 2026-10-22, item 3): write the rebate only once every settlement
+        # job row is finished, so the waiter's follow-up decision is behind us. (A write in
+        # that window used to start an automatic 「接續」 run — the stress flake of 2026-10-22;
+        # the service no longer chains it, and the harness no longer races it.)
+        while time.monotonic() < deadline and not _settlement_rows_finished(scratch):
+            time.sleep(0.2)
+        ev.check("unquoted_ccy_cash.boot_run_finished",
+                 "every settlement job row finished before the rebate is written", True,
+                 _settlement_rows_finished(scratch), ph)
+        P1.SETTLE.last = P1._Settled(raw0, P1.fixture_closes(raw0), P1.fixture_fx_rows(), gen)
+        op = Ops(ev, api, scratch, phase=ph)
+        r = op.cash_move("moomoo_my", "rebate", "MYR", "2026-01-28", "50")
+        ev.check("unquoted_ccy_cash.row_written", "moomoo_my REBATE 50 MYR on 2026-01-28", 201,
+                 r.get("status"), ph)
+        j = r.get("json")
+        ev.check("unquoted_ccy_cash.row_id", "the door answers the new row's id", True,
+                 isinstance(j, dict) and isinstance(j.get("id"), int), ph)
+        reconcile(ev, api, scratch, "unquoted_ccy_cash", valuation=True)
+        dash = api.get("/api/dashboard").json()
+        ev.check("unquoted_ccy_cash.trend_available", "the trend converts the MYR rebate",
+                 [True, None], [(dash.get("trend") or {}).get("available"),
+                                (dash.get("freshness") or {}).get("trend_unavailable_reason")],
+                 ph)
+    finally:
+        api.close()
+        srv.stop()
+        P1.SETTLE.last = saved[0]
+        P1.SEEDED_SERIES.clear()
+        P1.SEEDED_SERIES.update(saved[1])
 
 
 def run_missing_fx(ev: C.Evidence, api: C.Api, db_path, op: Ops):

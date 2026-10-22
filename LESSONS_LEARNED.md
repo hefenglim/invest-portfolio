@@ -2269,3 +2269,72 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
   `running`. Rule: anything acquired before a step that can fail is released on that failure, and
   the caller's row and in-process state are ended, never left active.
 
+
+## A clean-up trap that `set -e` can abort is not a clean-up (2026-10-20, WP8 on the VM)
+
+- **What happened.** The WP8 before/after copied the prod pre-deploy backup twice into `/tmp`
+  (a tmpfs directory with mode 700), ran v0.1.31 and v0.1.32 against the copies, and relied on
+  `trap 'kill $VMSTAT 2>/dev/null; rm -rf /tmp/pd_wp8' EXIT` to delete them. The script ran
+  under `set -e`, and the script body had already killed `vmstat`. The trap's `kill` therefore
+  failed, `set -e` ended the trap, and the `rm` never ran. The two real-data copies stayed for
+  about a minute, until the next logged command noticed `copies left: /tmp/pd_wp8` and removed
+  them (VM log #385).
+- **Rule.** A clean-up handler starts with `set +e`, or ends every command with `|| true`. The
+  last command of a run that copies real data asserts the copies are gone (`ls -d … || echo
+  none`), and that line is read before anything else in the output.
+
+## After v0.1.32: the code review, PERF-F2 and the split edge (2026-10-20..21)
+
+- **A date window on the app clock is a window on the wrong calendar (split edge).** The write
+  seam asked "which splits had the provider folded in?" with the TAIPEI date of the fetch. The
+  defect was filed as an edge (a manual fetch before the New York open), but the US quote job
+  itself fires at 16:30 New York, already the next day in Taipei, so EVERY scheduled fetch of a
+  split's last pre-split session hit it. It surfaced only when someone set the job's cron zone
+  beside the window's clock. Rule: a window about an exchange's events is computed on that
+  exchange's calendar, and a defect's reach is measured against the schedule that actually runs,
+  not against the scenario that first exposed it.
+- **A repair script must enter through the app's seam, not the function under it (split edge,
+  review finding 1).** `--apply` called `reconcile_prices` directly and skipped the signal
+  invalidation that lived one layer up in the doors' wrapper; the next scan would have fired
+  phantom transitions. Rule: a side effect that must accompany a write belongs in the ONE seam
+  every path calls, and a script calls that seam.
+- **Cancelling a pending timer is not a stop (review finding 2).** `reset()` cancelled the next
+  pre-warm but not the one running, which then reopened what had just been closed. Rule: a
+  shutdown forbids new work, waits (bounded) for the work in progress, and only then releases.
+- **A before/after mark taken before a queue wait counts everyone's changes as the queued job's
+  (review finding 6).** And a mark of the PENDING counters only read a cancelled run's put-back
+  as new. Rule: take the mark when the work starts, over every state the counted thing can be in.
+- **A stop must also stop follow-ups (review of finding 2's fix).** A settle waiter finishing
+  during the stop started the run's resume as a new child. Rule: once shutdown began, nothing
+  starts; boot picks up what was left.
+
+## The second post-v0.1.32 round: perf backlog, tooltip, accountant minors, sessions (2026-10-22)
+
+- **A stronger invalidation signal makes older guards redundant — re-derive which (perf item 1).**
+  The result cache's "no cache while ANY write window is open" dated from the in-flight key, which
+  had only the write generation; once the key gained `PRAGMA data_version` (it moves at the commit
+  itself), the process-wide `None` outlived its reason by a release. Rule: when a key gains a signal,
+  list the guards it subsumes and prove each with an interleaving, not a reading.
+- **Every write is a cache invalidation — price it before adding one (session touch).** A sliding
+  idle expiry needs "last used" written; each write moved `data_version` and emptied the dashboard
+  cache, discarding the 06:40 pre-warm on the first navigation of the morning. The owner chose a
+  24 h touch plus an immediate pre-warm over a 6 h touch. Rule: a feature that writes on reads states
+  what it invalidates and what it costs per day, before it is proposed.
+- **Measure a perf-sensitive proposal on prod-sized data before asking (tooltip).** The owner
+  worried a server-side field would slow the page. The answer came from a prod-sized copy: hover
+  unaffected, +8.6 KB gzip compact vs +18.8 KB full precision. A question asked with the numbers was
+  decided in one round.
+- **A public repository's spec must not carry the owner's tickers (delisted spec).** The first draft
+  listed real symbols and holding dates; it was caught before commit. Real facts go in
+  `docs/human_noted/`; the spec says "several symbols" and points there.
+- **Stress-harness waits must target the last step of the thing they wait for.** The unquoted-ccy
+  checkpoint waited for the status to read idle, which turns true at the swap — before the waiter
+  finalises — so a write landed in between and started a chained run (3 transient failures). The
+  barrier is the settlement `job_runs` row being finished. The same gap let an owner's back-dated
+  edit bypass the PERF-D2 prompt; fixing the product fixed the flake.
+- **One answer assembled from several SELECTs needs one read transaction (settlement status).** In
+  autocommit each SELECT reads its own snapshot, so a status built from a dozen of them described,
+  for an instant, a database that never existed (the old generation, a claimed day as stale, no run
+  active). The stress harness accepted it because it read the derived status BEFORE the record that
+  proves the end. Rule: a multi-read endpoint reads in one snapshot; a waiter reads the proof of the
+  end first, then a view that must be at or after it.

@@ -31,10 +31,19 @@ def _boom(*_a: object, **_k: object) -> None:
     raise InvalidOperation("[<class 'decimal.DivisionUndefined'>]")
 
 
+def _break_the_replays(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fault BOTH replays the build can start: since post-v0.1.32 item 2 today's book is the
+    last book of the trend's one ``iter_books`` pass (``dashboard._replay_once``), and
+    ``kpis_as_of`` replays with ``build_book`` only when that pass raised or went past its
+    bounds — so the floor this file pins is reached through a faulted ``iter_books``."""
+    monkeypatch.setattr(dashboard_mod, "iter_books", _boom)
+    monkeypatch.setattr(dashboard_mod, "build_book", _boom)
+
+
 def test_the_dashboard_retypes_a_decimal_fault_as_a_ledger_problem(
     golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dashboard_mod, "build_book", _boom)
+    _break_the_replays(monkeypatch)
     with pytest.raises(UnbookableLedgerError) as exc:
         dashboard_mod.build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     # The owner is told which ledger to open, in their own language — not handed a traceback.
@@ -51,7 +60,7 @@ def test_the_raw_arithmetic_error_no_longer_escapes(
     Without this, a handler that catches ``UnbookableLedgerError`` would still be bypassed —
     which is precisely how this escaped for as long as it did.
     """
-    monkeypatch.setattr(dashboard_mod, "build_book", _boom)
+    _break_the_replays(monkeypatch)
     try:
         dashboard_mod.build_dashboard(golden_db, now=_NOW, reporting=Currency.TWD)
     except UnbookableLedgerError:

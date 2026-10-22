@@ -3,7 +3,10 @@
 
 Every store here is built by the REAL worker (``settle_worker.run``, inline) on the reference
 corpora — never hand-written generations. The oracle is v0.1.31's own output: the reference
-payloads (``tests/reference/payloads``) and the frozen v0.1.31 engine (``tests/reference``).
+payloads (``tests/reference/payloads``, with PERF-F2's intended difference on
+``unquoted_ccy_cash``, ``tests/reference/perf_f2.py``, and the served trend points' ``pnl``,
+``tests/reference/trend_pnl.py`` — which is also what proves a day served from the STORE carries
+it) and the frozen v0.1.31 engine (``tests/reference``).
 
 - **clean** and **dirty inside the live window**: ``GET /api/dashboard`` is byte-identical to
   the v0.1.31 reference on every corpus (invariant 1), and the store was actually read;
@@ -36,13 +39,14 @@ from portfolio_dash.data_ingestion.store import insert_transaction, upsert_instr
 from portfolio_dash.portfolio import dashboard
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.dashboard import _build_dashboard
-from portfolio_dash.portfolio.dashboard_models import TrendSeries
+from portfolio_dash.portfolio.dashboard_models import TrendSeries, with_trend_pnl
 from portfolio_dash.portfolio.settlement_models import RunRequest
 from portfolio_dash.pricing.results import PriceRow
 from portfolio_dash.pricing.store import upsert_prices
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import Side
+from tests.reference import perf_f2, trend_pnl
 from tests.reference import trend_v0131 as ref
 from tests.reference.canon import canon, first_difference
 from tests.reference.corpora import (
@@ -97,7 +101,7 @@ def settled(tmp_path_factory: pytest.TempPathFactory) -> Settled:
 
 
 def _reference(name: str) -> bytes:
-    return (PAYLOADS / name / "dashboard.json").read_bytes()
+    return trend_pnl.expected_bytes(name, "dashboard.json")
 
 
 def _body(app: FastAPI, db: CorpusDB) -> bytes:
@@ -440,7 +444,8 @@ _SHAPES = {
 
 
 def _frozen_trend(conn: sqlite3.Connection, now: datetime, reporting: Currency) -> TrendSeries:
-    """v0.1.31's steps 9 / 9b on the frozen functions and unbounded (1900-) loads."""
+    """v0.1.31's steps 9 / 9b on the frozen functions and unbounded (1900-) loads, as served
+    (``with_trend_pnl``)."""
     i = load_inputs(conn, now, reporting)
     trend = ref.ref_daily_value_series(i.bundle, i.price_history, i.trend_fx_history,
                                        i.reporting, end=i.as_of,
@@ -450,7 +455,9 @@ def _frozen_trend(conn: sqlite3.Connection, now: datetime, reporting: Currency) 
     cash = ref.ref_daily_cash_series(i.cash_movements, i.cash_convs, i.cash_txs, i.cash_divs,
                                      i.instruments, i.cash_fx_history, i.reporting,
                                      end=i.as_of)
-    return ref.ref_compose_net_worth(trend, cash)
+    # the series as SERVED: each point's pnl (owner ruling 2026-10-22), which the dashboard
+    # sets on every day it serves (stored and live) and the frozen engine never did
+    return with_trend_pnl(ref.ref_compose_net_worth(trend, cash))
 
 
 @pytest.fixture(params=sorted(_SHAPES))
@@ -500,21 +507,30 @@ def test_the_live_part_carries_the_last_close_into_its_first_day(
 # ---------------------------------------------------------------------------------------------
 
 
+@pytest.fixture
+def missing_rate(corpus_db: CorpusFactory) -> CorpusDB:
+    """``unquoted_ccy_cash`` with its rebate's rate dropped (``perf_f2.drop_rebate_rate``) and
+    a store the real worker published: placeholders from the MYR rebate (2026-03-16), which has
+    no rate on or before its date."""
+    db = corpus_db("unquoted_ccy_cash")
+    perf_f2.drop_rebate_rate(db.path)
+    prepare(db)
+    assert start_run(db, 1) == "published"
+    return db
+
+
 def test_placeholder_days_are_served_live_while_the_live_series_is_available(
-        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``unquoted_ccy_cash`` stores placeholders from its MYR rebate (2026-03-16). A MYR
-    instrument bought on 2026-05-04 makes the live series available while the store is dirty
-    only from 05-04: the days from the first placeholder are valued live, never read as 0."""
-    db = settled("unquoted_ccy_cash")
-    _x(db, "INSERT INTO instruments (symbol, market, quote_ccy, sector, name) "
-           "VALUES ('MYQ', 'MY', 'MYR', 'Energy', 'probe')")
-    _x(db, "INSERT INTO prices (instrument, market, as_of_date, close, source, fetched_at) "
-           "VALUES ('MYQ', 'MY', '2026-05-04', '2.60', 'test', '2026-05-04T00:00:00')")
-    _x(db, "INSERT INTO transactions (account_id, symbol, side, quantity, price, fees, tax, "
-           "trade_date) VALUES ('moomoo_my', 'MYQ', 'BUY', '100', '2.50', '0', '0', "
-           "'2026-05-04')")
+        app: FastAPI, missing_rate: CorpusDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The store holds placeholders from the MYR rebate (2026-03-16, no rate on or before it).
+    The missing rate arrives later, dated on the rebate day: the live series is available again
+    while the store is dirty only from that day — before the live window, so its days up to
+    ``live_from`` would be the previous generation's — and the days from the first placeholder
+    are valued live, never read as 0."""
+    db = missing_rate
+    _x(db, "INSERT INTO fx_rates (base, quote, as_of_date, rate, source, fetched_at) "
+           "VALUES ('MYR', 'TWD', '2026-03-16', '7.05', 'test', '2026-06-11T00:00:00')")
     state = _state(db)
-    assert state.dirty_from == date(2026, 5, 4)
+    assert state.dirty_from == date(2026, 3, 16) < st.window_start(db.now.date())
     conn = open_db(db.path)
     try:
         assert st.first_placeholder_day(conn, state.generation) == date(2026, 3, 16)
@@ -548,13 +564,34 @@ def test_an_option_open_only_on_stored_days_keeps_the_series_flag(
     assert json.loads(body)["options"]["trend_excludes_value"] is True
 
 
-def test_a_series_unavailable_live_serves_no_trend(app: FastAPI, settled: Settled) -> None:
-    """While the live series is unavailable the trend is, exactly as v0.1.31 answers — the
-    store's points before the placeholder are never served alone (PERF-F2 stays as it is)."""
-    db = settled("unquoted_ccy_cash")
+def test_a_series_unavailable_live_serves_no_trend(
+        app: FastAPI, missing_rate: CorpusDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the live series is unavailable (a flow with no rate on or before its date) the
+    trend is, exactly as the full live build answers — the store's points before the
+    placeholder are never served alone."""
+    db = missing_rate
     data = _build(db)
     assert not data.trend.available and data.trend.points == []
-    assert _body(app, db) == _reference("unquoted_ccy_cash")
+    # the series' ONE sentence: the first flow with no rate, its date and its pair (MINOR 4)
+    assert data.freshness.trend_unavailable_reason == (
+        "2026-03-16 起缺少 MYR/TWD 匯率（當日或之前無匯率），走勢無法計算")
+    assert data.history_state.generation == 1
+    assert _body(app, db) == _live_body(app, db, monkeypatch)
+
+
+def test_a_clean_store_of_the_unquoted_rebate_corpus_is_the_live_build(
+        app: FastAPI, settled: Settled, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PERF-F2: the worker and the live build load the trend's FX over ONE pair set
+    (``timeseries.trend_fx_currencies``), so the store settled on ``unquoted_ccy_cash`` — its
+    MYR rebate converted, no placeholder — serves exactly what the full live build shows."""
+    db = settled("unquoted_ccy_cash")
+    data = _build(db)
+    assert data.trend.available
+    assert data.history_state.generation == 1
+    assert data.history_state.live_from == db.now.date()
+    body = _body(app, db)
+    assert body == _live_body(app, db, monkeypatch), _first_difference(
+        _live_body(app, db, monkeypatch), body)
 
 
 def test_a_first_day_the_generation_does_not_hold_is_served_live(
