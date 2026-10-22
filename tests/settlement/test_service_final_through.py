@@ -377,3 +377,60 @@ def test_a_hand_edit_seen_by_a_boot_still_blocks_a_missed_fire_before_it(
     assert row[0] is not None
     assert (row[1], row[2]) == ("30 14 * * mon-fri|Asia/Taipei|1",
                                 "0 14 * * mon-fri|Asia/Taipei|1")
+
+
+def _hand_edit(conn: sqlite3.Connection, cron: str) -> None:
+    """quotes_tw's row edited behind the 排程 page's back, with no boot since: the live
+    scheduler never loads it."""
+    conn.execute("UPDATE schedule_config SET cron = ? WHERE job_id = 'quotes_tw'", (cron,))
+    conn.commit()
+
+
+def _stamps(conn: sqlite3.Connection) -> tuple[object, ...]:
+    return tuple(conn.execute(
+        "SELECT cron, updated_at, previous_schedule, stamped_schedule FROM schedule_config "
+        "WHERE job_id = 'quotes_tw'").fetchone())
+
+
+def test_a_save_after_an_unbooted_hand_edit_keeps_the_stamp_as_the_previous_schedule(
+    conn: sqlite3.Connection,
+) -> None:
+    """Backlog after v0.1.33: a hand edit no boot has seen was never in effect, so a save from
+    the 排程 page records the STAMP — the 14:00 cron that ran — as the previous schedule, never
+    the hand-edited 14:45. Judged by 14:45, no 14:00 row answers a fire and every day from
+    go-live (08-03) would block; judged by 14:00, 08-12's missed fire still blocks."""
+    _missed_fires(conn)
+    now = datetime(2026, 8, 15, 6, 40, tzinfo=TPE)
+    strict = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    _hand_edit(conn, "45 14 * * mon-fri")
+    assert update_schedule(conn, "quotes_tw", cron="30 14 * * mon-fri", tz="Asia/Taipei",
+                           enabled=True, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    assert _stamps(conn) == ("30 14 * * mon-fri", "2026-08-14T20:00:00+08:00",
+                             "0 14 * * mon-fri|Asia/Taipei|1",
+                             "30 14 * * mon-fri|Asia/Taipei|1")
+    assert service.final_through(conn, now, since=service.SINCE_GO_LIVE) == strict
+    assert strict.blocked_on == date(2026, 8, 12)
+
+
+def test_saving_a_hand_edit_puts_it_in_effect_and_saving_the_stamp_back_changes_nothing(
+    conn: sqlite3.Connection,
+) -> None:
+    """``changed`` compares with the schedule IN EFFECT (the stamp): a save of the hand-edited
+    row itself reschedules the live job, so it is a change, stamped now; a save of the stamp
+    over a later hand edit puts nothing new in effect, so the row is restored and the stamps
+    stay as they were."""
+    _missed_fires(conn)
+    now = datetime(2026, 8, 15, 6, 40, tzinfo=TPE)
+    strict = service.final_through(conn, now, since=service.SINCE_GO_LIVE)
+    _hand_edit(conn, "30 14 * * mon-fri")
+    assert update_schedule(conn, "quotes_tw", cron="30 14 * * mon-fri", tz="Asia/Taipei",
+                           enabled=True, now=datetime(2026, 8, 14, 20, 0, tzinfo=TPE))
+    stamped = ("30 14 * * mon-fri", "2026-08-14T20:00:00+08:00",
+               "0 14 * * mon-fri|Asia/Taipei|1", "30 14 * * mon-fri|Asia/Taipei|1")
+    assert _stamps(conn) == stamped
+    assert service.final_through(conn, now, since=service.SINCE_GO_LIVE) == strict
+    _hand_edit(conn, "45 14 * * mon-fri")
+    assert not update_schedule(conn, "quotes_tw", cron="30 14 * * mon-fri", tz="Asia/Taipei",
+                               enabled=True, now=datetime(2026, 8, 14, 21, 0, tzinfo=TPE))
+    assert _stamps(conn) == stamped
+    assert service.final_through(conn, now, since=service.SINCE_GO_LIVE) == strict

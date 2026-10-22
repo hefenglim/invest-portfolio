@@ -19,6 +19,8 @@ read-only POST opens no write window (``api/read_only.py`` in ``api/app.py``'s
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -34,7 +36,7 @@ from portfolio_dash.llm_insight import composer_store
 from portfolio_dash.portfolio import dashboard
 from portfolio_dash.portfolio.dashboard import RateResolver
 from portfolio_dash.portfolio.returns import replay_dividend_refusals
-from portfolio_dash.shared import result_cache
+from portfolio_dash.shared import flight, result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.db import connect_path
 from portfolio_dash.strategy import whatif
@@ -204,3 +206,47 @@ def test_a_prewarm_leaves_the_next_alerts_request_a_hit(
     assert counts["assemble"].n == 0, "GET /api/alerts re-read its 400-day inputs"
     _send(client, "GET", "/api/dashboard", None)
     assert counts["build"].n == 0, "the pre-warmed dashboard was rebuilt"
+
+
+def test_a_navigation_that_lands_while_the_prewarm_runs_joins_it(
+    cached_client: tuple[TestClient, str, CorpusDB], counts: dict[str, Counter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded session touch pre-warms AT ONCE (``auth_store``, owner ruling 2026-10-22),
+    so a navigation can land while the pre-warm still builds. ``GET /api/dashboard`` asks for
+    the SAME cache key as ``alert_inputs.prewarm_today`` (the app's database, its
+    ``data_version`` and write generation, the day of ``deps.get_now``, ``get_reporting``,
+    the kill switch) and joins that build in flight (``shared/flight.py``): one build."""
+    client, _preflight, db = cached_client               # DB_PATH already names the copy
+    monkeypatch.setattr(deps, "get_now", lambda: db.now)
+    _send(client, "GET", "/api/dashboard", None)         # warm-up: a first GET may seed
+    result_cache.invalidate()
+    counted = dashboard._build_dashboard
+    entered, release = threading.Event(), threading.Event()
+
+    def held(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        release.wait(timeout=30)
+        return counted(*args, **kwargs)
+
+    monkeypatch.setattr(dashboard, "_build_dashboard", held)
+    counts["build"].n = 0
+    answers: list[Any] = []
+    prewarm = threading.Thread(target=alert_inputs.prewarm_today)
+    navigation = threading.Thread(
+        target=lambda: answers.append(_send(client, "GET", "/api/dashboard", None)))
+    prewarm.start()
+    try:
+        assert entered.wait(timeout=30), "the pre-warm never started its build"
+        navigation.start()
+        deadline = time.monotonic() + 30
+        while not any(f.joiners for f in flight._flights.values()):
+            assert time.monotonic() < deadline, "the navigation did not join the pre-warm"
+            time.sleep(0.01)
+    finally:
+        release.set()
+        prewarm.join(timeout=60)
+        if navigation.ident is not None:  # started
+            navigation.join(timeout=60)
+    assert len(answers) == 1
+    assert counts["build"].n == 1, "the navigation built the dashboard a second time"

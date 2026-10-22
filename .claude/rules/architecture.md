@@ -254,7 +254,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       `api/snapshots.py`, after the dashboard build): it opens it with `marked_snapshot` and
       passes `mark=`, and when no commit, window edge or own write happened since that snapshot
       opened, the entry is filed under the CURRENT key instead of the one taken before the
-      computation. `day` is `now.date()`, so no entry outlives its day.
+      computation. The dashboard build those closes redo, uncached, inside their snapshot
+      (review G #8) is filed for the next `/api/dashboard` by the same rule, once the snapshot
+      has closed (`result_cache.file_marked` via `dashboard.file_snapshot_build`, backlog
+      item 4), and not at all otherwise. `day` is `now.date()`, so no entry outlives its day.
     - **Scope.** It caches the app's OWN database only (`get_settings().db_path`). Any other file
       computes uncached and gets no version connection. Nothing is cached inside a transaction or
       for a database with no file. Another request's write window does not stop caching or
@@ -265,12 +268,16 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       A miss runs inside ONE read transaction (PERF-S12).
     - **Pre-warm** (`PD_PREWARM=1`): a debounced daemon timer computes today's dashboard and
       alerts (`api/alert_inputs.prewarm_today`). It fires 3 s after the last write window closes
-      (`api/app.py::WRITE_PREWARM_DELAY_S`) and 1 s after a settlement run ends.
-    - **Shutdown.** The lifespan calls `result_cache.shutdown()` first. It closes the cache for
-      the rest of the lifespan (no pre-warm starts, no version connection opens, no entry is
-      kept), waits up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running —
-      whose read snapshot would keep a TRUNCATE checkpoint from finishing and which would
-      reopen a version connection — and closes the version connections. THEN the lifespan runs
+      (`api/app.py::WRITE_PREWARM_DELAY_S`), 1 s after a settlement run ends, and at once after
+      a recorded session touch, which itself waited for the page load to settle (`api/` →
+      the session touch).
+    - **Shutdown.** The lifespan calls `result_cache.shutdown()` once it has cancelled the
+      pending session touches (`auth_store.cancel_pending_touches`) and stopped every child
+      process it spawned (`child_runner.stop_all`, below). It closes the cache for the rest of
+      the lifespan (no pre-warm starts, no version connection opens, no entry is kept), waits
+      up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running — whose read
+      snapshot would keep a TRUNCATE checkpoint from finishing and which would reopen a version
+      connection — and closes the version connections. THEN the lifespan runs
       `PRAGMA wal_checkpoint(TRUNCATE)` (`api/app.py::checkpoint_on_stop`, result on
       `app.state.stop_checkpoint`). A read-only connection cannot checkpoint, and a clean stop
       must leave the database in one file. A pre-warm that outlives the wait (a full live build
@@ -302,6 +309,27 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       package's own root, and `DB_PATH` is made absolute. It never uses `-I`, which would drop
       both.
     - `terminate_and_wait` returns once the process is gone AND `on_exit` has returned.
+    - **`stop_all`** is the app's stop (backlog item 2, 2026-10-22). The lifespan calls it after
+      `settlement_service.shutdown()` and the scheduler's, before the result cache's shutdown and
+      the WAL checkpoint, with ONE bound, `api/app.py::STOP_CHILDREN_WAIT_S` (30 s, which fits
+      under systemd's default 90 s stop timeout with the 15 s pre-warm wait). It cancels every
+      live child of the runner first — so none that is queued starts as the gate passes the turn
+      on — terminates the running ones (killed `STOP_KILL_AFTER_S` later if still alive), and
+      waits until each is gone and its `on_exit` has returned (the runner keeps every child
+      until then). Each result carries `stopped`, and its owner records the run as a restart
+      leaves it: a settle run 中斷 (「系統停止時結算尚未完成」, which boot resumes), a job row
+      `error` 「系統停止時此工作尚未完成」 with reason `interrupted`. A child left running held the
+      database through the checkpoint (its `-wal` / `-shm` stayed), and on a dev server's Ctrl+C
+      it went on running after the app stopped. **The units run `KillMode=mixed`** (owner ruling
+      2026-10-22, `docs/DEPLOYMENT.md` §5): with systemd's default `control-group` the unit's
+      SIGTERM reached every child together with uvicorn, so each was already dead and finalised
+      as a crash (「結算程序異常結束」, a failure push) before the lifespan's stop ran, and this
+      step found nothing to stop. `mixed` signals only the main process; the stop terminates the
+      children itself, and systemd's SIGKILL after `TimeoutStopSec` (90 s) still ends whatever
+      is left.
+      From the call on, a child spawned anyway (a job thread already past the scheduler's
+      shutdown) never starts its process and is recorded `stopped`; the lifespan's start
+      reopens the runner (`child_runner.reopen`).
     - **`on_start`** (optional) runs on the waiter thread once the child's turn has come (after
       the heavy gate, for a heavy child) and before its process starts, unless the child was
       cancelled by then. A cancel landing during or right after it still keeps the process from
@@ -380,18 +408,28 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   only reads: an expired (idle > 30 d, a stamp more than `SESSION_CLOCK_SKEW` in the future, or an
   unreadable stamp), locked or unknown session is refused, and the login it lets through goes on
   `request.state` (`LOGIN_STATE_ATTR`) for the action log. A use is recorded by
-  `auth_store.touch_after_response`, a background task the gate schedules only when the stored
-  `last_seen_at` is `SESSION_TOUCH_INTERVAL` (24 h) old and the in-process guard has no touch of
-  that session in flight or recorded within the interval: after the response, on its own
-  connection, a 100 ms busy timeout, one autocommit compare-and-set UPDATE (`TOUCH_SQL`), skipped
-  when the lock is busy, a WARNING (and a 10 min back-off) on any other failure. A recorded touch
-  moves `data_version`, so it schedules `alert_inputs.prewarm_today` with the write window's delay
-  (the owner chose 24 h + pre-warm over 6 h for the cache's sake; a session lapses 29–30 days after
-  its last use). The request's own connection still writes nothing and takes no write lock:
-  `tests/contract/test_def065_get_never_writes.py` section 5 holds the touch to its statement, its
-  own connection and once per interval. `/api/auth/logout` is an open path, so an expired cookie
-  can be cleared. The boot (`prepare_sessions_at_boot`) dates unstamped sessions from the boot and
-  purges expired, locked and orphaned ones.
+  `auth_store.run_touch`, never by the gate itself. When the stored `last_seen_at` is
+  `SESSION_TOUCH_INTERVAL` (24 h) old and the in-process guard has no touch of that session in
+  flight or recorded within the interval, the gate ARMS the session's pending touch
+  (`schedule_touch`; owner ruling 2026-10-22, 「續期延後，記完立刻預熱」). It is a daemon timer, one
+  per session, that fires once the page load has settled: `SESSION_TOUCH_SETTLE_S` (3 s, equal to
+  `WRITE_PREWARM_DELAY_S`) after the session's LATEST gated request, each request pushing it back,
+  and never later than `SESSION_TOUCH_MAX_DEFER_S` (30 s) after the request that armed it. The
+  touch runs on its own connection: a 100 ms busy timeout, one autocommit compare-and-set UPDATE
+  (`TOUCH_SQL`), skipped when the lock is busy (the next request arms it again), a WARNING (and a
+  10 min back-off) on any other failure. A recorded touch moves `data_version`, so it schedules
+  `alert_inputs.prewarm_today` AT ONCE (delay 0, the write window's debounced timer). Until the
+  touch commits, the page load and a navigation inside the settle window still hit the previous
+  cache entry; a navigation that lands while the pre-warm runs joins it in flight, since the
+  pre-warm and `GET /api/dashboard` build under one cache key. The owner chose 24 h + pre-warm
+  over 6 h for the cache's sake; a session lapses 29–30 days after its last use. The lifespan's
+  stop cancels the pending touches (`cancel_pending_touches`, before `result_cache.shutdown()`;
+  it waits up to 2 s for one already running). A cancelled use is recorded on the session's first
+  request after the boot, since its stamp did not move. The request's own connection still writes
+  nothing and takes no write lock: `tests/contract/test_def065_get_never_writes.py` section 5
+  holds the touch to its statement, its own connection and once per interval. `/api/auth/logout`
+  is an open path, so an expired cookie can be cleared. The boot (`prepare_sessions_at_boot`)
+  dates unstamped sessions from the boot and purges expired, locked and orphaned ones.
   **`get_conn` is function-scoped** (PERF-S10, 2026-10-18). Every route declares
   `Depends(get_conn, scope="function")`, and so does the gate, `auth_store.require_session`. A
   request therefore holds ONE cached connection, and its session commits when the path function
@@ -423,8 +461,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     hours and sent once they end, Q-P1 = (a)), calls `flight.note_write()`, pre-warms, and
     starts the follow-up (chained, resume or queued). `shutdown()` stops every new start:
     `start_run` raises `Stopping`, `start_automatic` starts nothing, and a waiter finishing
-    during the stop leaves its follow-up to the next boot (`on_boot` opens it again). It also
-    owns cancel, the boot hook
+    during the stop leaves its follow-up to the next boot (`on_boot` opens it again) and
+    pre-warms nothing. The lifespan then terminates a running child (`child_runner.stop_all`):
+    its waiter ends the run 中斷 「系統停止時結算尚未完成」, with no failure push, and boot resumes
+    its range. It also owns cancel, the boot hook
     (`on_boot` plans inside the boot session; `start_after_boot` starts once that session has
     committed) and the chip's `status`, which only reads. **Every settlement read is one
     snapshot** (2026-10-22, found by the stress audit): `status` / `runs_page` / `run_report` /
@@ -511,6 +551,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     settle child has no limit.
   - A child that dies without finishing its row is finalised by the parent as
     「工作子程序異常結束」.
+  - A child the app's stop ended (`child_runner.stop_all`: terminated, or cancelled while it
+    waited for the gate) is finalised by the parent as `error` 「系統停止時此工作尚未完成」, reason
+    `interrupted` — the reason a restart gives.
   - At boot, `close_abandoned_runs` closes every unfinished non-`settlement` `job_runs` row whose
     lock nobody holds, as `error` 「系統重新啟動時此工作尚未完成」, reason `interrupted`. The first
     boot of v0.1.32 closes the rows left stuck by older versions this way. Settlement rows are

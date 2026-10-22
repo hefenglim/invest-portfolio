@@ -118,6 +118,11 @@ Restart=always
 RestartSec=3
 # 1 GB box: cap memory so a runaway never takes down the VM (restarts instead).
 MemoryMax=700M
+# Stop: SIGTERM goes to uvicorn only; its lifespan terminates the settle / job children itself
+# and records their runs as stopped (resumed at boot). The default (control-group) killed them
+# together with uvicorn, so a stop read as a crash. systemd still SIGKILLs every process left
+# after TimeoutStopSec (90 s).
+KillMode=mixed
 # Settlement store + job workers (v0.1.32) — the PROD values; see "Process flags" below.
 # PD_STATIC_IMMUTABLE=1 belongs on an instance that runs released tags ONLY (never a test/demo).
 Environment=PD_SETTLE=on
@@ -132,6 +137,13 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now portfolio-dash
+# An install made before v0.1.34 adds the stop mode as a drop-in instead of editing the unit:
+#   sudo mkdir -p /etc/systemd/system/portfolio-dash.service.d
+#   printf '[Service]
+KillMode=mixed
+' | sudo tee /etc/systemd/system/portfolio-dash.service.d/killmode.conf
+#   sudo systemctl daemon-reload      # takes effect at the next stop / restart
+#   systemctl show -p KillMode portfolio-dash      # KillMode=mixed
 sudo systemctl status portfolio-dash --no-pager      # should be "active (running)"
 curl -s http://127.0.0.1:8400/api/health             # -> {"status":"ok"}
 ```
@@ -279,8 +291,10 @@ sudo systemctl start portfolio-dash
 holds COMMITTED changes not yet folded back into `portfolio.db`: SQLite folds them in on the
 next open, so never delete the `-wal` of the database you keep.
 - **Clean stop** (`systemctl stop` / restart, v0.1.32+): the app checkpoints on the way out, so
-  `data/` holds ONE file, `portfolio.db`. It first waits up to 15 s for a background pre-warm
-  still reading the database. If `app.log` shows `the WAL checkpoint could not complete` or
+  `data/` holds ONE file, `portfolio.db`. It first stops its own child processes (a running
+  re-settlement or background job: up to 30 s; a re-settlement reads 中斷 and resumes at the
+  next start) and waits up to 15 s for a background pre-warm still reading the database. If
+  `app.log` shows `the WAL checkpoint could not complete`, `child(ren) not done` or
   `pre-warm(s) still running` for that stop, `-wal` / `-shm` may remain, as after a crash.
 - **Crash** (an OOM kill, a power loss, a `kill -9`): `data/portfolio.db-wal` and
   `data/portfolio.db-shm` may remain.

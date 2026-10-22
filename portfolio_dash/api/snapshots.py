@@ -65,7 +65,12 @@ from portfolio_dash.data_ingestion.store import list_accounts, load_ledger_bundl
 from portfolio_dash.portfolio import period_close as pc
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.cost_basis import iter_books
-from portfolio_dash.portfolio.dashboard import OnOrBefore, build_dashboard, build_dashboard_keyed
+from portfolio_dash.portfolio.dashboard import (
+    OnOrBefore,
+    build_dashboard,
+    build_dashboard_keyed,
+    file_snapshot_build,
+)
 from portfolio_dash.portfolio.dashboard_models import DashboardData, HistoryState, TrendPoint
 from portfolio_dash.portfolio.results import Book
 from portfolio_dash.portfolio.settlement_models import (
@@ -245,6 +250,9 @@ class _Inputs:
     ledgers: CashLedgers
     #: The ledger's first row counting by today — where the first close's period starts.
     first_row: date | None
+    #: *data* was built again, uncached, inside the snapshot (review G #8): :func:`_closes`
+    #: files it for the next dashboard reader once the snapshot has closed.
+    rebuilt: bool = False
 
 
 def _store_view(history: HistoryState) -> tuple[Any, ...] | None:
@@ -289,7 +297,8 @@ def _inputs(conn: sqlite3.Connection, data: DashboardData, *, now: datetime,
     (``load_cash_ledgers``, ⑪); a live close's cash at D re-applies its own book's refusals
     (``cash_at``)."""
     moved = before is not None and mark is not None and mark.conn_version != before
-    if moved or _store_view(data.history_state) != _state_view(conn, reporting):
+    rebuilt = moved or _store_view(data.history_state) != _state_view(conn, reporting)
+    if rebuilt:
         data = build_dashboard(conn, now=now, reporting=reporting)
     today = now.date()
     raw = load_ledger_bundle(conn)
@@ -298,7 +307,8 @@ def _inputs(conn: sqlite3.Connection, data: DashboardData, *, now: datetime,
     ledgers = load_cash_ledgers(conn)
     return _Inputs(data=data, history=data.history_state, registered=registered, cut=cut,
                    ledgers=ledgers,
-                   first_row=st.ledger_first_row(cut, ledgers.movements, ledgers.fx, today))
+                   first_row=st.ledger_first_row(cut, ledgers.movements, ledgers.fx, today),
+                   rebuilt=rebuilt)
 
 
 def _stale_range(history: HistoryState) -> tuple[date, date] | None:
@@ -358,6 +368,12 @@ def _closes(conn: sqlite3.Connection, select: _Select, *, now: datetime,
             s.restatements = st.restatements_for(conn, p.kind, p.period)
             _read_time_fields(s, history=history, stale=stale, inputs=inputs, today=today)
             out.append(s)
+    if inputs.rebuilt:
+        # The build redone inside the snapshot (an uncached build: a transaction was open) is
+        # the dashboard of the state it read: file it under that state for the next
+        # /api/dashboard, which otherwise built it all again (backlog item 4) — only while that
+        # state is still the current one. The closes above only read it.
+        file_snapshot_build(conn, inputs.data, now=now, reporting=reporting, mark=mark)
     return out, periods, mark
 
 

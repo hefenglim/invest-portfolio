@@ -145,6 +145,7 @@ def test_terminate_and_wait_on_a_running_child(runner: ChildRunner, tmp_path: Pa
     # It returns only after the process is gone AND on_exit has run.
     assert rec.calls == [result] and handle.state == "exited"
     assert result.started and result.terminated and result.killed and not result.ok
+    assert not result.stopped                            # a cancel, not the app's stop
     assert handle.terminate_and_wait(5.0) is result      # again: just the result
     assert rec.calls == [result]                         # on_exit ran exactly once
 
@@ -260,6 +261,7 @@ def test_cancelling_a_queued_heavy_child(runner: ChildRunner, tmp_path: Path) ->
     result = second.terminate_and_wait(5.0)
     assert rec.calls == [result]
     assert not result.started and result.terminated and result.pid is None
+    assert not result.stopped
     assert runner.gate.queued() == 1                       # only the third is left
     first.terminate_and_wait(5.0)
     assert _done(third).ok                                 # the queue moved on past it
@@ -378,6 +380,77 @@ def test_an_on_start_that_raises_is_logged_and_the_child_still_runs(
     caplog.set_level(logging.WARNING, logger="portfolio_dash.shared.child_runner")
     assert _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True, on_start=_bad)).ok
     assert any("on_start" in r.getMessage() for r in caplog.records)
+
+
+# -- the app's stop --------------------------------------------------------------------------
+def test_stop_all_terminates_the_running_child_and_no_queued_one_ever_starts(
+        runner: ChildRunner, tmp_path: Path) -> None:
+    """The lifespan's stop (backlog item 2, 2026-10-22): the running heavy child is
+    terminated and the two queued behind it are cancelled — neither starts when the gate
+    passes the turn on — and every ``on_exit`` has returned when the call does, each result
+    marked ``stopped``."""
+    ready = tmp_path / "ready.json"
+    recs = [Recorder() for _ in range(3)]
+    running = runner.spawn(f"{_FX}.sleeper", [str(ready)], heavy=True, on_exit=recs[0])
+    assert _wait_for(ready.exists)
+    queued = [runner.spawn(f"{_FX}.exit_code", ["0"], heavy=True, on_exit=rec)
+              for rec in recs[1:]]
+    assert [h.state for h in queued] == ["queued", "queued"]
+    started = time.monotonic()
+    assert runner.stop_all(_WAIT) == []
+    assert time.monotonic() - started < _WAIT
+    assert [len(rec.calls) for rec in recs] == [1, 1, 1]       # each on_exit ran, once
+    first = recs[0].calls[0]
+    assert first.started and first.terminated and first.stopped and not first.ok
+    for rec in recs[1:]:
+        never = rec.calls[0]
+        assert not never.started and never.pid is None and never.terminated and never.stopped
+    assert [h.state for h in (running, *queued)] == ["exited"] * 3
+    assert runner._live == set() and runner.gate.queued() == 0
+    assert not proc_lock.is_held(tmp_path / "heavy-child.lock")
+    assert runner.stop_all(_WAIT) == []                         # nothing left: a no-op
+
+
+def test_stop_all_is_bounded_and_an_exited_childs_result_stands(runner: ChildRunner) -> None:
+    """A child whose process exited on its own while its ``on_exit`` is still at work (a
+    waiter finalising its run): the stop waits for it, at most its bound, and returns it as
+    not done — and its result stands: not ``stopped``, not ``terminated``."""
+    entered, release = threading.Event(), threading.Event()
+    calls: list[ChildResult] = []
+
+    def slow_on_exit(result: ChildResult) -> None:
+        calls.append(result)
+        entered.set()
+        assert release.wait(_WAIT)
+
+    handle = runner.spawn(f"{_FX}.exit_code", ["0"], on_exit=slow_on_exit)
+    assert entered.wait(_WAIT)
+    started = time.monotonic()
+    assert runner.stop_all(0.5) == [handle]
+    assert 0.4 <= time.monotonic() - started < 5
+    release.set()
+    result = _done(handle)
+    assert calls == [result] and result.ok and not result.stopped and not result.terminated
+    assert runner._live == set()
+
+
+@pytest.mark.parametrize("heavy", [True, False])
+def test_a_child_spawned_after_the_stop_began_never_starts_until_reopen(
+        runner: ChildRunner, heavy: bool) -> None:
+    """A job thread already past the scheduler's shutdown can reach ``spawn`` after
+    ``stop_all`` took its snapshot (review of the backlog fixes, 2026-10-22): that child never
+    starts its process — nobody would stop it, and it would hold the database through the
+    checkpoint — and its result says the stop ended it. ``reopen`` (the next lifespan) lets
+    children start again."""
+    assert runner.stop_all(_WAIT) == []          # no child alive: the stop still begins
+    rec = Recorder()
+    result = _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=heavy, on_exit=rec))
+    assert rec.calls == [result]
+    assert not result.started and result.pid is None and result.terminated and result.stopped
+    assert runner._live == set() and runner.gate.queued() == 0
+    runner.reopen()
+    again = _done(runner.spawn(f"{_FX}.exit_code", ["0"], heavy=heavy))
+    assert again.started and again.ok and not again.stopped
 
 
 def test_a_broken_gate_lock_still_reports(tmp_path: Path) -> None:

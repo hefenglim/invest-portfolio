@@ -346,7 +346,8 @@
     document.getElementById('trend-title').textContent =
       isTwr ? '績效比較（時間加權報酬）' : '總市值 vs 累計淨投入';
     document.getElementById('trend-sub').textContent =
-      isTwr ? '重定基準＝100' : ((D && D.reporting_currency) || 'TWD') + '・日線';
+      // No currency until the payload names one: a static 'TWD' was wrong for a USD ledger.
+      isTwr ? '重定基準＝100' : ((D && D.reporting_currency) ? D.reporting_currency + '・' : '') + '日線';
     if (isTwr) {
       if (refetch) { twrData = null; loadTwr(); }
       else if (twrData) renderTwr(twrData);

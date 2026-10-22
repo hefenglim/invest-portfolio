@@ -338,8 +338,9 @@ def migrate_job_runs_results(conn: sqlite3.Connection) -> None:
       #2, fold #2): when a job's cron, timezone or enabled flag last changed (NULL = never),
       the schedule as stamped then, and the schedule in effect BEFORE that change
       (:func:`schedule_key`). :func:`update_schedule` stamps all three; a boot stamps a schedule
-      edited behind its back (a hand edit, a script) with the boot time, its previous schedule
-      being the last stamp. ``final_through`` judges the fires before ``updated_at`` by the
+      edited behind its back (a hand edit, a script) with the boot time. Either way the previous
+      schedule is the last stamp when there is one — the schedule the live scheduler ran, never
+      a hand edit it never loaded. ``final_through`` judges the fires before ``updated_at`` by the
       previous schedule and the later ones by the current one — exact for the LAST change — so
       a schedule change never rewrites history.
 
@@ -383,25 +384,45 @@ def parse_schedule_key(key: str | None) -> tuple[str, str, bool] | None:
 
 def update_schedule(conn: sqlite3.Connection, job_id: str, *, cron: str, tz: str,
                     enabled: bool, now: datetime) -> bool:
-    """Store a job's schedule; returns whether it changed. A change stamps
+    """Store a job's schedule; returns whether the schedule IN EFFECT changed. A change stamps
     ``schedule_config.updated_at`` with *now* and keeps the schedule in effect until then in
     ``previous_schedule`` (the boot migration adds the columns; without them the stamp is
     skipped), so ``final_through`` judges the fires before the change by the schedule that was
-    in effect then, never by the new one (review E #2, fold #2)."""
-    row = conn.execute("SELECT cron, timezone, enabled FROM schedule_config WHERE job_id = ?",
-                       (job_id,)).fetchone()
-    changed = row is None or (str(row[0]), str(row[1]), bool(row[2])) != (cron, tz, enabled)
-    old = None if row is None else schedule_key(str(row[0]), str(row[1]), bool(row[2]))
+    in effect then, never by the new one (review E #2, fold #2).
+
+    The schedule in effect until now is ``stamped_schedule`` when there is one, not the row: the
+    live scheduler loads ``schedule_config`` at a boot (``runtime.build_scheduler``) and
+    otherwise only through this function's caller (``runtime.reschedule_job``), so a row edited
+    by hand since the last boot was never in effect — its stamp was. Without a stamp (before the
+    boot migration, or a row added since the last boot) it is the row, as before. *changed*
+    compares with that same schedule: saving a hand edit puts it in effect (a change); saving
+    the stamp back over one puts nothing new in effect (no change: the row is restored and the
+    stamps stay). An ``insight:<id>`` row is rebound live without a stamp
+    (``bind_insight_schedule``), so its stamps can lag; ``final_through`` reads only the quote
+    jobs'."""
+    try:
+        row = conn.execute("SELECT cron, timezone, enabled, stamped_schedule "
+                           "FROM schedule_config WHERE job_id = ?", (job_id,)).fetchone()
+        stamped = None if row is None or row[3] is None else str(row[3])
+    except sqlite3.OperationalError:  # the boot migration has not added the column
+        row = conn.execute("SELECT cron, timezone, enabled FROM schedule_config "
+                           "WHERE job_id = ?", (job_id,)).fetchone()
+        stamped = None
+    if stamped is not None:
+        old: str | None = stamped
+    else:
+        old = None if row is None else schedule_key(str(row[0]), str(row[1]), bool(row[2]))
+    new = schedule_key(cron, tz, enabled)
+    changed = old != new
     conn.execute(
         "UPDATE schedule_config SET cron = ?, timezone = ?, enabled = ? WHERE job_id = ?",
         (cron, tz, 1 if enabled else 0, job_id),
     )
     if changed:
         try:
-            # the schedule in effect until now: the row this change replaces
             conn.execute("UPDATE schedule_config SET previous_schedule = ?, updated_at = ?, "
                          "stamped_schedule = ? WHERE job_id = ?",
-                         (old, now.isoformat(), schedule_key(cron, tz, enabled), job_id))
+                         (old, now.isoformat(), new, job_id))
         except sqlite3.OperationalError:
             logger.debug("schedule_config.updated_at missing (boot migration not run)")
     conn.commit()
@@ -2090,8 +2111,11 @@ def running_progress() -> dict[str, str | None]:
 #
 # Liveness is the OS lock (``shared/proc_lock.py``): the child holds ``job-<run_id>.lock``
 # for its whole life. A child that dies before finishing its row is finalised here
-# (:func:`_child_exited`, 「工作子程序異常結束」); a row left ``running`` by a process that is
-# gone (a restart) is finalised at boot (:func:`close_abandoned_runs`).
+# (:func:`_child_exited`, 「工作子程序異常結束」); one the app's stop ended
+# (``child_runner.stop_all``: terminated, or cancelled while it waited for the heavy gate) is
+# finalised here too, as a restart leaves it (:data:`STOPPED_AT_SHUTDOWN`, reason
+# ``interrupted``); a row left ``running`` by a process that is gone (a restart) is finalised
+# at boot (:func:`close_abandoned_runs`).
 
 #: The job worker's module, registered by the composition root. ``None`` (a scheduler-only
 #: process, or a test): every job runs in-process whatever ``PD_JOB_MODE`` says.
@@ -2105,6 +2129,9 @@ WORKER_DIED = "工作子程序異常結束"
 WORKER_NOT_STARTED = "工作子程序無法啟動"
 #: ``job_runs.detail`` of a run left ``running`` by a process that is gone (boot).
 ABANDONED_AT_BOOT = "系統重新啟動時此工作尚未完成"
+#: ``job_runs.detail`` of a run whose worker child the app's stop ended (reason
+#: ``interrupted``, as :data:`ABANDONED_AT_BOOT`): terminated mid-run, or never started.
+STOPPED_AT_SHUTDOWN = "系統停止時此工作尚未完成"
 #: ``job_runs.detail`` of a run whose child could not even be spawned (``<class>`` is the
 #: exception's class name — ``RuntimeError: can't start new thread`` under memory pressure).
 SPAWN_FAILED = "無法啟動工作子程序（{error}）"
@@ -2340,6 +2367,8 @@ def _run_in_child(job_id: str, run_id: int, *, now: datetime,
       ``already_running`` until a restart (package H review, 2026-10-20);
     - it ran longer than :data:`JOB_TIME_LIMIT_S`: terminated, :data:`JOB_TIMED_OUT`,
       reason ``timeout``;
+    - the app's stop ended it (``child_runner.stop_all``): :data:`STOPPED_AT_SHUTDOWN`,
+      reason ``interrupted``;
     - it died without finishing its row: :data:`WORKER_DIED` (:func:`_close_if_open`).
 
     *on_start* is ``child_runner``'s: called once the heavy gate grants the run its turn,
@@ -2432,6 +2461,9 @@ def _close_if_open(entry: _ChildRun, result: child_runner.ChildResult, *,
                    now: datetime) -> None:
     if entry.timed_out:
         detail, reason = JOB_TIMED_OUT.format(limit=_limit_text(JOB_TIME_LIMIT_S)), "timeout"
+    elif result.stopped:
+        # the app's stop, not a crash: the reason a restart gives (close_abandoned_runs)
+        detail, reason = STOPPED_AT_SHUTDOWN, "interrupted"
     elif result.started:
         detail, reason = WORKER_DIED, "worker_died"
     else:
@@ -2486,14 +2518,16 @@ def close_abandoned_runs(conn: sqlite3.Connection, *, now: datetime) -> list[int
     (``commit=False``).
 
     **An orphan worker.** A child outlives its web process only where the process dies
-    without its process group: on POSIX the child runs in its own session
-    (``start_new_session``), so a dev server killed by hand or restarted by ``--reload``
-    leaves it running; prod's systemd unit (``KillMode=control-group``) kills it with the
-    service. Such an orphan finishes its own row, but it runs OUTSIDE the new process's heavy
-    gate — the data folder's ``heavy-child.lock`` was held by the dead parent's waiter and was
-    released with it, so the new process may start another heavy child beside the orphan —
-    and WITHOUT the after-job hook, which lived in the dead process: a back-dated change it
-    makes waits for the nightly re-settlement instead of starting one.
+    without its process group and without a clean stop (a clean stop terminates every child
+    first, ``child_runner.stop_all``): on POSIX the child runs in its own session
+    (``start_new_session``), so a dev server killed by hand, or restarted by a ``--reload``
+    that skips the lifespan's stop, leaves it running; prod's systemd unit
+    (``KillMode=control-group``) kills it with the service. Such an orphan finishes its own
+    row, but it runs OUTSIDE the new process's heavy gate — the data folder's
+    ``heavy-child.lock`` was held by the dead parent's waiter and was released with it, so
+    the new process may start another heavy child beside the orphan — and WITHOUT the
+    after-job hook, which lived in the dead process: a back-dated change it makes waits for
+    the nightly re-settlement instead of starting one.
 
     **Files.** A lock file of a run whose row is still open is never deleted here, held or
     not: on POSIX a probe that finds it free cannot tell "nobody" from "a surviving child

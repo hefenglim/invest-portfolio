@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pytest_socket import disable_socket, enable_socket
 
+from portfolio_dash.api import auth_store
 from portfolio_dash.api.app import create_app
 from portfolio_dash.api.auth_store import create_auth_tables
 from portfolio_dash.api.deps import get_conn, get_now, get_reporting
@@ -40,7 +41,7 @@ from portfolio_dash.pricing.results import FxRow, PriceRow
 from portfolio_dash.pricing.schema import create_tables as create_pricing_tables
 from portfolio_dash.pricing.store import upsert_fx, upsert_prices
 from portfolio_dash.scheduler.jobs import create_scheduler_tables, migrate_job_runs_results
-from portfolio_dash.shared import result_cache
+from portfolio_dash.shared import child_runner, result_cache
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
@@ -83,6 +84,83 @@ def _fresh_result_cache() -> Iterator[None]:
     result_cache.reset()
     yield
     result_cache.reset()
+
+
+@pytest.fixture(autouse=True)
+def _child_runner_open() -> Iterator[None]:
+    """A test that stops the process-wide child runner (``child_runner.stop_all``, as the
+    lifespan's stop does) leaves it refusing to start a child: every test starts and ends with
+    it open, as the next lifespan would (``child_runner.reopen``)."""
+    child_runner.reopen()
+    yield
+    child_runner.reopen()
+
+
+@pytest.fixture(autouse=True)
+def _no_pending_session_touch() -> Iterator[None]:
+    """A session touch armed by a test (``auth_store.schedule_touch``: a daemon timer, a few
+    seconds out) never fires into the next test: every test ends with none pending."""
+    yield
+    auth_store.cancel_pending_touches(timeout=0)
+
+
+class _FakeTimer:
+    def __init__(self, at: float, fn: Callable[[], None]) -> None:
+        self.at = at
+        self.fn = fn
+        self.cancelled = False
+        self.fired = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class TouchClock:
+    """Drives the deferred session touch without waiting: a fake monotonic clock and the
+    timers ``auth_store`` arms on it, fired on the TEST's thread when the clock passes them
+    (so a statement the touch runs is traced in the test's order)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.timers: list[_FakeTimer] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def start(self, delay: float, fn: Callable[[], None]) -> _FakeTimer:
+        timer = _FakeTimer(self.now + delay, fn)
+        self.timers.append(timer)
+        return timer
+
+    @property
+    def armed(self) -> list[_FakeTimer]:
+        """The timers that have neither fired nor been cancelled."""
+        return [t for t in self.timers if not (t.fired or t.cancelled)]
+
+    def advance(self, seconds: float) -> None:
+        """Move the clock by *seconds*, firing every timer that falls due on the way, in
+        order (a timer that fires may arm the next one)."""
+        target = self.now + seconds
+        while due := [t for t in self.armed if t.at <= target]:
+            timer = min(due, key=lambda t: t.at)
+            self.now = max(self.now, timer.at)
+            timer.fired = True
+            timer.fn()
+        self.now = target
+
+    def settle(self) -> None:
+        """Let every pending touch fire: past its settle window and its cap."""
+        self.advance(auth_store.SESSION_TOUCH_MAX_DEFER_S + auth_store.SESSION_TOUCH_SETTLE_S)
+
+
+@pytest.fixture
+def touch_clock(monkeypatch: pytest.MonkeyPatch) -> TouchClock:
+    """``auth_store``'s pending touch on a :class:`TouchClock`: nothing fires until the test
+    advances it."""
+    clock = TouchClock()
+    monkeypatch.setattr(auth_store, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(auth_store, "_start_timer", clock.start)
+    return clock
 
 
 def _seed_golden(conn: sqlite3.Connection) -> None:

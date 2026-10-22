@@ -7,7 +7,8 @@
 - the price gate reads OLD and NEW symbol and every ledger; an instrument's day reads its OLD
   and NEW symbol;
 - a ``REPLACE`` that removes a conflicting row marks the removed row's day (no DELETE trigger
-  fires for it), while an unchanged upsert stays silent;
+  fires for it), while an unchanged upsert stays silent; on an id-keyed ledger, one that moves
+  the row to another day reads as its delete + insert in the trail;
 - a ``DROP COLUMN`` migration on a trigger table does not abort boot;
 - an external ``ex_date = ''`` reads as no ex-date.
 """
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -27,7 +28,9 @@ from portfolio_dash.data_ingestion.store import (
     upsert_instrument,
     upsert_opening,
 )
+from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
+from portfolio_dash.portfolio.settlement_models import CHANGE_TABLE_ZH, RunRequest
 from portfolio_dash.shared.enums import Currency, Market
 from portfolio_dash.shared.models.assets import Instrument
 from portfolio_dash.shared.models.enums import DividendType, Side
@@ -271,19 +274,30 @@ def test_a_replace_that_moves_a_row_later_marks_its_old_day(store: sqlite3.Conne
 _ID_TABLES = sorted(t for t in _DAY_COLUMN if t != "opening_inventory")
 
 
+def _replace_with(conn: sqlite3.Connection, table: str, rowid: int, column: str,
+                  value: str) -> None:
+    """``INSERT OR REPLACE`` the row *rowid* of *table* with *column* set to *value*."""
+    columns = [str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")]
+    picked = ", ".join("?" if c == column else c for c in columns)
+    conn.execute(f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) SELECT {picked} "
+                 f"FROM {table} WHERE rowid = ?", (value, rowid))
+    conn.commit()
+
+
 def _replace_day(conn: sqlite3.Connection, table: str, rowid: int, day: str) -> None:
     """``INSERT OR REPLACE`` the row *rowid* of *table* with its day column set to *day*."""
-    columns = [str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")]
-    picked = ", ".join("?" if c == _DAY_COLUMN[table] else c for c in columns)
-    conn.execute(f"INSERT OR REPLACE INTO {table} ({', '.join(columns)}) SELECT {picked} "
-                 f"FROM {table} WHERE rowid = ?", (day, rowid))
-    conn.commit()
+    _replace_with(conn, table, rowid, _DAY_COLUMN[table], day)
 
 
 def _log_rows(conn: sqlite3.Connection) -> list[tuple[object, ...]]:
     return [tuple(r) for r in conn.execute(
         "SELECT table_name, op, row_key, old_account_id, new_account_id, old_symbol, "
         "new_symbol, old_day, new_day FROM settle_change_log ORDER BY id")]
+
+
+def _log_seqs(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    return [(str(r[0]), int(r[1])) for r in conn.execute(
+        "SELECT op, seq FROM settle_change_log ORDER BY id")]
 
 
 @pytest.mark.parametrize("table", _ID_TABLES)
@@ -307,14 +321,63 @@ def test_a_replace_that_moves_a_settled_row_past_the_bound_reads_as_its_delete(
 
 
 @pytest.mark.parametrize("table", _ID_TABLES)
-def test_a_replace_inside_the_bound_is_recorded_once_by_its_insert(
+def test_a_replace_that_moves_a_row_later_inside_the_bound_reads_as_its_delete_and_insert(
+        store: sqlite3.Connection, table: str) -> None:
+    """Backlog after v0.1.33: the AFTER INSERT's trail row carries only the NEW day, so the
+    REPLACE trigger writes the removed row as a ``delete`` too, with its own ``seq`` — the old
+    day is in the trail, not only in ``dirty_from``."""
+    row = store.execute(f"SELECT rowid, {_DAY_COLUMN[table]} FROM {table} WHERE "
+                        f"{_ROW[table]} ORDER BY rowid LIMIT 1").fetchone()
+    old_day = str(row[1])
+    assert old_day < "2026-06-01"
+    _, seq = _dirt(store)
+    _replace_day(store, table, row[0], "2026-06-01")
+    assert _dirt(store) == (old_day, seq + 2)
+    lines = _log_rows(store)
+    assert [(line[0], line[1], line[2]) for line in lines] == [
+        (table, "delete", str(row[0])), (table, "insert", str(row[0]))]
+    assert [(line[7], line[8]) for line in lines] == [(old_day, None), (None, "2026-06-01")]
+    assert _log_seqs(store) == [("delete", seq + 1), ("insert", seq + 2)]
+
+
+#: A watched column outside the day and the key, per id-keyed ledger, and a value it takes.
+_SAME_DAY_EDIT = {"transactions": ("quantity", "7"), "dividends": ("gross", "7"),
+                  "cash_movements": ("amount", "7"), "fx_conversions": ("from_amount", "7"),
+                  "corporate_actions": ("ratio_to", "7")}
+
+
+@pytest.mark.parametrize("table", _ID_TABLES)
+def test_a_replace_on_the_same_day_is_recorded_once_by_its_insert(
         store: sqlite3.Connection, table: str) -> None:
     row = store.execute(f"SELECT rowid, {_DAY_COLUMN[table]} FROM {table} WHERE "
                         f"{_ROW[table]} ORDER BY rowid LIMIT 1").fetchone()
     _, seq = _dirt(store)
-    _replace_day(store, table, row[0], "2026-06-01")
+    column, value = _SAME_DAY_EDIT[table]
+    _replace_with(store, table, row[0], column, value)
     assert _dirt(store) == (str(row[1]), seq + 1)
-    assert [line[1] for line in _log_rows(store)] == ["insert"]
+    assert _log_seqs(store) == [("insert", seq + 1)]
+
+
+@pytest.mark.parametrize("table", ["transactions", "dividends"])
+def test_a_close_between_a_replaces_old_and_later_day_names_the_change(
+        store: sqlite3.Connection, table: str) -> None:
+    """The restatement reason of a close ending between the removed day and the later new day
+    names the record by its OLD day; it read 「重新結算」 (no change on or before the close)
+    while the trail held only the insert. A later close still names ONE entry, not two."""
+    row = store.execute(f"SELECT rowid, {_DAY_COLUMN[table]} FROM {table} WHERE "
+                        f"{_ROW[table]} ORDER BY rowid LIMIT 1").fetchone()
+    old_day = str(row[1])
+    assert old_day < "2026-05-31"
+    _replace_day(store, table, row[0], "2026-06-01")
+    st.create_run(store, RunRequest(scope="dirty", reason="prompt", started_by=None,
+                                    through=date(2026, 6, 10), unconfirmed_closes={}),
+                  run_id=1, trigger_text="測試啟動",
+                  started_at=datetime(2026, 6, 11, tzinfo=UTC))
+    st.claim(store, 1, scope="dirty", run_through=date(2026, 6, 10))
+    changes = st.claimed_changes(store, 1)
+    named = f"{old_day} {CHANGE_TABLE_ZH[table]}更正後重新結算"
+    for through in (date(2026, 5, 31), date(2026, 6, 30)):
+        assert settle_worker.correction_reason(changes, through, calc_changed=False)[0] == named
 
 
 def test_a_replace_keeps_an_earlier_dirt(store: sqlite3.Connection) -> None:

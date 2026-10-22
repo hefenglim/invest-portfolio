@@ -17,22 +17,34 @@ the window. Its last use is ``auth_sessions.last_seen_at``. Because a GET never 
 * **the check is a pure read** in the gate (:func:`require_session`, :func:`session_state`):
   an expired session answers 401 with :data:`SESSION_EXPIRED_MESSAGE` and is treated as gone
   — never deleted by the request that found it;
-* **a use is recorded by the touch** (:func:`touch_after_response`), which the gate schedules
-  only when the stored stamp is :data:`SESSION_TOUCH_INTERVAL` old or older. It runs as a
-  background task AFTER the response, on its OWN short-lived connection with a
+* **a use is recorded by the touch** (:func:`run_touch`), which the gate never runs itself.
+  When the stored stamp is :data:`SESSION_TOUCH_INTERVAL` old or older, the gate ARMS the
+  session's pending touch (:func:`schedule_touch`): a daemon timer that fires once the page
+  load has settled, :data:`SESSION_TOUCH_SETTLE_S` after the session's LATEST gated request
+  (each one pushes it back), and never later than :data:`SESSION_TOUCH_MAX_DEFER_S` after the
+  request that armed it. The touch runs on its OWN short-lived connection with a
   :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS` busy timeout, as one autocommit compare-and-set
-  UPDATE (:data:`TOUCH_SQL`). It is skipped when the write lock is held (a later request
-  retries), and it never raises. The request's own connection still writes nothing and takes
-  no write lock: ``tests/contract/test_def065_get_never_writes.py`` (section 5) holds the
-  touch as the one reviewed exception, by its statement and by its connection. One touch
-  per session runs at a time in this process, and none again within the interval once one
-  recorded (the in-process guard, :func:`touch_wanted`).
+  UPDATE (:data:`TOUCH_SQL`). It is skipped when the write lock is held (the next request
+  arms it again), and it never raises. The request's own connection still writes nothing and
+  takes no write lock: ``tests/contract/test_def065_get_never_writes.py`` (section 5) holds
+  the touch as the one reviewed exception, by its statement and by its connection. One touch
+  per session is pending at a time, one runs at a time in this process, and none runs again
+  within the interval once one recorded (the in-process guard, :func:`touch_wanted`). The
+  lifespan's stop cancels the pending ones (:func:`cancel_pending_touches`).
 
-**The cache cost** (owner ruling 2026-10-22). A recorded touch commits from its own
+**The cache cost** (owner rulings 2026-10-22). A recorded touch commits from its own
 connection, which moves ``PRAGMA data_version`` and empties the result cache. Hence the 24 h
-interval (at most one invalidation a day per session) and the pre-warm a recorded touch
-schedules at once. The price of 24 h: a session lapses 29 to 30 days after its last use
-(that use may have been recorded up to a day earlier); the notice still says 30 天.
+interval (at most one invalidation a day per session), and the order 「續期延後，記完立刻預熱」
+— defer the touch, pre-warm the moment it is recorded. Until the touch commits, every read of
+the page load and a navigation inside the settle window are served from the previous cache
+entry: nothing has changed. The pre-warm then starts AT ONCE: no read of that page load is
+left to compete with its build on the host's one vCPU, and a navigation that lands while it
+runs joins it in flight (``shared/flight.py``; the pre-warm and ``GET /api/dashboard`` build
+under one cache key) instead of building the dashboard a second time. Measured before (a 3 s
+pre-warm after a touch committed right after a page load's FIRST response): a navigation
+inside those 3 s rebuilt the dashboard itself, about 0.9 s on the VM, once per session a day.
+The price of 24 h: a session lapses 29 to 30 days after its last use (that use may have been
+recorded up to a day earlier); the notice still says 30 天.
 
 A stamp further than :data:`SESSION_CLOCK_SKEW` in the future, and one that cannot be read
 at all (a BLOB, a number, text that is no time), are expired: they fail closed. The boot
@@ -49,11 +61,14 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from functools import partial
+from typing import Any, Literal, Protocol
 
-from fastapi import BackgroundTasks, Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from portfolio_dash.api.deps import get_conn, get_now
 from portfolio_dash.shared import config_store, flags, result_cache
@@ -78,11 +93,22 @@ SESSION_TOUCH_BUSY_TIMEOUT_MS = 100
 #: A touch that failed for any reason other than a busy lock is retried after this long —
 #: logged (WARNING) at most this often per session, rather than on every request.
 SESSION_TOUCH_FAILURE_BACKOFF = timedelta(minutes=10)
-#: The pre-warm after a recorded touch waits as long as the write window's does
-#: (``api/app.py::WRITE_PREWARM_DELAY_S``; a test holds the two equal): from the cache's view
-#: a touch IS a write, the two share one debounced timer, and the touch commits right after
-#: the first response of a page load, while that load's other reads may still be running.
-SESSION_TOUCH_PREWARM_DELAY_S = 3.0
+#: The touch waits for the page load to settle (owner ruling 2026-10-22, 「續期延後」): it
+#: fires this long after the LATEST gated request of its session, each further request
+#: pushing it back. As long as the write window waits before its pre-warm
+#: (``api/app.py::WRITE_PREWARM_DELAY_S``; a test holds the two equal): both mean "the page
+#: load is over", and from the cache's view a touch IS a write.
+SESSION_TOUCH_SETTLE_S = 3.0
+#: ... but never later than this after the request that armed it, so a session that never
+#: falls quiet for :data:`SESSION_TOUCH_SETTLE_S` (a page left polling) is still touched.
+SESSION_TOUCH_MAX_DEFER_S = 30.0
+#: The pre-warm after a recorded touch starts at once (「記完立刻預熱」): the touch itself
+#: waited for the page load to settle, so nothing of that load is left to compete with it.
+SESSION_TOUCH_PREWARM_DELAY_S = 0.0
+#: How long the lifespan's stop waits for a touch already RUNNING (one UPDATE, giving up on a
+#: held lock after :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS`): a commit after the stop's WAL
+#: checkpoint would leave ``-wal`` / ``-shm`` beside the database.
+SHUTDOWN_TOUCH_WAIT_S = 2.0
 #: The ``request.state`` attribute the gate sets to the login it let through (and the login /
 #: logout routes to the login they authenticated / ended); the action log names it. A request
 #: refused — no session, unknown, locked or expired — carries none.
@@ -342,7 +368,7 @@ def touch_session(
     conn: sqlite3.Connection, token: str, *, seen_raw: str | None, now: datetime
 ) -> bool:
     """Record a use of *token* at *now*, guarded by the stamp the caller read; ``True`` when
-    this call recorded it. The caller owns the connection (see :func:`touch_after_response`).
+    this call recorded it. The caller owns the connection (see :func:`run_touch`).
     """
     cur = conn.execute(TOUCH_SQL, (now.isoformat(), token, seen_raw))
     if conn.in_transaction:
@@ -352,15 +378,18 @@ def touch_session(
 
 #: What one touch did: ``recorded`` (the row changed), ``lost`` (the stamp it read had
 #: already moved, or the session was locked or removed: nothing to do), ``busy`` (the write
-#: lock was held: skipped, the next request retries), ``failed`` (any other error: logged at
-#: WARNING, retried after :data:`SESSION_TOUCH_FAILURE_BACKOFF`), ``throttled`` (this process
-#: has the session's touch in flight, or recorded it within the interval: nothing ran).
+#: lock was held: skipped, the next request arms it again), ``failed`` (any other error:
+#: logged at WARNING, retried after :data:`SESSION_TOUCH_FAILURE_BACKOFF`), ``throttled``
+#: (this process has the session's touch in flight, or recorded it within the interval:
+#: nothing ran).
 TouchOutcome = Literal["recorded", "lost", "busy", "failed", "throttled"]
 
 # The in-process guard (owner ruling 2026-10-22, item 5): the requests of one page load all
 # find the touch due at once, and each would run the UPDATE (12 GETs → 12 UPDATEs, one row
 # changed). Per token: the touch in flight, and the earliest `now` at which another may run.
+# The pending touches (below) live under the same lock, and the stop waits on its condition.
 _touch_lock = threading.Lock()
+_touch_done = threading.Condition(_touch_lock)
 _touch_in_flight: set[str] = set()
 _touch_not_before: dict[str, datetime] = {}
 #: The guard forgets everything past this many sessions (only the throttling is lost).
@@ -379,23 +408,22 @@ def _guard_allows(token: str, now: datetime) -> bool:
 
 
 def touch_wanted(token: str, now: datetime) -> bool:
-    """The gate's peek: would a touch of *token* run now? It claims nothing — a claim made
-    at scheduling time would leak whenever the route raises (an exception handler's response
-    runs no background task), and a leaked claim would let the session expire."""
+    """A peek: would a touch of *token* run now? It claims nothing — the touch claims when
+    it RUNS, so a claim can never be left behind by a request that raised."""
     with _touch_lock:
         return _guard_allows(token, now)
 
 
-def _claim_touch(token: str, now: datetime) -> bool:
-    with _touch_lock:
-        if not _guard_allows(token, now):
-            return False
-        _touch_in_flight.add(token)
-        return True
+def _claim_locked(token: str, now: datetime) -> bool:
+    """Under ``_touch_lock``: claim the session's touch (in flight) if the guard allows it."""
+    if not _guard_allows(token, now):
+        return False
+    _touch_in_flight.add(token)
+    return True
 
 
 def _release_touch(token: str, now: datetime, outcome: TouchOutcome) -> None:
-    with _touch_lock:
+    with _touch_done:
         _touch_in_flight.discard(token)
         if outcome in ("recorded", "lost"):
             _touch_not_before[token] = now + SESSION_TOUCH_INTERVAL
@@ -403,6 +431,7 @@ def _release_touch(token: str, now: datetime, outcome: TouchOutcome) -> None:
             _touch_not_before[token] = now + SESSION_TOUCH_FAILURE_BACKOFF
         if len(_touch_not_before) > _TOUCH_GUARD_MAX:
             _touch_not_before.clear()
+        _touch_done.notify_all()
 
 
 def _is_busy(exc: sqlite3.Error) -> bool:
@@ -414,9 +443,14 @@ def _is_busy(exc: sqlite3.Error) -> bool:
 
 def _prewarm_after_touch() -> None:
     """A recorded touch committed from its own connection, which moves ``PRAGMA
-    data_version`` and so empties the result cache (``shared/result_cache.py``). Schedule the
-    ordinary pre-warm right away (owner ruling 2026-10-22), so the next page is a hit — the
-    same call, and the same debounced timer, as the write window's (``api/app.py``)."""
+    data_version`` and so empties the result cache (``shared/result_cache.py``). Pre-warm AT
+    ONCE (owner ruling 2026-10-22, 「記完立刻預熱」): the touch waited for the page load to
+    settle, so no read of that load is left to compete with the build, and a navigation that
+    lands while it runs joins it in flight (``alert_inputs.prewarm_today`` and ``GET
+    /api/dashboard`` build under one cache key) rather than building again. The same call, and
+    the same debounced timer, as the write window's (``api/app.py``): a later schedule
+    replaces this one, and a write window open when it fires skips it — that window's end
+    schedules the next."""
     if not flags.prewarm_enabled():
         return
     from portfolio_dash.api import alert_inputs  # local: it pulls in the dashboard build
@@ -424,24 +458,29 @@ def _prewarm_after_touch() -> None:
     result_cache.schedule_prewarm(alert_inputs.prewarm_today, SESSION_TOUCH_PREWARM_DELAY_S)
 
 
-def touch_after_response(
-    app: Any, token: str, seen_raw: str | None, now: datetime
-) -> TouchOutcome:
-    """The background task the gate schedules when a touch is due: best effort, never raises.
+def run_touch(app: Any, token: str, seen_raw: str | None, now: datetime) -> TouchOutcome:
+    """Record a use of *token*, dated *now*, right away: best effort, never raises.
 
-    It runs after the response, so the request's connection is already closed; it opens its
-    OWN, waits at most :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS` for the write lock and runs one
-    autocommit statement. A held lock skips it (a later request retries); any other error is
-    a WARNING. One touch per session runs at a time in this process, and none again within
-    the interval once one recorded (:func:`touch_wanted`). A recorded touch pre-warms the
-    result cache (:func:`_prewarm_after_touch`).
+    A pending touch (:func:`schedule_touch`) ends in the same work: its timer claims the
+    guard in the step that retires it, then calls :func:`_run_claimed`. It opens its OWN connection,
+    waits at most :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS` for the write lock and runs one
+    autocommit statement. A held lock skips it (the next request arms it again); any other
+    error is a WARNING. One touch per session runs at a time in this process, and none again
+    within the interval once one recorded (:func:`touch_wanted`). A recorded touch pre-warms
+    the result cache at once (:func:`_prewarm_after_touch`).
 
     When a test has injected ``get_conn`` (the hermetic golden database), the touch writes
     there, exactly as the action-log middleware does — the configured file is not the
     database that request used — and pre-warms nothing (the cache serves the file only).
     """
-    if not _claim_touch(token, now):
-        return "throttled"
+    with _touch_lock:
+        if not _claim_locked(token, now):
+            return "throttled"
+    return _run_claimed(app, token, seen_raw, now)
+
+
+def _run_claimed(app: Any, token: str, seen_raw: str | None, now: datetime) -> TouchOutcome:
+    """:func:`run_touch` once its claim is held; releases the claim."""
     outcome: TouchOutcome = "failed"
     own = False
     try:
@@ -477,6 +516,131 @@ def touch_after_response(
             logger.warning("pre-warm after a session touch could not be scheduled",
                            exc_info=True)
     return outcome
+
+
+# --- the pending touch: deferred until the page load has settled -----------------------------
+
+
+class _Cancellable(Protocol):
+    def cancel(self) -> None: ...
+
+
+def _start_timer(delay: float, fn: Callable[[], None]) -> _Cancellable:
+    """Run ``fn()`` on a daemon thread *delay* seconds from now. A seam, with
+    :data:`_monotonic`: the tests replace both and drive a pending touch without waiting
+    (``tests/conftest.py::touch_clock``)."""
+    timer = threading.Timer(delay, fn)
+    timer.daemon = True
+    timer.name = "session-touch"
+    timer.start()
+    return timer
+
+
+#: The pending touch's clock, in seconds. Monotonic, so a step of the wall clock neither fires
+#: nor holds a touch; the request's clock (``now``) only dates the use it records.
+_monotonic: Callable[[], float] = time.monotonic
+
+
+@dataclass
+class _PendingTouch:
+    """One session's armed touch: the latest gated request's view, and when it may fire."""
+
+    app: Any
+    seen_raw: str | None
+    #: the latest gated request's clock: the use the touch records
+    now: datetime
+    #: when the latest gated request arrived (:data:`_monotonic`)
+    last: float
+    #: the cap: the arming request's arrival + :data:`SESSION_TOUCH_MAX_DEFER_S`
+    deadline: float
+    timer: _Cancellable | None = None
+
+    def due(self) -> float:
+        return min(self.last + SESSION_TOUCH_SETTLE_S, self.deadline)
+
+
+#: The pending touch of each session token, under ``_touch_lock``: at most one per session.
+#: An entry leaves when its timer fires (or the stop cancels it), so the map holds only the
+#: sessions used within the last :data:`SESSION_TOUCH_MAX_DEFER_S`.
+_pending_touches: dict[str, _PendingTouch] = {}
+
+
+def schedule_touch(app: Any, token: str, seen_raw: str | None, now: datetime) -> bool:
+    """The gate's call when the session's touch is due: arm its pending touch, or push the one
+    already armed back to :data:`SESSION_TOUCH_SETTLE_S` after this request (never past its
+    cap, :data:`SESSION_TOUCH_MAX_DEFER_S` after the request that armed it).
+
+    Pushing back is bookkeeping only: the armed timer, when it fires early, waits out the
+    rest itself (:func:`_fire_touch`), so a request never starts a thread for a touch that is
+    already armed. The touch records the LATEST request's clock and the stamp it read.
+
+    ``False`` — nothing armed, a later request tries again — when the in-process guard has
+    the touch in flight or recorded within the interval (:func:`touch_wanted`), or no timer
+    could be started. Never raises: the request goes on either way.
+    """
+    with _touch_lock:
+        if not _guard_allows(token, now):
+            return False
+        arrived = _monotonic()
+        entry = _pending_touches.get(token)
+        if entry is not None:
+            entry.app, entry.seen_raw, entry.now, entry.last = app, seen_raw, now, arrived
+            return True
+        entry = _PendingTouch(app=app, seen_raw=seen_raw, now=now, last=arrived,
+                              deadline=arrived + SESSION_TOUCH_MAX_DEFER_S)
+        try:
+            entry.timer = _start_timer(entry.due() - arrived, partial(_fire_touch, token, entry))
+        except Exception:  # noqa: BLE001 — e.g. no thread can be started: the next request retries
+            logger.warning("session touch could not be armed", exc_info=True)
+            return False
+        _pending_touches[token] = entry
+        return True
+
+
+def _fire_touch(token: str, entry: _PendingTouch) -> None:
+    """A pending touch's timer: run the touch once the session has been quiet for
+    :data:`SESSION_TOUCH_SETTLE_S`, or its cap has passed; otherwise wait for the rest. The
+    claim is taken in the same step that retires the entry, so no request can arm a second
+    touch of the session in between."""
+    with _touch_lock:
+        if _pending_touches.get(token) is not entry:
+            return  # cancelled by the stop
+        left = entry.due() - _monotonic()
+        if left > 0:  # a later request pushed it back
+            try:
+                entry.timer = _start_timer(left, partial(_fire_touch, token, entry))
+            except Exception:  # noqa: BLE001 — a timer thread has nobody to raise to
+                del _pending_touches[token]  # the next request arms it again
+                logger.warning("session touch could not be re-armed", exc_info=True)
+            return
+        del _pending_touches[token]
+        if not _claim_locked(token, entry.now):
+            return
+    _run_claimed(entry.app, token, entry.seen_raw, entry.now)
+
+
+def cancel_pending_touches(timeout: float = SHUTDOWN_TOUCH_WAIT_S) -> int:
+    """The lifespan's stop, BEFORE ``result_cache.shutdown()`` and the WAL checkpoint: cancel
+    every pending touch, then wait up to *timeout* seconds for one already running (a commit
+    after the checkpoint would leave ``-wal`` / ``-shm``). Returns how many were cancelled.
+
+    A cancelled touch records nothing and loses nothing that matters: the stamp did not move,
+    so the session's first request after the boot finds the touch still due and records the
+    use then. No request arms a new one during the stop: uvicorn drains the requests in
+    flight before it runs the lifespan's stop. Never raises; a touch that outlives the wait
+    is logged and the stop goes on.
+    """
+    with _touch_done:
+        pending = list(_pending_touches.values())
+        _pending_touches.clear()
+        for entry in pending:
+            if entry.timer is not None:
+                entry.timer.cancel()
+        finished = _touch_done.wait_for(lambda: not _touch_in_flight, timeout)
+    if not finished:
+        logger.warning("a session touch still runs %.0f s into the stop; the WAL checkpoint "
+                       "may not complete", timeout)
+    return len(pending)
 
 
 @dataclass(frozen=True)
@@ -559,7 +723,6 @@ def lock_session(conn: sqlite3.Connection, token: str) -> bool:
 
 def require_session(
     request: Request,
-    background_tasks: BackgroundTasks,
     conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
 ) -> None:
@@ -571,12 +734,13 @@ def require_session(
     ``Depends(get_conn)`` — with the routes' ``scope="function"``, so the request has one
     connection — and tests' DB override applies.
 
-    It only READS (DEF-065). When the session's last recorded use is a touch interval old and
-    this process has no touch of it in flight or recorded within the interval
-    (:func:`touch_wanted`), it schedules :func:`touch_after_response`, which runs after the
-    response on its own connection. A route that RAISES (an ``HTTPException``, an unexpected
-    error) answers from an exception handler, which runs no background task: the next
-    request touches instead.
+    It only READS (DEF-065). When the session's last recorded use is a touch interval old, it
+    arms (or pushes back) the session's pending touch (:func:`schedule_touch`), which records
+    the use on its own connection once the page load has settled — unless this process has
+    the touch in flight or recorded it within the interval (:func:`touch_wanted`). The touch
+    is armed before the route runs, so a request whose route RAISES still counts as a use.
+    The settle window is measured from each request's arrival: a request still running when
+    the session has been quiet that long does not hold the touch back.
 
     The login it lets through is stored on ``request.state`` (:data:`LOGIN_STATE_ATTR`) for
     the action log; a refused request carries none.
@@ -593,5 +757,5 @@ def require_session(
     if state.expired:
         raise HTTPException(status_code=401, detail=SESSION_EXPIRED_MESSAGE)
     setattr(request.state, LOGIN_STATE_ATTR, state.username)
-    if state.touch_due and touch_wanted(token, now):
-        background_tasks.add_task(touch_after_response, request.app, token, state.seen_raw, now)
+    if state.touch_due:
+        schedule_touch(request.app, token, state.seen_raw, now)
