@@ -1510,19 +1510,38 @@ def _wait_idle(api: C.Api, timeout: float = SETTLE_TIMEOUT_S) -> dict:
 
 def _wait_run(api: C.Api, run_id: int,
               timeout: float = SETTLE_TIMEOUT_S) -> tuple[dict | None, dict, bool]:
-    """Poll until no run is active AND run *run_id*'s report has ended (the task's rule): the
-    status alone could read idle in the instant before a chained follow-up starts. The last
-    element says whether it ended in time."""
+    """Poll run *run_id*'s REPORT until it has ended, THEN the status until it reads idle
+    in a state at or after that end: no run active and, when the run published, a generation
+    at least the report's ``generation_after``. The last element says whether it ended in
+    time.
+
+    Report first, status after (2026-10-22): the status used to be read FIRST and the report
+    after it, so a status read in the instant before the run ended was accepted whenever the
+    report, read later, had ended — the harness then judged a pre-swap status as the run's
+    result (a status torn across the swap, since fixed in the service, read generation 3 with
+    the claimed day stale while run #4 had published generation 4). Idle alone is still not
+    enough: the status can read idle in the instant before a chained follow-up starts, and
+    the generation floor keeps a status from before this run's swap from passing."""
     deadline = time.monotonic() + timeout
     report: dict | None = None
+    summary: dict = {}
+    while time.monotonic() < deadline:
+        rr = api.get(f"/api/settlement/runs/{run_id}")
+        if rr.status_code == 200:
+            report = rr.json()
+            summary = (report or {}).get("summary") or {}
+            if summary.get("status") not in _ACTIVE:
+                break
+        time.sleep(0.5)
+    else:
+        return report, _status(api), False
+    floor = (int(summary.get("generation_after") or 0)
+             if summary.get("status") in ("published", "partial") else 0)
     while time.monotonic() < deadline:
         st = _status(api)
-        if st.get("state") not in _ACTIVE and st.get("run") is None:
-            rr = api.get(f"/api/settlement/runs/{run_id}")
-            if rr.status_code == 200:
-                report = rr.json()
-                if ((report or {}).get("summary") or {}).get("status") not in _ACTIVE:
-                    return report, st, True
+        if (st.get("state") not in _ACTIVE and st.get("run") is None
+                and int(st.get("generation") or 0) >= floor):
+            return report, st, True
         time.sleep(0.5)
     return report, _status(api), False
 
