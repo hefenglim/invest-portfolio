@@ -1285,13 +1285,43 @@ def build_dashboard_keyed(
             setattr(data, name, now)
         return data
 
-    # The kill switch is part of the key: with history stale, a build with the store and a
-    # full live build differ on the stale days (§10), and a flag flipped between two reads of
-    # one state must not be answered from the other's entry.
     return result_cache.cached_keyed(
-        conn, name="dashboard", now=now, reporting=reporting, compute=build,
-        copy=_own_copy, restamp=stamp, extra=(flags.settle_enabled(),),
+        conn, name=_CACHE_NAME, now=now, reporting=reporting, compute=build,
+        copy=_own_copy, restamp=stamp, extra=_cache_extra(),
     )
+
+
+def file_snapshot_build(
+    conn: sqlite3.Connection, data: DashboardData, *, now: datetime, reporting: Currency,
+    mark: result_cache.SnapshotMark | None,
+) -> result_cache.CacheKey | None:
+    """File *data* — a build computed UNCACHED inside the read snapshot *mark* describes — as
+    the dashboard's cache entry, under the key :func:`build_dashboard_keyed` will take next,
+    once that snapshot has closed (``result_cache.file_marked``).
+
+    ``api/snapshots.py``'s closes redo the build inside their own snapshot when the cached one
+    may describe another state (review G #8); a build inside a transaction is never cached,
+    so the next ``/api/dashboard`` built it all again (post-v0.1.32 backlog item 4). It is
+    filed only while the snapshot's state is still the current one — no commit, write-window
+    edge or own write since it opened — and never otherwise. The entry is a deep copy; each
+    later reader gets its own, with :data:`SUB_DAY_FIELDS` set to its own clock. Returns the
+    key it was filed under, or ``None``."""
+    return result_cache.file_marked(
+        conn, name=_CACHE_NAME, now=now, reporting=reporting, extra=_cache_extra(),
+        value=data, copy=_own_copy, mark=mark,
+    )
+
+
+#: The result-cache name of the dashboard build.
+_CACHE_NAME = "dashboard"
+
+
+def _cache_extra() -> tuple[bool]:
+    """The build's key beyond the state, the day and the reporting currency: the kill switch.
+    With history stale, a build with the store and a full live build differ on the stale days
+    (§10), and a flag flipped between two reads of one state must not be answered from the
+    other's entry."""
+    return (flags.settle_enabled(),)
 
 
 #: Every ``DashboardData`` field that depends on ``now`` beyond its date — re-stamped on each

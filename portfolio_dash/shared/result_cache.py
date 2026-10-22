@@ -47,7 +47,9 @@ the entry unreachable for the same reason: the key is the one taken at compute S
 unless the computation opened its own snapshot late and marked it (:func:`marked_snapshot`,
 :func:`serve`'s ``mark``): a commit that landed BEFORE that snapshot is in the result, and
 when no commit has landed since, the entry is filed under the current key instead
-(post-v0.1.32 item 4, the closes of ``api/snapshots.py``).
+(post-v0.1.32 item 4, the closes of ``api/snapshots.py``). :func:`file_marked` files a value
+computed OUTSIDE the cache inside such a snapshot by the same rule (the dashboard build those
+closes redo inside theirs, backlog item 4).
 
 **No caching** (the key is ``None`` and the computation runs alone, exactly as before) when
 the caller's connection is in a transaction (its own uncommitted changes must be in its
@@ -513,6 +515,43 @@ def serve[T](
     return _finish(flight.coalesce(key, lead, copy=copy), restamp)
 
 
+def file_marked[T](
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    now: datetime,
+    value: T,
+    copy: Callable[[T], T],
+    mark: SnapshotMark | None,
+    reporting: Hashable = None,
+    extra: Hashable = (),
+) -> CacheKey | None:
+    """File *value* — computed OUTSIDE the cache, inside the read snapshot *mark* describes
+    (:func:`marked_snapshot`) — as the latest entry of *name*, under the CURRENT key, but only
+    while that snapshot's state is still the current one (:func:`_current_key`): no write
+    window has opened or closed and no session has committed in this process, no other
+    connection has committed and *conn* has written nothing since the snapshot opened.
+    Otherwise nothing is filed — never under a key whose state the value was not read from.
+    Nothing either for an uncacheable request (:func:`key_for` ``None``: *conn* still in a
+    transaction, another file) or a ``None`` *mark*.
+
+    Called once the snapshot has closed. The entry is a copy (*copy*); *value* stays the
+    caller's, and every later reader receives its own copy, re-stamped by its own
+    :func:`cached` call. Returns the key it was filed under, or ``None``.
+
+    For a computation that had to run uncached inside another one's snapshot (post-v0.1.32
+    backlog item 4: ``api/snapshots.py``'s closes redo the dashboard build inside theirs,
+    review G #8) — so the next reader of *name* is a hit instead of a second build."""
+    key = key_for(conn, name=name, now=now, reporting=reporting, extra=extra)
+    if key is None:
+        return None
+    filed = _current_key(conn, key, mark)
+    if filed is None:
+        return None
+    _store(filed, copy(value))
+    return filed
+
+
 def same_state(a: CacheKey | None, b: CacheKey | None) -> bool:
     """``True`` when two keys describe the same database state: the same file, write
     generation, ``data_version``, day and reporting currency (their names and extras may
@@ -674,6 +713,7 @@ __all__ = [
     "cached_keyed",
     "data_version",
     "db_file",
+    "file_marked",
     "invalidate",
     "is_app_database",
     "key_for",

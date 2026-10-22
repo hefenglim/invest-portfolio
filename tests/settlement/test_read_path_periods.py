@@ -39,6 +39,7 @@ from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
 from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.dashboard import build_dashboard_keyed
+from portfolio_dash.portfolio.dashboard_models import DashboardData
 from portfolio_dash.portfolio.returns import DividendRefusals, dividend_key
 from portfolio_dash.portfolio.settlement_models import PeriodHolding, PeriodKpi
 from portfolio_dash.shared import result_cache
@@ -776,6 +777,90 @@ def test_a_job_writing_after_the_closes_snapshot_opened_is_computed_again(
     assert injected and (stats.misses, stats.hits) == (2, 0)
     assert before["month"] == after["month"] == f"{db.now:%Y-%m}"
     assert before["total_value"] != after["total_value"]   # the buy is in the second only
+
+
+def _dashboard_now(db: CorpusDB) -> tuple[DashboardData, result_cache.CacheKey | None]:
+    """``/api/dashboard``'s build on a fresh connection (as a next request takes it)."""
+    conn = open_db(db.path)
+    try:
+        return build_dashboard_keyed(conn, now=db.now, reporting=db.reporting)
+    finally:
+        conn.close()
+
+
+def test_the_build_redone_inside_the_closes_snapshot_is_filed_for_the_next_dashboard(
+        app: FastAPI, settled: Settled, cached_app_db: Callable[[CorpusDB], None],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backlog item 4. A job commits between the closes' cached dashboard build and their read
+    snapshot, so the build is redone inside the snapshot (review G #8) — uncached, since a
+    transaction is open — and used to be thrown away: the next ``/api/dashboard`` built it all
+    again. It is now filed under the state it read: the next build is a hit, and the same
+    payload as a fresh build."""
+    db = settled("rich")
+    cached_app_db(db)
+    real = build_dashboard_keyed
+    injected: list[bool] = []
+
+    def build_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real(*a, **kw)
+        if not injected:
+            injected.append(True)
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", build_then_a_job_writes)
+    _get(app, db, "/api/snapshots")
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", real)
+    before = result_cache.stats()["dashboard"]
+    assert injected and before.uncached == 1          # the redone build, inside the snapshot
+    served, key = _dashboard_now(db)
+    after = result_cache.stats()["dashboard"]
+    assert key is not None
+    assert (after.hits - before.hits, after.misses - before.misses) == (1, 0)
+    result_cache.reset()                               # the truth, computed afresh
+    truth, _key = _dashboard_now(db)
+    assert served.model_dump() == truth.model_dump()
+    assert served.as_of == truth.as_of == db.now        # each reader's copy, re-stamped
+
+
+def test_a_commit_after_the_closes_snapshot_opened_files_no_redone_build(
+        app: FastAPI, settled: Settled, cached_app_db: Callable[[CorpusDB], None],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side: the build is redone inside the snapshot, then a job commits while the
+    closes are computed. That build describes a state that is no longer the current one, so
+    it is filed under no key at all — the next ``/api/dashboard`` builds the new state."""
+    db = settled("rich")
+    cached_app_db(db)
+    monkeypatch.setenv("PD_SETTLE", "off")             # every close live, so _live_closes runs
+    real_build, real_closes = build_dashboard_keyed, snapshots._live_closes
+    injected: list[str] = []
+
+    def build_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real_build(*a, **kw)
+        if not injected:
+            injected.append("before the snapshot")
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    def closes_then_a_job_writes(*a: Any, **kw: Any) -> Any:
+        out = real_closes(*a, **kw)
+        if len(injected) == 1:
+            injected.append("inside it")
+            _x(db, _TODAYS_BUY, (db.now.date().isoformat(),))
+        return out
+
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", build_then_a_job_writes)
+    monkeypatch.setattr(snapshots, "_live_closes", closes_then_a_job_writes)
+    _get(app, db, "/api/snapshots")
+    monkeypatch.setattr(snapshots, "build_dashboard_keyed", real_build)
+    monkeypatch.setattr(snapshots, "_live_closes", real_closes)
+    before = result_cache.stats()["dashboard"]
+    assert injected == ["before the snapshot", "inside it"] and before.uncached == 1
+    served, _key = _dashboard_now(db)
+    after = result_cache.stats()["dashboard"]
+    assert (after.hits - before.hits, after.misses - before.misses) == (0, 1)
+    result_cache.reset()
+    assert served.model_dump() == _dashboard_now(db)[0].model_dump()   # both buys in it
 
 
 # ---------------------------------------------------------------------------------------------

@@ -254,7 +254,10 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       `api/snapshots.py`, after the dashboard build): it opens it with `marked_snapshot` and
       passes `mark=`, and when no commit, window edge or own write happened since that snapshot
       opened, the entry is filed under the CURRENT key instead of the one taken before the
-      computation. `day` is `now.date()`, so no entry outlives its day.
+      computation. The dashboard build those closes redo, uncached, inside their snapshot
+      (review G #8) is filed for the next `/api/dashboard` by the same rule, once the snapshot
+      has closed (`result_cache.file_marked` via `dashboard.file_snapshot_build`, backlog
+      item 4), and not at all otherwise. `day` is `now.date()`, so no entry outlives its day.
     - **Scope.** It caches the app's OWN database only (`get_settings().db_path`). Any other file
       computes uncached and gets no version connection. Nothing is cached inside a transaction or
       for a database with no file. Another request's write window does not stop caching or
