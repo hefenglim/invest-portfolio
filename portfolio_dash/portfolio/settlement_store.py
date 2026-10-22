@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 import portfolio_dash
+from portfolio_dash.data_ingestion.store import undo_source
 from portfolio_dash.portfolio.cash import UNBOOKED_DIVIDEND_NOTE
 from portfolio_dash.portfolio.returns import DividendRefusals
 from portfolio_dash.portfolio.settlement_models import (
@@ -2568,9 +2569,10 @@ def claimed_attempts(conn: sqlite3.Connection, run_id: int) -> ClaimedAttempts:
 
 @dataclass(frozen=True)
 class ClaimedChange:
-    """A change a run claimed: a ledger or reference record (its ``op`` and its import batch)
-    or a price / FX counter (``op`` ``None``, ``row_key`` the symbol or the pair), with its
-    affected day — the earlier of the old and new day; a counter's earliest."""
+    """A change behind a run's restatements: a ledger or reference record (its ``op``, its
+    import batch, its trail ``kind``) or a price / FX counter (``op`` ``None``, ``row_key`` the
+    symbol or the pair), with its affected day — the earlier of the old and new day; a
+    counter's earliest."""
 
     table: str
     row_key: str
@@ -2578,31 +2580,106 @@ class ClaimedChange:
     #: ``insert`` / ``update`` / ``delete`` for a record; ``None`` for a counter.
     op: str | None = None
     import_batch_id: str | None = None
+    #: The trail line's ``detail.kind`` when it is not a ledger record's change:
+    #: :data:`TRIGGER_REBUILT_KIND` for a rebuilt trigger (「觸發器重建：<table>」).
+    kind: str | None = None
+    #: A DELETE made by an import batch's UNDO (``provenance.delete_batch``), told apart from a
+    #: hand delete of an imported row by the undo's ``ledger_audit`` tag
+    #: (``store.undo_source``); a hand delete carries the row's batch id too.
+    batch_undo: bool = False
 
     @property
     def is_counter(self) -> bool:
         return self.op is None
 
 
-def claimed_changes(conn: sqlite3.Connection, run_id: int) -> list[ClaimedChange]:
-    """Every change run *run_id* claimed that has an affected day, earliest first (records in
-    trail order within a day, then the counters) — what a restatement's reason names (§14.6,
-    ``settle_worker.correction_reason``)."""
+def _undo_deletes(conn: sqlite3.Connection) -> set[tuple[str, str, str]]:
+    """``(table, row id, source)`` of every ``ledger_audit`` delete a bulk door tagged — a
+    BORROWED table (``data_ingestion/store.py`` owns it; direct SQL, architecture.md). Absent
+    table or ``source`` column (a database before DEF-049): no undo is known, every delete reads
+    as a hand delete."""
+    try:
+        return {(str(r[0]), str(r[1]), str(r[2])) for r in conn.execute(
+            "SELECT table_name, row_id, source FROM ledger_audit WHERE action = 'delete' "
+            "AND source IS NOT NULL")}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _reason_changes(conn: sqlite3.Connection, column: str, run_id: int, *,
+             before: date | None = None) -> list[ClaimedChange]:
+    """The trail rows and counters whose *column* (``claimed_run_id`` / ``settled_run_id``)
+    is *run_id*, with an affected day (before *before*, when given)."""
+    cond = "" if before is None else " AND d < ?"
+    agg_cond = "" if before is None else " AND earliest < ?"
+    extra = [] if before is None else [before.isoformat()]
+    rows = conn.execute(
+        f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d, op, import_batch_id, "
+        f"json_extract(detail, '$.kind') FROM settle_change_log WHERE {column} = ? "
+        f"AND d IS NOT NULL{cond} ORDER BY d, id", [run_id, *extra]).fetchall()
+    undone = (_undo_deletes(conn)
+              if any(r[3] == "delete" and r[4] is not None for r in rows) else set())
+
+    def by_undo(r: Sequence[Any]) -> bool:
+        batch = None if r[4] is None else str(r[4])
+        return (r[3] == "delete" and batch is not None and batch.isdigit()
+                and (str(r[0]), str(r[1]), undo_source(int(batch))) in undone)
+
     out = [
-        ClaimedChange(table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])),
-                      op=str(r[3]), import_batch_id=None if r[4] is None else str(r[4]))
-        for r in conn.execute(
-            f"SELECT table_name, row_key, {_AFFECTED_SQL} AS d, op, import_batch_id "
-            "FROM settle_change_log WHERE claimed_run_id = ? AND d IS NOT NULL "
-            "ORDER BY d, id", (run_id,))
+        ClaimedChange(
+            table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])), op=str(r[3]),
+            import_batch_id=None if r[4] is None else str(r[4]),
+            kind=None if r[5] is None else str(r[5]), batch_undo=by_undo(r))
+        for r in rows
     ]
     out += [
         ClaimedChange(table=str(r[0]), row_key=str(r[1]), day=date.fromisoformat(str(r[2])))
         for r in conn.execute(
-            "SELECT table_name, key, earliest FROM settle_change_agg WHERE claimed_run_id = ? "
-            "ORDER BY earliest, id", (run_id,))
+            f"SELECT table_name, key, earliest FROM settle_change_agg WHERE {column} = ?"
+            f"{agg_cond} ORDER BY earliest, id", [run_id, *extra])
     ]
     out.sort(key=lambda c: c.day)  # stable: records before counters on one day
+    return out
+
+
+def claimed_changes(conn: sqlite3.Connection, run_id: int) -> list[ClaimedChange]:
+    """Every change run *run_id* claimed that has an affected day, earliest first (records in
+    trail order within a day, then the counters)."""
+    return _reason_changes(conn, "claimed_run_id", run_id)
+
+
+def inherited_changes(conn: sqlite3.Connection, run_id: int) -> list[ClaimedChange]:
+    """The changes a ``chained`` (or ``resume``) run's restatements are ALSO moved by: those its
+    predecessors settled in a PARTIAL publish (review 2026-10-22). A partial publish at ``N``
+    keeps the previous generation's closes from ``N`` on, so the closes the chained run
+    restates from ``N`` still hold figures from before the predecessor's own changes — which
+    the predecessor settled (every one dated before ``N``) and the chained run never claims.
+
+    The chain is walked back through ``previous_run_id`` while each run is ``chained`` /
+    ``resume``: a ``partial`` predecessor adds the trail rows and counters it settled dated
+    before its ``handed_from``; one that published nothing (superseded, interrupted, failed)
+    adds nothing and the walk goes on; a ``published`` one ends it — its generation holds its
+    own figures. Earliest first; a pruned report ends the walk."""
+    out: list[ClaimedChange] = []
+    seen = {run_id}
+    run = _run_row(conn, run_id)
+    while (run is not None and run["reason"] in ("chained", "resume")
+           and run["previous_run_id"] is not None):
+        prev_id = int(run["previous_run_id"])
+        if prev_id in seen:
+            break
+        seen.add(prev_id)
+        prev = _run_row(conn, prev_id)
+        if prev is None or prev["status"] == "published":
+            break
+        if prev["status"] == "partial":
+            report = _load_report(conn, prev_id)
+            handed = None if report is None else report.range.handed_from
+            if handed is None:
+                break
+            out += _reason_changes(conn, "settled_run_id", prev_id, before=handed)
+        run = prev
+    out.sort(key=lambda c: c.day)
     return out
 
 
@@ -2885,6 +2962,7 @@ __all__ = [
     "discard_run_results",
     "first_placeholder_day",
     "claimed_changes",
+    "inherited_changes",
     "generation_rows",
     "last_successful_run",
     "CODE_DIGEST",

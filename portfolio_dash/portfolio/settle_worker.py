@@ -283,39 +283,53 @@ REASON_RESETTLED_ZH = "重新結算"
 REASON_CALC_ZH = "計算規則更新"
 
 
+def _by_import(c: st.ClaimedChange) -> bool:
+    """A row an import batch wrote or its UNDO removed (``batch_undo``) — never an UPDATE, nor a
+    hand delete: both carry the row's batch id, and both are hand corrections."""
+    return c.import_batch_id is not None and (
+        c.op == "insert" or (c.op == "delete" and c.batch_undo))
+
+
 def correction_reason(changes: Sequence[st.ClaimedChange], through: date, *,
                       calc_changed: bool) -> tuple[str, str | None]:
     """A restated close's ``(reason, source)`` (§14.6; accountant MINOR 2, owner ruling
-    2026-10-22): every claimed change whose affected day is on or before the close's end day
-    *through*, earliest first — 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A run
-    names, per close, only what can have moved THAT close: one reason per run named its
-    earliest change on every close, so a May dividend correction read as a February trade.
+    2026-10-22): every change behind the run's restatements (``claimed_changes`` +
+    ``inherited_changes``) whose affected day is on or before the close's end day *through*,
+    earliest first — 「2026-02-05 交易、2026-05-08 股利更正後重新結算」. A run names, per close,
+    only what can have moved THAT close: one reason per run named its earliest change on every
+    close, so a May dividend correction read as a February trade.
 
     - **An entry** is one ledger or reference record (「2026-02-05 交易」), one price / FX
-      counter with its symbol or pair (「2026-06-09 價格（2330）」), or one import batch — the
-      inserts and deletes of two or more claimed records sharing ``import_batch_id`` (an import
-      or its undo), dated by its earliest record on or before *through*
-      (「2026-01-03 匯入批次（交易／股利）」). An UPDATE of an imported row is a correction of
-      that row and stays its own entry: it carries the row's batch id, not an import.
+      counter with its symbol or pair (「2026-06-09 價格（2330）」), one import batch — the rows
+      of two or more distinct records an import inserted or its undo deleted
+      (:func:`_by_import`), dated by its earliest row on or before *through*
+      (「2026-01-03 匯入批次（交易／股利）」) — or the rebuilt triggers, one entry for every table
+      (「觸發器重建（交易／股利）」, undated: the line's day is the store's first day, not a
+      change of anyone's). An UPDATE of an imported row, and a hand delete of one, are
+      corrections of that row and stay their own entries.
     - **At most** :data:`REASON_NAMED_MAX` distinct texts are named; when there are more
       entries than texts named (more entries, or two the same day and table), the total follows
       as 「等 N 筆」 — N counts entries, an import batch and a symbol's counter each one.
-    - The vocabulary is ``CHANGE_TABLE_ZH``'s. :data:`REASON_CALC_ZH` when the calc version
-      changed; :data:`REASON_RESETTLED_ZH` when no claimed change is on or before *through*.
+    - 「…更正後重新結算」, or 「…後重新結算」 when the only entry is the rebuilt triggers. The
+      vocabulary is ``CHANGE_TABLE_ZH``'s. :data:`REASON_CALC_ZH` when the calc version changed;
+      :data:`REASON_RESETTLED_ZH` when no change is on or before *through*.
 
     ``source`` is a machine reference, never shown: the named entries' ``table:key`` (an import
-    batch ``import_batch:<id>``), comma-joined, or ``None``."""
-    sizes: dict[str, int] = {}
+    batch ``import_batch:<id>``, the rebuilt triggers ``trigger_rebuilt:<tables>``),
+    comma-joined, or ``None``."""
+    records: dict[str, set[tuple[str, str]]] = {}
     for c in changes:
-        if c.import_batch_id is not None and c.op in ("insert", "delete"):
-            sizes[c.import_batch_id] = sizes.get(c.import_batch_id, 0) + 1
+        if _by_import(c):
+            assert c.import_batch_id is not None
+            records.setdefault(c.import_batch_id, set()).add((c.table, c.row_key))
     entries: dict[tuple[str, str, str], tuple[date, list[str]]] = {}
     for c in changes:
         if c.day > through:
             continue
-        batch = c.import_batch_id
-        if batch is not None and c.op in ("insert", "delete") and sizes[batch] >= 2:
-            key = ("batch", batch, "")
+        if c.kind == st.TRIGGER_REBUILT_KIND:
+            key = ("rebuilt", "", "")
+        elif _by_import(c) and len(records[c.import_batch_id or ""]) >= 2:
+            key = ("batch", c.import_batch_id or "", "")
         else:
             key = ("counter" if c.is_counter else "record", c.table, c.row_key)
         if key not in entries:
@@ -328,13 +342,18 @@ def correction_reason(changes: Sequence[st.ClaimedChange], through: date, *,
     def label(table: str) -> str:
         return CHANGE_TABLE_ZH.get(table, table)
 
+    def labels(tables: list[str]) -> str:
+        return "／".join(label(t) for t in sorted(
+            tables, key=lambda t: (order.index(t) if t in order else len(order), t)))
+
     texts: list[str] = []
     refs: list[str] = []
     for (kind, a, b), (day, tables) in entries.items():
-        if kind == "batch":
-            joined = "／".join(label(t) for t in sorted(
-                tables, key=lambda t: (order.index(t) if t in order else len(order), t)))
-            text, ref = f"{day.isoformat()} 匯入批次（{joined}）", f"import_batch:{a}"
+        if kind == "rebuilt":
+            text = f"觸發器重建（{labels(tables)}）"
+            ref = f"{st.TRIGGER_REBUILT_KIND}:{'/'.join(sorted(tables))}"
+        elif kind == "batch":
+            text, ref = f"{day.isoformat()} 匯入批次（{labels(tables)}）", f"import_batch:{a}"
         elif kind == "counter":
             text, ref = f"{day.isoformat()} {label(a)}（{b}）", f"{a}:{b}"
         else:
@@ -348,7 +367,8 @@ def correction_reason(changes: Sequence[st.ClaimedChange], through: date, *,
     if not entries:
         return REASON_RESETTLED_ZH, None
     more = f"等 {len(entries)} 筆" if len(entries) > len(texts) else ""
-    return f"{'、'.join(texts)}{more}更正後重新結算", source
+    only_rebuilt = all(kind == "rebuilt" for kind, _a, _b in entries)
+    return f"{'、'.join(texts)}{more}{'' if only_rebuilt else '更正'}後重新結算", source
 
 
 def _changes_phrase(tables: Sequence[Any]) -> str:
@@ -1488,14 +1508,17 @@ class _Run:
         """The closes this run moved (§14.6): compared with the previous generation's close of
         the same period when both hold it (same reporting currency, inside the range), and —
         on a period's FIRST publish — with its retired month-end snapshot (``cutover``). Each
-        close's reason names the claimed changes on or before ITS end day
-        (:func:`correction_reason`)."""
+        close's reason names the changes on or before ITS end day (:func:`correction_reason`):
+        this run's claims, and — for a chained run after a partial publish, whose closes from
+        the hand-over day still hold figures from before its predecessors' own changes — the
+        changes those predecessors settled (``settlement_store.inherited_changes``)."""
         at = datetime.now(UTC)
         drafts: list[st.RestatementDraft] = []
         old = ({(p.kind, p.period): p for p in st.read_periods(self.conn, old_gen, start=lo,
                                                                end=hi)}
                if old_gen > 0 else {})
-        claimed = st.claimed_changes(self.conn, self.run_id)
+        claimed = sorted([*st.inherited_changes(self.conn, self.run_id),
+                          *st.claimed_changes(self.conn, self.run_id)], key=lambda c: c.day)
         calc_changed = old_gen > 0 and not state.calc_ok
         reasons: dict[date, tuple[str, str | None]] = {}
         snapshots: dict[str, st.SnapshotRow] | None = None

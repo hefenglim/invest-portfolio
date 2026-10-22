@@ -77,6 +77,14 @@ def audit_source(label: str) -> Iterator[None]:
         _AUDIT_SOURCE.reset(token)
 
 
+def undo_source(batch_id: int) -> str:
+    """The ``ledger_audit.source`` every row of an import batch's undo is tagged with
+    (``provenance.delete_batch``). Its ONE spelling: the settlement's restatement reason
+    (``settlement_store.claimed_changes``) reads it to tell a batch undo from hand deletes of
+    imported rows."""
+    return f"批次復原 #{batch_id}"
+
+
 def _write_audit(
     conn: sqlite3.Connection,
     table_name: str,

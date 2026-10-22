@@ -16,14 +16,16 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
+from portfolio_dash.data_ingestion.store import audit_source, delete_transaction, undo_source
 from portfolio_dash.portfolio import settle_worker
 from portfolio_dash.portfolio import settlement_store as st
+from portfolio_dash.portfolio.settlement_models import RunRequest
 from portfolio_dash.shared.enums import Currency
 from tests.reference.corpora import CorpusDB, open_db
 from tests.settlement.conftest import CorpusFactory
@@ -219,10 +221,186 @@ def test_each_restated_close_names_the_changes_on_or_before_its_day(demo: Corpus
         assert (x.reason, x.source) == by_period[(x.kind, x.period)]
 
 
+def test_a_chained_run_after_a_partial_publish_names_its_predecessors_changes(
+        demo: CorpusDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review 2026-10-22, item 1: a trade of 2026-02-05 moved to 02-27, then — while that run
+    computes — a dividend of 2026-05-08 raised. The run publishes PARTIALLY through 05-07 and
+    hands 05-08 on to a chained run; the closes from May on still hold figures from before BOTH
+    corrections (the partial publish keeps the previous generation's closes from 05-08), so
+    the chained run's restatements must name both — not only the dividend it claimed."""
+    assert start_run(demo, 1) == "published"
+    conn = open_db(demo.path)
+    try:
+        tx = int(conn.execute("SELECT id FROM transactions WHERE symbol = 'ORBT' "
+                              "AND trade_date = '2026-02-05'").fetchone()[0])
+        dv = int(conn.execute("SELECT id FROM dividends WHERE symbol = 'KEMB' "
+                              "AND date = '2026-05-08'").fetchone()[0])
+    finally:
+        conn.close()
+    _x(demo, "UPDATE transactions SET trade_date = '2026-02-27' WHERE id = ?", (tx,))
+    real = settle_worker._Run._close
+
+    def close_after_a_late_edit(self: Any, *args: Any, **kwargs: Any) -> Any:
+        _x(demo, "UPDATE dividends SET gross = '7000', net = '7000' WHERE id = ?", (dv,))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(settle_worker._Run, "_close", close_after_a_late_edit)
+    assert start_run(demo, 2, scope="dirty", reason="prompt") == "partial"
+    monkeypatch.undo()
+    assert _report(demo, 2).range.handed_from == date(2026, 5, 8)
+    assert start_run(demo, 3, scope="dirty", reason="chained", previous=2) == "published"
+    conn = open_db(demo.path)
+    try:
+        partial = {(x.kind, x.period): x.reason for x in st.restatements_of_run(conn, 2)}
+        chained = {(x.kind, x.period): x.reason for x in st.restatements_of_run(conn, 3)}
+    finally:
+        conn.close()
+    assert partial[("M", "2026-02")] == "2026-02-05 交易更正後重新結算"
+    assert all(p < "2026-05" for _k, p in partial)  # restated only below the hand-over
+    both = "2026-02-05 交易、2026-05-08 股利更正後重新結算"
+    for month in ("2026-05", "2026-06", "2026-07"):
+        assert chained[("M", month)] == both, (month, chained)
+
+
+def test_the_chain_is_walked_back_through_partial_and_unpublished_runs(
+        demo: CorpusDB) -> None:
+    """``inherited_changes``: a partial predecessor gives what it settled before its hand-over
+    day; a predecessor that published nothing is passed through; a published one ends the
+    walk; a run that is not a chained / resume run inherits nothing."""
+    assert start_run(demo, 1) == "published"
+    conn = open_db(demo.path)
+    try:
+        assert st.inherited_changes(conn, 1) == []
+        report = st.get_run(conn, 1)
+        assert report is not None
+        # run 2 published PARTIALLY through 03-31 having settled one change of 02-05; run 3,
+        # chained after it, was superseded; run 4 chains after run 3
+        for run_id, status, reason, prev in ((2, "partial", "prompt", None),
+                                             (3, "superseded", "chained", 2),
+                                             (4, "running", "chained", 3)):
+            conn.execute(
+                "INSERT INTO settle_run (run_id, status, reason, trigger_text, started_at, "
+                "previous_run_id, report) VALUES (?, ?, ?, '', '2026-08-11T00:00:00+08:00', ?, "
+                "?)", (run_id, status, reason, prev, report.model_copy(update={
+                    "range": report.range.model_copy(update={
+                        "handed_from": date(2026, 4, 1) if run_id == 2 else None})})
+                    .model_dump_json(by_alias=True)))
+        conn.execute("INSERT INTO settle_change_log (seq, table_name, op, row_key, old_day, "
+                     "new_day, written_at, settled_run_id) VALUES (1, 'transactions', "
+                     "'update', '7', '2026-02-05', '2026-02-27', '2026-08-11T00:00:00', 2)")
+        conn.execute("INSERT INTO settle_change_agg (table_name, key, changes, earliest, "
+                     "latest, settled_run_id) VALUES ('prices', '2330', 1, '2026-03-02', "
+                     "'2026-03-02', 2)")
+        conn.commit()
+        got = st.inherited_changes(conn, 4)
+        assert [(c.table, c.row_key, c.day) for c in got] == [
+            ("transactions", "7", date(2026, 2, 5)), ("prices", "2330", date(2026, 3, 2))]
+        # a published predecessor ends the walk
+        conn.execute("UPDATE settle_run SET status = 'published' WHERE run_id = 3")
+        conn.commit()
+        assert st.inherited_changes(conn, 4) == []
+    finally:
+        conn.close()
+
+
+def test_a_rebuilt_trigger_reads_as_a_rebuild_never_as_a_correction(demo: CorpusDB) -> None:
+    """Review 2026-10-22, item 5: a trigger recreated at boot writes the trail line
+    「觸發器重建：交易」 (table ``transactions``, ``row_key`` ``*``). The run it starts restates
+    what the unrecorded edit moved; its reason says the triggers were rebuilt, never
+    「<first day> 交易更正後重新結算」 as if a trade had been corrected on the store's first day."""
+    assert start_run(demo, 1) == "published"
+    conn = open_db(demo.path)
+    try:
+        conn.execute(f"DROP TRIGGER {st.TRIGGER_PREFIX}transactions_upd")
+        conn.execute("UPDATE transactions SET quantity = '31' WHERE symbol = 'ORBT' "
+                     "AND trade_date = '2026-02-05'")  # recorded by nothing
+        conn.commit()
+        assert st.install_or_verify(conn, calc_version_changed=False).marked_dirty
+        st.record_schema_version(conn)
+    finally:
+        conn.close()
+    assert start_run(demo, 2) == "published"
+    conn = open_db(demo.path)
+    try:
+        rows = st.restatements_of_run(conn, 2)
+    finally:
+        conn.close()
+    assert rows
+    assert {x.reason for x in rows} == {"觸發器重建（交易）後重新結算"}, {x.reason for x in rows}
+
+
+def test_an_undo_is_a_batch_and_hand_deletes_of_imported_rows_are_corrections(
+        demo: CorpusDB) -> None:
+    """Review 2026-10-22, item 6: an import batch's undo and a hand delete of one of its rows
+    both carry the row's batch id; only the undo's ``ledger_audit`` tag
+    (``store.undo_source``) tells them apart. Two rows undone together are one 匯入批次; a row
+    deleted by hand is a correction of its own."""
+    assert start_run(demo, 1) == "published"
+    conn = open_db(demo.path)
+    try:
+        ids = [int(r[0]) for r in conn.execute(
+            "SELECT id FROM transactions WHERE trade_date BETWEEN '2026-02-01' AND '2026-06-30' "
+            "ORDER BY trade_date, id LIMIT 3")]
+        conn.executemany("UPDATE transactions SET import_batch_id = 42 WHERE id = ?",
+                         [(i,) for i in ids])
+        conn.commit()
+        with audit_source(undo_source(42)):
+            for i in ids[:2]:
+                delete_transaction(conn, i, commit=False)
+        delete_transaction(conn, ids[2], commit=False)  # by hand
+        conn.commit()
+        st.create_run(conn, RunRequest(scope="dirty", reason="prompt", started_by=None,
+                                       through=yesterday(demo), unconfirmed_closes={}),
+                      run_id=2, trigger_text="測試啟動",
+                      started_at=datetime(2026, 8, 11, tzinfo=UTC))
+        st.claim(conn, 2, scope="dirty", run_through=yesterday(demo))
+        got = {c.row_key: c for c in st.claimed_changes(conn, 2)}
+    finally:
+        conn.close()
+    assert [got[str(i)].batch_undo for i in ids] == [True, True, False]
+    assert all(got[str(i)].import_batch_id == "42" for i in ids)
+    text = settle_worker.correction_reason(list(got.values()), date(2026, 6, 30),
+                                           calc_changed=False)[0]
+    first, hand = got[str(ids[0])].day, got[str(ids[2])].day
+    assert text.startswith(f"{first.isoformat()} 匯入批次（交易）"), text
+    assert f"{hand.isoformat()} 交易" in text, text
+
+
 def _change(day: str, table: str = "transactions", key: str = "1", *, op: str | None = "update",
-            batch: str | None = None) -> st.ClaimedChange:
+            batch: str | None = None, kind: str | None = None,
+            undo: bool = False) -> st.ClaimedChange:
     return st.ClaimedChange(table=table, row_key=key, day=date.fromisoformat(day), op=op,
-                            import_batch_id=batch)
+                            import_batch_id=batch, kind=kind, batch_undo=undo)
+
+
+def test_a_batch_counts_records_and_only_an_undo_groups_deletes() -> None:
+    """Review 2026-10-22, item 6: a batch is two or more distinct RECORDS — one row inserted
+    and then undone is one record, not two trail rows — and a delete groups only when the undo
+    made it; hand deletes of imported rows stay corrections."""
+    reason = settle_worker.correction_reason
+    one_record = [_change("2026-02-05", key="5", op="insert", batch="9"),
+                  _change("2026-02-05", key="5", op="delete", batch="9", undo=True)]
+    assert reason(one_record, date(2026, 2, 28), calc_changed=False)[0] == (
+        "2026-02-05 交易更正後重新結算")
+    by_hand = [_change("2026-02-05", key="5", op="delete", batch="9"),
+               _change("2026-03-02", key="6", op="delete", batch="9")]
+    assert reason(by_hand, date(2026, 3, 31), calc_changed=False)[0] == (
+        "2026-02-05 交易、2026-03-02 交易更正後重新結算")
+    undone = [_change("2026-02-05", key="5", op="delete", batch="9", undo=True),
+              _change("2026-03-02", "dividends", "6", op="delete", batch="9", undo=True)]
+    assert reason(undone, date(2026, 3, 31), calc_changed=False) == (
+        "2026-02-05 匯入批次（交易／股利）更正後重新結算", "import_batch:9")
+
+
+def test_rebuilt_triggers_are_one_undated_entry() -> None:
+    reason = settle_worker.correction_reason
+    rebuilt = [_change("2026-01-05", key="*", kind=st.TRIGGER_REBUILT_KIND),
+               _change("2026-01-05", "dividends", "*", kind=st.TRIGGER_REBUILT_KIND)]
+    assert reason(rebuilt, date(2026, 1, 31), calc_changed=False) == (
+        "觸發器重建（交易／股利）後重新結算", "trigger_rebuilt:dividends/transactions")
+    assert reason([*rebuilt, _change("2026-02-05", key="9")], date(2026, 2, 28),
+                  calc_changed=False)[0] == (
+        "觸發器重建（交易／股利）、2026-02-05 交易更正後重新結算")
 
 
 def test_a_reason_names_three_changes_and_counts_the_rest() -> None:
