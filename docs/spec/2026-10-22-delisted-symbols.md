@@ -2,171 +2,247 @@
 
 | Field | Value |
 | --- | --- |
-| Status | DRAFT for accountant review, then owner approval |
+| Status | REVISED after the accountant review (READY-WITH-FIXES, 2026-10-22); awaiting the owner's answers to §7 |
 | Date | 2026-10-22 |
 | Base | `fix/post-v0132` (v0.1.32 + the post-release fixes) |
-| Owner rulings | 2026-10-22 (multiple choice, recorded below) |
+| Owner rulings | 2026-10-22 (multiple choice, recorded in §2) |
 
 ## 1. The problem, measured
 
-Several US symbols on the prod ledger have **no price history from any provider**: they delisted
-years ago (SPAC mergers renamed into a successor ticker, a take-private) and the providers dropped
-their history. The real list, with holding dates, is in the git-ignored owner note
-`docs/human_noted/delisted-symbols-2026-10-22.md` (this repository is public: no real trades,
-tickers or amounts here). Read from a local prod snapshot (2026-10-13, read-only), every one of
-those positions was **closed by the ledger before the symbol delisted**: either a sale at a real
-price, or an EXCHANGE into a successor ticker that has prices.
+Several US symbols on the prod ledger have **no price history under their own ticker**: they
+delisted years ago (SPAC mergers renamed into a successor ticker, a take-private) and the
+providers dropped their history. The real list, with holding dates and the provider check below,
+is in the git-ignored owner note `docs/human_noted/delisted-symbols-2026-10-22.md` (this
+repository is public: no real trades, tickers or amounts here). Read from a local prod snapshot
+(2026-10-13, read-only), every one of those positions was **closed by the ledger before the symbol
+delisted**: either a sale at a real price, or an EXCHANGE into a successor ticker.
 
-Realized P&L, cost basis and XIRR are therefore complete and correct. What is missing is the
-**daily valuation while the position was held**: `timeseries.daily_value_series` finds no stored
-close on or before the day, leaves the holding out and marks the day `incomplete`. So on prod the
-trend, B, B − A, TWR, the benchmark and the month closes are incomplete over a multi-year range of
-holding days.
+Realized P&L, cost basis and XIRR are complete and correct. What is missing is the **daily
+valuation while the position was held**: `timeseries.daily_value_series` finds no stored close on
+or before the day, leaves the holding out and marks the day `incomplete`. On prod the trend, B,
+B − A, TWR, the benchmark and the month closes are incomplete over a multi-year range of holding
+days — and TWR is worse than incomplete: `twr_index` carries the incomplete stretch flat and bridges
+it in one step against the last complete day, i.e. against a base that excludes the unpriced
+position, so the symbol's whole gain or loss is divided by the wrong base (accountant review M2).
 
-Two side effects today:
-- none of them is archived, so the quote jobs ask the providers for them every day;
-- nothing on the watchlist says they are delisted.
+**Provider check (2026-10-22, read-only):** for the positions that left by a 1:1 EXCHANGE, the
+successor ticker's provider history DOES cover the predecessor's holding days (the SPAC was the
+surviving issuer and only renamed); for the positions that were sold, no provider has any history.
+So some symbols can be valued from real market closes, and the rest need an estimate.
+
+Two side effects today: none of them is archived, so the quote jobs ask the providers for them every
+day; nothing on the watchlist says they are delisted.
 
 ## 2. Owner rulings (2026-10-22)
 
-1. **Delisted symbols are marked 已下市, no longer quoted, and shown as delisted on the
-   watchlist,** "as if it were not on the watchlist".
-2. **After delisting (once that month is closed), the stock is no longer computed, as if the
-   position were cleared.**
-3. **The holding-period gap is valued at the ledger's last trade price, labelled 估計** (the owner
-   first chose to accept the gap, then preferred this; recommended after comparing: accept the gap
-   / monthly statement prices / ledger price / other providers).
-4. Process: this spec → independent accountant review → owner approval → implementation, as its
-   own change.
+1. Delisted symbols are marked 已下市, are no longer quoted, and are labelled on the watchlist.
+2. After delisting the stock is "no longer computed, as if the position were cleared".
+3. The holding days with no price history are valued at the ledger's last trade price, labelled
+   估計 (chosen over: accepting the gap; typed month-end statement prices; other providers).
+4. Process: this spec → independent accountant review (done: READY-WITH-FIXES, folded below) →
+   owner answers §7 → implementation as its own change.
 
 ## 3. Design
 
-### 3.1 Data: `instruments.delisted_on`
+### 3.1 Data: `instruments.delisted_on`, and the mark stops tracking by itself
 
 - A nullable DATE column, added by an additive boot migration (`data_ingestion/schema.py`).
-  NULL = listed (every row today).
-- It is an **input** of the settlement triggers by default (the `instruments` spec exempts only
-  display columns and `archived`), so setting or clearing it marks history dirty from the symbol's
-  first ledger day and the next run re-settles those days. That is intended: the valuation of
-  those days changes.
-- Setting it also sets `archived = 1` (the existing 停止追蹤, FU-D13): `shared/instrument_scope.
-  TRACKED_SQL` then excludes the symbol from every quote, history, dividend, news, chip and
-  fundamentals job, and the instrument list hides it behind the existing archived toggle.
-  Clearing `delisted_on` leaves `archived` as it is (restoring tracking is the existing 恢復追蹤).
+  NULL = listed. It is an **input** of the settlement triggers by default (the `instruments` spec
+  exempts only display columns and `archived`), so setting or clearing it re-settles from the
+  symbol's first ledger day. The `instruments` trail row records the changed input
+  (`delisted_on` old → new) so the restatement reason can name it (§3.8).
+- **The mark itself stops tracking; it never writes `archived`** (review B1). DEF-064 keeps
+  持有 ⇒ 未封存 from both sides (the archive door refuses a held symbol; every booking un-archives),
+  so coupling the mark to `archived` would be silently undone by the next booking.
+  `shared/instrument_scope.TRACKED_SQL` becomes
+  `COALESCE(archived,0)=0 AND delisted_on IS NULL AND asset_type='stock'`, and every one-symbol
+  bypass refuses a marked symbol with 「已下市標的不再取得報價」 — quick-add, 恢復追蹤 and its gap
+  backfill, `refresh_instrument_quote`, the Alpha Vantage held universe, held-only news (the same
+  list the options spec refuses for contracts). 封存 stays the owner's separate choice.
+- Before marking, the dialog offers the existing gap backfill once across the configured chain
+  (FinMind for TW), because the mark stops every later fetch (review m8).
 
-### 3.2 Door: 標記已下市
+### 3.2 Door: 標記已下市 / 取消已下市標記
 
-- On the instrument page, an archived-or-not row gets 「標記已下市」 with a date input. The
-  default date is the symbol's last ledger exit (its last SELL that brought every account to zero,
-  or the EXCHANGE / SPINOFF date that vacated it); the owner may change it.
-- The confirm dialog states the consequences in plain words: quotes stop, the symbol shows
-  「已下市（YYYY-MM-DD）」, history from its first ledger day is re-settled, and closes that change
-  are marked 已重述.
-- `PATCH /api/instruments/{symbol}` gains `delisted_on` (date or null). It is a mutating route with
-  an action-log label (「標記已下市」 / 「取消已下市標記」).
-- **Refusal:** an option contract (`asset_type = 'option'`) cannot be marked (options have their
-  own expiry and close rows).
+- `PUT /api/instruments/{symbol}` gains `delisted_on` (date or null); action-log labels 「標記已下市」
+  / 「取消已下市標記」. An option contract is refused (options have their own expiry rows).
+- **A date after today is refused** (review M3): only the past can be valued by the fallback, so
+  no figure as at today can contain an estimate.
+- **Default date: 帳上最後出場日** — offered only when the symbol is flat today and was held: the
+  EXCHANGE that vacated it, or the SELL that emptied every account (a SPINOFF never vacates its
+  source). No default when it is still held or was never held. The dialog says this is the
+  ledger's exit, not necessarily the exchange's delisting date.
+- **The door asks (an ack) when the ledger still holds the symbol after the chosen date**, naming
+  the first such day and the shares (§3.5).
+- The confirm text says: quotes stop; the symbol shows 「已下市（YYYY-MM-DD）」; the history from its
+  first ledger day is re-settled and the closes that change are marked 已重述. On confirm the
+  re-settlement follows PERF-D2 (prompt first).
+- Clearing the mark re-settles the same range with its own reason (§3.8); tracking resumes unless
+  the symbol is 封存.
 
-### 3.3 Label
+### 3.3 Labels on lists
 
-- Instrument list / watchlist: a delisted row reads 「已下市（YYYY-MM-DD）」 in place of 持有 /
-  觀察. The archived toggle still hides it by default.
+- Instrument list / watchlist: a marked, flat symbol reads 「已下市（YYYY-MM-DD）」 and is hidden by
+  default with the archived rows (the toggle shows `archived OR delisted`).
+- **A marked symbol still held after its date is never hidden**: 「已下市・帳上仍持有（待釐清）」
+  (§3.5).
 - Drawer header: the same badge.
 
-### 3.4 The valuation fallback: the ledger's last trade price (ONE owner)
+### 3.4 The price of a marked symbol on a past day d (ONE owner)
 
-A new pure function in `portfolio/` (e.g. `portfolio/price_fallback.py::ledger_price_on`) answers:
-for a symbol with `delisted_on` set, valued on day `d`, when **no stored close exists on or before
-`d`**, the price is the ledger's most recent ordinary trade price of that symbol on or before `d`:
+A new pure module, `portfolio/price_fallback.py`, answers for a marked symbol on a past day `d`
+(never for an unmarked symbol — a temporarily missing price stays missing, `data-and-pricing.md`
+"never guess"; never for today — §3.5 governs a held marked symbol). It takes the **most recent
+observation on or before `d`** among:
 
-- any account; `close_reason` rows excluded (they are not market prices);
-- in the replay's order (an action before the day's trades; same-day trades by id);
-- re-expressed for the splits in `(trade date, d]` by `portfolio/price_basis.price_in`, exactly
-  as a carried-forward stored close is (`data-and-pricing.md` → the read divides);
-- no trade on or before `d` (an opening only) → the opening's `original_cost_total / shares` on
-  its `build_date` (the owner's "last buy price"), re-expressed the same way;
-- the value it yields is **estimated**: every reader that uses it marks it.
+1. the symbol's own stored close (as today's carry-forward);
+2. **the successor's stored close × the exchange ratio**, for days before an EXCHANGE out of the
+   marked symbol, when the successor's provider history covers them (§7 Q4; review M6). The
+   dialog then offers a one-off backfill of the successor from the predecessor's first ledger day.
+   The rows go through the ordinary write seam under the successor's own symbol, so the split
+   basis applies (a later split of the successor that the ledger records is folded out; one it
+   does not record would show as a ratio mismatch — the dialog compares the successor-derived
+   close with the predecessor's own trade prices on the trade days and warns when they differ by
+   more than 25 %);
+3. the symbol's own ordinary trade price (any account; `close_reason` rows excluded) or DRIP
+   reinvest price — a real transaction, dated its day;
 
-It is used only when BOTH hold: the symbol is marked delisted, and the stored series has nothing
-on or before `d`. A symbol with any stored close on or before `d` keeps the existing
-carry-forward. A symbol that is not marked never gets a fallback — a temporarily missing price
-stays missing (`data-and-pricing.md`: "Live price unobtainable → label clearly; never guess").
+and, only when none exists, 4. the opening's cost per share (`original_cost_total / shares`, the
+latest `build_date` ≤ `d`) — a COST, not a price (review m2).
 
-It mirrors the options rule (R2: an option is valued at its last ordinary trade price from the
-ledger), so the app has one idea of "a price from the ledger" for instruments no provider quotes.
+Every observation is re-expressed into `d`'s share terms by `price_basis.price_in` for the splits in
+`(observed on, d]`, exactly like a carried stored close. A position that arrived by EXCHANGE with no
+own trade takes the source's last observation on or before the action date × the ratio, dated the
+source's day (review m1, the options R1-M2 rule). Stored rows of a marked symbol dated AFTER
+`delisted_on` are ignored and listed as suspect (a reused ticker; review m7).
 
-**Readers** (each must use the one function; none re-derives it):
-1. the trend: `timeseries.daily_value_series` (live tail and the settle worker, which runs the
-   same engine) — where `_entry_at_or_before` returns None today;
-2. the point-in-time KPIs: the `PriceSource` of a close (`OnOrBefore`) and of the live build
-   (`LatestStored`) — a held, marked symbol with no stored price gets the fallback;
-3. the month / year close's holdings rows (`period_close`): price used, its date and its source.
+**Basis and label of the value:**
 
-### 3.5 After the delisting date (owner ruling 2)
+| Observation used | Basis label | `estimated` |
+| --- | --- | --- |
+| own stored close or successor close, ≤ 4 days old | `market` / `successor` (「承接代號合併前報價」) | no (successor named in notes) |
+| own stored close or successor close, older | as above | yes |
+| own trade / reinvest price | `ledger` (「帳上成交價」) | yes |
+| opening cost per share | `opening_cost` (「期初成本」) | yes |
 
-`delisted_on` is the day the symbol stops existing as a quoted security. If the BOOK still holds
-it on a day after `delisted_on` (no sale, exchange or write-off recorded), the ledger is
-incomplete. Proposal (needs the owner's confirmation, §6 Q1): the position becomes 待釐清 with
-「已下市但帳上仍持有：請登錄賣出、換股或註銷」, the day is `incomplete`, the holding's value is
-left out (never a guessed disposal), and the drawer offers the remedy. None of today's marked
-symbols reaches this branch (all were closed before delisting).
+The fallback is never written to `prices` and never appears in freshness (review m4).
 
-### 3.6 Labels of an estimated value
+**Readers**, each through the one module: the trend (`timeseries.daily_value_series`, live tail and
+settle worker alike) and a close's point-in-time prices (`OnOrBefore` for a past D). `LatestStored`
+never returns it: no figure as at today contains an estimate (review M3, with a test).
 
-- `TrendPoint` gains `estimated: bool`, **serialized only when true** (so every payload of a
-  ledger without a marked symbol stays byte-identical, including the v0.1.31 reference payloads
-  and the golden payload). The trend tooltip adds 「含估計價（帳上成交價）」.
-- `settled_day` stores the flag (a store schema change → `STORE_SCHEMA_VERSION` +1 → the calc
-  version moves → full re-settle at first boot, as any `portfolio/` change already does).
-- A close gains `notes.estimated_prices`: `[{symbol, price, priced_on, source: "ledger"}]`,
-  shown as ⚠ 「估計：SYM 以 YYYY-MM-DD 帳上成交價估值」 on 月度成績. A close whose only defect was
-  the missing price is no longer `incomplete`; it is estimated.
-- A live holding row (only reachable via §3.5's refusal path or a marked symbol held today with no
-  stored price) shows its price source 「帳上成交價（估計）」, like an option.
-- B, B − A, TWR and the benchmark over estimated days are computed (not withheld), and the days
-  carry the estimated mark. XIRR is unaffected (those positions are closed; XIRR reads flows).
+### 3.5 A marked symbol still held after its date (owner ruling 2)
 
-### 3.7 What changes on prod
+"As if cleared" is already true for every position a ledger row closed — all of prod. For a
+position still held after `delisted_on` the ledger is incomplete. Proposed (§7 Q1): a
+**valuation-layer** 待釐清 (never a replay refusal, so 重算 and the tax package are untouched):
+`pending_positions` kind `delisted_held` and a 檢查帳本 finding, the holding's value omitted, the day
+`incomplete`, XIRR and B withheld with the reason named — and the drawer offers the remedies that
+match what the statement shows:
 
-After the owner marks the symbols:
-- quote attempts for them stop;
-- the holding days become complete-but-estimated; the trend, B, TWR and the closes of those
-  months change, and every close whose KPI changes gets a permanent 已重述 row whose reason names
-  the instrument change (accountant MINOR #1's per-close rule);
-- the realized P&L, the cost basis, XIRR, the tax package and every figure after the last such
-  holding day are unchanged.
+- **sale / cash-out** (take-private, SPAC redemption, liquidation, ETF liquidation): a SELL dated by
+  the statement, with fee and tax **as supplied** — pre-filled 0, editable — never the engine's
+  (a TW tender offer bears 證交稅; a 企併法 cash merger is exempt) (review M4);
+- **ticker change / OTC continuation / stock merger**: an EXCHANGE at the ratio;
+- **write-off** (bankruptcy, lapsed rights): a new stock close row, `close_reason = 'worthless'`
+  (§7 Q5): price 0, fee 0, tax 0, quantity the whole position, dated by the statement (it decides
+  the realized loss's tax year), never opening a lot — the options §4.4 rules. Today a price-0
+  stock SELL and a `close_reason` on a stock are both refused, so without it a worthless holding
+  stays 待釐清 forever.
 
-Known limit: a stock that moved a lot while held reads flat at its trade price on those days (one
-of the symbols did); a SPAC before its merger usually trades near its trust value, so the estimate
-is close there. The owner note quantifies it.
+### 3.6 Labels of an estimated value (review M1, m4)
+
+- `TrendPoint.estimated: bool`, serialized only when true; `TrendSeries.estimated_ranges`
+  `[{symbol, from, to, basis}]`, serialized only when non-empty — so every payload of a ledger
+  without a marked symbol stays byte-identical (v0.1.31 references, golden). The tooltip names the
+  symbol, the price, its date and its basis.
+- **The exit day is estimated too**: the day a position last valued at an estimate is sold,
+  exchanged or reduced, because the whole holding-period move lands there.
+- A close carries `notes.estimated_prices` at D — 「估計（非市價）：SYM 以 YYYY-MM-DD 帳上成交價 10.00
+  估值（距期末 176 天）」 — and `notes.estimated_in_period` `[{symbol, from, to}]`, the OR over
+  `(previous end, D]` (the rule the worker already uses for `options_value_excluded`), shown as
+  「當期報酬含估計期間：SYM YYYY-MM-DD～YYYY-MM-DD」. One note per estimate: an estimated price is
+  never also in `missing_prices` or `stale_prices`.
+- `/api/performance/twr` adds `estimated_note` whenever its window contains an estimated day
+  (additive, like `options_note`).
+- `settled_day` stores `estimated` (store schema version +1 → full re-settle at first boot, as
+  any `portfolio/` change already does).
+- **The drawdown alert excludes estimated days** from both its peak and its trough
+  (`strategy/alerts.py::max_drawdown` skips `incomplete` today), with a test: marking must never
+  send a push measured from an estimated peak (review M2b).
+- A day with an estimated price but no FX rate stays `incomplete`; both flags may be set and
+  incomplete governs (review m10).
+
+### 3.7 What changes on prod (review M2)
+
+**Unchanged:** realized P&L; the cost basis; today's 總市值, A, B, B − A and XIRR; the lifetime
+benchmark comparison; the tax package; every close after the last exit month.
+
+**Changed:** the trend and net-worth curves over the holding days; the closes of the holding months
+and of each exit month (KPIs, 累計 XIRR — from 不計 to a figure — and 當期報酬); every cumulative TWR
+window that spans the stretch (it will move, most likely a lot, and the new figure is the correct
+one: the old bridge divided the position's move by a base that excluded it); the drawdown peak
+(estimated days excluded). Expect about 6–7 permanent 已重述 rows per changed holding month plus the
+exit month.
+
+### 3.8 Restatement reason (review M5)
+
+The reason of a close moved by a mark reads 「標記已下市：SYM（下市日 YYYY-MM-DD），持有期間改以帳上成交價／
+承接代號報價估值」, and by an un-mark 「取消已下市標記：SYM」. With the per-close rule of accountant MINOR
+#1 (`fix/accountant-minors`), a run that claimed several marks names each one whose symbol the
+close's period held. The trail row's affected day is the symbol's first ledger day; the reason does
+not print it as if it were an old dated correction.
+
+### 3.9 Markets and instruments
+
+- TW / MY: the same rule. A TW share that delisted but sits in 集保 with no market is §3.5 plus the
+  write-off row. A TW ETF liquidation payout is a disposal at NAV with supplied fee and tax.
+- Options: refusing to mark a contract is right; a contract whose underlying is marked keeps R2; the
+  underlying gets no fallback, so its obligation figures stay missing rather than estimated (m9).
+- Multi-account: the most recent trade across accounts is used; internal transfers booked as trades
+  at a book price would distort it — the owner note says whether any exist.
 
 ## 4. Tests
 
-- The function: a stored close always wins; no stored close + marked → the ledger price; not
-  marked → None; a split between the trade and `d` re-expressed; an opening-only position; a
-  `close_reason` row ignored; same-day ordering.
-- The trend: a marked symbol's days are valued and `estimated`, not `incomplete`; an unmarked
-  symbol with no price stays `incomplete`; byte identity of every reference corpus (no marked
-  symbol) and of the golden payload.
-- The settle worker ≡ the live build on a corpus with a marked symbol (the prefix property).
-- Closes: `notes.estimated_prices`, holdings rows' price source, KPIs as at D.
-- §3.5: a marked symbol still held after `delisted_on` → 待釐清, `incomplete`, value omitted.
-- The door: PATCH sets / clears; archived set; option refused; action-log label; the settle
-  trigger marks the symbol's first ledger day dirty (and only an input change does).
-- e2e: mark a symbol, see 「已下市（…）」, the confirm text, and the 估計 note on 月度成績.
-- Stress audit: the oracle transcribes the fallback (it values from the fixture's own trades) and
-  a phase-1 scenario op marks a no-history symbol; mutation check (remove the fallback → fails).
+- `price_fallback`: the ladder (market close, successor × ratio, own trade, reinvest price, opening
+  cost), most-recent-observation, the 4-day carry → estimated, splits re-expressed, an
+  EXCHANGE-arrival without a trade, `close_reason` ignored, rows after `delisted_on` ignored, an
+  unmarked symbol → None, today → never.
+- The trend: marked days valued and `estimated` (not `incomplete`), the exit day estimated, ranges,
+  unmarked unchanged; byte identity of every reference corpus and the golden payload.
+- Settle worker ≡ live build with a marked symbol (prefix property).
+- Closes: `estimated_prices`, `estimated_in_period`, basis per holding row, KPIs as at D, 累計 XIRR,
+  當期報酬; the TWR note; the drawdown alert never fires from an estimated peak.
+- §3.5: still held after the date → `delisted_held`, value omitted, XIRR/B withheld, strict replay
+  (重算, tax package) unchanged; the three remedies (supplied fee/tax; EXCHANGE; the write-off row
+  and its refusals: never opens a lot, fee/tax 0).
+- The door: set / clear, future date refused, default date rules, the held-after ack, option
+  refused, the trail row's changed input, TRACKED_SQL and every bypass refusal, the list toggle.
+- e2e: mark, see the badge, the confirm text, the 估計 notes on 月度成績 and the tooltip.
+- Stress audit: the oracle transcribes the ladder from the fixture's own data; a phase-1 op marks a
+  no-history symbol; a mutation (remove the fallback) fails.
 
 ## 5. Docs
 
-`data-and-pricing.md` (the fallback beside "never guess", and that only a marked symbol gets it),
-`domain-ledger.md` (month closes: `estimated_prices`; §3.5), the accounting manual (zh + en) with a
-verification anchor, the CHANGELOG, a whatsnew entry (instrument page → 標記已下市).
+`data-and-pricing.md` (the ladder beside "never guess"; only a marked symbol; never today),
+`domain-ledger.md` (closes: the two notes; §3.5; the write-off close row), `architecture.md`
+(TRACKED_SQL, `price_fallback`), the accounting manual (zh + en) with a verification anchor, the
+CHANGELOG, a whatsnew entry.
 
-## 6. Open questions for the owner
+## 6. Out of scope
 
-- **Q1 (§3.5)** A marked symbol still held after its delisting date: 待釐清 and value omitted until
-  the owner records the disposal (recommended) / value it at the ledger price as estimated /
-  value it at 0.
-- **Q2 (§3.1)** Marking delisted also archives (stops quotes) — recommended yes.
-- **Q3 (§3.2)** The default date is the last ledger exit — recommended yes; the owner can change it.
+Typing month-end statement prices; a provider other than the configured chain; re-keying a reused
+ticker (flagged, not fixed).
+
+## 7. Questions for the owner
+
+- **Q1** A marked symbol still held after its date: 待釐清, value omitted, until the statement's
+  outcome is recorded (recommended) / keep valuing at the last trade price, 估計 / value it at 0.
+- **Q2** How quotes stop: the 已下市 mark itself stops them, 封存 stays separate (recommended) / also
+  set 封存 (undone by the next booking) / keep quoting.
+- **Q3** Default date: the ledger's last exit, editable; future dates refused; an ack when the
+  ledger holds the symbol after it (recommended) / no default / today.
+- **Q4** Successor pre-merger closes: use them where the provider has them, ranked above the ledger
+  price and labelled (recommended — the check found them for every EXCHANGE exit) / ledger price only.
+- **Q5** Build the stock write-off close row (`worthless`) in this change: yes (recommended; Q1's
+  remedy needs it) / later.
