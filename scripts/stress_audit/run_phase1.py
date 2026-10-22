@@ -525,6 +525,20 @@ def run_live_window(ev: C.Evidence, api: C.Api, db_path, op: Ops):
     reconcile(ev, api, db_path, "live_window", valuation=True)
 
 
+def _settlement_rows_finished(db_path) -> bool:
+    """Every ``job_runs`` row of the settlement (``job_id = 'settlement'``) has its
+    ``finished_at`` — the service's waiter has finalised the run, follow-up decided — and
+    there is at least one."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        total, open_rows = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(finished_at IS NULL), 0) FROM job_runs "
+            "WHERE job_id = 'settlement'").fetchone()
+    finally:
+        conn.close()
+    return int(total) > 0 and int(open_rows) == 0
+
+
 def run_unquoted_ccy_cash(ev: C.Evidence, db_path):
     """PERF-F2 (fixed after v0.1.32): a 50 MYR ``REBATE`` — an XIRR cash kind (AI-D42) — on
     moomoo_my dated 2026-01-28, while NO ledger instrument is quoted in MYR (the MY buys come
@@ -594,6 +608,16 @@ def run_unquoted_ccy_cash(ev: C.Evidence, db_path):
                  True, gen >= 1 and st.get("state") == "clean", ph)
         if gen < 1:
             return
+        # The status reads idle from the SWAP on, before the service's waiter finalises the
+        # boot run (review 2026-10-22, item 3): write the rebate only once every settlement
+        # job row is finished, so the waiter's follow-up decision is behind us. (A write in
+        # that window used to start an automatic 「接續」 run — the stress flake of 2026-10-22;
+        # the service no longer chains it, and the harness no longer races it.)
+        while time.monotonic() < deadline and not _settlement_rows_finished(scratch):
+            time.sleep(0.2)
+        ev.check("unquoted_ccy_cash.boot_run_finished",
+                 "every settlement job row finished before the rebate is written", True,
+                 _settlement_rows_finished(scratch), ph)
         P1.SETTLE.last = P1._Settled(raw0, P1.fixture_closes(raw0), P1.fixture_fx_rows(), gen)
         op = Ops(ev, api, scratch, phase=ph)
         r = op.cash_move("moomoo_my", "rebate", "MYR", "2026-01-28", "50")
