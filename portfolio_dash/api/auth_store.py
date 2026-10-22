@@ -434,8 +434,8 @@ def require_session(
 
     It only READS (DEF-065). When the session's last recorded use is a touch interval old, it
     schedules :func:`touch_after_response`, which runs after the response on its own
-    connection. A request that ends in an error response runs no background task: the next
-    request touches instead.
+    connection. A route that RAISES (an ``HTTPException``, an unexpected error) answers from
+    an exception handler, which runs no background task: the next request touches instead.
     """
     path = request.url.path
     if not path.startswith("/api/") or path in _OPEN_PATHS:

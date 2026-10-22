@@ -28,6 +28,13 @@ prompt version backfill ran two ``INSERT … SELECT`` + ``commit`` per read). Th
 ``CREATE TABLE IF NOT EXISTS`` on a table that exists is still executed by 40 GET routes
 (the ``ensure_*`` helpers they call). It is resolved at prepare time and takes no lock —
 the third guard is exactly the proof, since it runs them under a held write lock.
+
+Section 4 keeps the settlement store's change actor off every read connection. Section 5
+(session idle expiry, owner ruling 2026-10-22) repeats the class guard in PROTECTED mode,
+where the gate reads a session on every request: the request's connection still writes
+nothing and takes no write lock, and the one reviewed exception — recording the session's
+use (``auth_store.touch_after_response``) — is held to its exact statement, its own
+connection, after the response, and once per touch interval.
 """
 
 from __future__ import annotations
