@@ -9,6 +9,51 @@ headings. (`## [Unreleased]` is intentionally not counted.)
 
 ## [Unreleased]
 
+The six backlog items recorded with v0.1.33, each fixed on its own branch and reviewed.
+
+### Owner sign-off
+
+- **Session touch (2026-10-22): 「續期延後，記完立刻預熱」** — the touch waits for the page load to
+  settle, and the pre-warm runs at once after it records (chosen over a 0 s pre-warm alone, which
+  could run a second build beside the page's own, and over leaving it as it was).
+
+### Fixed
+
+- **Session touch** (`api/auth_store.py`): the gate arms ONE pending touch per session, a daemon
+  timer that fires `SESSION_TOUCH_SETTLE_S` (3 s) after the session's latest gated request and never
+  later than `SESSION_TOUCH_MAX_DEFER_S` (30 s) after the request that armed it; a recorded touch
+  pre-warms with delay 0. A navigation inside the settle window still hits the previous cache entry,
+  and one landing while the pre-warm runs joins it (one cache key), so no page builds the dashboard
+  twice. `touch_after_response` is now `run_touch`; the stop cancels pending touches
+  (`cancel_pending_touches`, 2 s wait for one running). A request answered by an exception handler
+  now counts as a use.
+- **Stop** (`shared/child_runner.py::stop_all`, `api/app.py`): before the WAL checkpoint the stop
+  cancels every queued child, terminates every running one (killed after `STOP_KILL_AFTER_S`, 5 s)
+  and waits up to `STOP_CHILDREN_WAIT_S` (30 s) for each run to be finalised. A settle run the stop
+  ends is 中斷 「系統停止時結算尚未完成」 (resumed at boot, no failure push, no pre-warm during the
+  stop); a job run reads 「系統停止時此工作尚未完成」 (reason `interrupted`). Under systemd the children
+  usually die from the unit's SIGTERM first and keep their earlier wording.
+- **Schedule history** (`scheduler/jobs.py::update_schedule`): `previous_schedule` is the STAMP —
+  the schedule the live scheduler ran — not a row hand-edited since the last boot, which was never
+  in effect; saving a hand edit as it stands now counts as a change, saving the stamp back does not.
+- **Change trail** (`portfolio/settlement_store.py`): a REPLACE that moves an id-keyed ledger row to
+  another day writes the removed row as a `delete` trail row (with its own `seq`) also when the new
+  day is inside the bound, so a close between the two days names the change.
+- **Result cache** (`shared/result_cache.file_marked`, `portfolio/dashboard.file_snapshot_build`): the
+  dashboard the closes rebuild inside their read snapshot is filed under that state while it is
+  still current, so the next `/api/dashboard` is a hit.
+- **Trend subtitle** (`web/index.html`, `web/charts.js`): 「日線」 until the payload names its
+  reporting currency (it read 「TWD・日線」 on a USD ledger until the chart script ran).
+
+### Backlog
+
+- A stopped settle run that boot settles in full instead of resuming (a calc-version change at the
+  deploy) keeps its own consequence text, without the 「未續跑：…」 note.
+- A child spawned after `stop_all` began is not stopped (the scheduler and the settlement service
+  start no new work by then).
+- The touch's 3 s settle counts from each request's ARRIVAL: a request still running past it (a
+  full live build while the store is unusable) can see the touch commit mid-build.
+
 ## [v0.1.33] - 2026-10-22
 
 Changes after v0.1.32, each built on its own branch, reviewed independently, its findings fixed by
