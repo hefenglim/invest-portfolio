@@ -265,7 +265,9 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
       A miss runs inside ONE read transaction (PERF-S12).
     - **Pre-warm** (`PD_PREWARM=1`): a debounced daemon timer computes today's dashboard and
       alerts (`api/alert_inputs.prewarm_today`). It fires 3 s after the last write window closes
-      (`api/app.py::WRITE_PREWARM_DELAY_S`) and 1 s after a settlement run ends.
+      (`api/app.py::WRITE_PREWARM_DELAY_S`), 1 s after a settlement run ends, and at once after
+      a recorded session touch, which itself waited for the page load to settle (`api/` →
+      the session touch).
     - **Shutdown.** The lifespan calls `result_cache.shutdown()` first. It closes the cache for
       the rest of the lifespan (no pre-warm starts, no version connection opens, no entry is
       kept), waits up to `SHUTDOWN_PREWARM_WAIT_S` (15 s) for a pre-warm already running —
@@ -380,18 +382,28 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
   only reads: an expired (idle > 30 d, a stamp more than `SESSION_CLOCK_SKEW` in the future, or an
   unreadable stamp), locked or unknown session is refused, and the login it lets through goes on
   `request.state` (`LOGIN_STATE_ATTR`) for the action log. A use is recorded by
-  `auth_store.touch_after_response`, a background task the gate schedules only when the stored
-  `last_seen_at` is `SESSION_TOUCH_INTERVAL` (24 h) old and the in-process guard has no touch of
-  that session in flight or recorded within the interval: after the response, on its own
-  connection, a 100 ms busy timeout, one autocommit compare-and-set UPDATE (`TOUCH_SQL`), skipped
-  when the lock is busy, a WARNING (and a 10 min back-off) on any other failure. A recorded touch
-  moves `data_version`, so it schedules `alert_inputs.prewarm_today` with the write window's delay
-  (the owner chose 24 h + pre-warm over 6 h for the cache's sake; a session lapses 29–30 days after
-  its last use). The request's own connection still writes nothing and takes no write lock:
-  `tests/contract/test_def065_get_never_writes.py` section 5 holds the touch to its statement, its
-  own connection and once per interval. `/api/auth/logout` is an open path, so an expired cookie
-  can be cleared. The boot (`prepare_sessions_at_boot`) dates unstamped sessions from the boot and
-  purges expired, locked and orphaned ones.
+  `auth_store.run_touch`, never by the gate itself. When the stored `last_seen_at` is
+  `SESSION_TOUCH_INTERVAL` (24 h) old and the in-process guard has no touch of that session in
+  flight or recorded within the interval, the gate ARMS the session's pending touch
+  (`schedule_touch`; owner ruling 2026-10-22, 「續期延後，記完立刻預熱」). It is a daemon timer, one
+  per session, that fires once the page load has settled: `SESSION_TOUCH_SETTLE_S` (3 s, equal to
+  `WRITE_PREWARM_DELAY_S`) after the session's LATEST gated request, each request pushing it back,
+  and never later than `SESSION_TOUCH_MAX_DEFER_S` (30 s) after the request that armed it. The
+  touch runs on its own connection: a 100 ms busy timeout, one autocommit compare-and-set UPDATE
+  (`TOUCH_SQL`), skipped when the lock is busy (the next request arms it again), a WARNING (and a
+  10 min back-off) on any other failure. A recorded touch moves `data_version`, so it schedules
+  `alert_inputs.prewarm_today` AT ONCE (delay 0, the write window's debounced timer). Until the
+  touch commits, the page load and a navigation inside the settle window still hit the previous
+  cache entry; a navigation that lands while the pre-warm runs joins it in flight, since the
+  pre-warm and `GET /api/dashboard` build under one cache key. The owner chose 24 h + pre-warm
+  over 6 h for the cache's sake; a session lapses 29–30 days after its last use. The lifespan's
+  stop cancels the pending touches (`cancel_pending_touches`, before `result_cache.shutdown()`;
+  it waits up to 2 s for one already running). A cancelled use is recorded on the session's first
+  request after the boot, since its stamp did not move. The request's own connection still writes
+  nothing and takes no write lock: `tests/contract/test_def065_get_never_writes.py` section 5
+  holds the touch to its statement, its own connection and once per interval. `/api/auth/logout`
+  is an open path, so an expired cookie can be cleared. The boot (`prepare_sessions_at_boot`)
+  dates unstamped sessions from the boot and purges expired, locked and orphaned ones.
   **`get_conn` is function-scoped** (PERF-S10, 2026-10-18). Every route declares
   `Depends(get_conn, scope="function")`, and so does the gate, `auth_store.require_session`. A
   request therefore holds ONE cached connection, and its session commits when the path function

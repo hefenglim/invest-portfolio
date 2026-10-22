@@ -7,16 +7,19 @@ The design constraint is DEF-065 — a GET never writes, on its own connection o
 write lock. The expiry check is therefore a pure read inside the gate
 (``auth_store.require_session``), and a USE is recorded by a separate step, the touch:
 
-* at most once per ``SESSION_TOUCH_INTERVAL`` (6 h) per session — the gate schedules it only
+* at most once per ``SESSION_TOUCH_INTERVAL`` (24 h) per session — the gate arms it only
   when the stored stamp is older than that;
-* AFTER the response (a FastAPI background task), on its OWN short-lived connection with a
-  ``SESSION_TOUCH_BUSY_TIMEOUT_MS`` busy timeout, as one autocommit compare-and-set UPDATE;
-* skipped when the write lock is held (a later request retries), and never raising.
+* once the page load has SETTLED (owner ruling 2026-10-22, 「續期延後，記完立刻預熱」): the gate
+  arms the session's pending touch, which fires ``SESSION_TOUCH_SETTLE_S`` after the
+  session's latest gated request (capped at ``SESSION_TOUCH_MAX_DEFER_S``), on its OWN
+  short-lived connection with a ``SESSION_TOUCH_BUSY_TIMEOUT_MS`` busy timeout, as one
+  autocommit compare-and-set UPDATE — and a recorded touch pre-warms at once;
+* skipped when the write lock is held (a later request arms it again), and never raising.
 
 Hermetic half: the golden in-memory client (``api_client``), whose injected ``get_conn`` the
 touch reuses exactly as the action log does. File half: a real database file, where the
-touch opens its own connection — the probes below drive the ASGI app directly and watch the
-order of ``send`` messages, because TestClient returns only after the background task.
+touch opens its own connection. Both drive the pending touch with ``touch_clock``
+(``tests/conftest.py``), which fires it on the test's thread when the test moves the clock.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ from portfolio_dash.api.deps import get_now
 from portfolio_dash.shared import db as shared_db
 from portfolio_dash.shared.clock import app_now
 from portfolio_dash.shared.config import get_settings
-from tests.conftest import GOLDEN_NOW, init_golden_base
+from tests.conftest import GOLDEN_NOW, TouchClock, init_golden_base
 
 _USER, _PASS = "chiaming", "password123"
 _DAY = timedelta(days=1)
@@ -75,35 +78,42 @@ def _seen(conn: sqlite3.Connection, token: str) -> str | None:
 
 
 def test_an_expired_session_is_refused_with_the_zh_message(
-    api_client: TestClient, golden_db: sqlite3.Connection
+    api_client: TestClient, golden_db: sqlite3.Connection, touch_clock: TouchClock
 ) -> None:
     _login(api_client)
     _at(api_client, GOLDEN_NOW + 29 * _DAY + timedelta(hours=23))
     assert api_client.get("/api/accounts").status_code == 200
+    touch_clock.settle()
     token = api_client.cookies.get("pd_session")
     assert token is not None
     # 29 d 23 h recorded a use; measure the next 30 days from it
     seen = datetime.fromisoformat(_seen(golden_db, token) or "")
+    assert seen == GOLDEN_NOW + 29 * _DAY + timedelta(hours=23)
     _at(api_client, seen + 30 * _DAY + timedelta(seconds=1))
     r = api_client.get("/api/accounts")
     assert r.status_code == 401
     assert r.json() == {"error": {"code": "unauthorized",
                                   "message": "登入已逾期（30 天未使用），請重新登入"}}
+    touch_clock.settle()
     # the expired row is treated as gone: no use is recorded for it
     assert _seen(golden_db, token) == seen.isoformat()
 
 
-def test_a_use_slides_the_expiry(api_client: TestClient, golden_db: sqlite3.Connection) -> None:
+def test_a_use_slides_the_expiry(
+    api_client: TestClient, golden_db: sqlite3.Connection, touch_clock: TouchClock
+) -> None:
     token = _login(api_client)
     _at(api_client, GOLDEN_NOW + 20 * _DAY)
     assert api_client.get("/api/accounts").status_code == 200
+    assert _seen(golden_db, token) == GOLDEN_NOW.isoformat()  # not while the page loads
+    touch_clock.settle()
     assert _seen(golden_db, token) == (GOLDEN_NOW + 20 * _DAY).isoformat()
     _at(api_client, GOLDEN_NOW + 45 * _DAY)  # 45 days after the login, 25 after its last use
     assert api_client.get("/api/accounts").status_code == 200
 
 
 def test_a_use_is_recorded_at_most_once_a_day(
-    api_client: TestClient, golden_db: sqlite3.Connection
+    api_client: TestClient, golden_db: sqlite3.Connection, touch_clock: TouchClock
 ) -> None:
     token = _login(api_client)
     login_stamp = _seen(golden_db, token)
@@ -111,30 +121,50 @@ def test_a_use_is_recorded_at_most_once_a_day(
     _at(api_client, GOLDEN_NOW + timedelta(hours=23, minutes=59, seconds=59))
     for _ in range(3):
         assert api_client.get("/api/accounts").status_code == 200
+    touch_clock.settle()
     assert _seen(golden_db, token) == login_stamp
     _at(api_client, GOLDEN_NOW + timedelta(hours=24))
     assert api_client.get("/api/accounts").status_code == 200
+    touch_clock.settle()
     assert _seen(golden_db, token) == (GOLDEN_NOW + timedelta(hours=24)).isoformat()
 
 
 def test_a_stale_read_does_not_touch_again_within_the_interval(
-    api_client: TestClient, golden_db: sqlite3.Connection
+    api_client: TestClient, golden_db: sqlite3.Connection, touch_clock: TouchClock
 ) -> None:
     """The in-process guard: once this process recorded a use, a request that still reads the
-    old stamp (it read before the touch committed) schedules no second touch that day."""
+    old stamp (it read before the touch committed) arms no second touch that day."""
     token = _login(api_client)
     _at(api_client, GOLDEN_NOW + _DAY)
     assert api_client.get("/api/accounts").status_code == 200
+    touch_clock.settle()
     assert _seen(golden_db, token) == (GOLDEN_NOW + _DAY).isoformat()
     golden_db.execute("UPDATE auth_sessions SET last_seen_at = ? WHERE token = ?",
                       (GOLDEN_NOW.isoformat(), token))  # what a stale reader sees
     golden_db.commit()
     _at(api_client, GOLDEN_NOW + _DAY + timedelta(hours=23))
     assert api_client.get("/api/accounts").status_code == 200
+    assert not touch_clock.armed  # nothing pending
+    touch_clock.settle()
     assert _seen(golden_db, token) == GOLDEN_NOW.isoformat()  # untouched: the guard held
     _at(api_client, GOLDEN_NOW + 2 * _DAY)
     assert api_client.get("/api/accounts").status_code == 200
+    touch_clock.settle()
     assert _seen(golden_db, token) == (GOLDEN_NOW + 2 * _DAY).isoformat()
+
+
+def test_a_request_answered_by_an_exception_handler_still_counts_as_a_use(
+    api_client: TestClient, golden_db: sqlite3.Connection, touch_clock: TouchClock
+) -> None:
+    """The touch is armed by the gate, before the route runs: a request answered by an
+    exception handler (a refused query parameter here: ``api/errors.py`` answers it 400) was a
+    use all the same. Before the deferred touch it ran as a background task, which an
+    exception handler's response never runs."""
+    token = _login(api_client)
+    _at(api_client, GOLDEN_NOW + _DAY)
+    assert api_client.get("/api/dashboard", params={"trend_days": 0}).status_code == 400
+    touch_clock.settle()
+    assert _seen(golden_db, token) == (GOLDEN_NOW + _DAY).isoformat()
 
 
 def test_a_stamp_from_the_future_is_refused(
@@ -153,7 +183,7 @@ def test_a_stamp_from_the_future_is_refused(
                                      RuntimeError("anything else")])
 def test_a_failing_touch_never_fails_the_request(
     api_client: TestClient, golden_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
-    failure: Exception,
+    touch_clock: TouchClock, failure: Exception,
 ) -> None:
     token = _login(api_client)
 
@@ -164,6 +194,7 @@ def test_a_failing_touch_never_fails_the_request(
     _at(api_client, GOLDEN_NOW + _DAY)
     r = api_client.get("/api/accounts")
     assert r.status_code == 200, r.text
+    touch_clock.settle()  # the touch fails on its timer: nothing raises, nothing recorded
     assert _seen(golden_db, token) == GOLDEN_NOW.isoformat()
 
 
@@ -354,12 +385,13 @@ def _drive(app: FastAPI, path: str, token: str,
         disable_socket(allow_unix_socket=True)
 
 
-def test_the_touch_runs_after_the_response_on_its_own_connection(
-    protected_db: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_touch_waits_for_the_page_load_to_settle_on_its_own_connection(
+    protected_db: Path, monkeypatch: pytest.MonkeyPatch, touch_clock: TouchClock
 ) -> None:
-    """The response is complete (its last body message sent) before the use is recorded, and
-    the connection that records it is not the request's: the request's connection runs no
-    write and takes no write lock."""
+    """The response is complete (its last body message sent) before the use is recorded —
+    and so is the page load: the use is recorded only once the session has been quiet for
+    ``SESSION_TOUCH_SETTLE_S``. The connection that records it is not the request's: the
+    request's connection runs no write and takes no write lock."""
     token = _file_session(protected_db, idle=timedelta(hours=25))
     before = _file_seen(protected_db, token)
     statements: dict[int, list[str]] = {}
@@ -382,6 +414,9 @@ def test_the_touch_runs_after_the_response_on_its_own_connection(
 
     _drive(create_app(), "/api/accounts", token, on_send)
     assert at_end == [before], "the use was recorded before the response was complete"
+    touch_clock.advance(A.SESSION_TOUCH_SETTLE_S - 0.1)
+    assert _file_seen(protected_db, token) == before, "recorded before the page load settled"
+    touch_clock.advance(0.1)
     after = _file_seen(protected_db, token)
     assert after is not None and before is not None and after > before
     touchers = [i for i, log in statements.items()
@@ -401,7 +436,7 @@ def test_the_touch_runs_after_the_response_on_its_own_connection(
 
 
 def test_a_held_write_lock_skips_the_touch_and_the_request_answers(
-    protected_db: Path,
+    protected_db: Path, touch_clock: TouchClock
 ) -> None:
     token = _file_session(protected_db, idle=timedelta(hours=25))
     before = _file_seen(protected_db, token)
@@ -412,17 +447,19 @@ def test_a_held_write_lock_skips_the_touch_and_the_request_answers(
         holder = sqlite3.connect(protected_db, isolation_level=None)
         try:
             holder.execute("BEGIN IMMEDIATE")
+            r = client.get("/api/accounts")
             started = time.perf_counter()
-            r = client.get("/api/accounts")  # TestClient waits for the background touch too
+            touch_clock.settle()  # the touch fires while the lock is still held
             elapsed = time.perf_counter() - started
             holder.execute("ROLLBACK")
         finally:
             holder.close()
         assert r.status_code == 200, r.text
         # the touch gave up after its own busy timeout, not the 5 s every other one waits
-        assert elapsed < 3.0, f"the request waited {elapsed:.1f} s behind the write lock"
+        assert elapsed < 3.0, f"the touch waited {elapsed:.1f} s behind the write lock"
         assert _file_seen(protected_db, token) == before  # skipped
-        assert client.get("/api/accounts").status_code == 200  # a later request retries
+        assert client.get("/api/accounts").status_code == 200  # a later request arms it again
+        touch_clock.settle()
         after = _file_seen(protected_db, token)
         assert after is not None and before is not None and after > before
     finally:
@@ -430,11 +467,11 @@ def test_a_held_write_lock_skips_the_touch_and_the_request_answers(
 
 
 def test_a_request_that_records_a_use_prewarms_the_cache_once(
-    protected_db: Path, monkeypatch: pytest.MonkeyPatch
+    protected_db: Path, monkeypatch: pytest.MonkeyPatch, touch_clock: TouchClock
 ) -> None:
     """The touch's commit moves ``PRAGMA data_version``, so the result cache is empty for the
-    next read: the request that recorded the use schedules the ordinary pre-warm; the
-    requests after it (no touch due) schedule none."""
+    next read: the touch that recorded the use schedules the ordinary pre-warm AT ONCE (it
+    waited for the page load itself); the requests after it (no touch due) schedule none."""
     from portfolio_dash.api import alert_inputs
     from portfolio_dash.shared import result_cache
 
@@ -451,11 +488,17 @@ def test_a_request_that_records_a_use_prewarms_the_cache_once(
     try:
         client = TestClient(create_app())
         client.cookies.set("pd_session", token)
-        for _ in range(3):
+        for _ in range(3):  # one page load
             assert client.get("/api/accounts").status_code == 200
+        assert calls == []  # nothing recorded while the page loads
+        touch_clock.settle()
+        assert calls == [(alert_inputs.prewarm_today, 0.0)]
+        for _ in range(3):  # the next page: the use is recorded, no touch is due
+            assert client.get("/api/accounts").status_code == 200
+        touch_clock.settle()
     finally:
         disable_socket(allow_unix_socket=True)
-    assert calls == [(alert_inputs.prewarm_today, A.SESSION_TOUCH_PREWARM_DELAY_S)]
+    assert calls == [(alert_inputs.prewarm_today, 0.0)]
 
 
 # --- the boot: upgrade and purge, through the real lifespan ----------------------------------
@@ -550,3 +593,42 @@ def test_a_session_with_a_non_text_stamp_does_not_stop_the_boot(
     finally:
         conn.close()
     assert left == {live} and not {blob, future} & left
+
+
+def test_the_stop_cancels_a_pending_touch_before_the_cache_closes(
+    boot_db: Path, monkeypatch: pytest.MonkeyPatch, touch_clock: TouchClock
+) -> None:
+    """The lifespan's stop cancels every pending touch BEFORE ``result_cache.shutdown()`` and
+    the WAL checkpoint: a touch firing afterwards would commit past the checkpoint (``-wal``
+    left beside the database) and pre-warm into a closed cache. The cancelled use is not
+    recorded; the session's first request after the next boot records it."""
+    from portfolio_dash.shared import result_cache
+
+    conn = sqlite3.connect(boot_db)
+    conn.row_factory = sqlite3.Row
+    A.create_auth_tables(conn)
+    A.create_user(conn, name="家明", username=_USER, password=_PASS, now=app_now())
+    token = A.create_session(conn, _USER, now=app_now() - timedelta(hours=25))
+    conn.close()
+    before = _file_seen(boot_db, token)
+    order: list[str] = []
+    real_cancel, real_shutdown = A.cancel_pending_touches, result_cache.shutdown
+
+    def cancel(timeout: float = A.SHUTDOWN_TOUCH_WAIT_S) -> int:
+        cancelled = real_cancel(timeout)
+        order.append(f"touches:{cancelled}")
+        return cancelled
+
+    def shutdown(timeout: float = result_cache.SHUTDOWN_PREWARM_WAIT_S) -> bool:
+        order.append("cache")
+        return real_shutdown(timeout)
+
+    monkeypatch.setattr(A, "cancel_pending_touches", cancel)
+    monkeypatch.setattr(result_cache, "shutdown", shutdown)
+    with TestClient(create_app()) as client:
+        client.cookies.set("pd_session", token)
+        assert client.get("/api/accounts").status_code == 200
+        assert len(touch_clock.armed) == 1
+    assert order == ["touches:1", "cache"]
+    touch_clock.settle()  # the cancelled timer never fires
+    assert _file_seen(boot_db, token) == before

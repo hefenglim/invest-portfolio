@@ -14,6 +14,7 @@ import pytest
 from portfolio_dash.api import auth_store as A
 from portfolio_dash.shared import result_cache
 from portfolio_dash.shared.config import get_settings
+from tests.conftest import TouchClock
 
 NOW = datetime(2026, 6, 11, 14, 30, tzinfo=ZoneInfo("Asia/Taipei"))
 _DAY = timedelta(days=1)
@@ -272,7 +273,7 @@ def test_a_row_written_without_a_stamp_reads_its_creation_time() -> None:
     assert _state(c, "rb", NOW + 31 * _DAY).expired is False
 
 
-# --- the touch task: its own connection, its outcome, its guard, its pre-warm ---------------
+# --- the touch: its own connection, its outcome, its guard, its pre-warm ---------------------
 
 
 class _App:
@@ -331,21 +332,31 @@ def prewarms(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, float]]:
     return calls
 
 
-def test_a_recorded_touch_schedules_exactly_one_prewarm(
+def test_the_touch_waits_for_the_page_load_and_its_prewarm_starts_at_once() -> None:
+    """Owner ruling 2026-10-22, 「續期延後，記完立刻預熱」. The touch commits only once the
+    page load has settled — the same quiet period the write window waits before ITS pre-warm,
+    because from the cache's view a touch is a write — so the pre-warm it schedules needs no
+    delay of its own: no read of that page load is left to compete with it."""
+    from portfolio_dash.api.app import WRITE_PREWARM_DELAY_S
+
+    assert A.SESSION_TOUCH_SETTLE_S == WRITE_PREWARM_DELAY_S == 3.0
+    assert A.SESSION_TOUCH_PREWARM_DELAY_S == 0.0
+    # a busy session is still touched, within half a minute of the request that armed it
+    assert A.SESSION_TOUCH_SETTLE_S < A.SESSION_TOUCH_MAX_DEFER_S <= 60.0
+
+
+def test_a_recorded_touch_schedules_exactly_one_prewarm_at_once(
     file_db: Path, prewarms: list[tuple[object, float]]
 ) -> None:
     """A touch that changed a row moved ``PRAGMA data_version``, which empties the result
-    cache: the ordinary pre-warm is scheduled right away (owner ruling 2026-10-22), with the
-    write window's own delay."""
+    cache: the ordinary pre-warm is scheduled at once, with no delay."""
     from portfolio_dash.api import alert_inputs
-    from portfolio_dash.api.app import WRITE_PREWARM_DELAY_S
 
     tok = _file_token(file_db, NOW)
-    assert A.touch_after_response(_App(), tok, NOW.isoformat(), NOW + _DAY) == "recorded"
-    assert prewarms == [(alert_inputs.prewarm_today, WRITE_PREWARM_DELAY_S)]
-    assert A.SESSION_TOUCH_PREWARM_DELAY_S == WRITE_PREWARM_DELAY_S
+    assert A.run_touch(_App(), tok, NOW.isoformat(), NOW + _DAY) == "recorded"
+    assert prewarms == [(alert_inputs.prewarm_today, 0.0)]
     # the same session again inside the interval: nothing runs, nothing is pre-warmed
-    assert A.touch_after_response(_App(), tok, NOW.isoformat(), NOW + _DAY) == "throttled"
+    assert A.run_touch(_App(), tok, NOW.isoformat(), NOW + _DAY) == "throttled"
     assert len(prewarms) == 1
 
 
@@ -354,7 +365,7 @@ def test_a_lost_touch_schedules_no_prewarm(
 ) -> None:
     tok = _file_token(file_db, NOW)
     # its guard (the stamp it read) is stale: another request recorded the use first
-    assert A.touch_after_response(_App(), tok, "stale", NOW + _DAY) == "lost"
+    assert A.run_touch(_App(), tok, "stale", NOW + _DAY) == "lost"
     assert prewarms == [] and _file_seen(file_db, tok) == NOW.isoformat()
 
 
@@ -366,7 +377,7 @@ def test_a_busy_touch_is_skipped_quietly_and_the_next_request_retries(
     holder = sqlite3.connect(file_db, isolation_level=None)
     try:
         holder.execute("BEGIN IMMEDIATE")
-        assert A.touch_after_response(_App(), tok, NOW.isoformat(), NOW + _DAY) == "busy"
+        assert A.run_touch(_App(), tok, NOW.isoformat(), NOW + _DAY) == "busy"
         holder.execute("ROLLBACK")
     finally:
         holder.close()
@@ -374,7 +385,7 @@ def test_a_busy_touch_is_skipped_quietly_and_the_next_request_retries(
     records = [r for r in caplog.records if r.name == "portfolio_dash.api.auth_store"]
     assert records and all(r.levelno == logging.DEBUG for r in records)
     assert A.touch_wanted(tok, NOW + _DAY)  # a busy lock leaves no mark: retried at once
-    assert A.touch_after_response(_App(), tok, NOW.isoformat(), NOW + _DAY) == "recorded"
+    assert A.run_touch(_App(), tok, NOW.isoformat(), NOW + _DAY) == "recorded"
 
 
 def test_any_other_database_error_is_a_warning_and_backs_off(
@@ -387,7 +398,7 @@ def test_any_other_database_error_is_a_warning_and_backs_off(
     caplog.set_level(logging.DEBUG, logger="portfolio_dash.api.auth_store")
     monkeypatch.setattr(A, "TOUCH_SQL", A.TOUCH_SQL.replace("SET last_seen_at", "SET nope"))
     tok = _file_token(file_db, NOW)
-    assert A.touch_after_response(_App(), tok, NOW.isoformat(), NOW + _DAY) == "failed"
+    assert A.run_touch(_App(), tok, NOW.isoformat(), NOW + _DAY) == "failed"
     warnings = [r for r in caplog.records
                 if r.name == "portfolio_dash.api.auth_store" and r.levelno == logging.WARNING]
     assert len(warnings) == 1 and prewarms == []
@@ -398,8 +409,9 @@ def test_any_other_database_error_is_a_warning_and_backs_off(
 def test_concurrent_requests_run_one_touch(
     file_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Twelve requests of one page load all found the touch due: one UPDATE runs, the others
-    see it in flight (and, after it, done within the interval) and touch nothing."""
+    """Twelve touches of one session at once (the guard holds whoever runs them — the pending
+    touch is one caller): one UPDATE runs, the others see it in flight (and, after it, done
+    within the interval) and touch nothing."""
     tok = _file_token(file_db, NOW)
     real = A.touch_session
     ran: list[str] = []
@@ -416,7 +428,7 @@ def test_concurrent_requests_run_one_touch(
 
     def request() -> None:
         start.wait()
-        outcomes.append(A.touch_after_response(_App(), tok, NOW.isoformat(), NOW + _DAY))
+        outcomes.append(A.run_touch(_App(), tok, NOW.isoformat(), NOW + _DAY))
 
     threads = [threading.Thread(target=request) for _ in range(12)]
     for t in threads:
@@ -428,3 +440,161 @@ def test_concurrent_requests_run_one_touch(
     # the gate's peek: done within the interval, so a stale read schedules nothing
     assert not A.touch_wanted(tok, NOW + _DAY + timedelta(hours=23))
     assert A.touch_wanted(tok, NOW + 2 * _DAY)
+
+
+# --- the pending touch: deferred until the page load has settled ------------------------------
+#
+# Owner ruling 2026-10-22, 「續期延後，記完立刻預熱」. The gate arms the session's touch
+# (`schedule_touch`); it fires SESSION_TOUCH_SETTLE_S after the session's LATEST gated request,
+# never later than SESSION_TOUCH_MAX_DEFER_S after the request that armed it, and a recorded
+# touch pre-warms at once. `touch_clock` (tests/conftest.py) drives the timers without waiting.
+
+_SETTLE = A.SESSION_TOUCH_SETTLE_S
+_CAP = A.SESSION_TOUCH_MAX_DEFER_S
+
+
+def test_each_request_pushes_the_touch_back_until_the_page_load_has_settled(
+    file_db: Path, prewarms: list[tuple[object, float]], touch_clock: TouchClock
+) -> None:
+    from portfolio_dash.api import alert_inputs
+
+    tok = _file_token(file_db, NOW)
+    seen = NOW.isoformat()
+    assert A.schedule_touch(_App(), tok, seen, NOW + _DAY)
+    touch_clock.advance(2.0)
+    later = NOW + _DAY + timedelta(seconds=2)  # a second request of the same page load
+    assert A.schedule_touch(_App(), tok, seen, later)
+    touch_clock.advance(_SETTLE - 0.5)  # past the first request's window, not the second's
+    assert _file_seen(file_db, tok) == seen and prewarms == []
+    touch_clock.advance(0.5)  # quiet for the whole window: the touch records the LATEST use
+    assert _file_seen(file_db, tok) == later.isoformat()
+    assert prewarms == [(alert_inputs.prewarm_today, 0.0)]  # and pre-warms at once
+    assert not touch_clock.armed and tok not in A._pending_touches
+    # the second request only moved the time: one timer, re-armed once by the first firing
+    assert len(touch_clock.timers) == 2
+
+
+def test_a_session_that_never_falls_quiet_is_touched_at_the_cap(
+    file_db: Path, prewarms: list[tuple[object, float]], touch_clock: TouchClock
+) -> None:
+    tok = _file_token(file_db, NOW)
+    seen = NOW.isoformat()
+    step = _SETTLE / 2  # a request every 1.5 s: never quiet for the settle window
+    requests = int(_CAP / step)
+    for i in range(requests):
+        assert _file_seen(file_db, tok) == seen, f"touched after {touch_clock.now} s"
+        assert A.schedule_touch(_App(), tok, seen, NOW + _DAY + timedelta(seconds=i))
+        touch_clock.advance(step)
+    assert touch_clock.now == _CAP
+    assert _file_seen(file_db, tok) == (NOW + _DAY + timedelta(seconds=requests - 1)).isoformat()
+    assert len(prewarms) == 1 and tok not in A._pending_touches
+
+
+def test_one_pending_touch_per_session(
+    file_db: Path, prewarms: list[tuple[object, float]], touch_clock: TouchClock
+) -> None:
+    first, second = _file_token(file_db, NOW), _file_token(file_db, NOW)
+    seen = NOW.isoformat()
+    for _ in range(12):  # one page load: twelve gated requests that all find the touch due
+        assert A.schedule_touch(_App(), first, seen, NOW + _DAY)
+    assert A.schedule_touch(_App(), second, seen, NOW + _DAY)
+    assert set(A._pending_touches) == {first, second}
+    assert len(touch_clock.armed) == 2  # one timer per session, never one per request
+    touch_clock.settle()
+    assert _file_seen(file_db, first) == _file_seen(file_db, second) == (NOW + _DAY).isoformat()
+    assert len(prewarms) == 2 and not A._pending_touches
+    # recorded: within the interval no request arms it again
+    assert not A.schedule_touch(_App(), first, seen, NOW + _DAY + timedelta(hours=1))
+    assert not touch_clock.armed and not A._pending_touches
+
+
+def test_a_skipped_touch_prewarms_nothing_and_the_next_request_arms_it_again(
+    file_db: Path, prewarms: list[tuple[object, float]], touch_clock: TouchClock
+) -> None:
+    from portfolio_dash.api import alert_inputs
+
+    tok = _file_token(file_db, NOW)
+    seen = NOW.isoformat()
+    holder = sqlite3.connect(file_db, isolation_level=None)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        assert A.schedule_touch(_App(), tok, seen, NOW + _DAY)
+        touch_clock.settle()  # busy: skipped, quietly
+        holder.execute("ROLLBACK")
+    finally:
+        holder.close()
+    assert _file_seen(file_db, tok) == seen and prewarms == [] and not A._pending_touches
+    assert A.schedule_touch(_App(), tok, seen, NOW + _DAY)  # a busy lock leaves no mark
+    touch_clock.settle()
+    assert _file_seen(file_db, tok) == (NOW + _DAY).isoformat()
+    assert prewarms == [(alert_inputs.prewarm_today, 0.0)]
+
+
+def test_the_stop_cancels_a_pending_touch_and_the_next_use_records_it(
+    file_db: Path, prewarms: list[tuple[object, float]], touch_clock: TouchClock
+) -> None:
+    tok = _file_token(file_db, NOW)
+    seen = NOW.isoformat()
+    assert A.schedule_touch(_App(), tok, seen, NOW + _DAY)
+    (timer,) = touch_clock.armed
+    assert A.cancel_pending_touches() == 1
+    assert timer.cancelled and not A._pending_touches
+    timer.fn()  # a timer already firing as the stop cancelled it finds its touch gone
+    touch_clock.settle()
+    assert _file_seen(file_db, tok) == seen and prewarms == []
+    # the session's first request after the boot finds the touch still due: recorded then
+    assert A.schedule_touch(_App(), tok, seen, NOW + _DAY + timedelta(minutes=5))
+    touch_clock.settle()
+    assert _file_seen(file_db, tok) == (NOW + _DAY + timedelta(minutes=5)).isoformat()
+
+
+def test_the_stop_waits_briefly_for_a_touch_already_running(
+    file_db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A touch that commits after the stop's WAL checkpoint would leave ``-wal`` / ``-shm``:
+    the stop waits for one already running — bounded, then logged, and the stop goes on."""
+    tok = _file_token(file_db, NOW)
+    real = A.touch_session
+    entered, go = threading.Event(), threading.Event()
+
+    def held(conn: sqlite3.Connection, token: str, *, seen_raw: str | None,
+             now: datetime) -> bool:
+        entered.set()
+        go.wait(timeout=10)
+        return real(conn, token, seen_raw=seen_raw, now=now)
+
+    monkeypatch.setattr(A, "touch_session", held)
+    touch = threading.Thread(target=A.run_touch, args=(_App(), tok, NOW.isoformat(), NOW + _DAY))
+    touch.start()
+    try:
+        assert entered.wait(timeout=10)
+        caplog.set_level(logging.WARNING, logger="portfolio_dash.api.auth_store")
+        started = time.perf_counter()
+        assert A.cancel_pending_touches(timeout=0.2) == 0  # outlived: logged, not raised
+        assert time.perf_counter() - started < 2.0
+        assert any("into the stop" in r.getMessage() for r in caplog.records)
+        stop = threading.Thread(target=A.cancel_pending_touches, kwargs={"timeout": 10})
+        stop.start()
+        stop.join(timeout=0.3)
+        assert stop.is_alive(), "the stop did not wait for the running touch"
+        go.set()
+        stop.join(timeout=10)
+        assert not stop.is_alive()
+    finally:
+        go.set()
+        touch.join(timeout=10)
+    assert _file_seen(file_db, tok) == (NOW + _DAY).isoformat()
+
+
+def test_the_real_timer_fires_on_its_own_thread(
+    file_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production timer (no fake clock), with the settle window shortened."""
+    monkeypatch.setattr(A, "SESSION_TOUCH_SETTLE_S", 0.05)
+    tok = _file_token(file_db, NOW)
+    assert A.schedule_touch(_App(), tok, NOW.isoformat(), NOW + _DAY)
+    deadline = time.monotonic() + 10
+    while _file_seen(file_db, tok) == NOW.isoformat() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert _file_seen(file_db, tok) == (NOW + _DAY).isoformat()
+    assert tok not in A._pending_touches

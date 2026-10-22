@@ -33,8 +33,9 @@ Section 4 keeps the settlement store's change actor off every read connection. S
 (session idle expiry, owner ruling 2026-10-22) repeats the class guard in PROTECTED mode,
 where the gate reads a session on every request: the request's connection still writes
 nothing and takes no write lock, and the one reviewed exception — recording the session's
-use (``auth_store.touch_after_response``) — is held to its exact statement, its own
-connection, after the response, and once per touch interval.
+use (the pending touch the gate arms, ``auth_store.schedule_touch`` → ``run_touch``) — is
+held to its exact statement, its own connection, after the page load has settled, and once
+per touch interval.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ from portfolio_dash.portfolio.settlement_store import install_or_verify
 from portfolio_dash.shared import config_store
 from portfolio_dash.shared.config import get_settings
 from portfolio_dash.shared.ui_prefs import set_ui_prefs
-from tests.conftest import GOLDEN_NOW, _seed_golden
+from tests.conftest import GOLDEN_NOW, TouchClock, _seed_golden
 
 _WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b", re.I)
 _NOOP_DDL = re.compile(r"^\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX)\s+IF\s+NOT\s+EXISTS\b", re.I)
@@ -344,12 +345,16 @@ def test_no_get_or_read_only_post_connection_carries_the_actor_trigger(
 #
 # Reviewed exception (owner ruling 2026-10-22, review finding L5 — sessions expire after 30
 # days without use). Sliding expiry must record a use, and most uses are GETs. The record is
-# the "touch" (`auth_store.touch_after_response`), and it is allowed ONLY in this shape:
+# the "touch" (`auth_store.run_touch`, armed by the gate as a pending touch,
+# `auth_store.schedule_touch`), and it is allowed ONLY in this shape:
 #   * this exact statement (`_REVIEWED_TOUCH`), nothing else;
 #   * on a connection that runs nothing but its pragmas and that statement — never the
 #     request's connection, which still writes nothing and takes no write lock;
-#   * after the response (a background task), at most once per SESSION_TOUCH_INTERVAL per
-#     session, giving up after SESSION_TOUCH_BUSY_TIMEOUT_MS when the write lock is held.
+#   * once the page load has settled (a timer, SESSION_TOUCH_SETTLE_S after the session's
+#     latest request), at most once per SESSION_TOUCH_INTERVAL per session, giving up after
+#     SESSION_TOUCH_BUSY_TIMEOUT_MS when the write lock is held.
+# The test drives the timer with `touch_clock` (tests/conftest.py): it lets each route's
+# pending touch fire right after that route answered, still under the held lock.
 # The guest-mode class test (3.) above has no exception at all: with no authorised user the
 # gate reads no session and nothing is touched.
 
@@ -362,7 +367,7 @@ _OPEN = {"/api/auth/session", "/api/health"}  # outside the gate: no session is 
 
 
 def test_protected_get_routes_write_nothing_and_the_touch_is_the_reviewed_exception(
-    db_file: Path, monkeypatch: pytest.MonkeyPatch
+    db_file: Path, monkeypatch: pytest.MonkeyPatch, touch_clock: TouchClock
 ) -> None:
     from datetime import timedelta
 
@@ -408,22 +413,26 @@ def test_protected_get_routes_write_nothing_and_the_touch_is_the_reviewed_except
         routes = _get_routes(app)
         assert len(routes) >= 60, f"route enumeration broke: {len(routes)}"
         failing: list[str] = []
-        answered: set[str] = set()  # gated routes that answered 2xx: each one schedules a touch
+        answered: set[str] = set()  # gated routes that answered 2xx: each one arms a touch
         for template, path in routes:
             current[0] = template
             with _HeldLock(db_file, news_db):
                 r = client.get(path, params=_QUERY.get(template, {}))
+                touch_clock.settle()  # this route's touch fires under the lock: busy, skipped
             if r.status_code >= 500 or r.status_code == 401:
                 failing.append(f"{template} -> {r.status_code} {r.text[:160]}")
             elif r.status_code < 400 and template not in _OPEN:
                 answered.add(template)
         stamp_under_lock = seed.execute("SELECT last_seen_at FROM auth_sessions").fetchone()[0]
-        # with the lock released, one GET records the use, and the next ones do not
+        # with the lock released, one page load records the use once, and the next ones do not
         current[0] = "free"
         assert client.get("/api/accounts").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200
+        touch_clock.settle()
         current[0] = "throttled"
         assert client.get("/api/accounts").status_code == 200
         assert client.get("/api/dashboard").status_code == 200
+        touch_clock.settle()
         stamp_after = seed.execute("SELECT last_seen_at FROM auth_sessions").fetchone()[0]
         seed.close()
 
@@ -456,6 +465,9 @@ def test_protected_get_routes_write_nothing_and_the_touch_is_the_reviewed_except
     attempted = {route: n for route, n in touch_conns.items() if route in answered}
     assert attempted == dict.fromkeys(answered, 1), (
         f"routes without exactly one touch: {sorted(answered ^ set(attempted))} {attempted}")
+    # (a gated route that answered 4xx arms one too — the gate runs before the route — but
+    # never more than one)
+    assert set(touch_conns.values()) == {1}, touch_conns
     assert stamp_under_lock == due, "a touch went through while the write lock was held"
     assert touch_conns.get("free") == 1 and stamp_after > due
     assert "throttled" not in touch_conns, "a second touch inside the touch interval"

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
 
-from portfolio_dash.api import action_log, alert_inputs, settlement_service
+from portfolio_dash.api import action_log, alert_inputs, auth_store, settlement_service
 from portfolio_dash.api.auth_store import (
     LOGIN_STATE_ATTR,
     ensure_auth_seeded,
@@ -278,6 +278,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         settlement_service.shutdown()
         if scheduler is not None:
             scheduler.shutdown(wait=False)
+        # A pending session touch would commit (and pre-warm) after the checkpoint below:
+        # cancel it, and wait briefly for one already running. A cancelled touch is simply
+        # recorded on the session's first use after the boot — its stamp did not move.
+        auth_store.cancel_pending_touches()
         # The result cache holds a READ-ONLY connection per database for the life of the
         # process, and a read-only connection cannot checkpoint: left open, the last close no
         # longer folds the WAL back and deletes it. Close it for good — it also waits (bounded)
