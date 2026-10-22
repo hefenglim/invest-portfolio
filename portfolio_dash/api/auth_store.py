@@ -2,10 +2,12 @@
 
 Self-contained access-control store for the api layer. Guest mode = ``auth_users``
 empty (everything open); protected mode = >=1 user (a valid ``pd_session`` cookie is
-required for all ``/api/*`` except login/session). Stdlib only — no third-party
+required for all ``/api/*`` except login/session/logout/health). Stdlib only — no third-party
 dependency. Stores **only** salted scrypt hashes; ``password_hash`` is never returned
 or logged. Imports only ``shared`` + ``api.deps`` + stdlib (never portfolio/forex/
-pricing) — auth is access control, not business calculation.
+pricing) — auth is access control, not business calculation. The one exception is local and
+lazy: the pre-warm after a recorded touch names ``api.alert_inputs.prewarm_today``, imported
+only when the pre-warm is on, exactly as ``api/settlement_service.py`` does.
 
 **Session idle expiry** (owner ruling 2026-10-22, review finding L5; sessions never expired
 before). A session expires after :data:`SESSION_IDLE_EXPIRY` without use, and each use slides
@@ -22,13 +24,22 @@ the window. Its last use is ``auth_sessions.last_seen_at``. Because a GET never 
   UPDATE (:data:`TOUCH_SQL`). It is skipped when the write lock is held (a later request
   retries), and it never raises. The request's own connection still writes nothing and takes
   no write lock: ``tests/contract/test_def065_get_never_writes.py`` (section 5) holds the
-  touch as the one reviewed exception, by its statement and by its connection.
+  touch as the one reviewed exception, by its statement and by its connection. One touch
+  per session runs at a time in this process, and none again within the interval once one
+  recorded (the in-process guard, :func:`touch_wanted`).
 
-So a session may lapse up to one touch interval before 30 days after its last request (its
-last use was recorded up to 6 h earlier). The boot (:func:`prepare_sessions_at_boot`) dates
-the sessions that have no stamp from the boot — every session created before this change,
-and any created by an older build re-pinned after it — and purges the expired, the locked
-(never revived: re-login issues a new token) and the orphaned ones.
+**The cache cost** (owner ruling 2026-10-22). A recorded touch commits from its own
+connection, which moves ``PRAGMA data_version`` and empties the result cache. Hence the 24 h
+interval (at most one invalidation a day per session) and the pre-warm a recorded touch
+schedules at once. The price of 24 h: a session lapses 29 to 30 days after its last use
+(that use may have been recorded up to a day earlier); the notice still says 30 天.
+
+A stamp further than :data:`SESSION_CLOCK_SKEW` in the future, and one that cannot be read
+at all (a BLOB, a number, text that is no time), are expired: they fail closed. The boot
+(:func:`prepare_sessions_at_boot`) dates the sessions that have no stamp from the boot —
+every session created before this change, and any created by an older build re-pinned after
+it — and purges the expired, the locked (never revived: re-login issues a new token) and the
+orphaned ones. Logout is an open path, so an expired cookie can be cleared.
 """
 
 import hashlib
@@ -37,14 +48,15 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Request
 
 from portfolio_dash.api.deps import get_conn, get_now
-from portfolio_dash.shared import config_store
+from portfolio_dash.shared import config_store, flags, result_cache
 from portfolio_dash.shared.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -54,9 +66,27 @@ logger = logging.getLogger(__name__)
 #: A session unused for longer than this is expired (owner ruling 2026-10-22).
 SESSION_IDLE_EXPIRY = timedelta(days=30)
 #: A use is recorded at most once per this interval per session (the touch's throttle).
-SESSION_TOUCH_INTERVAL = timedelta(hours=6)
+#: 24 h (owner ruling 2026-10-22, the cache cost): every recorded touch empties the result
+#: cache, so at most once a day per session. The price: a session lapses 29 to 30 days after
+#: its last use, since that use may have been recorded up to a day earlier.
+SESSION_TOUCH_INTERVAL = timedelta(hours=24)
+#: A stamp further than this in the FUTURE is expired (it fails closed): a few minutes of
+#: clock difference are tolerated, a stamp from a clock set ahead or a hand edit is not.
+SESSION_CLOCK_SKEW = timedelta(minutes=5)
 #: The touch's own connection waits at most this long for the write lock, then skips.
 SESSION_TOUCH_BUSY_TIMEOUT_MS = 100
+#: A touch that failed for any reason other than a busy lock is retried after this long —
+#: logged (WARNING) at most this often per session, rather than on every request.
+SESSION_TOUCH_FAILURE_BACKOFF = timedelta(minutes=10)
+#: The pre-warm after a recorded touch waits as long as the write window's does
+#: (``api/app.py::WRITE_PREWARM_DELAY_S``; a test holds the two equal): from the cache's view
+#: a touch IS a write, the two share one debounced timer, and the touch commits right after
+#: the first response of a page load, while that load's other reads may still be running.
+SESSION_TOUCH_PREWARM_DELAY_S = 3.0
+#: The ``request.state`` attribute the gate sets to the login it let through (and the login /
+#: logout routes to the login they authenticated / ended); the action log names it. A request
+#: refused — no session, unknown, locked or expired — carries none.
+LOGIN_STATE_ATTR = "pd_login"
 #: The gate's 401 for an expired session, and the login page's notice.
 SESSION_EXPIRED_MESSAGE = f"登入已逾期（{SESSION_IDLE_EXPIRY.days} 天未使用），請重新登入"
 #: The login page's notice for a cookie the store no longer knows (purged at boot, user
@@ -77,7 +107,12 @@ _DKLEN = 32
 # the liveness probe). ``/api/health`` returns only ``{"status": "ok"}`` (no data),
 # so it is unauthenticated by design: a liveness probe must answer regardless of
 # login state. Every OTHER ``/api/*`` path still requires a session in protected mode.
-_OPEN_PATHS = {"/api/auth/login", "/api/auth/session", "/api/health"}
+# ``/api/auth/logout`` (2026-10-22): an EXPIRED cookie must be clearable — behind the gate
+# its logout answered 401 and the cookie stayed. Logout only deletes the session the
+# request's own cookie names, so it needs nothing but possession of that token, and the
+# cookie's SameSite=Lax keeps a cross-site POST from carrying it. Lock stays gated: an
+# expired session has nothing left to lock.
+_OPEN_PATHS = {"/api/auth/login", "/api/auth/session", "/api/auth/logout", "/api/health"}
 
 
 def create_auth_tables(conn: sqlite3.Connection) -> None:
@@ -250,17 +285,20 @@ class SessionState:
     touch_due: bool
 
 
-def _idle_for(stamp: str | None, now: datetime) -> timedelta | None:
+def _idle_for(stamp: object, now: datetime) -> timedelta | None:
     """How long ago *stamp* was at *now*; ``None`` when it cannot be read.
 
     A stamp without an offset (an older writer, a hand edit) reads as application-local
-    time, the zone every stamp this module writes carries.
+    time, the zone every stamp this module writes carries. Anything that is not an ISO text
+    — a BLOB or a number from a hand edit (``fromisoformat`` raises TypeError on those), or
+    text that is not a time — cannot be read: the gate refuses it, and the boot purges it
+    instead of failing to start.
     """
     if stamp is None:
         return None
     try:
-        seen = datetime.fromisoformat(stamp)
-    except ValueError:
+        seen = datetime.fromisoformat(stamp)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return None
     if seen.tzinfo is None and now.tzinfo is not None:
         seen = seen.replace(tzinfo=now.tzinfo)
@@ -270,8 +308,11 @@ def _idle_for(stamp: str | None, now: datetime) -> timedelta | None:
 
 
 def _is_expired(idle: timedelta | None) -> bool:
-    """THE expiry rule: unreadable, or idle for longer than the ruling allows."""
-    return idle is None or idle > SESSION_IDLE_EXPIRY
+    """THE expiry rule (the gate and the boot purge both ask it): the stamp cannot be read,
+    it is older than the ruling allows, or it lies further in the future than the clock-skew
+    tolerance — a future stamp would otherwise keep a session alive for as long as it is
+    ahead, so it fails closed."""
+    return idle is None or idle > SESSION_IDLE_EXPIRY or idle < -SESSION_CLOCK_SKEW
 
 
 def session_state(conn: sqlite3.Connection, token: str, *, now: datetime) -> SessionState | None:
@@ -309,35 +350,133 @@ def touch_session(
     return cur.rowcount > 0
 
 
-def touch_after_response(app: Any, token: str, seen_raw: str | None, now: datetime) -> None:
+#: What one touch did: ``recorded`` (the row changed), ``lost`` (the stamp it read had
+#: already moved, or the session was locked or removed: nothing to do), ``busy`` (the write
+#: lock was held: skipped, the next request retries), ``failed`` (any other error: logged at
+#: WARNING, retried after :data:`SESSION_TOUCH_FAILURE_BACKOFF`), ``throttled`` (this process
+#: has the session's touch in flight, or recorded it within the interval: nothing ran).
+TouchOutcome = Literal["recorded", "lost", "busy", "failed", "throttled"]
+
+# The in-process guard (owner ruling 2026-10-22, item 5): the requests of one page load all
+# find the touch due at once, and each would run the UPDATE (12 GETs → 12 UPDATEs, one row
+# changed). Per token: the touch in flight, and the earliest `now` at which another may run.
+_touch_lock = threading.Lock()
+_touch_in_flight: set[str] = set()
+_touch_not_before: dict[str, datetime] = {}
+#: The guard forgets everything past this many sessions (only the throttling is lost).
+_TOUCH_GUARD_MAX = 256
+
+
+def _guard_allows(token: str, now: datetime) -> bool:
+    """Under ``_touch_lock``: not in flight, and no recorded touch within the interval."""
+    if token in _touch_in_flight:
+        return False
+    not_before = _touch_not_before.get(token)
+    try:
+        return not_before is None or now >= not_before
+    except TypeError:  # a naive and an aware clock met (tests only): let it run
+        return True
+
+
+def touch_wanted(token: str, now: datetime) -> bool:
+    """The gate's peek: would a touch of *token* run now? It claims nothing — a claim made
+    at scheduling time would leak whenever the route raises (an exception handler's response
+    runs no background task), and a leaked claim would let the session expire."""
+    with _touch_lock:
+        return _guard_allows(token, now)
+
+
+def _claim_touch(token: str, now: datetime) -> bool:
+    with _touch_lock:
+        if not _guard_allows(token, now):
+            return False
+        _touch_in_flight.add(token)
+        return True
+
+
+def _release_touch(token: str, now: datetime, outcome: TouchOutcome) -> None:
+    with _touch_lock:
+        _touch_in_flight.discard(token)
+        if outcome in ("recorded", "lost"):
+            _touch_not_before[token] = now + SESSION_TOUCH_INTERVAL
+        elif outcome == "failed":
+            _touch_not_before[token] = now + SESSION_TOUCH_FAILURE_BACKOFF
+        if len(_touch_not_before) > _TOUCH_GUARD_MAX:
+            _touch_not_before.clear()
+
+
+def _is_busy(exc: sqlite3.Error) -> bool:
+    """SQLITE_BUSY / SQLITE_LOCKED, extended codes included (the primary code is the low
+    byte): another connection holds the lock. Nothing else counts as busy."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def _prewarm_after_touch() -> None:
+    """A recorded touch committed from its own connection, which moves ``PRAGMA
+    data_version`` and so empties the result cache (``shared/result_cache.py``). Schedule the
+    ordinary pre-warm right away (owner ruling 2026-10-22), so the next page is a hit — the
+    same call, and the same debounced timer, as the write window's (``api/app.py``)."""
+    if not flags.prewarm_enabled():
+        return
+    from portfolio_dash.api import alert_inputs  # local: it pulls in the dashboard build
+
+    result_cache.schedule_prewarm(alert_inputs.prewarm_today, SESSION_TOUCH_PREWARM_DELAY_S)
+
+
+def touch_after_response(
+    app: Any, token: str, seen_raw: str | None, now: datetime
+) -> TouchOutcome:
     """The background task the gate schedules when a touch is due: best effort, never raises.
 
     It runs after the response, so the request's connection is already closed; it opens its
     OWN, waits at most :data:`SESSION_TOUCH_BUSY_TIMEOUT_MS` for the write lock and runs one
-    autocommit statement. A held lock skips it (a later request retries). When a test has
-    injected ``get_conn`` (the hermetic golden database), the touch writes there, exactly as
-    the action-log middleware does — the configured file is not the database that request
-    used.
+    autocommit statement. A held lock skips it (a later request retries); any other error is
+    a WARNING. One touch per session runs at a time in this process, and none again within
+    the interval once one recorded (:func:`touch_wanted`). A recorded touch pre-warms the
+    result cache (:func:`_prewarm_after_touch`).
+
+    When a test has injected ``get_conn`` (the hermetic golden database), the touch writes
+    there, exactly as the action-log middleware does — the configured file is not the
+    database that request used — and pre-warms nothing (the cache serves the file only).
     """
+    if not _claim_touch(token, now):
+        return "throttled"
+    outcome: TouchOutcome = "failed"
+    own = False
     try:
         override = getattr(app, "dependency_overrides", {}).get(get_conn)
         if override is not None:
             injected = override()
-            if isinstance(injected, sqlite3.Connection):
-                touch_session(injected, token, seen_raw=seen_raw, now=now)
-            return
-        conn = get_connection()
-        try:
-            conn.isolation_level = None  # autocommit: the UPDATE is its own transaction
-            conn.execute(f"PRAGMA busy_timeout = {int(SESSION_TOUCH_BUSY_TIMEOUT_MS)}")
-            touch_session(conn, token, seen_raw=seen_raw, now=now)
-        finally:
-            conn.close()
-    except sqlite3.OperationalError as exc:
-        # The write lock was held past the busy timeout ("database is locked"): skipped.
-        logger.debug("session touch skipped: %s", exc)
+            recorded = (isinstance(injected, sqlite3.Connection)
+                        and touch_session(injected, token, seen_raw=seen_raw, now=now))
+        else:
+            own = True
+            conn = get_connection()
+            try:
+                conn.isolation_level = None  # autocommit: the UPDATE is its own transaction
+                conn.execute(f"PRAGMA busy_timeout = {int(SESSION_TOUCH_BUSY_TIMEOUT_MS)}")
+                recorded = touch_session(conn, token, seen_raw=seen_raw, now=now)
+            finally:
+                conn.close()
+        outcome = "recorded" if recorded else "lost"
+    except sqlite3.Error as exc:
+        if _is_busy(exc):
+            outcome = "busy"
+            logger.debug("session touch skipped, the database is busy: %s", exc)
+        else:
+            logger.warning("session touch failed", exc_info=True)
     except Exception:  # noqa: BLE001 — a bookkeeping write never fails or follows a request
         logger.warning("session touch failed", exc_info=True)
+    finally:
+        _release_touch(token, now, outcome)
+    if outcome == "recorded" and own:
+        try:
+            _prewarm_after_touch()
+        except Exception:  # noqa: BLE001 — the pre-warm only saves the next reader a build
+            logger.warning("pre-warm after a session touch could not be scheduled",
+                           exc_info=True)
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -432,10 +571,15 @@ def require_session(
     ``Depends(get_conn)`` — with the routes' ``scope="function"``, so the request has one
     connection — and tests' DB override applies.
 
-    It only READS (DEF-065). When the session's last recorded use is a touch interval old, it
-    schedules :func:`touch_after_response`, which runs after the response on its own
-    connection. A route that RAISES (an ``HTTPException``, an unexpected error) answers from
-    an exception handler, which runs no background task: the next request touches instead.
+    It only READS (DEF-065). When the session's last recorded use is a touch interval old and
+    this process has no touch of it in flight or recorded within the interval
+    (:func:`touch_wanted`), it schedules :func:`touch_after_response`, which runs after the
+    response on its own connection. A route that RAISES (an ``HTTPException``, an unexpected
+    error) answers from an exception handler, which runs no background task: the next
+    request touches instead.
+
+    The login it lets through is stored on ``request.state`` (:data:`LOGIN_STATE_ATTR`) for
+    the action log; a refused request carries none.
     """
     path = request.url.path
     if not path.startswith("/api/") or path in _OPEN_PATHS:
@@ -448,5 +592,6 @@ def require_session(
         raise HTTPException(status_code=401, detail="需要登入")
     if state.expired:
         raise HTTPException(status_code=401, detail=SESSION_EXPIRED_MESSAGE)
-    if state.touch_due:
+    setattr(request.state, LOGIN_STATE_ATTR, state.username)
+    if state.touch_due and touch_wanted(token, now):
         background_tasks.add_task(touch_after_response, request.app, token, state.seen_raw, now)

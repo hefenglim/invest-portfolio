@@ -13,10 +13,10 @@ from fastapi import Depends, FastAPI, Request, Response
 
 from portfolio_dash.api import action_log, alert_inputs, settlement_service
 from portfolio_dash.api.auth_store import (
+    LOGIN_STATE_ATTR,
     ensure_auth_seeded,
     prepare_sessions_at_boot,
     require_session,
-    session_user,
 )
 from portfolio_dash.api.composition import bind_runtime
 from portfolio_dash.api.deps import get_conn
@@ -313,8 +313,10 @@ def create_app() -> FastAPI:
             duration_ms = int((time.perf_counter() - start) * 1000)
 
             def _write(conn_w: sqlite3.Connection) -> None:
-                token = request.cookies.get("pd_session")
-                username = session_user(conn_w, token) if token else None
+                # The login the gate let through (or the login / logout route named), never
+                # the cookie looked up again: a request refused as expired, locked or unknown
+                # names nobody (session idle expiry, 2026-10-22).
+                username = getattr(request.state, LOGIN_STATE_ATTR, None)
                 action_log.record(
                     conn_w, ts=datetime.now(UTC), username=username,
                     method=request.method, path=request.url.path,

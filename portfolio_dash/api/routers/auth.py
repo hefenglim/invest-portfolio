@@ -2,7 +2,8 @@
 
 Thin over ``auth_store``. login establishes a server-side session + HttpOnly cookie;
 session is the page-load gate query (exempt from the global gate, so it reads the
-cookie itself); logout/lock return 204. Bad username and bad password return the same
+cookie itself); logout/lock return 204 — logout is exempt from the gate too (2026-10-22), so
+an expired cookie can be cleared. Bad username and bad password return the same
 401 (no user enumeration). Never returns ``password_hash``.
 """
 
@@ -10,7 +11,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Cookie, Depends, Response
+from fastapi import APIRouter, Cookie, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -31,6 +32,7 @@ class LoginBody(BaseModel):
 @router.post("/auth/login")
 def login(
     body: LoginBody,
+    request: Request,
     response: Response,
     conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     now: datetime = Depends(get_now),
@@ -40,6 +42,8 @@ def login(
             status_code=401,
             content=error_body("invalid_credentials", "帳號或密碼錯誤"),
         )
+    # the action log names who logged in (an open path: the gate set no login)
+    setattr(request.state, A.LOGIN_STATE_ATTR, body.username)
     token = A.create_session(conn, body.username, now=now)
     user = A.get_user(conn, body.username)
     name = user["name"] if user is not None else body.username
@@ -85,11 +89,19 @@ def session(
 
 @router.post("/auth/logout", status_code=204)
 def logout(
+    request: Request,
     response: Response,
     conn: sqlite3.Connection = Depends(get_conn, scope="function"),
     pd_session: str | None = Cookie(default=None),
+    now: datetime = Depends(get_now),
 ) -> Response:
+    """An open path (2026-10-22): it ends the session the request's OWN cookie names —
+    valid, expired, locked or unknown — and always clears the cookie, so an expired login can
+    be cleared. The action log names the login only when that session was still live."""
     if pd_session is not None:
+        state = A.session_state(conn, pd_session, now=now)
+        if A.is_protected(conn) and state is not None and not (state.expired or state.locked):
+            setattr(request.state, A.LOGIN_STATE_ATTR, state.username)
         A.delete_session(conn, pd_session)
     response.delete_cookie(_COOKIE, path="/")
     response.status_code = 204

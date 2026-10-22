@@ -402,7 +402,7 @@ def test_protected_get_routes_write_nothing_and_the_touch_is_the_reviewed_except
         current[0] = "login"
         assert client.post("/api/auth/login", json={
             "username": "owner", "password": "pw-123456"}).status_code == 200
-        due = (app_now() - timedelta(hours=7)).isoformat()  # a touch is due on every request
+        due = (app_now() - timedelta(hours=25)).isoformat()  # a touch is due on every request
         seed.execute("UPDATE auth_sessions SET last_seen_at = ?", (due,))
         seed.commit()
         routes = _get_routes(app)
