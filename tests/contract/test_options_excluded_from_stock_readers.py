@@ -104,6 +104,10 @@ _ALLOWLIST: dict[str, str] = {
     "portfolio/dashboard.py::kpis_as_of": (
         "the valuation's KPI half, extracted from _build_dashboard (PERF §11.2): it values "
         "every position and splits the options out itself (opt_syms / split_holdings)"),
+    "portfolio/dashboard.py::_replay_once": (
+        "only COUNTS each held book's holdings to bound the memory of the one-replay path "
+        "(len(book.holdings) + len(book.opened_positions)); it values nothing and lists nothing "
+        "— the books it hands on are split by _build_dashboard / kpis_as_of and the trend"),
     "api/snapshots.py::period_detail": (
         "serves one close's position rows (settled_period_holding, or period_close.holdings_at "
         "for a close computed live): every position at D, stocks and contracts each tagged "
