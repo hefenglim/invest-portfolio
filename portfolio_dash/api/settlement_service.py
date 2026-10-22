@@ -789,14 +789,35 @@ def active_run_id() -> int | None:
         return None if _S.active is None else _S.active.run_id
 
 
+def _worker_alive(active: _Active) -> bool:
+    if active.inline:
+        return True
+    return active.handle is not None and active.handle.state != "exited"
+
+
 def _in_process_alive(run_id: int) -> bool:
     with _S.lock:
         active = _S.active
-        if active is None or active.run_id != run_id:
-            return False
-        if active.inline:
-            return True
-        return active.handle is not None and active.handle.state != "exited"
+        return active is not None and active.run_id == run_id and _worker_alive(active)
+
+
+@dataclass(frozen=True)
+class _Liveness:
+    """What was alive at ONE moment: the run whose worker this process started and that had
+    not exited, and whether any process held the settle lock."""
+
+    in_process: int | None
+    locked: bool
+
+    def alive(self, run_id: int) -> bool:
+        return self.locked or self.in_process == run_id
+
+
+def _liveness() -> _Liveness:
+    with _S.lock:
+        active = _S.active
+        run_id = active.run_id if active is not None and _worker_alive(active) else None
+    return _Liveness(in_process=run_id, locked=proc_lock.is_held(_lock_path()))
 
 
 def _enqueue(pending: _Pending) -> None:
@@ -2057,9 +2078,35 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
            reporting: Currency) -> SettlementStatus:
     """``GET /api/settlement/status`` (spec §15). Reads only: the store, the trail, the run
     reports, ``job_runs`` / ``schedule_config`` (``final_through``), the progress file and a
-    non-blocking probe of the settle lock. Never writes, never starts or resumes anything."""
+    non-blocking probe of the settle lock. Never writes, never starts or resumes anything.
+
+    **One answer, one database state** (stress audit phase 1, 2026-10-22). Every table is read
+    inside ONE read transaction (``result_cache.read_snapshot``: a deferred ``BEGIN``, a WAL
+    reader that no writer blocks — DEF-065). The answer had been assembled from a dozen
+    autocommit SELECTs, each on its own snapshot, so a swap committing between
+    ``store_state`` and ``active_or_unfinished_runs`` read as the OLD generation with the
+    run's claimed day as a stale range (待結算) and no run at all — a combination the
+    database never holds, since the swap clears ``settle_meta.run_*`` and publishes the
+    report in one transaction.
+
+    The settle lock and the progress file are not in the database, so no snapshot covers
+    them. The lock is observed BEFORE the snapshot opens and again after its reads, and a
+    ``running`` report is alive when either observation says so: a child that swaps and exits
+    while the status reads is alive in the state the snapshot shows (reading 已中斷 there
+    would pair the pre-swap database with the post-exit process), and a child that takes the
+    lock and claims just before the snapshot opens is seen by the later probe. Only a report
+    whose lock was free at both moments reads 已中斷. The progress file is display only and
+    is taken only when it names the snapshot's run (:func:`read_progress`)."""
     if not flags.settle_enabled():
         return SettlementStatus(state="off")
+    seen = _liveness()  # BEFORE the snapshot opens (docstring)
+    with result_cache.read_snapshot(conn):
+        return _status(conn, viewer=viewer, now=now, reporting=reporting, seen=seen)
+
+
+def _status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
+            reporting: Currency, seen: _Liveness) -> SettlementStatus:
+    """:func:`status`'s reads, all inside its one snapshot."""
     state = store.store_state(conn, reporting=reporting)
     today = _today(now)
     window = store.window_start(today)
@@ -2077,7 +2124,8 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
     if current is not None:
         if current.status == "preparing":
             run_state = "preparing"
-        elif _in_process_alive(current.run_id) or proc_lock.is_held(_lock_path()):
+        elif (seen.alive(current.run_id) or _in_process_alive(current.run_id)
+              or proc_lock.is_held(_lock_path())):
             run_state = "running"
         else:
             run_state = "interrupted"
@@ -2138,13 +2186,17 @@ def status(conn: sqlite3.Connection, *, viewer: str | None, now: datetime,
 
 
 # =============================================================================================
-# Report reads for the API (spec §15)
+# Report reads for the API (spec §15) — each inside ONE read snapshot, as :func:`status`: a
+# page's COUNT and its rows, or a report's JSON and its columns, describe one database state
+# (a run created, a swap or a diff written between two of them was mixed into the answer —
+# ``tests/settlement/test_service_status_snapshot.py``)
 # =============================================================================================
 
 
 def runs_page(conn: sqlite3.Connection, *, viewer: str | None, limit: int, offset: int,
               only_changes: bool) -> dict[str, Any]:
-    page = store.list_runs(conn, limit=limit, offset=offset, only_changes=only_changes)
+    with result_cache.read_snapshot(conn):
+        page = store.list_runs(conn, limit=limit, offset=offset, only_changes=only_changes)
     return {"rows": [_render_summary(s, viewer).model_dump(mode="json", by_alias=True)
                      for s in page.items], "total_count": page.total_count}
 
@@ -2152,12 +2204,13 @@ def runs_page(conn: sqlite3.Connection, *, viewer: str | None, limit: int, offse
 def run_report(conn: sqlite3.Connection, run_id: int, *,
                viewer: str | None) -> dict[str, Any] | None:
     """One run's full report, with the restatements it wrote (§9.6 Result — closes)."""
-    report = store.get_run(conn, run_id)
-    if report is None:
-        return None
+    with result_cache.read_snapshot(conn):
+        report = store.get_run(conn, run_id)
+        if report is None:
+            return None
+        restatements = store.restatements_of_run(conn, run_id)
     body = _render_report(report, viewer).model_dump(mode="json", by_alias=True)
-    body["restatements"] = [r.model_dump(mode="json", by_alias=True)
-                            for r in store.restatements_of_run(conn, run_id)]
+    body["restatements"] = [r.model_dump(mode="json", by_alias=True) for r in restatements]
     return body
 
 
@@ -2188,13 +2241,14 @@ def changes_page(conn: sqlite3.Connection, *, state: str, viewer: str | None, li
                  offset: int) -> dict[str, Any] | None:
     """``state = pending`` or ``run:<id>``; ``None`` for a run with no report (pruned)."""
     run_id: int | None = None
-    if state == "pending":
-        page = store.pending_changes(conn, limit=limit, offset=offset)
-    else:
-        run_id = int(state.split(":", 1)[1])
-        if store.get_run(conn, run_id) is None:
-            return None
-        page = store.run_changes(conn, run_id, limit=limit, offset=offset)
+    with result_cache.read_snapshot(conn):
+        if state == "pending":
+            page = store.pending_changes(conn, limit=limit, offset=offset)
+        else:
+            run_id = int(state.split(":", 1)[1])
+            if store.get_run(conn, run_id) is None:
+                return None
+            page = store.run_changes(conn, run_id, limit=limit, offset=offset)
     return {
         "rows": [_record_row(r, viewer=viewer, run_id=run_id) for r in page.records],
         "total_count": page.total_count,
@@ -2206,10 +2260,11 @@ def changes_page(conn: sqlite3.Connection, *, state: str, viewer: str | None, li
 
 def diff_rows(conn: sqlite3.Connection, run_id: int, *, field_name: str | None,
               kind: str | None, limit: int, offset: int) -> dict[str, Any] | None:
-    if store.get_run(conn, run_id) is None:
-        return None
-    page = store.diff_page(conn, run_id, field=field_name, kind=kind, limit=limit,
-                           offset=offset)
+    with result_cache.read_snapshot(conn):
+        if store.get_run(conn, run_id) is None:
+            return None
+        page = store.diff_page(conn, run_id, field=field_name, kind=kind, limit=limit,
+                               offset=offset)
     return {"rows": [r.model_dump(mode="json", by_alias=True) for r in page.items],
             "total_count": page.total_count}
 

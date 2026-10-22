@@ -26,7 +26,11 @@ from tests.settlement import service_support as sup
 from tests.settlement import stub_settle_worker as stub
 from tests.settlement.conftest import CorpusFactory
 
-_WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|BEGIN)\b", re.I)
+#: A write, or a transaction that takes the write lock. A deferred ``BEGIN`` is not one: the
+#: status reads inside ONE read transaction (``test_service_status_snapshot.py``).
+_WRITE = re.compile(
+    r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|BEGIN\s+(IMMEDIATE|EXCLUSIVE))\b",
+    re.I)
 
 
 @pytest.fixture
@@ -44,7 +48,7 @@ def _status(path: Path, *, viewer: str | None = "user:guest",
     try:
         result = service.status(conn, viewer=viewer, now=now or service._now(),
                                 reporting=Currency.TWD)
-        assert conn.total_changes == 0
+        assert conn.total_changes == 0 and not conn.in_transaction
     finally:
         conn.close()
     writes = [s for s in statements if _WRITE.match(s)]
