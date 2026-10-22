@@ -2332,3 +2332,9 @@ corpus spans weeks, so no gate, no verify run and no demo click-through ever fel
   finalises — so a write landed in between and started a chained run (3 transient failures). The
   barrier is the settlement `job_runs` row being finished. The same gap let an owner's back-dated
   edit bypass the PERF-D2 prompt; fixing the product fixed the flake.
+- **One answer assembled from several SELECTs needs one read transaction (settlement status).** In
+  autocommit each SELECT reads its own snapshot, so a status built from a dozen of them described,
+  for an instant, a database that never existed (the old generation, a claimed day as stale, no run
+  active). The stress harness accepted it because it read the derived status BEFORE the record that
+  proves the end. Rule: a multi-read endpoint reads in one snapshot; a waiter reads the proof of the
+  end first, then a view that must be at or after it.

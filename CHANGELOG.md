@@ -122,6 +122,14 @@ so the release that carries them re-settles in full at its first boot.
   the owner's prompt for a back-dated edit (and the root of a stress-harness flake). The waiter now
   chains only what the run itself left (a partial publish, a superseded run, or a change the swap
   found queued); a later change takes the prompt or the nightly run.
+- **Settlement status no longer mixes two database states** (found by the stress audit, 2026-10-22).
+  `GET /api/settlement/status` was assembled from a dozen autocommit SELECTs; a run's swap
+  committing between them read as the previous generation with the run's claimed day as a stale
+  range and no run active, so the chip and banner could flash 待結算 / 更新前版本 at the end of a
+  run. Every settlement read (status, run history, one run's report, its diff, the change trail)
+  now reads inside one read transaction (DEF-065 unchanged). The settle lock is probed before the
+  snapshot opens and after its reads, so a child that publishes and exits during the read is not
+  shown 已中斷. The stress harness waits for the run's report before it reads the status.
 
 ### Performance
 - Readers keep caching and sharing during another request's write window (the review's backlog

@@ -388,7 +388,8 @@ end other than a publish runs one transaction: it puts the claimed changes back,
 `dirty_from` to the earlier of itself and the dirty day the run CLAIMED (`run_dirty_from`; the
 whole range only before anything was ever published), clears the run fields and deletes the
 orphan generation. A cancelled full run on a clean store leaves it clean. **Liveness is the OS lock, never the heartbeat.** A status read probes the
-lock, and a silent heartbeat only reads 「進行緩慢」 after 60 s. Boot ends every `preparing` /
+lock twice — before its one read snapshot opens and after its reads — and a running report
+reads 中斷 only when both probes find it free; and a silent heartbeat only reads 「進行緩慢」 after 60 s. Boot ends every `preparing` /
 `running` report whose lock is free as 中斷（未續跑）, together with its `job_runs` row. It first
 terminates an orphan child that still holds the lock.
 

@@ -426,7 +426,15 @@ of 2026-06-13 replaced with `api/` + `web/`, and it never gained `forex/`, `expo
     during the stop leaves its follow-up to the next boot (`on_boot` opens it again). It also
     owns cancel, the boot hook
     (`on_boot` plans inside the boot session; `start_after_boot` starts once that session has
-    committed) and the chip's `status`, which only reads.
+    committed) and the chip's `status`, which only reads. **Every settlement read is one
+    snapshot** (2026-10-22, found by the stress audit): `status` / `runs_page` / `run_report` /
+    `diff_rows` / `changes_page` read inside `result_cache.read_snapshot` (a deferred BEGIN — a
+    read transaction no writer blocks, so DEF-065 holds). Built from autocommit SELECTs, a status
+    mixed a swap into its answer (the old generation with the run's claimed day as a stale range
+    and no run active — a state the database never holds). The settle lock is outside the
+    database: `status` probes it before the snapshot opens and after its reads, and a `running`
+    report reads 已中斷 only when both probes find it free
+    (`tests/settlement/test_service_status_snapshot.py`).
   - `snapshots.py` serves 月度成績 and the period routes from ONE rule: a past close whose end
     day is before the build's `live_from` comes from the store, every other one is computed live
     with the same `period_close` functions. It no longer writes `portfolio_snapshots`.
